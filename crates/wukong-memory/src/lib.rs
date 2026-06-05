@@ -1,5 +1,6 @@
 //! wukong-memory: persistent memory core for the Wukong assistant.
 
+pub mod embed;
 pub mod error;
 pub mod model;
 pub mod recall;
