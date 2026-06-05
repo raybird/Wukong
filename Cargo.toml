@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/wukong-memory", "crates/wukong-memoryd"]
+members = ["crates/wukong-memory", "crates/wukong-memoryd", "crates/wukong-gateway"]
 
 [workspace.package]
 edition = "2021"
@@ -15,3 +15,4 @@ serde_json = "1"
 thiserror = "1"
 tower = "0.5"
 tempfile = "3"
+clap = { version = "4", features = ["derive"] }
