@@ -3,6 +3,7 @@
 pub mod error;
 pub mod model;
 pub mod scope;
+pub mod scoring;
 
 pub use error::{MemoryError, Result};
 pub use model::{
@@ -10,3 +11,4 @@ pub use model::{
     ScopeCount, Stats, WukongResult,
 };
 pub use scope::Scope;
+pub use scoring::Weights;
