@@ -1,0 +1,18 @@
+[package]
+name = "wukong-orchestrator"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "wukong_orchestrator"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wukong-orchestrate"
+path = "src/main.rs"
+
+[dependencies]
+wukong-gateway = { path = "../wukong-gateway" }
+tokio = { workspace = true }
+clap = { workspace = true }
+thiserror = { workspace = true }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/wukong-memory", "crates/wukong-memoryd", "crates/wukong-gateway"]
+members = ["crates/wukong-memory", "crates/wukong-memoryd", "crates/wukong-gateway", "crates/wukong-orchestrator"]
 
 [workspace.package]
 edition = "2021"
