@@ -1,0 +1,21 @@
+[package]
+name = "wukong-gateway"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "wukong_gateway"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wukong"
+path = "src/main.rs"
+
+[dependencies]
+wukong-memory = { path = "../wukong-memory" }
+tokio = { workspace = true }
+clap = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
