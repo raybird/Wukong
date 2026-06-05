@@ -1,0 +1,162 @@
+use serde::{Deserialize, Serialize};
+
+/// Category of a stored memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryKind {
+    Decision,
+    Event,
+    Skill,
+    Note,
+    Summary,
+}
+
+impl MemoryKind {
+    /// Stable lowercase string used for DB storage.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MemoryKind::Decision => "decision",
+            MemoryKind::Event => "event",
+            MemoryKind::Skill => "skill",
+            MemoryKind::Note => "note",
+            MemoryKind::Summary => "summary",
+        }
+    }
+
+    /// Parse from a DB string; unknown values fall back to `Note`.
+    pub fn from_db_str(s: &str) -> MemoryKind {
+        match s {
+            "decision" => MemoryKind::Decision,
+            "event" => MemoryKind::Event,
+            "skill" => MemoryKind::Skill,
+            "summary" => MemoryKind::Summary,
+            _ => MemoryKind::Note,
+        }
+    }
+}
+
+/// A single memory to persist.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MemoryItem {
+    pub kind: MemoryKind,
+    pub text: String,
+    /// Defaults to 1.0 when omitted (see remember()).
+    #[serde(default)]
+    pub importance: Option<f64>,
+}
+
+/// Input to `remember`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RememberInput {
+    /// Scope string, e.g. "project:Wukong".
+    pub scope: String,
+    pub session_id: Option<String>,
+    pub items: Vec<MemoryItem>,
+}
+
+/// Recall strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallMode {
+    Keyword,
+    Tree,
+    #[default]
+    Hybrid,
+}
+
+fn default_top_k() -> usize {
+    5
+}
+
+/// Input to `recall`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RecallQuery {
+    pub query: String,
+    #[serde(default = "default_top_k")]
+    pub top_k: usize,
+    /// Optional scope filter; when set, only this scope + ancestors match.
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub mode: RecallMode,
+}
+
+/// A ranked recall result.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecallHit {
+    pub id: i64,
+    pub scope: String,
+    pub kind: MemoryKind,
+    pub text: String,
+    pub score: f64,
+}
+
+/// Provenance entry attached to every result envelope.
+#[derive(Debug, Clone, Serialize)]
+pub struct Evidence {
+    pub id: i64,
+    pub scope: String,
+    pub score: f64,
+}
+
+/// Standard response envelope (mirrors Memoria's MemoriaResult).
+#[derive(Debug, Clone, Serialize)]
+pub struct WukongResult<T> {
+    pub data: T,
+    pub evidence: Vec<Evidence>,
+    pub confidence: f64,
+    pub latency_ms: u64,
+}
+
+/// Count of memories within one scope.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScopeCount {
+    pub scope: String,
+    pub count: i64,
+}
+
+/// Aggregate statistics.
+#[derive(Debug, Clone, Serialize)]
+pub struct Stats {
+    pub total: i64,
+    pub by_scope: Vec<ScopeCount>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recall_mode_defaults_to_hybrid() {
+        assert_eq!(RecallMode::default(), RecallMode::Hybrid);
+    }
+
+    #[test]
+    fn recall_query_applies_defaults() {
+        let q: RecallQuery = serde_json::from_str(r#"{"query":"sqlite"}"#).unwrap();
+        assert_eq!(q.top_k, 5);
+        assert_eq!(q.mode, RecallMode::Hybrid);
+        assert!(q.scope.is_none());
+    }
+
+    #[test]
+    fn memory_kind_serde_is_snake_case() {
+        let json = serde_json::to_string(&MemoryKind::Decision).unwrap();
+        assert_eq!(json, "\"decision\"");
+        let parsed: MemoryKind = serde_json::from_str("\"skill\"").unwrap();
+        assert_eq!(parsed, MemoryKind::Skill);
+    }
+
+    #[test]
+    fn memory_kind_db_roundtrip() {
+        for k in [
+            MemoryKind::Decision,
+            MemoryKind::Event,
+            MemoryKind::Skill,
+            MemoryKind::Note,
+            MemoryKind::Summary,
+        ] {
+            assert_eq!(MemoryKind::from_db_str(k.as_str()), k);
+        }
+        assert_eq!(MemoryKind::from_db_str("garbage"), MemoryKind::Note);
+    }
+}
