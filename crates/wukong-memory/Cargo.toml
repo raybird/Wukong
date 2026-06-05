@@ -10,5 +10,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
+[dependencies.fastembed]
+version = "4"
+optional = true
+
+[features]
+embed = ["dep:fastembed"]
+
 [dev-dependencies]
 tempfile = { workspace = true }

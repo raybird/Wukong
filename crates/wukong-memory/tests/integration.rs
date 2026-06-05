@@ -112,3 +112,114 @@ async fn invalid_scope_is_rejected() {
         .await;
     assert!(err.is_err());
 }
+
+#[tokio::test]
+async fn remember_writes_embedding_and_backfill_fills_old_rows() {
+    use std::sync::Arc;
+    use wukong_memory::MockEmbedder;
+
+    let file = NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", file.path().display());
+    std::mem::forget(file);
+
+    // v1-style write: no embedder yet -> row has no embedding.
+    let plain = Memory::open(&url).await.unwrap();
+    plain
+        .remember(RememberInput {
+            scope: "global".into(),
+            session_id: None,
+            items: vec![item("old row without vector")],
+        })
+        .await
+        .unwrap();
+    drop(plain);
+
+    // Reopen with embedder, run backfill directly (deterministic).
+    let mem = Memory::open(&url)
+        .await
+        .unwrap()
+        .with_embedder(Arc::new(MockEmbedder::new(16)));
+    mem.backfill_embeddings().await.unwrap();
+
+    // New write now also gets an embedding inline.
+    mem.remember(RememberInput {
+        scope: "global".into(),
+        session_id: None,
+        items: vec![item("new row with vector")],
+    })
+    .await
+    .unwrap();
+
+    let hits = mem
+        .recall(RecallQuery {
+            query: "row".into(),
+            top_k: 5,
+            scope: Some("global".into()),
+            mode: RecallMode::Hybrid,
+        })
+        .await
+        .unwrap();
+    assert!(!hits.data.is_empty());
+}
+
+#[tokio::test]
+async fn semantic_similarity_boosts_ranking() {
+    use std::sync::Arc;
+    use wukong_memory::{Embedder, Result};
+
+    struct StubEmbedder;
+    impl Embedder for StubEmbedder {
+        fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            // "alpha"-bearing text -> [1,0]; everything else -> [0,1] (orthogonal).
+            if text.contains("alpha") {
+                Ok(vec![1.0, 0.0])
+            } else {
+                Ok(vec![0.0, 1.0])
+            }
+        }
+        fn dim(&self) -> usize {
+            2
+        }
+        fn model_id(&self) -> &str {
+            "stub"
+        }
+    }
+
+    let file = NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", file.path().display());
+    std::mem::forget(file);
+
+    let mem = Memory::open(&url)
+        .await
+        .unwrap()
+        .with_embedder(Arc::new(StubEmbedder));
+
+    mem.remember(RememberInput {
+        scope: "global".into(),
+        session_id: None,
+        items: vec![item("zzz alpha zzz"), item("yyy beta yyy")],
+    })
+    .await
+    .unwrap();
+    mem.backfill_embeddings().await.unwrap();
+
+    // Query embeds to [1,0] (contains "alpha"); semantically matches row 1.
+    // Query token "query" is absent from both rows so the keyword source is empty;
+    // both rows still arrive via the recency source, so ranking decides order.
+    let hits = mem
+        .recall(RecallQuery {
+            query: "alpha query".into(),
+            top_k: 2,
+            scope: Some("global".into()),
+            mode: RecallMode::Hybrid,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(hits.data.len(), 2);
+    assert!(
+        hits.data[0].text.contains("alpha"),
+        "semantic match should rank first, got: {:?}",
+        hits.data.iter().map(|h| &h.text).collect::<Vec<_>>()
+    );
+}

@@ -1,3 +1,4 @@
+use crate::embed::blob_to_embedding;
 use crate::error::Result;
 use crate::model::{MemoryKind, ScopeCount, Stats};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
@@ -47,6 +48,8 @@ pub struct Candidate {
     pub importance: f64,
     /// FTS5 bm25 rank (lower = better match); None for non-keyword sources.
     pub bm25: Option<f64>,
+    /// Cosine similarity to the query (higher = better); None for non-vector sources.
+    pub vector_sim: Option<f64>,
 }
 
 /// Owns the SQLite connection pool and all SQL.
@@ -64,6 +67,7 @@ impl Store {
             .journal_mode(SqliteJournalMode::Wal);
         let pool = SqlitePoolOptions::new().connect_with(opts).await?;
         sqlx::raw_sql(SCHEMA).execute(&pool).await?;
+        migrate(&pool).await?;
         Ok(Store { pool })
     }
 
@@ -160,6 +164,55 @@ impl Store {
         Ok(())
     }
 
+    /// Store an embedding blob and its model id for one memory.
+    pub async fn update_embedding(&self, id: i64, blob: &[u8], model: &str) -> Result<()> {
+        sqlx::query("UPDATE memories SET embedding = ?2, embedding_model = ?3 WHERE id = ?1")
+            .bind(id)
+            .bind(blob)
+            .bind(model)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// All memories that have an embedding, paired with the decoded vector.
+    /// bm25/vector_sim on the Candidate are None (filled later during ranking).
+    pub async fn embedded_candidates(&self, limit: i64) -> Result<Vec<(Candidate, Vec<f32>)>> {
+        let rows = sqlx::query(
+            "SELECT id, scope, kind, text, created_at, recall_count, importance,
+                    NULL AS bm25, embedding
+             FROM memories
+             WHERE embedding IS NOT NULL
+             ORDER BY created_at DESC
+             LIMIT ?1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let blob: Vec<u8> = r.get::<Vec<u8>, _>("embedding");
+                let cand = row_to_candidate(r);
+                (cand, blob_to_embedding(&blob))
+            })
+            .collect())
+    }
+
+    /// (id, text) for memories still lacking an embedding (backfill source).
+    pub async fn rows_missing_embedding(&self, limit: i64) -> Result<Vec<(i64, String)>> {
+        let rows = sqlx::query(
+            "SELECT id, text FROM memories WHERE embedding IS NULL ORDER BY id ASC LIMIT ?1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.get::<i64, _>("id"), r.get::<String, _>("text")))
+            .collect())
+    }
+
     /// Total memory count and per-scope breakdown.
     pub async fn stats(&self) -> Result<Stats> {
         let total: i64 = sqlx::query("SELECT COUNT(*) AS c FROM memories")
@@ -182,6 +235,26 @@ impl Store {
     }
 }
 
+/// Idempotently add v2 embedding columns to an existing `memories` table.
+/// Safe to run on every open: checks PRAGMA table_info before ALTER.
+async fn migrate(pool: &SqlitePool) -> Result<()> {
+    let cols = sqlx::query("PRAGMA table_info(memories)")
+        .fetch_all(pool)
+        .await?;
+    let names: Vec<String> = cols.iter().map(|r| r.get::<String, _>("name")).collect();
+    if !names.iter().any(|n| n == "embedding") {
+        sqlx::query("ALTER TABLE memories ADD COLUMN embedding BLOB")
+            .execute(pool)
+            .await?;
+    }
+    if !names.iter().any(|n| n == "embedding_model") {
+        sqlx::query("ALTER TABLE memories ADD COLUMN embedding_model TEXT")
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
 fn row_to_candidate(r: sqlx::sqlite::SqliteRow) -> Candidate {
     Candidate {
         id: r.get::<i64, _>("id"),
@@ -192,6 +265,7 @@ fn row_to_candidate(r: sqlx::sqlite::SqliteRow) -> Candidate {
         recall_count: r.get::<i64, _>("recall_count"),
         importance: r.get::<f64, _>("importance"),
         bm25: r.get::<Option<f64>, _>("bm25"),
+        vector_sim: None,
     }
 }
 
@@ -264,5 +338,67 @@ mod tests {
         store.touch_recalled(&[id], 500).await.unwrap();
         let recent = store.recent_candidates(1).await.unwrap();
         assert_eq!(recent[0].recall_count, 1);
+    }
+
+    #[tokio::test]
+    async fn migrate_adds_embedding_columns() {
+        let store = test_store().await;
+        let cols = sqlx::query("PRAGMA table_info(memories)")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+        let names: Vec<String> = cols.iter().map(|r| r.get::<String, _>("name")).collect();
+        assert!(names.iter().any(|n| n == "embedding"));
+        assert!(names.iter().any(|n| n == "embedding_model"));
+    }
+
+    #[tokio::test]
+    async fn migrate_is_idempotent() {
+        let file = NamedTempFile::new().unwrap();
+        let url = format!("sqlite://{}", file.path().display());
+        std::mem::forget(file);
+        // Open twice: second open re-runs migrate over already-migrated table.
+        let _first = Store::open(&url).await.unwrap();
+        let _second = Store::open(&url).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_and_read_embedding() {
+        use crate::embed::embedding_to_blob;
+        let store = test_store().await;
+        let id = store
+            .insert_memory(None, "global", MemoryKind::Note, "vec me", 1.0, 100)
+            .await
+            .unwrap();
+        let v = vec![0.1f32, 0.2, 0.3];
+        store
+            .update_embedding(id, &embedding_to_blob(&v), "mock")
+            .await
+            .unwrap();
+        let embedded = store.embedded_candidates(10).await.unwrap();
+        assert_eq!(embedded.len(), 1);
+        assert_eq!(embedded[0].0.id, id);
+        assert_eq!(embedded[0].1, v);
+    }
+
+    #[tokio::test]
+    async fn rows_missing_embedding_excludes_embedded() {
+        use crate::embed::embedding_to_blob;
+        let store = test_store().await;
+        let a = store
+            .insert_memory(None, "global", MemoryKind::Note, "a", 1.0, 100)
+            .await
+            .unwrap();
+        let _b = store
+            .insert_memory(None, "global", MemoryKind::Note, "b", 1.0, 100)
+            .await
+            .unwrap();
+        store
+            .update_embedding(a, &embedding_to_blob(&[1.0f32]), "mock")
+            .await
+            .unwrap();
+        let missing = store.rows_missing_embedding(10).await.unwrap();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].1, "b");
     }
 }

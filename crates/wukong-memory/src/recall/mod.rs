@@ -1,3 +1,4 @@
+use crate::embed::cosine_similarity;
 use crate::model::RecallMode;
 use crate::scope::Scope;
 use crate::scoring::{combined_score, Weights};
@@ -78,19 +79,30 @@ pub struct Scored {
     pub score: f64,
 }
 
-/// Normalize bm25 across candidates (lower bm25 = better => higher norm),
-/// compute combined scores, sort descending, and take top_k.
+/// Normalize bm25 and vector_sim across candidates, compute combined scores,
+/// sort descending, and take top_k. bm25: lower = better. vector_sim: higher =
+/// better. Either signal absent on a candidate contributes 0 for that term.
 pub fn rank(
     candidates: Vec<Candidate>,
     now: i64,
     top_k: usize,
     weights: &Weights,
 ) -> Vec<Scored> {
-    // Collect bm25 values (more negative = better match).
+    // bm25: more negative = better match.
     let bm25_vals: Vec<f64> = candidates.iter().filter_map(|c| c.bm25).collect();
-    let (min, max) = match (
+    let (bmin, bmax) = match (
         bm25_vals.iter().cloned().fold(f64::INFINITY, f64::min),
         bm25_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+    ) {
+        (mn, mx) if mn.is_finite() && mx.is_finite() => (mn, mx),
+        _ => (0.0, 0.0),
+    };
+
+    // vector_sim: higher = better match.
+    let vec_vals: Vec<f64> = candidates.iter().filter_map(|c| c.vector_sim).collect();
+    let (vmin, vmax) = match (
+        vec_vals.iter().cloned().fold(f64::INFINITY, f64::min),
+        vec_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
     ) {
         (mn, mx) if mn.is_finite() && mx.is_finite() => (mn, mx),
         _ => (0.0, 0.0),
@@ -99,15 +111,27 @@ pub fn rank(
     let mut scored: Vec<Scored> = candidates
         .into_iter()
         .map(|c| {
-            // relevance: invert bm25 (lower is better) then min-max to [0,1].
+            // lexical: invert bm25 (lower better) then min-max to [0,1].
             let lexical_norm = match c.bm25 {
                 None => 0.0,
-                Some(_) if (max - min).abs() < 1e-9 => 1.0,
-                Some(b) => (max - b) / (max - min),
+                Some(_) if (bmax - bmin).abs() < 1e-9 => 1.0,
+                Some(b) => (bmax - b) / (bmax - bmin),
+            };
+            // semantic: min-max vector_sim (higher better) to [0,1].
+            let semantic_norm = match c.vector_sim {
+                None => 0.0,
+                Some(_) if (vmax - vmin).abs() < 1e-9 => 1.0,
+                Some(s) => (s - vmin) / (vmax - vmin),
             };
             let age = (now - c.created_at).max(0);
-            let score =
-                combined_score(lexical_norm, age, c.importance, c.recall_count, weights);
+            let score = combined_score(
+                lexical_norm,
+                semantic_norm,
+                age,
+                c.importance,
+                c.recall_count,
+                weights,
+            );
             Scored {
                 id: c.id,
                 scope: c.scope,
@@ -124,13 +148,49 @@ pub fn rank(
 }
 
 /// Decide which candidate sources to combine for the given mode.
-pub fn sources_for_mode(mode: RecallMode) -> (bool, bool) {
-    // returns (use_keyword, use_recent)
+/// Returns (use_keyword, use_recent, use_vector).
+pub fn sources_for_mode(mode: RecallMode) -> (bool, bool, bool) {
     match mode {
-        RecallMode::Keyword => (true, false),
-        RecallMode::Tree => (false, true),
-        RecallMode::Hybrid => (true, true),
+        RecallMode::Keyword => (true, false, false),
+        RecallMode::Tree => (false, true, false),
+        RecallMode::Hybrid => (true, true, true),
     }
+}
+
+/// Build vector candidates from embedded rows: compute cosine to the query,
+/// set vector_sim, sort by similarity (best first), and keep `limit`.
+pub fn build_vector_candidates(
+    query_vec: &[f32],
+    embedded: Vec<(Candidate, Vec<f32>)>,
+    limit: usize,
+) -> Vec<Candidate> {
+    let mut cands: Vec<Candidate> = embedded
+        .into_iter()
+        .map(|(mut c, v)| {
+            c.vector_sim = Some(cosine_similarity(query_vec, &v));
+            c
+        })
+        .collect();
+    cands.sort_by(|a, b| {
+        b.vector_sim
+            .partial_cmp(&a.vector_sim)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    cands.truncate(limit);
+    cands
+}
+
+/// Fold vector candidates into a base set: for ids already present, copy their
+/// vector_sim onto the existing candidate (preserving bm25); append vector-only ids.
+pub fn apply_vector_sims(mut base: Vec<Candidate>, vector: Vec<Candidate>) -> Vec<Candidate> {
+    for v in vector {
+        if let Some(existing) = base.iter_mut().find(|c| c.id == v.id) {
+            existing.vector_sim = v.vector_sim;
+        } else {
+            base.push(v);
+        }
+    }
+    base
 }
 
 #[cfg(test)]
@@ -148,6 +208,7 @@ mod tests {
             recall_count: 0,
             importance: 1.0,
             bm25,
+            vector_sim: None,
         }
     }
 
@@ -200,5 +261,41 @@ mod tests {
         let ranked = rank(cands, 0, 1, &Weights::default());
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].id, 2); // more-negative bm25 = better match => higher lexical_norm
+    }
+
+    #[test]
+    fn higher_vector_sim_outranks_when_equal_age() {
+        let mut a = cand(1, "global", 0, None);
+        let mut b = cand(2, "global", 0, None);
+        a.vector_sim = Some(0.1);
+        b.vector_sim = Some(0.9);
+        let ranked = rank(vec![a, b], 0, 2, &Weights::default());
+        assert_eq!(ranked[0].id, 2); // stronger semantic match wins
+    }
+
+    #[test]
+    fn build_vector_candidates_sorts_and_truncates() {
+        let q = vec![1.0f32, 0.0];
+        let embedded = vec![
+            (cand(1, "global", 0, None), vec![0.0f32, 1.0]), // cosine 0
+            (cand(2, "global", 0, None), vec![1.0f32, 0.0]), // cosine 1
+        ];
+        let out = build_vector_candidates(&q, embedded, 1);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, 2);
+        assert!(out[0].vector_sim.unwrap() > 0.99);
+    }
+
+    #[test]
+    fn apply_vector_sims_merges_signals_and_appends() {
+        let base = vec![cand(1, "global", 0, Some(-2.0))]; // keyword hit
+        let mut v1 = cand(1, "global", 0, None);
+        v1.vector_sim = Some(0.8);
+        let mut v2 = cand(2, "global", 0, None);
+        v2.vector_sim = Some(0.5);
+        let merged = apply_vector_sims(base, vec![v1, v2]);
+        assert_eq!(merged.len(), 2);
+        let one = merged.iter().find(|c| c.id == 1).unwrap();
+        assert!(one.bm25.is_some() && one.vector_sim == Some(0.8)); // both signals
     }
 }
