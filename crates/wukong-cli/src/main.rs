@@ -1,8 +1,8 @@
 use clap::Parser;
+use wukong_cli::run_turn;
 use wukong_gateway::backend::AgentCliBackend;
 use wukong_gateway::cli::Cli;
 use wukong_gateway::config::GatewayConfig;
-use wukong_gateway::pipeline::run_turn;
 use wukong_memory::Memory;
 
 #[tokio::main]
@@ -24,7 +24,10 @@ async fn main() {
     };
 
     match run_turn(&memory, &backend, &cfg, &cli.prompt_text()).await {
-        Ok(text) => println!("{text}"),
+        Ok(out) => {
+            eprintln!("🐵 悟空·{}", out.role.name());
+            println!("{}", out.text);
+        }
         Err(e) => {
             eprintln!("error: {e}");
             std::process::exit(1);
