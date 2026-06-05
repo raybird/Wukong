@@ -47,6 +47,8 @@ pub struct Candidate {
     pub importance: f64,
     /// FTS5 bm25 rank (lower = better match); None for non-keyword sources.
     pub bm25: Option<f64>,
+    /// Cosine similarity to the query (higher = better); None for non-vector sources.
+    pub vector_sim: Option<f64>,
 }
 
 /// Owns the SQLite connection pool and all SQL.
@@ -192,6 +194,7 @@ fn row_to_candidate(r: sqlx::sqlite::SqliteRow) -> Candidate {
         recall_count: r.get::<i64, _>("recall_count"),
         importance: r.get::<f64, _>("importance"),
         bm25: r.get::<Option<f64>, _>("bm25"),
+        vector_sim: None,
     }
 }
 

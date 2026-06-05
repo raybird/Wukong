@@ -103,7 +103,7 @@ impl Memory {
             Some(s) => Some(Scope::parse(s)?),
             None => None,
         };
-        let (use_keyword, use_recent) = sources_for_mode(query.mode);
+        let (use_keyword, use_recent, _use_vector) = sources_for_mode(query.mode);
         let limit = fetch_limit(query.top_k);
         let now = now_unix();
 
