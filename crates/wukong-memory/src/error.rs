@@ -13,6 +13,8 @@ pub enum MemoryError {
     InvalidQuery(String),
     #[error("serialization error: {0}")]
     Serialize(#[from] serde_json::Error),
+    #[error("embedding error: {0}")]
+    Embed(String),
 }
 
 /// Convenience result alias used across the crate.
@@ -26,5 +28,11 @@ mod tests {
     fn invalid_scope_message_includes_input() {
         let err = MemoryError::InvalidScope("bogus".to_string());
         assert_eq!(err.to_string(), "invalid scope: bogus");
+    }
+
+    #[test]
+    fn embed_error_message_includes_detail() {
+        let err = MemoryError::Embed("model load failed".to_string());
+        assert_eq!(err.to_string(), "embedding error: model load failed");
     }
 }
