@@ -2,6 +2,7 @@
 
 pub mod error;
 pub mod model;
+pub mod recall;
 pub mod scope;
 pub mod scoring;
 pub mod store;
