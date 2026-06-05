@@ -4,6 +4,7 @@ pub mod error;
 pub mod model;
 pub mod scope;
 pub mod scoring;
+pub mod store;
 
 pub use error::{MemoryError, Result};
 pub use model::{
