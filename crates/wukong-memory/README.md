@@ -33,10 +33,31 @@ let stats = mem.stats().await?;
 | :--- | :--- |
 | `Keyword` | FTS5 `MATCH` + BM25 |
 | `Tree` | 依 scope 階層取近期記憶 |
-| `Hybrid`（預設） | 合併兩者，依綜合分重排 |
+| `Hybrid`（預設） | 合併詞彙＋近期＋語意，依綜合分重排 |
 
-綜合分：`α·正規化BM25 + β·時間衰減(90天半衰期) + γ·importance`，常被召回者加成。
+綜合分：`α·正規化BM25 + δ·語意相似 + β·時間衰減(90天半衰期) + γ·importance`，常被召回者加成。
 過短／全停用詞的查詢由 adaptive gate 直接略過。
+
+## 語意向量召回（選用增強層）
+
+預設純 BM25、零外部模型。開啟 cargo feature `embed` 後可加入本機 embedding：
+
+- 模型：fastembed `all-MiniLM-L6-v2`（384 維），首次使用下載至 cache、之後離線。
+- 儲存：向量以 BLOB 存在 `memories.embedding`，與 SQLite 同庫；純 Rust 暴力 cosine。
+- 排序：語意分以 `δ` 權重併入 Hybrid 綜合分（`δ` 缺席時為 0）。
+- 啟用：建置帶 `--features embed` 並設環境變數 `WUKONG_EMBED=1`。
+- 退場：未編 feature／未設環境變數／模型載入失敗 → 一律退回 v1 BM25，助手照常可用。
+- 既有記憶：開機背景批次補齊向量；補齊前仍可由 BM25 召回。
+
+```rust
+use std::sync::Arc;
+use wukong_memory::{Memory, MockEmbedder};
+
+// 測試用確定性 embedder（真實用 FastembedBackend，需 feature `embed`）
+let mem = Memory::open("sqlite://./memory.db").await?
+    .with_embedder(Arc::new(MockEmbedder::new(384)));
+mem.backfill_embeddings().await?; // 直接補齊（with_embedder 也會背景補齊）
+```
 
 ## Scope
 
@@ -47,4 +68,5 @@ let stats = mem.stats().await?;
 
 SQLite（WAL）+ FTS5 外部內容表。schema 啟動時冪等套用。回應信封：`WukongResult<T> { data, evidence[], confidence, latency_ms }`。
 
-詳見 [`docs/superpowers/specs/2026-06-05-wukong-memory-design.md`](../../docs/superpowers/specs/2026-06-05-wukong-memory-design.md)。
+詳見 [`docs/superpowers/specs/2026-06-05-wukong-memory-design.md`](../../docs/superpowers/specs/2026-06-05-wukong-memory-design.md)
+與語意層 [`docs/superpowers/specs/2026-06-06-semantic-recall-design.md`](../../docs/superpowers/specs/2026-06-06-semantic-recall-design.md)。

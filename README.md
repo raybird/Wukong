@@ -180,7 +180,8 @@ wukong/
 
 - **儲存**：SQLite + FTS5（BM25 關鍵字檢索），啟用 WAL。
 - **召回模式**：`keyword`（FTS5）、`tree`（依 scope 階層取近期）、`hybrid`（合併重排，預設）。
-- **排序**：`score = α·詞彙相關 + β·時間衰減 + γ·重要度`，時間衰減半衰期 90 天，常被取用者加成。
+- **排序**：`score = α·詞彙相關 + δ·語意相似 + β·時間衰減 + γ·重要度`，時間衰減半衰期 90 天，常被取用者加成。
+- **語意向量召回（選用增強層）**：cargo feature `embed` + `WUKONG_EMBED=1` 啟用本機 embedding（fastembed `all-MiniLM-L6-v2`，384 維，離線）。向量存同一 SQLite、純 Rust cosine、併入 Hybrid 綜合分；未啟用或模型載入失敗即優雅退回 BM25。既有記憶開機背景補齊。
 - **Scope 階層**：`project:X` / `agent:X` / `user:X` 召回時自動含 `global`。
 - **Adaptive gate**：過短／全停用詞的瑣碎查詢直接略過召回。
 
@@ -205,7 +206,6 @@ cargo run -p wukong-orchestrator --bin wukong-orchestrate -- --agent-cmd "printf
 - Telegram bot / Web Console 進入點（TeleNexus 完整願景）
 - 即時串流輸出、互動 REPL
 - 平行多角色調度、角色協作鏈、技能路由
-- 語意向量召回（本機 embedding）
 - 記憶 markdown/wiki 雙持久化、consolidation/prune、可觀測性快照
 
 ---
