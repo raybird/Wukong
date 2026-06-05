@@ -7,10 +7,6 @@ version.workspace = true
 name = "wukong_gateway"
 path = "src/lib.rs"
 
-[[bin]]
-name = "wukong"
-path = "src/main.rs"
-
 [dependencies]
 wukong-memory = { path = "../wukong-memory" }
 tokio = { workspace = true }
