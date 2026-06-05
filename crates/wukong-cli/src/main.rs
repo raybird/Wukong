@@ -18,6 +18,19 @@ async fn main() {
         }
     };
 
+    #[cfg(feature = "embed")]
+    let memory = if std::env::var("WUKONG_EMBED").as_deref() == Ok("1") {
+        match wukong_memory::FastembedBackend::new() {
+            Ok(backend) => memory.with_embedder(std::sync::Arc::new(backend)),
+            Err(e) => {
+                eprintln!("🐵 語意層停用（模型載入失敗）：{e}");
+                memory
+            }
+        }
+    } else {
+        memory
+    };
+
     let backend = AgentCliBackend {
         command: cfg.agent_command.clone(),
         continue_args: cfg.continue_args.clone(),

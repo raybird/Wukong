@@ -19,5 +19,8 @@ tokio = { workspace = true }
 clap = { workspace = true }
 thiserror = { workspace = true }
 
+[features]
+embed = ["wukong-memory/embed"]
+
 [dev-dependencies]
 tempfile = { workspace = true }

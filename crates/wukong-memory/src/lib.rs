@@ -14,6 +14,8 @@ pub use model::{
     ScopeCount, Stats, WukongResult,
 };
 pub use embed::{cosine_similarity, Embedder, MockEmbedder};
+#[cfg(feature = "embed")]
+pub use embed::FastembedBackend;
 pub use scope::Scope;
 pub use scoring::Weights;
 

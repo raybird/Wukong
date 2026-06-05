@@ -87,6 +87,59 @@ impl Embedder for MockEmbedder {
     }
 }
 
+/// Real local embedder backed by fastembed (ONNX). Behind the `embed` feature
+/// so the default build pulls no heavy dependencies. Default model:
+/// all-MiniLM-L6-v2 (384 dims). First use downloads the model to cache.
+#[cfg(feature = "embed")]
+pub struct FastembedBackend {
+    model: fastembed::TextEmbedding,
+    dim: usize,
+    model_id: String,
+}
+
+#[cfg(feature = "embed")]
+impl FastembedBackend {
+    /// Construct with the default all-MiniLM-L6-v2 model.
+    pub fn new() -> Result<Self> {
+        use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+        let model = TextEmbedding::try_new(
+            InitOptions::new(EmbeddingModel::AllMiniLML6V2).with_show_download_progress(false),
+        )
+        .map_err(|e| crate::error::MemoryError::Embed(e.to_string()))?;
+        Ok(Self {
+            model,
+            dim: 384,
+            model_id: "all-MiniLM-L6-v2".to_string(),
+        })
+    }
+}
+
+#[cfg(feature = "embed")]
+impl Embedder for FastembedBackend {
+    fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let mut out = self
+            .model
+            .embed(vec![text], None)
+            .map_err(|e| crate::error::MemoryError::Embed(e.to_string()))?;
+        out.pop()
+            .ok_or_else(|| crate::error::MemoryError::Embed("empty embedding".to_string()))
+    }
+
+    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        self.model
+            .embed(texts.to_vec(), None)
+            .map_err(|e| crate::error::MemoryError::Embed(e.to_string()))
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
