@@ -1,0 +1,23 @@
+[package]
+name = "wukong-memoryd"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "wukong_memoryd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wukong-memoryd"
+path = "src/main.rs"
+
+[dependencies]
+wukong-memory = { path = "../wukong-memory" }
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true }
+tempfile = { workspace = true }
