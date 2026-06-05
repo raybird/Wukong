@@ -46,6 +46,38 @@
 
 依賴方向（單向、無循環）：`wukong-cli → { memory, gateway, orchestrator }`，`orchestrator → gateway → memory`。
 
+### 一回合的資料流
+
+```
+你: wukong "幫我修這個 bug"
+      │
+      ▼
+┌─────────────────────── wukong-cli (金箍棒) ───────────────────────┐
+│                                                                    │
+│  1. recall ───────────────►  wukong-memory     回想此 scope 的相關記憶
+│                              （SQLite + FTS5）   ◄─── hits[]
+│                                                                    │
+│  2. route  ───────────────►  wukong-orchestrator  第 1 次 agent 呼叫：
+│         （判斷專家角色）          └─► agent CLI       「該找哪個角色？」
+│                                                  ◄─── role = Fixer
+│                                                                    │
+│  3. build_prompt = 人格(悟空) + 角色卡(Fixer) + 記憶 hits + 你的輸入     │
+│                                                                    │
+│  4. execute ──────────────►  wukong-gateway      第 2 次 agent 呼叫：
+│                              └─► agent CLI         以該角色執行
+│                                                  ◄─── 回答文字
+│                                                                    │
+│  5. remember ─────────────►  wukong-memory      落盤 User + Assistant
+│                                                                    │
+└────────────────────────────────────────────────────────────────────┘
+      │
+      ▼
+  stderr: 🐵 悟空·fixer
+  stdout: <回答>
+```
+
+> 每回合對底層 agent 進行兩次呼叫（路由 + 執行）。各 crate 另有自己的 README。
+
 ---
 
 ## 快速開始
