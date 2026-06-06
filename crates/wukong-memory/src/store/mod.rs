@@ -55,6 +55,15 @@ pub struct Candidate {
     pub vector_sim: Option<f64>,
 }
 
+/// A row eligible for consolidation (event/note, not yet consolidated).
+#[derive(Debug, Clone)]
+pub struct ConsolidationRow {
+    pub id: i64,
+    pub session_id: Option<String>,
+    pub text: String,
+    pub importance: f64,
+}
+
 /// Owns the SQLite connection pool and all SQL.
 #[derive(Clone)]
 pub struct Store {
@@ -214,6 +223,43 @@ impl Store {
             .into_iter()
             .map(|r| (r.get::<i64, _>("id"), r.get::<String, _>("text")))
             .collect())
+    }
+
+    /// Foldable rows in one scope: event/note kinds not yet consolidated,
+    /// oldest first.
+    pub async fn consolidation_candidates(&self, scope: &str) -> Result<Vec<ConsolidationRow>> {
+        let rows = sqlx::query(
+            "SELECT id, session_id, text, importance
+             FROM memories
+             WHERE scope = ?1
+               AND kind IN ('event','note')
+               AND consolidated_into IS NULL
+             ORDER BY created_at ASC, id ASC",
+        )
+        .bind(scope)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| ConsolidationRow {
+                id: r.get::<i64, _>("id"),
+                session_id: r.get::<Option<String>, _>("session_id"),
+                text: r.get::<String, _>("text"),
+                importance: r.get::<f64, _>("importance"),
+            })
+            .collect())
+    }
+
+    /// Mark the given rows as folded into `summary_id`.
+    pub async fn mark_consolidated(&self, ids: &[i64], summary_id: i64) -> Result<()> {
+        for id in ids {
+            sqlx::query("UPDATE memories SET consolidated_into = ?2 WHERE id = ?1")
+                .bind(id)
+                .bind(summary_id)
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Total memory count and per-scope breakdown.
@@ -408,6 +454,25 @@ mod tests {
         let missing = store.rows_missing_embedding(10).await.unwrap();
         assert_eq!(missing.len(), 1);
         assert_eq!(missing[0].1, "b");
+    }
+
+    #[tokio::test]
+    async fn consolidation_candidates_excludes_consolidated_and_nonfoldable() {
+        let store = test_store().await;
+        let e1 = store.insert_memory(Some("s1"), "project:X", MemoryKind::Event, "e1", 1.0, 100).await.unwrap();
+        let _e2 = store.insert_memory(None, "project:X", MemoryKind::Note, "n1", 2.0, 110).await.unwrap();
+        // Decision is never foldable.
+        let _d = store.insert_memory(None, "project:X", MemoryKind::Decision, "d1", 1.0, 120).await.unwrap();
+        // Different scope must not appear.
+        let _o = store.insert_memory(None, "global", MemoryKind::Event, "other", 1.0, 130).await.unwrap();
+        // Mark e1 as already consolidated.
+        store.mark_consolidated(&[e1], 999).await.unwrap();
+
+        let rows = store.consolidation_candidates("project:X").await.unwrap();
+        // Only the unconsolidated Note (n1) remains.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "n1");
+        assert_eq!(rows[0].importance, 2.0);
     }
 
     #[tokio::test]
