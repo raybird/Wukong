@@ -76,6 +76,17 @@ pub async fn route(backend: &impl AiBackend, task: &str) -> Result<Role, Orchest
     Ok(parse_role(&resp.text))
 }
 
+/// Phase 1 (chain): ask the backend for an ordered role chain.
+pub async fn plan_chain(backend: &impl AiBackend, task: &str) -> Result<Vec<Role>, OrchestratorError> {
+    let resp = backend
+        .run(AgentRequest {
+            prompt: planning_prompt(task),
+            continue_session: false,
+        })
+        .await?;
+    Ok(parse_chain(&resp.text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

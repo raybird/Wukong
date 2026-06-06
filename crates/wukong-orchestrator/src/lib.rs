@@ -6,7 +6,7 @@ pub mod router;
 
 pub use error::OrchestratorError;
 pub use role::Role;
-pub use router::{parse_role, route, routing_prompt};
+pub use router::{parse_chain, parse_role, plan_chain, planning_prompt, route, routing_prompt};
 
 use wukong_gateway::backend::{AgentRequest, AiBackend};
 
@@ -68,6 +68,24 @@ pub async fn orchestrate(
     })
 }
 
+/// Plan a role chain, then run each role in order, accumulating prior outputs
+/// into each step's prompt. Makes 1 planning call + one call per role.
+pub async fn orchestrate_chain(
+    backend: &impl AiBackend,
+    task: &str,
+) -> Result<ChainOutcome, OrchestratorError> {
+    let roles = plan_chain(backend, task).await?;
+    let mut steps: Vec<Outcome> = Vec::new();
+    for role in roles {
+        let prompt = format!("{}\n\n[任務]\n{}{}", role.card(), task, chain_context(&steps));
+        let resp = backend
+            .run(AgentRequest { prompt, continue_session: false })
+            .await?;
+        steps.push(Outcome { role, output: resp.text });
+    }
+    Ok(ChainOutcome { steps })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +141,29 @@ mod tests {
         let backend = MockBackend::new(&["no role here", "answer"]);
         let outcome = orchestrate(&backend, "ponder").await.unwrap();
         assert_eq!(outcome.role, Role::Oracle);
+    }
+
+    #[tokio::test]
+    async fn plan_chain_parses_backend_reply() {
+        let backend = MockBackend::new(&["explorer, fixer"]);
+        let chain = plan_chain(&backend, "build a thing").await.unwrap();
+        assert_eq!(chain, vec![Role::Explorer, Role::Fixer]);
+    }
+
+    #[tokio::test]
+    async fn orchestrate_chain_runs_each_role_in_order() {
+        // [0] planner reply, [1] explorer output, [2] fixer output.
+        let backend = MockBackend::new(&["explorer, fixer", "找到了", "修好了"]);
+        let co = orchestrate_chain(&backend, "fix it").await.unwrap();
+        assert_eq!(co.steps.len(), 2);
+        assert_eq!(co.steps[0].role, Role::Explorer);
+        assert_eq!(co.steps[1].role, Role::Fixer);
+        assert_eq!(co.final_output(), "修好了");
+
+        // The second step's prompt carries the first step's output.
+        let prompts = backend.prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 3); // plan + 2 executes
+        assert!(prompts[2].contains("找到了"));
     }
 
     #[test]
