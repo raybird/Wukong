@@ -89,6 +89,7 @@ mod tests {
             continue_args: vec![],
             continue_session: false,
             recall_top_k: 5,
+            stream: true,
         }
     }
 
