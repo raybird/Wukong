@@ -34,6 +34,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
 CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
     INSERT INTO memories_fts(rowid, text) VALUES (new.id, new.text);
 END;
+CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, text) VALUES('delete', old.id, old.text);
+END;
 "#;
 
 /// A raw row pulled during recall, before scoring.
@@ -252,6 +255,11 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
             .execute(pool)
             .await?;
     }
+    if !names.iter().any(|n| n == "consolidated_into") {
+        sqlx::query("ALTER TABLE memories ADD COLUMN consolidated_into INTEGER")
+            .execute(pool)
+            .await?;
+    }
     Ok(())
 }
 
@@ -400,5 +408,33 @@ mod tests {
         let missing = store.rows_missing_embedding(10).await.unwrap();
         assert_eq!(missing.len(), 1);
         assert_eq!(missing[0].1, "b");
+    }
+
+    #[tokio::test]
+    async fn migrate_adds_consolidated_into_column() {
+        let store = test_store().await;
+        let cols = sqlx::query("PRAGMA table_info(memories)")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+        let names: Vec<String> = cols.iter().map(|r| r.get::<String, _>("name")).collect();
+        assert!(names.iter().any(|n| n == "consolidated_into"));
+    }
+
+    #[tokio::test]
+    async fn delete_keeps_fts_in_sync() {
+        let store = test_store().await;
+        let id = store
+            .insert_memory(None, "global", MemoryKind::Note, "deletable widget", 1.0, 100)
+            .await
+            .unwrap();
+        assert_eq!(store.keyword_candidates("\"widget\"", 10).await.unwrap().len(), 1);
+        sqlx::query("DELETE FROM memories WHERE id = ?1")
+            .bind(id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        // FTS index must no longer match the deleted row.
+        assert_eq!(store.keyword_candidates("\"widget\"", 10).await.unwrap().len(), 0);
     }
 }
