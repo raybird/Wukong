@@ -133,10 +133,12 @@ mod tests {
         let msg = TgMessage { update_id: 1, chat_id: 12, text: "什麼是 BM25".to_string() };
         handle_message(&client, &mem, &base_cfg(), &backend, &[12], &msg).await;
 
-        // Final answer was sent to the right chat.
-        let sent = client.sent.lock().unwrap();
-        assert!(sent.iter().any(|(c, t)| *c == 12 && t == "答案來了"));
-        drop(sent);
+        // Final answer was sent to the right chat. Scope the guard so it is
+        // released before the await below.
+        {
+            let sent = client.sent.lock().unwrap();
+            assert!(sent.iter().any(|(c, t)| *c == 12 && t == "答案來了"));
+        }
 
         // Stored under the per-chat scope.
         let r = mem
