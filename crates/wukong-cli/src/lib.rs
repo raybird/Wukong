@@ -1,6 +1,7 @@
 //! wukong-cli: the unified Wukong assistant (金箍棒) tying the three pillars together.
 
 pub mod persona;
+pub mod render;
 
 use thiserror::Error;
 use wukong_gateway::backend::{AgentRequest, AiBackend};
@@ -131,6 +132,7 @@ mod tests {
             continue_args: vec![],
             continue_session: false,
             recall_top_k: 5,
+            stream: true,
         }
     }
 
