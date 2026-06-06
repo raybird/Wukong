@@ -1,6 +1,6 @@
 use clap::Parser;
 use wukong_gateway::backend::AgentCliBackend;
-use wukong_orchestrator::orchestrate;
+use wukong_orchestrator::orchestrate_chain;
 
 /// Demo entrypoint: auto-route a task to a role and run it.
 #[derive(Parser, Debug)]
@@ -31,10 +31,12 @@ async fn main() {
         continue_args: vec![],
     };
 
-    match orchestrate(&backend, &cli.task.join(" ")).await {
-        Ok(outcome) => {
-            eprintln!("[role: {}]", outcome.role.name());
-            println!("{}", outcome.output);
+    match orchestrate_chain(&backend, &cli.task.join(" ")).await {
+        Ok(chain) => {
+            for step in &chain.steps {
+                eprintln!("[role: {}]", step.role.name());
+            }
+            println!("{}", chain.final_output());
         }
         Err(e) => {
             eprintln!("error: {e}");
