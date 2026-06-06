@@ -14,7 +14,9 @@ pub use model::{
     Evidence, MemoryItem, MemoryKind, RecallHit, RecallMode, RecallQuery, RememberInput,
     ScopeCount, Stats, WukongResult,
 };
-pub use consolidate::{ConcatSummarizer, MockSummarizer, Summarizer};
+pub use consolidate::{
+    plan_batches, ConcatSummarizer, ConsolidatePlan, ConsolidatePolicy, MockSummarizer, Summarizer,
+};
 pub use embed::{cosine_similarity, Embedder, MockEmbedder};
 #[cfg(feature = "embed")]
 pub use embed::FastembedBackend;
@@ -223,6 +225,60 @@ impl Memory {
         })
     }
 
+    /// Plan (without executing) which source ids would fold into each summary.
+    pub async fn plan_consolidation(
+        &self,
+        scope: &str,
+        policy: &consolidate::ConsolidatePolicy,
+    ) -> Result<consolidate::ConsolidatePlan> {
+        let rows = self.store.consolidation_candidates(scope).await?;
+        let batches = consolidate::plan_batches(rows, policy.batch_size)
+            .into_iter()
+            .map(|b| b.iter().map(|r| r.id).collect())
+            .collect();
+        Ok(consolidate::ConsolidatePlan { batches })
+    }
+
+    /// Execute consolidation: for each batch, summarize the texts, insert a
+    /// Summary memory, and mark the sources as folded into it. Returns the new
+    /// summary ids. Each new summary is embedded (if an embedder is attached)
+    /// and mirrored to markdown (if a sink is attached).
+    pub async fn consolidate(
+        &self,
+        scope: &str,
+        policy: &consolidate::ConsolidatePolicy,
+        summarizer: &dyn consolidate::Summarizer,
+    ) -> Result<Vec<i64>> {
+        let rows = self.store.consolidation_candidates(scope).await?;
+        let batches = consolidate::plan_batches(rows, policy.batch_size);
+        let now = now_unix();
+        let mut summary_ids = Vec::with_capacity(batches.len());
+        for batch in batches {
+            if batch.is_empty() {
+                continue;
+            }
+            let texts: Vec<String> = batch.iter().map(|r| r.text.clone()).collect();
+            let importance = batch.iter().map(|r| r.importance).fold(0.0_f64, f64::max);
+            let summary_text = summarizer.summarize(&texts)?;
+            let summary_id = self
+                .store
+                .insert_memory(None, scope, MemoryKind::Summary, &summary_text, importance, now)
+                .await?;
+            let src_ids: Vec<i64> = batch.iter().map(|r| r.id).collect();
+            self.store.mark_consolidated(&src_ids, summary_id).await?;
+            if let Some(emb) = &self.embedder {
+                if let Ok(v) = emb.embed(&summary_text) {
+                    let _ = self
+                        .store
+                        .update_embedding(summary_id, &embedding_to_blob(&v), emb.model_id())
+                        .await;
+                }
+            }
+            summary_ids.push(summary_id);
+        }
+        Ok(summary_ids)
+    }
+
     /// Aggregate statistics.
     pub async fn stats(&self) -> Result<Stats> {
         self.store.stats().await
@@ -246,4 +302,60 @@ async fn backfill(store: &Store, embedder: &dyn Embedder) -> Result<()> {
         tokio::task::yield_now().await;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::consolidate::MockSummarizer;
+    use crate::model::{MemoryItem, RememberInput};
+    use tempfile::NamedTempFile;
+
+    async fn open_mem() -> Memory {
+        let file = NamedTempFile::new().unwrap();
+        let url = format!("sqlite://{}", file.path().display());
+        std::mem::forget(file);
+        Memory::open(&url).await.unwrap()
+    }
+
+    async fn remember_event(mem: &Memory, scope: &str, text: &str) {
+        mem.remember(RememberInput {
+            scope: scope.to_string(),
+            session_id: None,
+            items: vec![MemoryItem { kind: MemoryKind::Event, text: text.to_string(), importance: None }],
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn consolidate_creates_summary_and_marks_sources() {
+        let mem = open_mem().await;
+        remember_event(&mem, "project:X", "did A").await;
+        remember_event(&mem, "project:X", "did B").await;
+
+        let plan = mem
+            .plan_consolidation("project:X", &ConsolidatePolicy { batch_size: 20 })
+            .await
+            .unwrap();
+        assert_eq!(plan.batches.len(), 1);
+        assert_eq!(plan.batches[0].len(), 2);
+
+        let summary_ids = mem
+            .consolidate("project:X", &ConsolidatePolicy { batch_size: 20 }, &MockSummarizer)
+            .await
+            .unwrap();
+        assert_eq!(summary_ids.len(), 1);
+
+        // Sources are now consolidated => no longer candidates.
+        let after = mem
+            .plan_consolidation("project:X", &ConsolidatePolicy { batch_size: 20 })
+            .await
+            .unwrap();
+        assert!(after.batches.is_empty());
+
+        // The summary text came from the summarizer.
+        let recent = mem.store.recent_candidates(10).await.unwrap();
+        assert!(recent.iter().any(|c| c.kind == MemoryKind::Summary && c.text == "SUMMARY(2)"));
+    }
 }
