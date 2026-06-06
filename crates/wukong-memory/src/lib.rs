@@ -3,6 +3,7 @@
 pub mod consolidate;
 pub mod embed;
 pub mod error;
+pub mod markdown;
 pub mod model;
 pub mod prune;
 pub mod recall;
@@ -21,6 +22,7 @@ pub use consolidate::{
 pub use embed::{cosine_similarity, Embedder, MockEmbedder};
 #[cfg(feature = "embed")]
 pub use embed::FastembedBackend;
+pub use markdown::MarkdownSink;
 pub use prune::PrunePolicy;
 pub use scope::Scope;
 pub use scoring::Weights;
