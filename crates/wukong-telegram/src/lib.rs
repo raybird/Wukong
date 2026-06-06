@@ -2,6 +2,7 @@
 
 pub mod client;
 pub mod command;
+pub mod dispatch;
 pub mod error;
 pub mod parse;
 
