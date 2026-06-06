@@ -1,5 +1,7 @@
 use crate::error::GatewayError;
+use crate::stream::{parse_event, StreamEvent};
 use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 /// A request to the AI backend.
@@ -19,6 +21,18 @@ pub struct AgentResponse {
 #[allow(async_fn_in_trait)]
 pub trait AiBackend {
     async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError>;
+
+    /// Run, invoking `on_event` as events arrive, returning the full response.
+    /// Default: call `run`, then emit the whole text as a single Text event.
+    async fn run_streaming(
+        &self,
+        req: AgentRequest,
+        on_event: &mut dyn FnMut(StreamEvent),
+    ) -> Result<AgentResponse, GatewayError> {
+        let resp = self.run(req).await?;
+        on_event(StreamEvent::Text(resp.text.clone()));
+        Ok(resp)
+    }
 }
 
 /// Build the argv handed to the agent subprocess:
@@ -64,6 +78,69 @@ impl AiBackend for AgentCliBackend {
         }
         Ok(AgentResponse {
             text: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        req: AgentRequest,
+        on_event: &mut dyn FnMut(StreamEvent),
+    ) -> Result<AgentResponse, GatewayError> {
+        // Build argv then insert `--format json` before the prompt (last arg).
+        let mut argv = assemble_argv(
+            &self.command,
+            &self.continue_args,
+            req.continue_session,
+            &req.prompt,
+        );
+        let prompt = argv.pop().expect("argv always ends with the prompt");
+        argv.push("--format".to_string());
+        argv.push("json".to_string());
+        argv.push(prompt);
+
+        let mut child = Command::new(&argv[0])
+            .args(&argv[1..])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        // Drain stderr concurrently so a large stderr can't deadlock us while
+        // we read stdout line-by-line.
+        let stderr = child.stderr.take().expect("stderr piped");
+        let stderr_task = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = String::new();
+            let mut rdr = stderr;
+            let _ = rdr.read_to_string(&mut buf).await;
+            buf
+        });
+
+        let stdout = child.stdout.take().expect("stdout piped");
+        let mut lines = BufReader::new(stdout).lines();
+        let mut full = String::new();
+        while let Some(line) = lines.next_line().await? {
+            if let Some(ev) = parse_event(&line) {
+                if let StreamEvent::Text(t) = &ev {
+                    if !full.is_empty() {
+                        full.push('\n');
+                    }
+                    full.push_str(t);
+                }
+                on_event(ev);
+            }
+        }
+
+        let status = child.wait().await?;
+        let stderr_buf = stderr_task.await.unwrap_or_default();
+        if !status.success() {
+            return Err(GatewayError::AgentFailed {
+                code: status.code(),
+                stderr: stderr_buf.trim().to_string(),
+            });
+        }
+        Ok(AgentResponse {
+            text: full.trim().to_string(),
         })
     }
 }
@@ -126,5 +203,62 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, GatewayError::AgentFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn run_streaming_default_emits_single_text() {
+        // Test the DEFAULT run_streaming impl via a minimal mock backend.
+        struct Plain;
+        impl AiBackend for Plain {
+            async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+                Ok(AgentResponse { text: "whole answer".to_string() })
+            }
+        }
+        let mut events = Vec::new();
+        let resp = Plain
+            .run_streaming(
+                AgentRequest { prompt: "x".into(), continue_session: false },
+                &mut |e| events.push(e),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.text, "whole answer");
+        assert_eq!(events, vec![StreamEvent::Text("whole answer".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn agent_cli_run_streaming_parses_ndjson() {
+        // A fake "agent": `printf "%s\n" <lines...>` prints each extra arg on its
+        // own line. argv tail (--format json <prompt>) becomes extra %s lines
+        // (non-JSON) that parse_event ignores.
+        let backend = AgentCliBackend {
+            command: vec![
+                "printf".to_string(),
+                "%s\\n".to_string(),
+                r#"{"type":"step_start"}"#.to_string(),
+                r#"{"type":"tool_use","name":"read"}"#.to_string(),
+                r#"{"type":"text","text":"hello"}"#.to_string(),
+                r#"{"type":"step_finish"}"#.to_string(),
+            ],
+            continue_args: vec![],
+        };
+        let mut events = Vec::new();
+        let resp = backend
+            .run_streaming(
+                AgentRequest { prompt: "ignored".into(), continue_session: false },
+                &mut |e| events.push(e),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.text, "hello");
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::StepStart,
+                StreamEvent::ToolUse("read".to_string()),
+                StreamEvent::Text("hello".to_string()),
+                StreamEvent::StepFinish,
+            ]
+        );
     }
 }
