@@ -17,6 +17,19 @@ REPL meta 指令：`/exit`、`/quit`、Ctrl-D 離開；`/scope <x>` 切換本 se
 
 旗標與 `wukong-gateway::cli::Cli` 共用：`[PROMPT]...`、`-c/--continue`、`--scope`、`--db`、`--agent-cmd`、`--no-stream`。
 
+### 記憶維護子命令
+
+無 prompt + 子命令 → 走維護路徑(不進 REPL)。
+
+| 子命令 | 旗標 | 說明 |
+| :--- | :--- | :--- |
+| `memory snapshot` | `--scope` | 印健康快照(總數/類型/年齡/覆蓋率/候選數) |
+| `memory consolidate` | `--scope`、`--dry-run` | 經 opencode 把零碎 event 聚合成 Summary;`--dry-run` 只列批次 |
+| `memory prune` | `--scope`、`--dry-run` | 刪已摘要/低價值記憶;`--dry-run` 只列清單 |
+| `memory export` | `--dir` | 依 DB 全量重建 markdown(未給 `--dir` 則用 `WUKONG_MD_DIR`) |
+
+設 `WUKONG_MD_DIR` 後,每次對話的 remember 會同步把記憶鏡像成 per-scope markdown。
+
 ## 活動渲染（串流）
 
 預設開啟：execute 步驟以 `opencode run --format json` 解析事件——文字片段印到 **stdout**、工具活動（`▸ 使用工具 …`）印到 **stderr**，管線相容。`--no-stream` 或 `WUKONG_STREAM=0` 退回純文字一次輸出。

@@ -15,6 +15,10 @@ pub enum MemoryError {
     Serialize(#[from] serde_json::Error),
     #[error("embedding error: {0}")]
     Embed(String),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Other(String),
 }
 
 /// Convenience result alias used across the crate.

@@ -68,6 +68,10 @@ async fn stats(State(mem): State<Arc<Memory>>) -> Result<impl IntoResponse, AppE
     Ok(Json(mem.stats().await?))
 }
 
+async fn snapshot(State(mem): State<Arc<Memory>>) -> Result<impl IntoResponse, AppError> {
+    Ok(Json(mem.snapshot(None).await?))
+}
+
 async fn remember(
     State(mem): State<Arc<Memory>>,
     Json(input): Json<RememberInput>,
@@ -87,6 +91,7 @@ pub fn build_router(mem: Arc<Memory>) -> Router {
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/stats", get(stats))
+        .route("/v1/snapshot", get(snapshot))
         .route("/v1/remember", post(remember))
         .route("/v1/recall", post(recall))
         .with_state(mem)

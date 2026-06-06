@@ -122,6 +122,12 @@ wukong --scope "global" "記住：我偏好 4 空格縮排"
 
 # 關閉活動渲染（純文字一次輸出，適合管線）
 wukong --no-stream "這段程式做什麼？" > out.txt
+
+# 記憶維護（手動子命令；刪資料的操作都支援 --dry-run 預覽）
+wukong memory snapshot                       # 健康快照（總數/類型/年齡/覆蓋率/候選數）
+wukong memory consolidate --scope project:X  # 用 opencode 把零碎 event 聚合成 Summary
+wukong memory prune --dry-run                # 預覽將刪的低價值/已摘要記憶
+wukong memory export --dir ./mem-md          # 依 DB 全量重建 markdown 鏡像
 ```
 
 > **活動渲染**：預設開啟，execute 以 `opencode run --format json` 即時呈現——文字到 stdout、工具活動（`▸ 使用工具 …`）到 stderr。`--no-stream` / `WUKONG_STREAM=0` 退回純文字。（opencode 目前不吐逐 token，故顆粒度為片段／步驟級而非逐字。）
@@ -146,7 +152,16 @@ wukong --no-stream "這段程式做什麼？" > out.txt
 | `--agent-cmd <CMD>` | agent 指令（空白分隔） | `opencode run` |
 | `--no-stream` | 關閉活動渲染，純文字一次輸出 | off（預設串流） |
 
-環境變數：`WUKONG_MEMORY_DB`、`WUKONG_AGENT_CMD`、`WUKONG_AGENT_CONTINUE_ARGS`、`WUKONG_STREAM`（設 `0` 等同 `--no-stream`）。
+環境變數：`WUKONG_MEMORY_DB`、`WUKONG_AGENT_CMD`、`WUKONG_AGENT_CONTINUE_ARGS`、`WUKONG_STREAM`（設 `0` 等同 `--no-stream`）、`WUKONG_MD_DIR`（設定後每次 remember 同步把記憶鏡像成 per-scope markdown）。
+
+### 記憶維護子命令
+
+| 子命令 | 說明 |
+| :--- | :--- |
+| `memory snapshot [--scope X]` | 印出健康快照：總數、依 scope/類型、年齡分佈、embedding 覆蓋率、consolidation/prune 候選數 |
+| `memory consolidate [--scope X] [--dry-run]` | 把該 scope 的零碎 event/note 聚合成 `Summary`（經 opencode 摘要），來源標記為已摘要；`--dry-run` 只列批次 |
+| `memory prune [--scope X] [--dry-run]` | 刪除「已被摘要」或「老舊+未取用+低重要度」的記憶；`Decision`/`Skill`/`Summary` 永不刪；`--dry-run` 只列清單 |
+| `memory export [--dir D]` | 依 DB 全量重建 markdown 鏡像（DB 為唯一真相來源，markdown 單向衍生） |
 
 ---
 
@@ -163,6 +178,7 @@ curl -s http://127.0.0.1:3917/v1/health        # {"status":"ok"}
 | :--- | :--- | :--- |
 | GET | `/v1/health` | 健康檢查 |
 | GET | `/v1/stats` | 統計（總數、各 scope 分布） |
+| GET | `/v1/snapshot` | 健康快照（總數/類型/年齡/embedding 覆蓋率/維護候選數） |
 | POST | `/v1/remember` | 寫入記憶 |
 | POST | `/v1/recall` | 召回記憶 |
 
@@ -196,6 +212,7 @@ wukong/
 - **語意向量召回（選用增強層）**：cargo feature `embed` + `WUKONG_EMBED=1` 啟用本機 embedding（fastembed `all-MiniLM-L6-v2`，384 維，離線）。向量存同一 SQLite、純 Rust cosine、併入 Hybrid 綜合分；未啟用或模型載入失敗即優雅退回 BM25。既有記憶開機背景補齊。
 - **Scope 階層**：`project:X` / `agent:X` / `user:X` 召回時自動含 `global`。
 - **Adaptive gate**：過短／全停用詞的瑣碎查詢直接略過召回。
+- **記憶維護（手動）**：`consolidation`（`Summarizer` trait 注入，預設機械串接、cli 注入 opencode 真摘要）把零碎記憶聚合成 `Summary`；`prune` 安全刪除已摘要或低價值記憶；`markdown` 雙持久化（`WUKONG_MD_DIR` 開啟、per-scope 單向鏡像）；`snapshot` 健康快照。詳見 `wukong memory <op>`。
 
 ---
 
@@ -217,7 +234,7 @@ cargo run -p wukong-orchestrator --bin wukong-orchestrate -- --agent-cmd "printf
 
 - Telegram bot / Web Console 進入點（TeleNexus 完整願景）
 - 平行多角色調度、角色協作鏈、技能路由
-- 記憶 markdown/wiki 雙持久化、consolidation/prune、可觀測性快照
+- ~~記憶 markdown 雙持久化、consolidation/prune、可觀測性快照~~ ✅ v0.4.0
 
 ---
 

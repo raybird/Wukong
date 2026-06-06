@@ -1,9 +1,18 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 /// Wukong assistant gateway (one-shot CLI).
 #[derive(Parser, Debug)]
-#[command(name = "wukong", about = "Wukong assistant gateway (CLI)")]
+#[command(
+    name = "wukong",
+    about = "Wukong assistant gateway (CLI)",
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true
+)]
 pub struct Cli {
+    /// Memory maintenance subcommands. Absent => chat / REPL.
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// The prompt to send to the assistant (joined with spaces). Empty => REPL.
     #[arg(num_args = 0..)]
     pub prompt: Vec<String>,
@@ -36,6 +45,45 @@ impl Cli {
     }
 }
 
+/// Top-level subcommands.
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Memory maintenance operations.
+    Memory {
+        #[command(subcommand)]
+        op: MemoryOp,
+    },
+}
+
+/// `wukong memory <op>`.
+#[derive(Subcommand, Debug)]
+pub enum MemoryOp {
+    /// Print a health snapshot.
+    Snapshot {
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// Fold scattered events into summaries.
+    Consolidate {
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
+    /// Delete consolidated / low-value memories.
+    Prune {
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
+    /// Rebuild markdown mirror from the DB.
+    Export {
+        #[arg(long)]
+        dir: Option<String>,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,6 +110,31 @@ mod tests {
         let cli = Cli::try_parse_from(["wukong", "--no-stream", "hi"]).unwrap();
         assert!(cli.no_stream);
         assert_eq!(cli.prompt_text(), "hi");
+    }
+
+    #[test]
+    fn parses_memory_snapshot_subcommand() {
+        let cli = Cli::try_parse_from(["wukong", "memory", "snapshot"]).unwrap();
+        match cli.command {
+            Some(Command::Memory { op: MemoryOp::Snapshot { scope } }) => assert!(scope.is_none()),
+            _ => panic!("expected memory snapshot"),
+        }
+    }
+
+    #[test]
+    fn parses_memory_prune_dry_run() {
+        let cli = Cli::try_parse_from(["wukong", "memory", "prune", "--dry-run"]).unwrap();
+        match cli.command {
+            Some(Command::Memory { op: MemoryOp::Prune { dry_run, .. } }) => assert!(dry_run),
+            _ => panic!("expected memory prune"),
+        }
+    }
+
+    #[test]
+    fn bare_prompt_has_no_subcommand() {
+        let cli = Cli::try_parse_from(["wukong", "hello", "world"]).unwrap();
+        assert!(cli.command.is_none());
+        assert_eq!(cli.prompt_text(), "hello world");
     }
 
     #[test]

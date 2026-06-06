@@ -121,6 +121,41 @@ pub struct Stats {
     pub by_scope: Vec<ScopeCount>,
 }
 
+/// Count of memories of one kind.
+#[derive(Debug, Clone, Serialize)]
+pub struct KindCount {
+    pub kind: MemoryKind,
+    pub count: i64,
+}
+
+/// Memory counts bucketed by age relative to "now".
+#[derive(Debug, Clone, Serialize)]
+pub struct AgeBuckets {
+    pub last_day: i64,
+    pub last_week: i64,
+    pub last_month: i64,
+    pub older: i64,
+}
+
+/// How many memories carry an embedding.
+#[derive(Debug, Clone, Serialize)]
+pub struct EmbeddingCoverage {
+    pub embedded: i64,
+    pub total: i64,
+}
+
+/// Rich health snapshot for observability.
+#[derive(Debug, Clone, Serialize)]
+pub struct Snapshot {
+    pub total: i64,
+    pub by_scope: Vec<ScopeCount>,
+    pub by_kind: Vec<KindCount>,
+    pub age: AgeBuckets,
+    pub embedding: EmbeddingCoverage,
+    pub consolidation_candidates: i64,
+    pub prune_candidates: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

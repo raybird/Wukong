@@ -19,6 +19,7 @@ curl -s http://127.0.0.1:3917/v1/health   # {"status":"ok"}
 | :--- | :--- | :--- |
 | GET | `/v1/health` | 健康檢查 |
 | GET | `/v1/stats` | 統計（總數、各 scope 分布） |
+| GET | `/v1/snapshot` | 健康快照（總數/類型/年齡/embedding 覆蓋率/維護候選數） |
 | POST | `/v1/remember` | 寫入（body = RememberInput） |
 | POST | `/v1/recall` | 召回（body = RecallQuery） |
 

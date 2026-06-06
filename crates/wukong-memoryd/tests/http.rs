@@ -84,6 +84,24 @@ async fn invalid_scope_returns_400() {
 }
 
 #[tokio::test]
+async fn snapshot_endpoint_returns_json() {
+    let app = test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/snapshot")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert!(json.get("total").is_some());
+    assert!(json.get("by_kind").is_some());
+}
+
+#[tokio::test]
 async fn stats_returns_totals() {
     let app = test_app().await;
     let resp = app
