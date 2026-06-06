@@ -1,5 +1,6 @@
 //! wukong-memory: persistent memory core for the Wukong assistant.
 
+pub mod consolidate;
 pub mod embed;
 pub mod error;
 pub mod model;
@@ -13,6 +14,7 @@ pub use model::{
     Evidence, MemoryItem, MemoryKind, RecallHit, RecallMode, RecallQuery, RememberInput,
     ScopeCount, Stats, WukongResult,
 };
+pub use consolidate::{ConcatSummarizer, MockSummarizer, Summarizer};
 pub use embed::{cosine_similarity, Embedder, MockEmbedder};
 #[cfg(feature = "embed")]
 pub use embed::FastembedBackend;
