@@ -17,6 +17,8 @@ pub enum MemoryError {
     Embed(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Other(String),
 }
 
 /// Convenience result alias used across the crate.

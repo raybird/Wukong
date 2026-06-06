@@ -7,6 +7,7 @@ pub mod error;
 pub mod pipeline;
 pub mod prompt;
 pub mod stream;
+pub mod summarize;
 
 pub use error::GatewayError;
 pub use stream::StreamEvent;
