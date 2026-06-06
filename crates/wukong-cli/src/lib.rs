@@ -48,25 +48,38 @@ pub async fn run_turn(
         })
         .await?;
 
-    // 2. Route the task to a role.
-    let role = wukong_orchestrator::route(backend, input).await?;
-    on_role(role);
+    // 2. Plan an ordered role chain (replaces single-role routing).
+    let roles = wukong_orchestrator::plan_chain(backend, input).await?;
 
-    // 3. Build the persona + role + memory prompt.
-    let prompt = persona::build_prompt(role, &recall.data, input);
+    // 3. Run each role in order, accumulating prior outputs into the prompt.
+    let mut prior: Vec<wukong_orchestrator::Outcome> = Vec::new();
+    let mut first = true;
+    for role in roles {
+        on_role(role);
+        let augmented = format!("{input}{}", wukong_orchestrator::chain_context(&prior));
+        let prompt = persona::build_prompt(role, &recall.data, &augmented);
+        let resp = backend
+            .run_streaming(
+                AgentRequest {
+                    prompt,
+                    // Only the first step honors the caller's session continuation;
+                    // intra-chain context is passed via the prompt, not the session.
+                    continue_session: first && cfg.continue_session,
+                },
+                on_event,
+            )
+            .await?;
+        prior.push(wukong_orchestrator::Outcome { role, output: resp.text });
+        first = false;
+    }
 
-    // 4. Execute (streamed): events flow to the caller-provided sink.
-    let resp = backend
-        .run_streaming(
-            AgentRequest {
-                prompt,
-                continue_session: cfg.continue_session,
-            },
-            on_event,
-        )
-        .await?;
+    // 4. Final output = last step. Fall back safely if the chain was empty.
+    let last = prior
+        .last()
+        .cloned()
+        .unwrap_or(wukong_orchestrator::Outcome { role: Role::Oracle, output: String::new() });
 
-    // 5. Persist the turn.
+    // 5. Persist the turn: user input + the final assistant output only.
     memory
         .remember(RememberInput {
             scope: cfg.scope.clone(),
@@ -79,7 +92,7 @@ pub async fn run_turn(
                 },
                 MemoryItem {
                     kind: MemoryKind::Event,
-                    text: format!("Assistant: {}", resp.text),
+                    text: format!("Assistant: {}", last.output),
                     importance: None,
                 },
             ],
@@ -87,8 +100,8 @@ pub async fn run_turn(
         .await?;
 
     Ok(TurnOutput {
-        role,
-        text: resp.text,
+        role: last.role,
+        text: last.output,
     })
 }
 
@@ -178,5 +191,48 @@ mod tests {
         assert_eq!(prompts.len(), 2);
         assert!(prompts[1].contains("孫悟空"));
         assert!(prompts[1].contains("你是 Fixer"));
+    }
+
+    #[tokio::test]
+    async fn run_turn_runs_multi_role_chain() {
+        let mem = open_memory().await;
+        // [0] planner -> explorer,fixer ; [1] explorer output ; [2] fixer output
+        let backend = MockBackend::new(&["explorer, fixer", "f1", "f2"]);
+        let mut roles_seen: Vec<Role> = Vec::new();
+        let out = run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "build and fix",
+            &mut |_| {},
+            &mut |r| roles_seen.push(r),
+        )
+        .await
+        .unwrap();
+
+        // on_role fired once per step, in order.
+        assert_eq!(roles_seen, vec![Role::Explorer, Role::Fixer]);
+        // Final output is the last step.
+        assert_eq!(out.text, "f2");
+        assert_eq!(out.role, Role::Fixer);
+
+        // Second execute prompt carries the first step's output.
+        let prompts = backend.prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 3); // plan + explorer + fixer
+        assert!(prompts[2].contains("f1"));
+        drop(prompts);
+
+        // Memory stored the user input and the FINAL assistant output only.
+        let r = mem
+            .recall(RecallQuery {
+                query: "build and fix".to_string(),
+                top_k: 10,
+                scope: Some("project:T".to_string()),
+                mode: RecallMode::Hybrid,
+            })
+            .await
+            .unwrap();
+        assert!(r.data.iter().any(|h| h.text.contains("Assistant: f2")));
+        assert!(!r.data.iter().any(|h| h.text.contains("Assistant: f1")));
     }
 }
