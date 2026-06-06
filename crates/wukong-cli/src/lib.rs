@@ -34,6 +34,8 @@ pub async fn run_turn(
     backend: &impl AiBackend,
     cfg: &GatewayConfig,
     input: &str,
+    on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
+    on_role: &mut dyn FnMut(Role),
 ) -> Result<TurnOutput, WukongError> {
     // 1. Recall relevant memory for this scope.
     let recall = memory
@@ -47,16 +49,20 @@ pub async fn run_turn(
 
     // 2. Route the task to a role.
     let role = wukong_orchestrator::route(backend, input).await?;
+    on_role(role);
 
     // 3. Build the persona + role + memory prompt.
     let prompt = persona::build_prompt(role, &recall.data, input);
 
-    // 4. Execute.
+    // 4. Execute (streamed): events flow to the caller-provided sink.
     let resp = backend
-        .run(AgentRequest {
-            prompt,
-            continue_session: cfg.continue_session,
-        })
+        .run_streaming(
+            AgentRequest {
+                prompt,
+                continue_session: cfg.continue_session,
+            },
+            on_event,
+        )
         .await?;
 
     // 5. Persist the turn.
@@ -140,7 +146,7 @@ mod tests {
     async fn run_turn_routes_executes_and_persists() {
         let mem = open_memory().await;
         let backend = MockBackend::new(&["fixer", "done"]);
-        let out = run_turn(&mem, &backend, &test_cfg("project:T"), "fix the bug")
+        let out = run_turn(&mem, &backend, &test_cfg("project:T"), "fix the bug", &mut |_| {}, &mut |_| {})
             .await
             .unwrap();
         assert_eq!(out.role, Role::Fixer);
@@ -163,7 +169,7 @@ mod tests {
     async fn execution_prompt_carries_persona_and_role() {
         let mem = open_memory().await;
         let backend = MockBackend::new(&["fixer", "done"]);
-        run_turn(&mem, &backend, &test_cfg("project:T"), "fix the bug")
+        run_turn(&mem, &backend, &test_cfg("project:T"), "fix the bug", &mut |_| {}, &mut |_| {})
             .await
             .unwrap();
         let prompts = backend.prompts.lock().unwrap();
