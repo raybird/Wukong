@@ -12,8 +12,8 @@ pub mod store;
 
 pub use error::{MemoryError, Result};
 pub use model::{
-    Evidence, MemoryItem, MemoryKind, RecallHit, RecallMode, RecallQuery, RememberInput,
-    ScopeCount, Stats, WukongResult,
+    AgeBuckets, EmbeddingCoverage, Evidence, KindCount, MemoryItem, MemoryKind, RecallHit,
+    RecallMode, RecallQuery, RememberInput, ScopeCount, Snapshot, Stats, WukongResult,
 };
 pub use consolidate::{
     plan_batches, ConcatSummarizer, ConsolidatePlan, ConsolidatePolicy, MockSummarizer, Summarizer,
