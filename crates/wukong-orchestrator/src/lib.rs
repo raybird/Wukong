@@ -17,6 +17,32 @@ pub struct Outcome {
     pub output: String,
 }
 
+/// The full result of a collaboration chain: every step in order.
+#[derive(Debug, Clone)]
+pub struct ChainOutcome {
+    pub steps: Vec<Outcome>,
+}
+
+impl ChainOutcome {
+    /// The last step's output; empty string for an empty chain.
+    pub fn final_output(&self) -> &str {
+        self.steps.last().map(|o| o.output.as_str()).unwrap_or("")
+    }
+}
+
+/// Render prior chain steps as a context block to prepend onto the next step's
+/// task. Empty slice yields an empty string (so the first step is unchanged).
+pub fn chain_context(prior: &[Outcome]) -> String {
+    if prior.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("\n\n[前序協作]\n");
+    for o in prior {
+        s.push_str(&format!("{}: {}\n", o.role.name(), o.output));
+    }
+    s
+}
+
 /// Build the execution prompt: the role card, then the task.
 pub fn execution_prompt(role: Role, task: &str) -> String {
     format!("{}\n\n[任務]\n{}", role.card(), task)
@@ -97,5 +123,41 @@ mod tests {
         let backend = MockBackend::new(&["no role here", "answer"]);
         let outcome = orchestrate(&backend, "ponder").await.unwrap();
         assert_eq!(outcome.role, Role::Oracle);
+    }
+
+    #[test]
+    fn chain_context_empty_for_no_prior() {
+        assert_eq!(chain_context(&[]), "");
+    }
+
+    #[test]
+    fn chain_context_includes_roles_and_outputs() {
+        let prior = vec![
+            Outcome { role: Role::Explorer, output: "找到了問題".to_string() },
+            Outcome { role: Role::Fixer, output: "已修正".to_string() },
+        ];
+        let c = chain_context(&prior);
+        assert!(c.contains("前序協作"));
+        assert!(c.contains("explorer"));
+        assert!(c.contains("找到了問題"));
+        assert!(c.contains("fixer"));
+        assert!(c.contains("已修正"));
+    }
+
+    #[test]
+    fn chain_outcome_final_is_last_step() {
+        let co = ChainOutcome {
+            steps: vec![
+                Outcome { role: Role::Explorer, output: "a".to_string() },
+                Outcome { role: Role::Fixer, output: "b".to_string() },
+            ],
+        };
+        assert_eq!(co.final_output(), "b");
+    }
+
+    #[test]
+    fn chain_outcome_final_empty_for_no_steps() {
+        let co = ChainOutcome { steps: vec![] };
+        assert_eq!(co.final_output(), "");
     }
 }
