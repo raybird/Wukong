@@ -1,6 +1,8 @@
 use crate::embed::blob_to_embedding;
 use crate::error::Result;
-use crate::model::{MemoryKind, ScopeCount, Stats};
+use crate::model::{
+    AgeBuckets, EmbeddingCoverage, KindCount, MemoryKind, ScopeCount, Snapshot, Stats,
+};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use std::str::FromStr;
@@ -304,6 +306,110 @@ impl Store {
         Ok(affected)
     }
 
+    /// Compose a full health snapshot. `scope` filters by-kind/age/coverage and
+    /// candidate counts to one scope; by_scope/total are always global.
+    pub async fn snapshot(
+        &self,
+        scope: Option<&str>,
+        now: i64,
+        max_age_secs: i64,
+        importance_floor: f64,
+    ) -> Result<Snapshot> {
+        let base = self.stats().await?; // total + by_scope (global)
+
+        // by_kind (optionally scoped)
+        let mut kind_sql = String::from("SELECT kind, COUNT(*) AS c FROM memories");
+        if scope.is_some() {
+            kind_sql.push_str(" WHERE scope = ?1");
+        }
+        kind_sql.push_str(" GROUP BY kind ORDER BY c DESC");
+        let mut kq = sqlx::query(&kind_sql);
+        if let Some(s) = scope {
+            kq = kq.bind(s);
+        }
+        let by_kind = kq
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .map(|r| KindCount {
+                kind: MemoryKind::from_db_str(&r.get::<String, _>("kind")),
+                count: r.get::<i64, _>("c"),
+            })
+            .collect();
+
+        // age buckets
+        let day = now - 86_400;
+        let week = now - 7 * 86_400;
+        let month = now - 30 * 86_400;
+        let mut age_sql = String::from(
+            "SELECT
+                 SUM(CASE WHEN created_at >= ?1 THEN 1 ELSE 0 END) AS d,
+                 SUM(CASE WHEN created_at >= ?2 AND created_at < ?1 THEN 1 ELSE 0 END) AS w,
+                 SUM(CASE WHEN created_at >= ?3 AND created_at < ?2 THEN 1 ELSE 0 END) AS m,
+                 SUM(CASE WHEN created_at < ?3 THEN 1 ELSE 0 END) AS o
+             FROM memories",
+        );
+        if scope.is_some() {
+            age_sql.push_str(" WHERE scope = ?4");
+        }
+        let mut aq = sqlx::query(&age_sql).bind(day).bind(week).bind(month);
+        if let Some(s) = scope {
+            aq = aq.bind(s);
+        }
+        let ar = aq.fetch_one(&self.pool).await?;
+        let age = AgeBuckets {
+            last_day: ar.get::<Option<i64>, _>("d").unwrap_or(0),
+            last_week: ar.get::<Option<i64>, _>("w").unwrap_or(0),
+            last_month: ar.get::<Option<i64>, _>("m").unwrap_or(0),
+            older: ar.get::<Option<i64>, _>("o").unwrap_or(0),
+        };
+
+        // embedding coverage
+        let mut cov_sql = String::from(
+            "SELECT COUNT(*) AS total, SUM(CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END) AS emb
+             FROM memories",
+        );
+        if scope.is_some() {
+            cov_sql.push_str(" WHERE scope = ?1");
+        }
+        let mut cq = sqlx::query(&cov_sql);
+        if let Some(s) = scope {
+            cq = cq.bind(s);
+        }
+        let cr = cq.fetch_one(&self.pool).await?;
+        let embedding = EmbeddingCoverage {
+            embedded: cr.get::<Option<i64>, _>("emb").unwrap_or(0),
+            total: cr.get::<i64, _>("total"),
+        };
+
+        // candidate counts
+        let mut cons_sql = String::from(
+            "SELECT COUNT(*) AS c FROM memories
+             WHERE kind IN ('event','note') AND consolidated_into IS NULL",
+        );
+        if scope.is_some() {
+            cons_sql.push_str(" AND scope = ?1");
+        }
+        let mut consq = sqlx::query(&cons_sql);
+        if let Some(s) = scope {
+            consq = consq.bind(s);
+        }
+        let consolidation_candidates = consq.fetch_one(&self.pool).await?.get::<i64, _>("c");
+
+        let prune_candidates =
+            self.prune_candidates(scope, max_age_secs, importance_floor, now).await?.len() as i64;
+
+        Ok(Snapshot {
+            total: base.total,
+            by_scope: base.by_scope,
+            by_kind,
+            age,
+            embedding,
+            consolidation_candidates,
+            prune_candidates,
+        })
+    }
+
     /// Total memory count and per-scope breakdown.
     pub async fn stats(&self) -> Result<Stats> {
         let total: i64 = sqlx::query("SELECT COUNT(*) AS c FROM memories")
@@ -515,6 +621,33 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].text, "n1");
         assert_eq!(rows[0].importance, 2.0);
+    }
+
+    #[tokio::test]
+    async fn snapshot_reports_counts() {
+        use crate::embed::embedding_to_blob;
+        let store = test_store().await;
+        let now = 1_000_000_000i64;
+        let old = now - 40 * 86_400;
+        let e1 = store.insert_memory(None, "project:X", MemoryKind::Event, "e1", 1.0, now).await.unwrap();
+        let _n1 = store.insert_memory(None, "project:X", MemoryKind::Note, "n1", 0.2, old).await.unwrap();
+        let _d1 = store.insert_memory(None, "project:X", MemoryKind::Decision, "d1", 1.0, now).await.unwrap();
+        store.update_embedding(e1, &embedding_to_blob(&[0.1f32]), "mock").await.unwrap();
+
+        let snap = store.snapshot(None, now, 30 * 86_400, 0.5).await.unwrap();
+        assert_eq!(snap.total, 3);
+        // by_kind has event/note/decision.
+        assert_eq!(snap.by_kind.iter().map(|k| k.count).sum::<i64>(), 3);
+        // age: e1 and d1 are "today", n1 is "older".
+        assert_eq!(snap.age.last_day, 2);
+        assert_eq!(snap.age.older, 1);
+        // 1 of 3 embedded.
+        assert_eq!(snap.embedding.embedded, 1);
+        assert_eq!(snap.embedding.total, 3);
+        // consolidation candidates: e1 + n1 (event/note, unconsolidated) = 2.
+        assert_eq!(snap.consolidation_candidates, 2);
+        // prune candidates: old low-value n1 = 1.
+        assert_eq!(snap.prune_candidates, 1);
     }
 
     #[tokio::test]

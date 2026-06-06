@@ -301,6 +301,14 @@ impl Memory {
         self.store.delete_memories(&ids).await
     }
 
+    /// Compose a health snapshot using default prune thresholds.
+    pub async fn snapshot(&self, scope: Option<&str>) -> Result<model::Snapshot> {
+        let p = prune::PrunePolicy::default();
+        self.store
+            .snapshot(scope, now_unix(), p.max_age_secs, p.importance_floor)
+            .await
+    }
+
     /// Aggregate statistics.
     pub async fn stats(&self) -> Result<Stats> {
         self.store.stats().await
