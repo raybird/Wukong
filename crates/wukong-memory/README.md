@@ -59,6 +59,23 @@ let mem = Memory::open("sqlite://./memory.db").await?
 mem.backfill_embeddings().await?; // 直接補齊（with_embedder 也會背景補齊）
 ```
 
+## 記憶維護（手動）
+
+記憶量變大後保持精簡、可觀測、可人工檢視。皆由上層手動觸發（不自動排程）。
+
+- **Consolidation**：`Summarizer` trait（比照 `Embedder` 注入模式）把零碎 `event`/`note` 聚合成 `Summary`。預設 `ConcatSummarizer`（機械串接、零依賴）；cli/gateway 層注入 `OpencodeSummarizer` 做真摘要。同 `session_id` 一批，其餘依時間每 `batch_size`（預設 20）一批；來源列標記 `consolidated_into`。`plan_consolidation` 提供 dry-run。
+- **Prune**：刪除「已被摘要」(`consolidated_into IS NOT NULL`) 或「老舊 + `recall_count=0` + 低重要度」的 `event`/`note`；`Decision`/`Skill`/`Summary` 永不刪。`PrunePolicy` 預設 30 天 / importance < 0.5。`plan_prune` 提供 dry-run。刪除經 `AFTER DELETE` 觸發器同步 FTS5 索引。
+- **Markdown 雙持久化**：`Memory::with_markdown(dir)` 開啟後，每次 `remember` 把記憶 append 到 per-scope markdown（`project:X` → `project_X.md`），best-effort（寫檔失敗只 warn，不阻斷 remember）。`export(dir)` 依 DB 全量重建。**DB 為唯一真相來源，markdown 單向衍生。**
+- **Snapshot**：`snapshot(scope)` 回 `Snapshot { total, by_scope, by_kind, age, embedding, consolidation_candidates, prune_candidates }`。
+
+```rust
+use wukong_memory::{ConsolidatePolicy, ConcatSummarizer, PrunePolicy};
+
+let summary_ids = mem.consolidate("project:X", &ConsolidatePolicy::default(), &ConcatSummarizer).await?;
+let removed = mem.prune(Some("project:X"), &PrunePolicy::default()).await?;
+let snap = mem.snapshot(Some("project:X")).await?;
+```
+
 ## Scope
 
 `Global` / `Project(name)` / `Agent(name)` / `User(name)`，序列化為 `global`、`project:X` 等。
