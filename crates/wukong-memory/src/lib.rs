@@ -4,6 +4,7 @@ pub mod consolidate;
 pub mod embed;
 pub mod error;
 pub mod model;
+pub mod prune;
 pub mod recall;
 pub mod scope;
 pub mod scoring;
@@ -20,6 +21,7 @@ pub use consolidate::{
 pub use embed::{cosine_similarity, Embedder, MockEmbedder};
 #[cfg(feature = "embed")]
 pub use embed::FastembedBackend;
+pub use prune::PrunePolicy;
 pub use scope::Scope;
 pub use scoring::Weights;
 
@@ -279,6 +281,26 @@ impl Memory {
         Ok(summary_ids)
     }
 
+    /// Ids that `prune` would delete (dry-run).
+    pub async fn plan_prune(
+        &self,
+        scope: Option<&str>,
+        policy: &prune::PrunePolicy,
+    ) -> Result<Vec<i64>> {
+        self.store
+            .prune_candidates(scope, policy.max_age_secs, policy.importance_floor, now_unix())
+            .await
+    }
+
+    /// Delete prunable rows. Returns the number deleted.
+    pub async fn prune(&self, scope: Option<&str>, policy: &prune::PrunePolicy) -> Result<u64> {
+        let ids = self.plan_prune(scope, policy).await?;
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        self.store.delete_memories(&ids).await
+    }
+
     /// Aggregate statistics.
     pub async fn stats(&self) -> Result<Stats> {
         self.store.stats().await
@@ -357,5 +379,27 @@ mod tests {
         // The summary text came from the summarizer.
         let recent = mem.store.recent_candidates(10).await.unwrap();
         assert!(recent.iter().any(|c| c.kind == MemoryKind::Summary && c.text == "SUMMARY(2)"));
+    }
+
+    #[tokio::test]
+    async fn prune_deletes_only_low_value() {
+        let mem = open_mem().await;
+        // Two events, then consolidate so they become prunable.
+        remember_event(&mem, "project:X", "did A").await;
+        remember_event(&mem, "project:X", "did B").await;
+        mem.consolidate("project:X", &ConsolidatePolicy::default(), &MockSummarizer)
+            .await
+            .unwrap();
+
+        // dry-run plan lists the two consolidated source events.
+        let plan = mem.plan_prune(Some("project:X"), &PrunePolicy::default()).await.unwrap();
+        assert_eq!(plan.len(), 2);
+
+        let deleted = mem.prune(Some("project:X"), &PrunePolicy::default()).await.unwrap();
+        assert_eq!(deleted, 2);
+
+        // The summary survives (never prunable).
+        let recent = mem.store.recent_candidates(10).await.unwrap();
+        assert!(recent.iter().all(|c| c.kind == MemoryKind::Summary));
     }
 }

@@ -262,6 +262,48 @@ impl Store {
         Ok(())
     }
 
+    /// Ids eligible for pruning: consolidated rows, OR old + never-recalled +
+    /// low-importance event/note rows. Never decision/skill/summary.
+    pub async fn prune_candidates(
+        &self,
+        scope: Option<&str>,
+        max_age_secs: i64,
+        importance_floor: f64,
+        now: i64,
+    ) -> Result<Vec<i64>> {
+        let cutoff = now - max_age_secs;
+        let mut sql = String::from(
+            "SELECT id FROM memories
+             WHERE (
+                 consolidated_into IS NOT NULL
+                 OR (kind IN ('event','note') AND created_at < ?1 AND recall_count = 0 AND importance < ?2)
+             )",
+        );
+        if scope.is_some() {
+            sql.push_str(" AND scope = ?3");
+        }
+        let mut q = sqlx::query(&sql).bind(cutoff).bind(importance_floor);
+        if let Some(s) = scope {
+            q = q.bind(s);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(|r| r.get::<i64, _>("id")).collect())
+    }
+
+    /// Delete the given memory rows. The AFTER DELETE trigger keeps FTS in sync.
+    /// Returns the number of rows removed.
+    pub async fn delete_memories(&self, ids: &[i64]) -> Result<u64> {
+        let mut affected = 0u64;
+        for id in ids {
+            let r = sqlx::query("DELETE FROM memories WHERE id = ?1")
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+            affected += r.rows_affected();
+        }
+        Ok(affected)
+    }
+
     /// Total memory count and per-scope breakdown.
     pub async fn stats(&self) -> Result<Stats> {
         let total: i64 = sqlx::query("SELECT COUNT(*) AS c FROM memories")
@@ -473,6 +515,39 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].text, "n1");
         assert_eq!(rows[0].importance, 2.0);
+    }
+
+    #[tokio::test]
+    async fn prune_candidates_matches_consolidated_or_low_value() {
+        let store = test_store().await;
+        let now = 1_000_000_000i64;
+        let old = now - 40 * 86_400; // 40 days old
+        // (a) consolidated event => prunable via main path.
+        let a = store.insert_memory(None, "project:X", MemoryKind::Event, "a", 1.0, old).await.unwrap();
+        store.mark_consolidated(&[a], 999).await.unwrap();
+        // (b) old, never recalled, low importance note => prunable via fallback.
+        let b = store.insert_memory(None, "project:X", MemoryKind::Note, "b", 0.2, old).await.unwrap();
+        // (c) old but high importance => NOT prunable.
+        let _c = store.insert_memory(None, "project:X", MemoryKind::Note, "c", 0.9, old).await.unwrap();
+        // (d) decision is never prunable, even if old/low.
+        let _d = store.insert_memory(None, "project:X", MemoryKind::Decision, "d", 0.1, old).await.unwrap();
+        // (e) recent low-importance note => NOT prunable (too new).
+        let _e = store.insert_memory(None, "project:X", MemoryKind::Note, "e", 0.1, now).await.unwrap();
+
+        let ids = store.prune_candidates(Some("project:X"), 30 * 86_400, 0.5, now).await.unwrap();
+        let mut ids = ids;
+        ids.sort();
+        assert_eq!(ids, vec![a, b]);
+    }
+
+    #[tokio::test]
+    async fn delete_memories_removes_rows_and_fts() {
+        let store = test_store().await;
+        let id = store.insert_memory(None, "global", MemoryKind::Note, "gizmo", 1.0, 100).await.unwrap();
+        let n = store.delete_memories(&[id]).await.unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(store.recent_candidates(10).await.unwrap().len(), 0);
+        assert_eq!(store.keyword_candidates("\"gizmo\"", 10).await.unwrap().len(), 0);
     }
 
     #[tokio::test]
