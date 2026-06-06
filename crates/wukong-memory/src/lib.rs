@@ -54,6 +54,7 @@ pub struct Memory {
     store: Store,
     weights: Weights,
     embedder: Option<Arc<dyn Embedder>>,
+    md_sink: Option<MarkdownSink>,
 }
 
 impl Memory {
@@ -63,7 +64,15 @@ impl Memory {
             store: Store::open(db_url).await?,
             weights: Weights::default(),
             embedder: None,
+            md_sink: None,
         })
+    }
+
+    /// Attach a markdown mirror directory. Every `remember` then also appends
+    /// to the per-scope markdown file (best-effort).
+    pub fn with_markdown(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.md_sink = Some(MarkdownSink::new(dir));
+        self
     }
 
     /// Attach an embedder, enabling the semantic layer. Spawns a background task
@@ -123,6 +132,11 @@ impl Memory {
                             .await;
                     }
                     Err(e) => eprintln!("wukong-memory: embed on remember failed: {e}"),
+                }
+            }
+            if let Some(sink) = &self.md_sink {
+                if let Err(e) = sink.append(&scope_str, now, item.kind, &item.text) {
+                    eprintln!("wukong-memory: markdown append failed: {e}");
                 }
             }
         }
@@ -278,6 +292,11 @@ impl Memory {
                         .await;
                 }
             }
+            if let Some(sink) = &self.md_sink {
+                if let Err(e) = sink.append(scope, now, MemoryKind::Summary, &summary_text) {
+                    eprintln!("wukong-memory: markdown append failed: {e}");
+                }
+            }
             summary_ids.push(summary_id);
         }
         Ok(summary_ids)
@@ -301,6 +320,25 @@ impl Memory {
             return Ok(0);
         }
         self.store.delete_memories(&ids).await
+    }
+
+    /// Rebuild markdown for every scope from the DB (full overwrite). Ignores
+    /// any attached live sink; writes a fresh mirror under `dir`.
+    pub async fn export(&self, dir: impl Into<std::path::PathBuf>) -> Result<()> {
+        let dir = dir.into();
+        std::fs::create_dir_all(&dir)?;
+        let rows = self.store.all_for_export().await?;
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let sink = markdown::MarkdownSink::new(&dir);
+        for (scope, created_at, kind, text) in rows {
+            if seen.insert(scope.clone()) {
+                // First time this scope appears in the rebuild: truncate its file.
+                let path = dir.join(markdown::scope_to_filename(&scope));
+                let _ = std::fs::write(&path, "");
+            }
+            sink.append(&scope, created_at, kind, &text)?;
+        }
+        Ok(())
     }
 
     /// Compose a health snapshot using default prune thresholds.
@@ -411,5 +449,32 @@ mod tests {
         // The summary survives (never prunable).
         let recent = mem.store.recent_candidates(10).await.unwrap();
         assert!(recent.iter().all(|c| c.kind == MemoryKind::Summary));
+    }
+
+    #[tokio::test]
+    async fn remember_mirrors_to_markdown_when_sink_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = NamedTempFile::new().unwrap();
+        let url = format!("sqlite://{}", file.path().display());
+        std::mem::forget(file);
+        let mem = Memory::open(&url).await.unwrap().with_markdown(dir.path());
+
+        remember_event(&mem, "project:X", "mirrored note").await;
+
+        let body = std::fs::read_to_string(dir.path().join("project_X.md")).unwrap();
+        assert!(body.contains("mirrored note"));
+    }
+
+    #[tokio::test]
+    async fn export_rebuilds_all_scope_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = open_mem().await; // no sink attached
+        remember_event(&mem, "project:X", "x-note").await;
+        remember_event(&mem, "global", "g-note").await;
+
+        mem.export(dir.path()).await.unwrap();
+
+        assert!(std::fs::read_to_string(dir.path().join("project_X.md")).unwrap().contains("x-note"));
+        assert!(std::fs::read_to_string(dir.path().join("global.md")).unwrap().contains("g-note"));
     }
 }

@@ -410,6 +410,27 @@ impl Store {
         })
     }
 
+    /// All memories ordered oldest-first, for full markdown export.
+    /// Returns (scope, created_at, kind, text).
+    pub async fn all_for_export(&self) -> Result<Vec<(String, i64, MemoryKind, String)>> {
+        let rows = sqlx::query(
+            "SELECT scope, created_at, kind, text FROM memories ORDER BY created_at ASC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                (
+                    r.get::<String, _>("scope"),
+                    r.get::<i64, _>("created_at"),
+                    MemoryKind::from_db_str(&r.get::<String, _>("kind")),
+                    r.get::<String, _>("text"),
+                )
+            })
+            .collect())
+    }
+
     /// Total memory count and per-scope breakdown.
     pub async fn stats(&self) -> Result<Stats> {
         let total: i64 = sqlx::query("SELECT COUNT(*) AS c FROM memories")
