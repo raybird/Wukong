@@ -2,6 +2,7 @@
 
 pub mod persona;
 pub mod render;
+pub mod repl;
 
 use thiserror::Error;
 use wukong_gateway::backend::{AgentRequest, AiBackend};
