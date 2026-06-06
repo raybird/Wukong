@@ -9,6 +9,9 @@ pub struct GatewayConfig {
     pub continue_args: Vec<String>,
     pub continue_session: bool,
     pub recall_top_k: usize,
+    /// Activity rendering (spinner + tool events). Default true; off via
+    /// `--no-stream` or `WUKONG_STREAM=0`.
+    pub stream: bool,
 }
 
 impl GatewayConfig {
@@ -36,6 +39,8 @@ impl GatewayConfig {
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| vec!["-c".to_string()]);
 
+        let stream = !cli.no_stream && std::env::var("WUKONG_STREAM").as_deref() != Ok("0");
+
         GatewayConfig {
             scope,
             db_url,
@@ -43,6 +48,7 @@ impl GatewayConfig {
             continue_args,
             continue_session: cli.continue_session,
             recall_top_k: 5,
+            stream,
         }
     }
 }
@@ -95,6 +101,14 @@ mod tests {
         assert!(cfg.continue_session);
         assert_eq!(cfg.recall_top_k, 5);
         assert_eq!(cfg.continue_args, vec!["-c".to_string()]);
+        assert!(cfg.stream); // default on when --no-stream absent
+    }
+
+    #[test]
+    fn no_stream_flag_disables_stream() {
+        let cli = Cli::try_parse_from(["wukong", "--no-stream", "hi"]).unwrap();
+        let cfg = GatewayConfig::resolve(&cli);
+        assert!(!cfg.stream);
     }
 
     #[test]

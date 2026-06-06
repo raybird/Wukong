@@ -4,8 +4,8 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(name = "wukong", about = "Wukong assistant gateway (CLI)")]
 pub struct Cli {
-    /// The prompt to send to the assistant (joined with spaces).
-    #[arg(required = true, num_args = 1..)]
+    /// The prompt to send to the assistant (joined with spaces). Empty => REPL.
+    #[arg(num_args = 0..)]
     pub prompt: Vec<String>,
 
     /// Continue the previous agent session (passes the continue flag through).
@@ -23,6 +23,10 @@ pub struct Cli {
     /// Override the agent command (whitespace-separated, e.g. "opencode run").
     #[arg(long = "agent-cmd")]
     pub agent_cmd: Option<String>,
+
+    /// Disable activity rendering (spinner + tool events); use plain capture.
+    #[arg(long = "no-stream")]
+    pub no_stream: bool,
 }
 
 impl Cli {
@@ -48,9 +52,16 @@ mod tests {
     }
 
     #[test]
-    fn prompt_is_required() {
-        let result = Cli::try_parse_from(["wukong"]);
-        assert!(result.is_err());
+    fn no_prompt_is_allowed_for_repl() {
+        let cli = Cli::try_parse_from(["wukong"]).unwrap();
+        assert!(cli.prompt_text().is_empty());
+    }
+
+    #[test]
+    fn no_stream_flag_parses() {
+        let cli = Cli::try_parse_from(["wukong", "--no-stream", "hi"]).unwrap();
+        assert!(cli.no_stream);
+        assert_eq!(cli.prompt_text(), "hi");
     }
 
     #[test]
