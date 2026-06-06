@@ -2,7 +2,9 @@
 
 > 柱 4 ──「修成正果・金箍棒」：統一 CLI（`wukong` 二進位）
 
-把三柱合為一個產品。一回合 = recall → route → execute（人格 + 角色 + 記憶）→ remember。
+把三柱合為一個產品。一回合 = recall → **plan_chain** → execute×N（人格 + 角色 + 記憶 + 前序協作）→ remember。
+
+> 一回合走**協作鏈**:planner 自動決定要哪幾個角色、什麼順序(簡單任務單角色 = 今日行為;複雜任務最多 3 棒)。每棒在 stderr 印自己的角色 header,前一棒輸出累加餵給後一棒;記憶只存最終輸出。
 
 ## 進入點
 

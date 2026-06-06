@@ -57,17 +57,17 @@
 │  1. recall ───────────────►  wukong-memory     回想此 scope 的相關記憶
 │                              （SQLite + FTS5）   ◄─── hits[]
 │                                                                    │
-│  2. route  ───────────────►  wukong-orchestrator  第 1 次 agent 呼叫：
-│         （判斷專家角色）          └─► agent CLI       「該找哪個角色？」
-│                                                  ◄─── role = Fixer
+│  2. plan_chain ───────────►  wukong-orchestrator  第 1 次 agent 呼叫：
+│      （規劃角色鏈）              └─► agent CLI       「要哪幾個角色、什麼順序？」
+│                                                  ◄─── [Fixer]（簡單）或多角色（cap 3）
 │                                                                    │
-│  3. build_prompt = 人格(悟空) + 角色卡(Fixer) + 記憶 hits + 你的輸入     │
+│  3. 逐棒執行：build_prompt = 人格(悟空) + 角色卡 + 記憶 hits + 你的輸入 + 前序協作 │
 │                                                                    │
-│  4. execute ──────────────►  wukong-gateway      第 2 次 agent 呼叫：
-│                              └─► agent CLI         以該角色執行
+│  4. execute×N ────────────►  wukong-gateway      每棒一次 agent 呼叫：
+│                              └─► agent CLI         以該角色執行、輸出累加給下一棒
 │                                                  ◄─── 回答文字
 │                                                                    │
-│  5. remember ─────────────►  wukong-memory      落盤 User + Assistant
+│  5. remember ─────────────►  wukong-memory      落盤 User + 最終 Assistant 輸出
 │                                                                    │
 └────────────────────────────────────────────────────────────────────┘
       │
@@ -233,7 +233,7 @@ cargo run -p wukong-orchestrator --bin wukong-orchestrate -- --agent-cmd "printf
 ## Roadmap（v2+）
 
 - Telegram bot / Web Console 進入點（TeleNexus 完整願景）
-- 平行多角色調度、角色協作鏈、技能路由
+- ~~角色協作鏈（多角色依序接力）~~ ✅ v0.5.0;平行多角色調度、技能路由(後續)
 - ~~記憶 markdown 雙持久化、consolidation/prune、可觀測性快照~~ ✅ v0.4.0
 
 ---

@@ -216,11 +216,13 @@ mod tests {
         assert_eq!(out.text, "f2");
         assert_eq!(out.role, Role::Fixer);
 
-        // Second execute prompt carries the first step's output.
-        let prompts = backend.prompts.lock().unwrap();
-        assert_eq!(prompts.len(), 3); // plan + explorer + fixer
-        assert!(prompts[2].contains("f1"));
-        drop(prompts);
+        // Second execute prompt carries the first step's output. Scope the
+        // guard so it is released before the await below.
+        {
+            let prompts = backend.prompts.lock().unwrap();
+            assert_eq!(prompts.len(), 3); // plan + explorer + fixer
+            assert!(prompts[2].contains("f1"));
+        }
 
         // Memory stored the user input and the FINAL assistant output only.
         let r = mem
