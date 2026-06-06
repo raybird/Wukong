@@ -186,6 +186,20 @@ curl -s http://127.0.0.1:3917/v1/health        # {"status":"ok"}
 
 ---
 
+## Telegram bot（選用）
+
+`wukong-telegram` 把對話引擎接上 Telegram:long-poll 收訊息 → 白名單過濾 → 每 chat 一個 scope（`user:tg-<id>`）→ 重用 `run_turn` → 回覆。處理時發 `typing`、協作鏈每棒發角色狀態、完成後送答案。
+
+```bash
+export WUKONG_TG_TOKEN="<BotFather token>"
+export WUKONG_TG_ALLOWED="<你的 chat id>"   # 空 = 忽略所有訊息(安全預設)
+cargo run -p wukong-telegram
+```
+
+`/指令` 目前回「尚未支援」,已預留分派接縫供未來加 `/reset`、`/compact`、`/model` 等。詳見 [`crates/wukong-telegram/README.md`](crates/wukong-telegram/README.md)。
+
+---
+
 ## 專案結構
 
 ```
@@ -196,7 +210,8 @@ wukong/
 │   ├── wukong-memoryd/             # 記憶 HTTP 服務（bin）
 │   ├── wukong-gateway/             # 柱2：執行閘道（lib）
 │   ├── wukong-orchestrator/        # 柱3：角色調度（lib + demo bin wukong-orchestrate）
-│   └── wukong-cli/                 # 柱4：統一 CLI（lib + bin wukong）
+│   ├── wukong-cli/                 # 柱4：統一 CLI（lib + bin wukong）
+│   └── wukong-telegram/            # 進入點：Telegram bot（lib + bin wukong-telegram）
 └── docs/superpowers/
     ├── specs/                      # 各柱設計 spec
     └── plans/                      # 各柱逐步實作計畫
@@ -232,7 +247,7 @@ cargo run -p wukong-orchestrator --bin wukong-orchestrate -- --agent-cmd "printf
 
 ## Roadmap（v2+）
 
-- Telegram bot / Web Console 進入點（TeleNexus 完整願景）
+- ~~Telegram bot 進入點~~ ✅ v0.6.0;Web Console 進入點(TeleNexus 完整願景,待做)
 - ~~角色協作鏈（多角色依序接力）~~ ✅ v0.5.0;平行多角色調度、技能路由(後續)
 - ~~記憶 markdown 雙持久化、consolidation/prune、可觀測性快照~~ ✅ v0.4.0
 

@@ -1,0 +1,28 @@
+[package]
+name = "wukong-telegram"
+edition.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "wukong-telegram"
+path = "src/main.rs"
+
+[lib]
+name = "wukong_telegram"
+path = "src/lib.rs"
+
+[dependencies]
+wukong-memory = { path = "../wukong-memory" }
+wukong-gateway = { path = "../wukong-gateway" }
+wukong-cli = { path = "../wukong-cli" }
+wukong-orchestrator = { path = "../wukong-orchestrator" }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+embed = ["wukong-memory/embed", "wukong-cli/embed"]
