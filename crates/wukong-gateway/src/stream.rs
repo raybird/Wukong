@@ -22,17 +22,20 @@ pub fn parse_event(line: &str) -> Option<StreamEvent> {
         return None;
     }
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    // opencode nests payload under "part": text at part.text, tool at part.tool.
+    let part = v.get("part");
     match v.get("type")?.as_str()? {
         "text" => {
-            let t = v.get("text").and_then(|t| t.as_str()).unwrap_or_default();
+            let t = part
+                .and_then(|p| p.get("text"))
+                .and_then(|t| t.as_str())
+                .unwrap_or_default();
             Some(StreamEvent::Text(t.to_string()))
         }
         "tool_use" => {
-            // tool name may live under "name" or "tool"; fall back to "tool".
-            let name = v
-                .get("name")
+            let name = part
+                .and_then(|p| p.get("tool"))
                 .and_then(|n| n.as_str())
-                .or_else(|| v.get("tool").and_then(|n| n.as_str()))
                 .unwrap_or("tool");
             Some(StreamEvent::ToolUse(name.to_string()))
         }
@@ -48,19 +51,21 @@ mod tests {
 
     #[test]
     fn parses_text_event() {
-        let ev = parse_event(r#"{"type":"text","text":"hello"}"#);
+        // opencode nests the assistant text under part.text.
+        let ev = parse_event(r#"{"type":"text","part":{"type":"text","text":"hello"}}"#);
         assert_eq!(ev, Some(StreamEvent::Text("hello".to_string())));
     }
 
     #[test]
-    fn parses_tool_use_with_name_or_tool() {
+    fn parses_tool_use_from_part_tool() {
         assert_eq!(
-            parse_event(r#"{"type":"tool_use","name":"read"}"#),
+            parse_event(r#"{"type":"tool_use","part":{"type":"tool","tool":"read"}}"#),
             Some(StreamEvent::ToolUse("read".to_string()))
         );
+        // Missing tool name falls back to a generic label.
         assert_eq!(
-            parse_event(r#"{"type":"tool_use","tool":"edit"}"#),
-            Some(StreamEvent::ToolUse("edit".to_string()))
+            parse_event(r#"{"type":"tool_use","part":{"type":"tool"}}"#),
+            Some(StreamEvent::ToolUse("tool".to_string()))
         );
     }
 
