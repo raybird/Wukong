@@ -42,9 +42,25 @@ const STYLES_CSS: &str = include_str!("../static/styles.css");
 const JS: &str = "application/javascript";
 const CSS: &str = "text/css";
 
-/// Serve the SPA shell at `/`.
-async fn index() -> axum::response::Html<&'static str> {
-    axum::response::Html(INDEX_HTML)
+/// Serve the SPA shell at `/`, injecting the token (if configured) so the
+/// bundled UI can authenticate.
+async fn index<B>(State(state): State<AppState<B>>) -> axum::response::Html<String>
+where
+    B: AiBackend + Send + Sync + 'static,
+{
+    let html = match &state.token {
+        Some(t) => {
+            // Tokens are short opaque strings; escape the two chars that could
+            // break out of the JS string literal.
+            let safe = t.replace('\\', "\\\\").replace('"', "\\\"");
+            INDEX_HTML.replace(
+                "window.WUKONG_TOKEN = null;",
+                &format!(r#"window.WUKONG_TOKEN = "{safe}";"#),
+            )
+        }
+        None => INDEX_HTML.to_string(),
+    };
+    axum::response::Html(html)
 }
 
 /// Build a static-asset response with an explicit content type.
@@ -81,7 +97,6 @@ impl SseMsg {
 #[derive(serde::Deserialize)]
 struct ChatQuery {
     q: Option<String>,
-    #[allow(dead_code)]
     token: Option<String>,
 }
 
@@ -94,6 +109,12 @@ where
     B: AiBackend + Send + Sync + 'static,
 {
     use axum::response::IntoResponse;
+
+    if let Some(expected) = &state.token {
+        if params.token.as_deref() != Some(expected.as_str()) {
+            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+        }
+    }
 
     let q = params.q.unwrap_or_default();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseMsg>();
@@ -164,7 +185,7 @@ where
     B: AiBackend + Send + Sync + 'static,
 {
     axum::Router::new()
-        .route("/", axum::routing::get(index))
+        .route("/", axum::routing::get(index::<B>))
         .route("/app.js", axum::routing::get(app_js))
         .route("/lib/html.js", axum::routing::get(html_js))
         .route("/components/wukong-chat.js", axum::routing::get(chat_js))
@@ -244,6 +265,42 @@ mod tests {
         assert!(content_type(build_router(state(None, &[]).await), "/styles.css")
             .await
             .contains("css"));
+    }
+
+    #[tokio::test]
+    async fn chat_requires_token_when_set() {
+        let app = build_router(state(Some("sekret"), &["oracle", "ans"]).await);
+        let resp = app
+            .oneshot(Request::builder().uri("/chat?q=hi").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn chat_accepts_matching_token() {
+        let app = build_router(state(Some("sekret"), &["oracle", "ans"]).await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/chat?q=hi&token=sekret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn index_injects_token_when_set() {
+        let app = build_router(state(Some("sekret"), &[]).await);
+        let resp = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = body_string(resp).await;
+        assert!(body.contains(r#"window.WUKONG_TOKEN = "sekret""#), "token not injected:\n{body}");
     }
 
     #[tokio::test]
