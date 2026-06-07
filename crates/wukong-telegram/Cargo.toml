@@ -16,6 +16,7 @@ wukong-memory = { path = "../wukong-memory" }
 wukong-gateway = { path = "../wukong-gateway" }
 wukong-cli = { path = "../wukong-cli" }
 wukong-orchestrator = { path = "../wukong-orchestrator" }
+wukong-render = { path = "../wukong-render" }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
