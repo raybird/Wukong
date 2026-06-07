@@ -97,6 +97,21 @@ impl Memory {
         }
     }
 
+    /// Stored opencode session id for a scope (None if none).
+    pub async fn agent_session(&self, scope: &str) -> Result<Option<String>> {
+        self.store.agent_session(scope).await
+    }
+
+    /// Set/overwrite the opencode session id for a scope.
+    pub async fn set_agent_session(&self, scope: &str, session_id: &str) -> Result<()> {
+        self.store.set_agent_session(scope, session_id, now_unix()).await
+    }
+
+    /// Clear the stored opencode session id for a scope.
+    pub async fn clear_agent_session(&self, scope: &str) -> Result<()> {
+        self.store.clear_agent_session(scope).await
+    }
+
     /// Persist a batch of memories. Returns the new row ids.
     pub async fn remember(&self, input: RememberInput) -> Result<WukongResult<Vec<i64>>> {
         let start = Instant::now();
@@ -386,6 +401,21 @@ mod tests {
         let url = format!("sqlite://{}", file.path().display());
         std::mem::forget(file);
         Memory::open(&url).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn agent_session_round_trip() {
+        let mem = open_mem().await;
+        assert_eq!(mem.agent_session("global").await.unwrap(), None);
+        mem.set_agent_session("global", "ses_1").await.unwrap();
+        assert_eq!(mem.agent_session("global").await.unwrap(), Some("ses_1".to_string()));
+        // UPSERT overwrites.
+        mem.set_agent_session("global", "ses_2").await.unwrap();
+        assert_eq!(mem.agent_session("global").await.unwrap(), Some("ses_2".to_string()));
+        // Clear, including a no-op clear of an unknown scope.
+        mem.clear_agent_session("global").await.unwrap();
+        assert_eq!(mem.agent_session("global").await.unwrap(), None);
+        mem.clear_agent_session("nope").await.unwrap();
     }
 
     async fn remember_event(mem: &Memory, scope: &str, text: &str) {

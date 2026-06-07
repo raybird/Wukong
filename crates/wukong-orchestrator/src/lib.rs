@@ -59,7 +59,8 @@ pub async fn orchestrate(
     let resp = backend
         .run(AgentRequest {
             prompt,
-            continue_session: false,
+            session_id: None,
+            thinking: false,
         })
         .await?;
     Ok(Outcome {
@@ -79,7 +80,7 @@ pub async fn orchestrate_chain(
     for role in roles {
         let prompt = format!("{}\n\n[任務]\n{}{}", role.card(), task, chain_context(&steps));
         let resp = backend
-            .run(AgentRequest { prompt, continue_session: false })
+            .run(AgentRequest { prompt, session_id: None, thinking: false })
             .await?;
         steps.push(Outcome { role, output: resp.text });
     }
@@ -113,7 +114,7 @@ mod tests {
         async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
             self.prompts.lock().unwrap().push(req.prompt);
             let text = self.replies.lock().unwrap().pop_front().unwrap_or_default();
-            Ok(AgentResponse { text })
+            Ok(AgentResponse { text, session_id: None })
         }
     }
 

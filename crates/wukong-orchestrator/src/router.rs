@@ -70,7 +70,8 @@ pub async fn route(backend: &impl AiBackend, task: &str) -> Result<Role, Orchest
     let resp = backend
         .run(AgentRequest {
             prompt: routing_prompt(task),
-            continue_session: false,
+            session_id: None,
+            thinking: false,
         })
         .await?;
     Ok(parse_role(&resp.text))
@@ -81,7 +82,8 @@ pub async fn plan_chain(backend: &impl AiBackend, task: &str) -> Result<Vec<Role
     let resp = backend
         .run(AgentRequest {
             prompt: planning_prompt(task),
-            continue_session: false,
+            session_id: None,
+            thinking: false,
         })
         .await?;
     Ok(parse_chain(&resp.text))

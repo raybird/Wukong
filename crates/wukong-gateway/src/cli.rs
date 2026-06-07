@@ -17,10 +17,6 @@ pub struct Cli {
     #[arg(num_args = 0..)]
     pub prompt: Vec<String>,
 
-    /// Continue the previous agent session (passes the continue flag through).
-    #[arg(short = 'c', long = "continue")]
-    pub continue_session: bool,
-
     /// Override the memory scope (e.g. "project:Foo", "global").
     #[arg(long)]
     pub scope: Option<String>,
@@ -36,6 +32,14 @@ pub struct Cli {
     /// Disable activity rendering (spinner + tool events); use plain capture.
     #[arg(long = "no-stream")]
     pub no_stream: bool,
+
+    /// Disable opencode reasoning/thinking output.
+    #[arg(long = "no-thinking")]
+    pub no_thinking: bool,
+
+    /// Start a fresh opencode session for this scope before the turn.
+    #[arg(long = "new")]
+    pub new_session: bool,
 }
 
 impl Cli {
@@ -91,12 +95,19 @@ mod tests {
     #[test]
     fn parses_prompt_and_flags() {
         let cli = Cli::try_parse_from([
-            "wukong", "-c", "--scope", "global", "hello", "world",
+            "wukong", "--scope", "global", "hello", "world",
         ])
         .unwrap();
         assert_eq!(cli.prompt_text(), "hello world");
-        assert!(cli.continue_session);
         assert_eq!(cli.scope.as_deref(), Some("global"));
+    }
+
+    #[test]
+    fn no_thinking_and_new_flags_parse() {
+        let cli = Cli::try_parse_from(["wukong", "--no-thinking", "--new", "hi"]).unwrap();
+        assert!(cli.no_thinking);
+        assert!(cli.new_session);
+        assert_eq!(cli.prompt_text(), "hi");
     }
 
     #[test]

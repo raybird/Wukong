@@ -47,7 +47,7 @@ async fn main() {
         .map(|s| s.split_whitespace().map(|t| t.to_string()).collect::<Vec<_>>())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| vec!["opencode".to_string(), "run".to_string()]);
-    let backend = AgentCliBackend { command: agent_command, continue_args: vec![] };
+    let backend = AgentCliBackend { command: agent_command };
 
     let state = AppState {
         memory: Arc::new(memory),

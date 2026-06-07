@@ -42,8 +42,13 @@ async fn main() {
 
     let backend = AgentCliBackend {
         command: cfg.agent_command.clone(),
-        continue_args: cfg.continue_args.clone(),
     };
+
+    if cli.new_session {
+        if let Err(e) = memory.clear_agent_session(&cfg.scope).await {
+            eprintln!("warning: failed to reset session: {e}");
+        }
+    }
 
     if let Some(Command::Memory { op }) = &cli.command {
         if let Err(e) = run_memory_op(&memory, &backend, &cfg, op).await {
@@ -60,8 +65,6 @@ async fn main() {
         eprintln!("🐵 悟空 REPL。輸入 /exit 或 Ctrl-D 離開。");
         let stdin = std::io::stdin();
         let mut cfg_repl = cfg.clone();
-        cfg_repl.continue_session = false;
-        let mut first = true;
         loop {
             eprint!("悟空 › ");
             let _ = std::io::stderr().flush();
@@ -76,9 +79,13 @@ async fn main() {
                 LineAction::SetScope(s) => {
                     cfg_repl.scope = s;
                 }
+                LineAction::Command(cmd) => {
+                    match wukong_cli::run_session_command(&memory, &backend, &cfg_repl, cmd).await {
+                        Ok(reply) => println!("{reply}"),
+                        Err(e) => eprintln!("error: {e}"),
+                    }
+                }
                 LineAction::Turn(input) => {
-                    cfg_repl.continue_session = !first;
-                    first = false;
                     if let Err(e) = run_one(&memory, &backend, &cfg_repl, &input).await {
                         eprintln!("error: {e}");
                     }
@@ -111,6 +118,9 @@ async fn run_one(
             }
             StreamEvent::ToolUse(n) => {
                 eprintln!("  ▸ 使用工具 {n}");
+            }
+            StreamEvent::Reasoning(t) => {
+                eprintln!("  💭 {t}");
             }
             _ => {}
         };

@@ -26,7 +26,8 @@ pub async fn run_turn(
     let resp = backend
         .run(AgentRequest {
             prompt,
-            continue_session: cfg.continue_session,
+            session_id: None,
+            thinking: cfg.thinking,
         })
         .await?;
 
@@ -70,6 +71,7 @@ mod tests {
             *self.captured.lock().unwrap() = Some(req.prompt);
             Ok(AgentResponse {
                 text: self.reply.clone(),
+                session_id: None,
             })
         }
     }
@@ -86,8 +88,7 @@ mod tests {
             scope: scope.to_string(),
             db_url: String::new(),
             agent_command: vec![],
-            continue_args: vec![],
-            continue_session: false,
+            thinking: true,
             recall_top_k: 5,
             stream: true,
         }

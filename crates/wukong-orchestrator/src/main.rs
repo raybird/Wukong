@@ -28,7 +28,6 @@ async fn main() {
 
     let backend = AgentCliBackend {
         command,
-        continue_args: vec![],
     };
 
     match orchestrate_chain(&backend, &cli.task.join(" ")).await {

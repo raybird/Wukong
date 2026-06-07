@@ -144,11 +144,26 @@ where
                     scope,
                     db_url: String::new(),
                     agent_command: vec![],
-                    continue_args: vec![],
-                    continue_session: false,
+                    thinking: true,
                     recall_top_k: 5,
                     stream: false,
                 };
+                // Leading-slash inputs are session commands, not turns.
+                let trimmed = q.trim();
+                if let Some(rest) = trimmed.strip_prefix('/') {
+                    let name = rest.split_whitespace().next().unwrap_or("").to_string();
+                    let reply = match wukong_cli::parse_session_command(&name) {
+                        Some(cmd) => match wukong_cli::run_session_command(mem.as_ref(), backend.as_ref(), &cfg, cmd).await {
+                            Ok(t) => t,
+                            Err(e) => format!("⚠️ 失敗：{e}"),
+                        },
+                        None => format!("指令 /{name} 尚未支援"),
+                    };
+                    let _ = tx.send(SseMsg::Answer(wukong_render::to_web_html(&reply)));
+                    let _ = tx.send(SseMsg::Done);
+                    return;
+                }
+
                 let role_tx = tx.clone();
                 let result = run_turn(
                     mem.as_ref(),
@@ -216,7 +231,10 @@ mod tests {
     }
     impl AiBackend for MockBackend {
         async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
-            Ok(AgentResponse { text: self.replies.lock().unwrap().pop_front().unwrap_or_default() })
+            Ok(AgentResponse {
+                text: self.replies.lock().unwrap().pop_front().unwrap_or_default(),
+                session_id: None,
+            })
         }
     }
 
@@ -301,6 +319,24 @@ mod tests {
             .unwrap();
         let body = body_string(resp).await;
         assert!(body.contains(r#"window.WUKONG_TOKEN = "sekret""#), "token not injected:\n{body}");
+    }
+
+    #[tokio::test]
+    async fn chat_new_command_clears_session() {
+        let app_state = state(None, &[]).await;
+        app_state.memory.set_agent_session("global", "ses_1").await.unwrap();
+        let app = build_router(app_state.clone());
+        let resp = app
+            .oneshot(Request::builder().uri("/chat?q=/new").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains("event: answer"), "missing answer:\n{body}");
+        assert!(body.contains("已開新"), "missing reply:\n{body}");
+        assert!(!body.contains("event: role"), "should not run a turn:\n{body}");
+        assert!(body.contains("event: done"));
+        assert_eq!(app_state.memory.agent_session("global").await.unwrap(), None);
     }
 
     #[tokio::test]
