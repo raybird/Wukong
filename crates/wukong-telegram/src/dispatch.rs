@@ -37,26 +37,42 @@ pub async fn handle_message<C, B>(
             let mut cfg = base_cfg.clone();
             cfg.scope = scope_for_chat(chat_id);
 
-            // Stream role progress from a side task so the sync on_role callback
+            // Instant acknowledgement: kills the dead gap before the (slow,
+            // non-streaming) planner call where nothing else would appear.
+            let _ = client.send_message(chat_id, "🐵 收到，思考中…").await;
+
+            // Sustained "typing…": opencode calls run for tens of seconds with
+            // no token streaming, and Telegram's typing indicator lasts only ~5s.
+            // A background task re-sends it until the turn completes.
+            let typing = {
+                let c = client.clone();
+                tokio::spawn(async move {
+                    loop {
+                        let _ = c.send_chat_action(chat_id, "typing").await;
+                        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                    }
+                })
+            };
+
+            // Per-role milestones from a side task so the sync on_role callback
             // never blocks on network I/O.
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Role>();
             let progress = {
                 let c = client.clone();
                 tokio::spawn(async move {
                     while let Some(role) = rx.recv().await {
-                        let _ = c.send_chat_action(chat_id, "typing").await;
                         let _ = c.send_message(chat_id, &format!("🐵 悟空·{}", role.name())).await;
                     }
                 })
             };
 
-            let _ = client.send_chat_action(chat_id, "typing").await;
             let result = run_turn(mem, backend, &cfg, &input, &mut |_| {}, &mut |r| {
                 let _ = tx.send(r);
             })
             .await;
             drop(tx);
             let _ = progress.await;
+            typing.abort();
 
             match result {
                 Ok(out) => {
@@ -151,6 +167,24 @@ mod tests {
             .await
             .unwrap();
         assert!(r.data.iter().any(|h| h.text.contains("User: 什麼是 BM25")));
+    }
+
+    #[tokio::test]
+    async fn turn_sends_immediate_ack_and_typing() {
+        let client = MockTgClient::default();
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["oracle", "答案"]);
+        let msg = TgMessage { update_id: 1, chat_id: 12, text: "hi".to_string() };
+        handle_message(&client, &mem, &base_cfg(), &backend, &[12], &msg).await;
+
+        let sent = client.sent.lock().unwrap();
+        // An immediate acknowledgement is sent before the (slow) planner call.
+        assert!(sent.iter().any(|(c, t)| *c == 12 && t.contains("思考中")));
+        // The final answer still arrives.
+        assert!(sent.iter().any(|(c, t)| *c == 12 && t == "答案"));
+        drop(sent);
+        // At least one typing action was emitted (sustained-typing refresher).
+        assert!(!client.actions.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
