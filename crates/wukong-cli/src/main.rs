@@ -119,7 +119,7 @@ async fn run_one(
             StreamEvent::ToolUse(n) => {
                 eprintln!("  ▸ 使用工具 {n}");
             }
-            StreamEvent::Reasoning(t) => {
+            StreamEvent::Reasoning(t) if !t.trim().is_empty() => {
                 eprintln!("  💭 {t}");
             }
             _ => {}

@@ -78,6 +78,7 @@ async fn styles_css() -> axum::response::Response { asset(CSS, STYLES_CSS) }
 /// Messages pushed from the turn task to the SSE stream.
 enum SseMsg {
     Role(String),
+    Reasoning(String),
     Answer(String),
     Error(String),
     Done,
@@ -87,6 +88,7 @@ impl SseMsg {
     fn into_event(self) -> Event {
         match self {
             SseMsg::Role(r) => Event::default().event("role").data(r),
+            SseMsg::Reasoning(t) => Event::default().event("reasoning").data(t),
             SseMsg::Answer(h) => Event::default().event("answer").data(h),
             SseMsg::Error(e) => Event::default().event("error").data(e),
             SseMsg::Done => Event::default().event("done").data("ok"),
@@ -165,12 +167,19 @@ where
                 }
 
                 let role_tx = tx.clone();
+                let ev_tx = tx.clone();
                 let result = run_turn(
                     mem.as_ref(),
                     backend.as_ref(),
                     &cfg,
                     &q,
-                    &mut |_| {},
+                    &mut |ev| {
+                        if let wukong_gateway::StreamEvent::Reasoning(t) = ev {
+                            if !t.trim().is_empty() {
+                                let _ = ev_tx.send(SseMsg::Reasoning(t));
+                            }
+                        }
+                    },
                     &mut |role| {
                         let _ = role_tx.send(SseMsg::Role(role.name().to_string()));
                     },
@@ -337,6 +346,58 @@ mod tests {
         assert!(!body.contains("event: role"), "should not run a turn:\n{body}");
         assert!(body.contains("event: done"));
         assert_eq!(app_state.memory.agent_session("global").await.unwrap(), None);
+    }
+
+    struct ReasoningBackend {
+        reasoning: &'static str,
+    }
+    impl AiBackend for ReasoningBackend {
+        async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+            Ok(AgentResponse { text: "答案".to_string(), session_id: None })
+        }
+        async fn run_streaming(
+            &self,
+            req: AgentRequest,
+            on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
+        ) -> Result<AgentResponse, GatewayError> {
+            on_event(wukong_gateway::StreamEvent::Reasoning(self.reasoning.to_string()));
+            self.run(req).await
+        }
+    }
+
+    async fn reasoning_state(reasoning: &'static str) -> AppState<ReasoningBackend> {
+        let f = NamedTempFile::new().unwrap();
+        let url = format!("sqlite://{}", f.path().display());
+        std::mem::forget(f);
+        AppState {
+            memory: Arc::new(Memory::open(&url).await.unwrap()),
+            backend: Arc::new(ReasoningBackend { reasoning }),
+            scope: "global".to_string(),
+            token: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_streams_reasoning_event() {
+        let app = build_router(reasoning_state("想一下").await);
+        let resp = app
+            .oneshot(Request::builder().uri("/chat?q=hi").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = body_string(resp).await;
+        assert!(body.contains("event: reasoning"), "missing reasoning event:\n{body}");
+        assert!(body.contains("想一下"), "missing reasoning text:\n{body}");
+    }
+
+    #[tokio::test]
+    async fn chat_skips_empty_reasoning() {
+        let app = build_router(reasoning_state("").await);
+        let resp = app
+            .oneshot(Request::builder().uri("/chat?q=hi").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = body_string(resp).await;
+        assert!(!body.contains("event: reasoning"), "empty reasoning should be skipped:\n{body}");
     }
 
     #[tokio::test]

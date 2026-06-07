@@ -36,6 +36,7 @@ export class WukongChat extends HTMLElement {
     this.bubble('user', html`${text}`.toString());
     // Single progress bubble, updated in place by role events.
     const progress = this.bubble('status', '🐵 收到，思考中…');
+    let thinking = null;
 
     const tokenParam = window.WUKONG_TOKEN
       ? '&token=' + encodeURIComponent(window.WUKONG_TOKEN)
@@ -44,6 +45,16 @@ export class WukongChat extends HTMLElement {
 
     es.addEventListener('role', (ev) => {
       progress.innerHTML = '🐵 悟空·' + escapeHTML(ev.data) + ' 思考中…';
+    });
+    es.addEventListener('reasoning', (ev) => {
+      if (!thinking) {
+        thinking = document.createElement('details');
+        thinking.className = 'thinking';
+        thinking.innerHTML = '<summary>💭 思考過程</summary><pre class="reasoning"></pre>';
+        this.log.appendChild(thinking);
+      }
+      thinking.querySelector('.reasoning').textContent += ev.data;
+      this.log.scrollTop = this.log.scrollHeight;
     });
     es.addEventListener('answer', (ev) => {
       progress.remove();
