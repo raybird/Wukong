@@ -39,6 +39,11 @@ END;
 CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
     INSERT INTO memories_fts(memories_fts, rowid, text) VALUES('delete', old.id, old.text);
 END;
+CREATE TABLE IF NOT EXISTS agent_sessions (
+    scope       TEXT PRIMARY KEY,
+    session_id  TEXT NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
 "#;
 
 /// A raw row pulled during recall, before scoring.
@@ -290,6 +295,38 @@ impl Store {
         }
         let rows = q.fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(|r| r.get::<i64, _>("id")).collect())
+    }
+
+    /// Read the stored opencode session id for a scope.
+    pub async fn agent_session(&self, scope: &str) -> Result<Option<String>> {
+        let row = sqlx::query("SELECT session_id FROM agent_sessions WHERE scope = ?1")
+            .bind(scope)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.get::<String, _>("session_id")))
+    }
+
+    /// Upsert the opencode session id for a scope.
+    pub async fn set_agent_session(&self, scope: &str, session_id: &str, now: i64) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO agent_sessions(scope, session_id, updated_at) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(scope) DO UPDATE SET session_id = ?2, updated_at = ?3",
+        )
+        .bind(scope)
+        .bind(session_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Remove any stored session id for a scope (no-op if absent).
+    pub async fn clear_agent_session(&self, scope: &str) -> Result<()> {
+        sqlx::query("DELETE FROM agent_sessions WHERE scope = ?1")
+            .bind(scope)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// Delete the given memory rows. The AFTER DELETE trigger keeps FTS in sync.
