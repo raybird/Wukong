@@ -8,4 +8,4 @@ name = "wukong_render"
 path = "src/lib.rs"
 
 [dependencies]
-pulldown-cmark = { workspace = true }
+pulldown-cmark = { workspace = true, features = ["html"] }

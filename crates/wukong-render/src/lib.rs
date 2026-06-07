@@ -22,6 +22,28 @@ pub fn to_telegram_html(markdown: &str) -> Vec<String> {
     split_chunks(trimmed, 4096)
 }
 
+/// Render GFM markdown into complete, browser-native HTML (real `<table>`,
+/// `<pre><code>`, lists). Raw HTML in the source is mapped to text so it is
+/// escaped by the renderer — this prevents an LLM from injecting `<script>`.
+/// Empty input yields an empty string.
+pub fn to_web_html(markdown: &str) -> String {
+    if markdown.trim().is_empty() {
+        return String::new();
+    }
+    let mut opts = Options::empty();
+    opts.insert(Options::ENABLE_TABLES);
+    opts.insert(Options::ENABLE_STRIKETHROUGH);
+    let events = Parser::new_ext(markdown, opts).map(|ev| match ev {
+        // Treat any raw HTML as literal text → push_html will escape it.
+        Event::Html(t) => Event::Text(t),
+        Event::InlineHtml(t) => Event::Text(t),
+        other => other,
+    });
+    let mut html = String::new();
+    pulldown_cmark::html::push_html(&mut html, events);
+    html.trim().to_string()
+}
+
 /// Walk markdown events and emit a Telegram HTML-subset string.
 fn render_html(markdown: &str) -> String {
     let mut opts = Options::empty();
@@ -217,6 +239,33 @@ mod tests {
         assert!(out.contains('a') && out.contains('b'));
         assert!(out.contains('1') && out.contains('2'));
         assert!(out.contains("</pre>"));
+    }
+
+    #[test]
+    fn web_renders_bold_and_table() {
+        let out = to_web_html("**ans**\n\n| a | b |\n| - | - |\n| 1 | 2 |");
+        assert!(out.contains("<strong>ans</strong>"));
+        assert!(out.contains("<table>"));
+        assert!(out.contains("<td>1</td>"));
+    }
+
+    #[test]
+    fn web_renders_code_block() {
+        let out = to_web_html("```\nlet x = 1;\n```");
+        assert!(out.contains("<pre><code"));
+        assert!(out.contains("let x = 1;"));
+    }
+
+    #[test]
+    fn web_escapes_raw_html() {
+        let out = to_web_html("a <script>alert(1)</script> tag");
+        assert!(out.contains("&lt;script&gt;"));
+        assert!(!out.contains("<script>"));
+    }
+
+    #[test]
+    fn web_empty_input_is_empty_string() {
+        assert_eq!(to_web_html(""), "");
     }
 
     #[test]
