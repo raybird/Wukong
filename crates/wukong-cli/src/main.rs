@@ -73,6 +73,12 @@ async fn main() {
                 LineAction::SetScope(s) => {
                     cfg_repl.scope = s;
                 }
+                LineAction::Command(cmd) => {
+                    match wukong_cli::run_session_command(&memory, &backend, &cfg_repl, cmd).await {
+                        Ok(reply) => println!("{reply}"),
+                        Err(e) => eprintln!("error: {e}"),
+                    }
+                }
                 LineAction::Turn(input) => {
                     if let Err(e) = run_one(&memory, &backend, &cfg_repl, &input).await {
                         eprintln!("error: {e}");
