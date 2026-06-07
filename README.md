@@ -188,7 +188,7 @@ curl -s http://127.0.0.1:3917/v1/health        # {"status":"ok"}
 
 ## Telegram bot（選用）
 
-`wukong-telegram` 把對話引擎接上 Telegram:long-poll 收訊息 → 白名單過濾 → 每 chat 一個 scope（`user:tg-<id>`）→ 重用 `run_turn` → 回覆。處理時發 `typing`、協作鏈每棒發角色狀態、完成後送答案。
+`wukong-telegram` 把對話引擎接上 Telegram:long-poll 收訊息 → 白名單過濾 → 每 chat 一個 scope（`user:tg-<id>`）→ 重用 `run_turn` → 回覆。進度為**單一狀態泡泡**(原地隨角色更新、全程 typing),完成後刪除並發答案;答案經 `wukong-render` 以 HTML 渲染(粗體/code block/表格降級)。
 
 ```bash
 export WUKONG_TG_TOKEN="<BotFather token>"
@@ -211,6 +211,7 @@ wukong/
 │   ├── wukong-gateway/             # 柱2：執行閘道（lib）
 │   ├── wukong-orchestrator/        # 柱3：角色調度（lib + demo bin wukong-orchestrate）
 │   ├── wukong-cli/                 # 柱4：統一 CLI（lib + bin wukong）
+│   ├── wukong-render/              # 渲染層：markdown → 傳輸格式（lib）
 │   └── wukong-telegram/            # 進入點：Telegram bot（lib + bin wukong-telegram）
 └── docs/superpowers/
     ├── specs/                      # 各柱設計 spec
