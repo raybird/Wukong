@@ -1,8 +1,11 @@
 //! wukong-cli: the unified Wukong assistant (金箍棒) tying the three pillars together.
 
+pub mod command;
 pub mod persona;
 pub mod render;
 pub mod repl;
+
+pub use command::{parse_session_command, run_session_command, SessionCommand};
 
 use thiserror::Error;
 use wukong_gateway::backend::{AgentRequest, AiBackend};
@@ -109,6 +112,25 @@ pub async fn run_turn(
         role: last.role,
         text: last.output,
     })
+}
+
+/// Send a raw `/compact` message to a specific opencode session (no planner,
+/// no persona) and return its text reply.
+pub async fn run_turn_session_passthrough(
+    backend: &impl AiBackend,
+    session_id: &str,
+) -> Result<String, WukongError> {
+    let resp = backend
+        .run_streaming(
+            AgentRequest {
+                prompt: "/compact".to_string(),
+                session_id: Some(session_id.to_string()),
+                thinking: false,
+            },
+            &mut |_| {},
+        )
+        .await?;
+    Ok(resp.text)
 }
 
 #[cfg(test)]
