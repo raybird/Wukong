@@ -29,8 +29,10 @@ impl<'a> StreamRenderer<'a> {
                 let _ = self.err.flush();
             }
             StreamEvent::Reasoning(t) => {
-                let _ = writeln!(self.err, "  💭 {t}");
-                let _ = self.err.flush();
+                if !t.trim().is_empty() {
+                    let _ = writeln!(self.err, "  💭 {t}");
+                    let _ = self.err.flush();
+                }
             }
             StreamEvent::StepStart | StreamEvent::StepFinish => {}
         }
@@ -40,6 +42,22 @@ impl<'a> StreamRenderer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasoning_shows_only_when_nonempty() {
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        {
+            let mut r = StreamRenderer::new(&mut out, &mut err);
+            r.on_event(&StreamEvent::Reasoning("".to_string()));
+            r.on_event(&StreamEvent::Reasoning("想一下".to_string()));
+        }
+        let err_s = String::from_utf8(err).unwrap();
+        assert!(err_s.contains("💭"));
+        assert!(err_s.contains("想一下"));
+        // Exactly one reasoning line (the empty one produced nothing).
+        assert_eq!(err_s.matches("💭").count(), 1);
+    }
 
     #[test]
     fn text_goes_to_out_tools_to_err() {
