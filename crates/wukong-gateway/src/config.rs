@@ -6,8 +6,9 @@ pub struct GatewayConfig {
     pub scope: String,
     pub db_url: String,
     pub agent_command: Vec<String>,
-    pub continue_args: Vec<String>,
-    pub continue_session: bool,
+    /// Pass `--thinking` to opencode for conversational turns. Default true;
+    /// off via `--no-thinking` or `WUKONG_THINKING=0`.
+    pub thinking: bool,
     pub recall_top_k: usize,
     /// Activity rendering (spinner + tool events). Default true; off via
     /// `--no-stream` or `WUKONG_STREAM=0`.
@@ -33,20 +34,14 @@ impl GatewayConfig {
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| vec!["opencode".to_string(), "run".to_string()]);
 
-        let continue_args = std::env::var("WUKONG_AGENT_CONTINUE_ARGS")
-            .ok()
-            .map(|s| split_ws(&s))
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| vec!["-c".to_string()]);
-
         let stream = !cli.no_stream && std::env::var("WUKONG_STREAM").as_deref() != Ok("0");
+        let thinking = !cli.no_thinking && std::env::var("WUKONG_THINKING").as_deref() != Ok("0");
 
         GatewayConfig {
             scope,
             db_url,
             agent_command,
-            continue_args,
-            continue_session: cli.continue_session,
+            thinking,
             recall_top_k: 5,
             stream,
         }
@@ -90,7 +85,6 @@ mod tests {
             "sqlite://x.db",
             "--agent-cmd",
             "my-agent go",
-            "-c",
             "hi",
         ])
         .unwrap();
@@ -98,9 +92,8 @@ mod tests {
         assert_eq!(cfg.scope, "project:Explicit");
         assert_eq!(cfg.db_url, "sqlite://x.db");
         assert_eq!(cfg.agent_command, vec!["my-agent".to_string(), "go".to_string()]);
-        assert!(cfg.continue_session);
         assert_eq!(cfg.recall_top_k, 5);
-        assert_eq!(cfg.continue_args, vec!["-c".to_string()]);
+        assert!(cfg.thinking); // default on when --no-thinking absent
         assert!(cfg.stream); // default on when --no-stream absent
     }
 

@@ -55,7 +55,6 @@ where
     I: IntoIterator<Item = String>,
 {
     let mut cfg = base_cfg.clone();
-    cfg.continue_session = false; // first turn fresh
     let mut turns = 0usize;
     for line in lines {
         match classify_line(&line) {
@@ -71,7 +70,6 @@ where
                 })
                 .await?;
                 turns += 1;
-                cfg.continue_session = true; // subsequent turns continue session
             }
         }
     }
@@ -89,21 +87,18 @@ mod tests {
 
     struct MockBackend {
         replies: Mutex<VecDeque<String>>,
-        continue_flags: Mutex<Vec<bool>>,
     }
     impl MockBackend {
         fn new(replies: &[&str]) -> Self {
             Self {
                 replies: Mutex::new(replies.iter().map(|s| s.to_string()).collect()),
-                continue_flags: Mutex::new(Vec::new()),
             }
         }
     }
     impl AiBackend for MockBackend {
-        async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
-            self.continue_flags.lock().unwrap().push(req.continue_session);
+        async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
             let text = self.replies.lock().unwrap().pop_front().unwrap_or_default();
-            Ok(AgentResponse { text })
+            Ok(AgentResponse { text, session_id: None })
         }
     }
 
@@ -119,8 +114,7 @@ mod tests {
             scope: "project:T".to_string(),
             db_url: String::new(),
             agent_command: vec![],
-            continue_args: vec![],
-            continue_session: false,
+            thinking: true,
             recall_top_k: 5,
             stream: true,
         }
@@ -162,11 +156,6 @@ mod tests {
         assert_eq!(turns, 2);
         // route reply "fixer" => Role::Fixer (name "fixer"); "oracle" => "oracle".
         assert_eq!(roles, vec!["fixer".to_string(), "oracle".to_string()]);
-        // route always runs with continue_session=false (routing never continues
-        // the agent session); only execute respects cfg.continue_session.
-        // turn1: route=false, execute=false; turn2: route=false, execute=true.
-        let flags = backend.continue_flags.lock().unwrap().clone();
-        assert_eq!(flags, vec![false, false, false, true]);
     }
 
     #[tokio::test]

@@ -6,6 +6,8 @@
 pub enum StreamEvent {
     /// A chunk of assistant text (opencode "text" part).
     Text(String),
+    /// A chunk of reasoning/thinking text (opencode "reasoning" part).
+    Reasoning(String),
     /// A tool invocation by name (opencode "tool_use").
     ToolUse(String),
     /// A step begins (drives the spinner).
@@ -32,6 +34,13 @@ pub fn parse_event(line: &str) -> Option<StreamEvent> {
                 .unwrap_or_default();
             Some(StreamEvent::Text(t.to_string()))
         }
+        "reasoning" => {
+            let t = part
+                .and_then(|p| p.get("text"))
+                .and_then(|t| t.as_str())
+                .unwrap_or_default();
+            Some(StreamEvent::Reasoning(t.to_string()))
+        }
         "tool_use" => {
             let name = part
                 .and_then(|p| p.get("tool"))
@@ -43,6 +52,12 @@ pub fn parse_event(line: &str) -> Option<StreamEvent> {
         "step_finish" => Some(StreamEvent::StepFinish),
         _ => None,
     }
+}
+
+/// Extract the opencode session id from one NDJSON line (top-level `sessionID`).
+pub fn parse_session_id(line: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    v.get("sessionID")?.as_str().map(|s| s.to_string())
 }
 
 #[cfg(test)]
@@ -73,6 +88,22 @@ mod tests {
     fn parses_step_events() {
         assert_eq!(parse_event(r#"{"type":"step_start"}"#), Some(StreamEvent::StepStart));
         assert_eq!(parse_event(r#"{"type":"step_finish"}"#), Some(StreamEvent::StepFinish));
+    }
+
+    #[test]
+    fn parses_reasoning_event() {
+        let ev = parse_event(r#"{"type":"reasoning","part":{"type":"reasoning","text":"hmm"}}"#);
+        assert_eq!(ev, Some(StreamEvent::Reasoning("hmm".to_string())));
+    }
+
+    #[test]
+    fn extracts_session_id() {
+        assert_eq!(
+            parse_session_id(r#"{"type":"text","sessionID":"ses_abc","part":{}}"#),
+            Some("ses_abc".to_string())
+        );
+        assert_eq!(parse_session_id("not json"), None);
+        assert_eq!(parse_session_id(r#"{"type":"text"}"#), None);
     }
 
     #[test]

@@ -118,7 +118,10 @@ mod tests {
     }
     impl AiBackend for MockBackend {
         async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
-            Ok(AgentResponse { text: self.replies.lock().unwrap().pop_front().unwrap_or_default() })
+            Ok(AgentResponse {
+                text: self.replies.lock().unwrap().pop_front().unwrap_or_default(),
+                session_id: None,
+            })
         }
     }
 
@@ -134,8 +137,7 @@ mod tests {
             scope: String::new(),
             db_url: String::new(),
             agent_command: vec![],
-            continue_args: vec![],
-            continue_session: false,
+            thinking: true,
             recall_top_k: 5,
             stream: false,
         }

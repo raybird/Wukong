@@ -42,7 +42,6 @@ async fn main() {
 
     let backend = AgentCliBackend {
         command: cfg.agent_command.clone(),
-        continue_args: cfg.continue_args.clone(),
     };
 
     if let Some(Command::Memory { op }) = &cli.command {
@@ -60,8 +59,6 @@ async fn main() {
         eprintln!("🐵 悟空 REPL。輸入 /exit 或 Ctrl-D 離開。");
         let stdin = std::io::stdin();
         let mut cfg_repl = cfg.clone();
-        cfg_repl.continue_session = false;
-        let mut first = true;
         loop {
             eprint!("悟空 › ");
             let _ = std::io::stderr().flush();
@@ -77,8 +74,6 @@ async fn main() {
                     cfg_repl.scope = s;
                 }
                 LineAction::Turn(input) => {
-                    cfg_repl.continue_session = !first;
-                    first = false;
                     if let Err(e) = run_one(&memory, &backend, &cfg_repl, &input).await {
                         eprintln!("error: {e}");
                     }
@@ -111,6 +106,9 @@ async fn run_one(
             }
             StreamEvent::ToolUse(n) => {
                 eprintln!("  ▸ 使用工具 {n}");
+            }
+            StreamEvent::Reasoning(t) => {
+                eprintln!("  💭 {t}");
             }
             _ => {}
         };

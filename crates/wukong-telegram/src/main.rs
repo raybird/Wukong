@@ -58,14 +58,13 @@ async fn main() {
         .map(|s| s.split_whitespace().map(|t| t.to_string()).collect::<Vec<_>>())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| vec!["opencode".to_string(), "run".to_string()]);
-    let backend = AgentCliBackend { command: agent_command, continue_args: vec![] };
+    let backend = AgentCliBackend { command: agent_command };
 
     let base_cfg = GatewayConfig {
         scope: String::new(),
         db_url,
         agent_command: vec![],
-        continue_args: vec![],
-        continue_session: false,
+        thinking: true,
         recall_top_k: 5,
         stream: false,
     };

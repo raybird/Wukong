@@ -1,5 +1,5 @@
 use crate::error::GatewayError;
-use crate::stream::{parse_event, StreamEvent};
+use crate::stream::{parse_event, parse_session_id, StreamEvent};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -8,13 +8,18 @@ use tokio::process::Command;
 #[derive(Debug, Clone)]
 pub struct AgentRequest {
     pub prompt: String,
-    pub continue_session: bool,
+    /// Some(id) → continue this opencode session via `-s <id>`; None → fresh.
+    pub session_id: Option<String>,
+    /// Pass `--thinking` to surface reasoning blocks.
+    pub thinking: bool,
 }
 
 /// The backend's textual response.
 #[derive(Debug, Clone)]
 pub struct AgentResponse {
     pub text: String,
+    /// opencode session id captured from the JSON stream (None on the plain path).
+    pub session_id: Option<String>,
 }
 
 /// Pluggable AI backend. v1 ships `AgentCliBackend`.
@@ -36,16 +41,20 @@ pub trait AiBackend {
 }
 
 /// Build the argv handed to the agent subprocess:
-/// `command + (continue_args if continue_session) + [prompt]`.
+/// `command + [-s <id>]? + [--thinking]? + [prompt]`.
 pub fn assemble_argv(
     command: &[String],
-    continue_args: &[String],
-    continue_session: bool,
+    session_id: Option<&str>,
+    thinking: bool,
     prompt: &str,
 ) -> Vec<String> {
     let mut argv: Vec<String> = command.to_vec();
-    if continue_session {
-        argv.extend(continue_args.iter().cloned());
+    if let Some(id) = session_id {
+        argv.push("-s".to_string());
+        argv.push(id.to_string());
+    }
+    if thinking {
+        argv.push("--thinking".to_string());
     }
     argv.push(prompt.to_string());
     argv
@@ -54,17 +63,11 @@ pub fn assemble_argv(
 /// Drives a configurable agent CLI as a subprocess (run-and-capture, no shell).
 pub struct AgentCliBackend {
     pub command: Vec<String>,
-    pub continue_args: Vec<String>,
 }
 
 impl AiBackend for AgentCliBackend {
     async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
-        let argv = assemble_argv(
-            &self.command,
-            &self.continue_args,
-            req.continue_session,
-            &req.prompt,
-        );
+        let argv = assemble_argv(&self.command, req.session_id.as_deref(), req.thinking, &req.prompt);
         let output = Command::new(&argv[0])
             .args(&argv[1..])
             .stdin(Stdio::null())
@@ -78,6 +81,7 @@ impl AiBackend for AgentCliBackend {
         }
         Ok(AgentResponse {
             text: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+            session_id: None,
         })
     }
 
@@ -87,12 +91,7 @@ impl AiBackend for AgentCliBackend {
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> Result<AgentResponse, GatewayError> {
         // Build argv then insert `--format json` before the prompt (last arg).
-        let mut argv = assemble_argv(
-            &self.command,
-            &self.continue_args,
-            req.continue_session,
-            &req.prompt,
-        );
+        let mut argv = assemble_argv(&self.command, req.session_id.as_deref(), req.thinking, &req.prompt);
         let prompt = argv.pop().expect("argv always ends with the prompt");
         argv.push("--format".to_string());
         argv.push("json".to_string());
@@ -119,7 +118,11 @@ impl AiBackend for AgentCliBackend {
         let stdout = child.stdout.take().expect("stdout piped");
         let mut lines = BufReader::new(stdout).lines();
         let mut full = String::new();
+        let mut session_id: Option<String> = None;
         while let Some(line) = lines.next_line().await? {
+            if let Some(id) = parse_session_id(&line) {
+                session_id = Some(id);
+            }
             if let Some(ev) = parse_event(&line) {
                 if let StreamEvent::Text(t) = &ev {
                     if !full.is_empty() {
@@ -141,6 +144,7 @@ impl AiBackend for AgentCliBackend {
         }
         Ok(AgentResponse {
             text: full.trim().to_string(),
+            session_id,
         })
     }
 }
@@ -150,38 +154,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn assemble_argv_without_continue() {
-        let argv = assemble_argv(
-            &["opencode".to_string(), "run".to_string()],
-            &["-c".to_string()],
-            false,
-            "hi",
-        );
+    fn assemble_argv_plain() {
+        let argv = assemble_argv(&["opencode".to_string(), "run".to_string()], None, false, "hi");
         assert_eq!(argv, vec!["opencode", "run", "hi"]);
     }
 
     #[test]
-    fn assemble_argv_with_continue() {
+    fn assemble_argv_with_session_and_thinking() {
         let argv = assemble_argv(
             &["opencode".to_string(), "run".to_string()],
-            &["-c".to_string()],
+            Some("ses_x"),
             true,
             "hi",
         );
-        assert_eq!(argv, vec!["opencode", "run", "-c", "hi"]);
+        assert_eq!(argv, vec!["opencode", "run", "-s", "ses_x", "--thinking", "hi"]);
     }
 
     #[tokio::test]
     async fn agent_cli_backend_captures_stdout() {
         // `echo <prompt>` prints the prompt back; verifies capture + trim.
-        let backend = AgentCliBackend {
-            command: vec!["echo".to_string()],
-            continue_args: vec![],
-        };
+        let backend = AgentCliBackend { command: vec!["echo".to_string()] };
         let resp = backend
             .run(AgentRequest {
                 prompt: "hello wukong".to_string(),
-                continue_session: false,
+                session_id: None,
+                thinking: false,
             })
             .await
             .unwrap();
@@ -191,14 +188,12 @@ mod tests {
     #[tokio::test]
     async fn agent_cli_backend_reports_failure() {
         // `false` exits non-zero with no output.
-        let backend = AgentCliBackend {
-            command: vec!["false".to_string()],
-            continue_args: vec![],
-        };
+        let backend = AgentCliBackend { command: vec!["false".to_string()] };
         let err = backend
             .run(AgentRequest {
                 prompt: "x".to_string(),
-                continue_session: false,
+                session_id: None,
+                thinking: false,
             })
             .await
             .unwrap_err();
@@ -211,13 +206,13 @@ mod tests {
         struct Plain;
         impl AiBackend for Plain {
             async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
-                Ok(AgentResponse { text: "whole answer".to_string() })
+                Ok(AgentResponse { text: "whole answer".to_string(), session_id: None })
             }
         }
         let mut events = Vec::new();
         let resp = Plain
             .run_streaming(
-                AgentRequest { prompt: "x".into(), continue_session: false },
+                AgentRequest { prompt: "x".into(), session_id: None, thinking: false },
                 &mut |e| events.push(e),
             )
             .await
@@ -235,22 +230,22 @@ mod tests {
             command: vec![
                 "printf".to_string(),
                 "%s\\n".to_string(),
-                r#"{"type":"step_start"}"#.to_string(),
+                r#"{"type":"step_start","sessionID":"ses_T"}"#.to_string(),
                 r#"{"type":"tool_use","part":{"type":"tool","tool":"read"}}"#.to_string(),
                 r#"{"type":"text","part":{"type":"text","text":"hello"}}"#.to_string(),
                 r#"{"type":"step_finish"}"#.to_string(),
             ],
-            continue_args: vec![],
         };
         let mut events = Vec::new();
         let resp = backend
             .run_streaming(
-                AgentRequest { prompt: "ignored".into(), continue_session: false },
+                AgentRequest { prompt: "ignored".into(), session_id: None, thinking: false },
                 &mut |e| events.push(e),
             )
             .await
             .unwrap();
         assert_eq!(resp.text, "hello");
+        assert_eq!(resp.session_id, Some("ses_T".to_string()));
         assert_eq!(
             events,
             vec![

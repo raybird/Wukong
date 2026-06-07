@@ -28,6 +28,10 @@ impl<'a> StreamRenderer<'a> {
                 let _ = writeln!(self.err, "  ▸ 使用工具 {name}");
                 let _ = self.err.flush();
             }
+            StreamEvent::Reasoning(t) => {
+                let _ = writeln!(self.err, "  💭 {t}");
+                let _ = self.err.flush();
+            }
             StreamEvent::StepStart | StreamEvent::StepFinish => {}
         }
     }

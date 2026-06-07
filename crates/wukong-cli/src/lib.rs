@@ -53,24 +53,17 @@ pub async fn run_turn(
 
     // 3. Run each role in order, accumulating prior outputs into the prompt.
     let mut prior: Vec<wukong_orchestrator::Outcome> = Vec::new();
-    let mut first = true;
     for role in roles {
         on_role(role);
         let augmented = format!("{input}{}", wukong_orchestrator::chain_context(&prior));
         let prompt = persona::build_prompt(role, &recall.data, &augmented);
         let resp = backend
             .run_streaming(
-                AgentRequest {
-                    prompt,
-                    // Only the first step honors the caller's session continuation;
-                    // intra-chain context is passed via the prompt, not the session.
-                    continue_session: first && cfg.continue_session,
-                },
+                AgentRequest { prompt, session_id: None, thinking: cfg.thinking },
                 on_event,
             )
             .await?;
         prior.push(wukong_orchestrator::Outcome { role, output: resp.text });
-        first = false;
     }
 
     // 4. Final output = last step. Fall back safely if the chain was empty.
@@ -118,6 +111,7 @@ mod tests {
     struct MockBackend {
         replies: Mutex<VecDeque<String>>,
         prompts: Mutex<Vec<String>>,
+        session_ids: Mutex<Vec<Option<String>>>,
     }
 
     impl MockBackend {
@@ -125,6 +119,7 @@ mod tests {
             MockBackend {
                 replies: Mutex::new(replies.iter().map(|s| s.to_string()).collect()),
                 prompts: Mutex::new(Vec::new()),
+                session_ids: Mutex::new(Vec::new()),
             }
         }
     }
@@ -132,8 +127,9 @@ mod tests {
     impl AiBackend for MockBackend {
         async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
             self.prompts.lock().unwrap().push(req.prompt);
+            self.session_ids.lock().unwrap().push(req.session_id);
             let text = self.replies.lock().unwrap().pop_front().unwrap_or_default();
-            Ok(AgentResponse { text })
+            Ok(AgentResponse { text, session_id: Some("ses_new".to_string()) })
         }
     }
 
@@ -149,8 +145,7 @@ mod tests {
             scope: scope.to_string(),
             db_url: String::new(),
             agent_command: vec![],
-            continue_args: vec![],
-            continue_session: false,
+            thinking: true,
             recall_top_k: 5,
             stream: true,
         }
