@@ -1,0 +1,11 @@
+[package]
+name = "wukong-render"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "wukong_render"
+path = "src/lib.rs"
+
+[dependencies]
+pulldown-cmark = { workspace = true }
