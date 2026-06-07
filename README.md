@@ -200,6 +200,26 @@ cargo run -p wukong-telegram
 
 ---
 
+## Web Console（選用）
+
+`wukong-web` 是零建置的瀏覽器進入點:重用同一套 `run_turn` 與記憶,透過 SSE 串流角色進度與渲染後的答案。前端為原生 ES Modules + `<wukong-chat>` custom element(採 `raybird/plainvanillaweb` 核心慣例的 SafeHTML),由 axum 以 `include_str!` 內嵌,單一可執行檔自帶前端。
+
+```bash
+WUKONG_AGENT_CMD="opencode run" cargo run -p wukong-web
+# 然後開 http://127.0.0.1:8787/
+```
+
+環境變數:
+
+- `WUKONG_WEB_HOST`(預設 `127.0.0.1`)、`WUKONG_WEB_PORT`(預設 `8787`)
+- `WUKONG_WEB_TOKEN`(選用;設了則 UI 與 `/chat` 都需帶 token)
+- `WUKONG_WEB_SCOPE`(預設 `global`)
+- 重用:`WUKONG_MEMORY_DB`、`WUKONG_AGENT_CMD`、`WUKONG_MD_DIR`、(feature `embed`)`WUKONG_EMBED`
+
+安全預設:只綁 `127.0.0.1`;伺服器端 `wukong-render::to_web_html` 把原始 HTML 跳脫防 XSS。
+
+---
+
 ## 專案結構
 
 ```
@@ -212,7 +232,8 @@ wukong/
 │   ├── wukong-orchestrator/        # 柱3：角色調度（lib + demo bin wukong-orchestrate）
 │   ├── wukong-cli/                 # 柱4：統一 CLI（lib + bin wukong）
 │   ├── wukong-render/              # 渲染層：markdown → 傳輸格式（lib）
-│   └── wukong-telegram/            # 進入點：Telegram bot（lib + bin wukong-telegram）
+│   ├── wukong-telegram/            # 進入點：Telegram bot（lib + bin wukong-telegram）
+│   └── wukong-web/                 # 進入點：Web Console（lib + bin wukong-web）
 └── docs/superpowers/
     ├── specs/                      # 各柱設計 spec
     └── plans/                      # 各柱逐步實作計畫
@@ -248,7 +269,7 @@ cargo run -p wukong-orchestrator --bin wukong-orchestrate -- --agent-cmd "printf
 
 ## Roadmap（v2+）
 
-- ~~Telegram bot 進入點~~ ✅ v0.6.0;Web Console 進入點(TeleNexus 完整願景,待做)
+- ~~Telegram bot 進入點~~ ✅ v0.6.0;~~Web Console 進入點~~ ✅(TeleNexus 完整願景,持續)
 - ~~角色協作鏈（多角色依序接力）~~ ✅ v0.5.0;平行多角色調度、技能路由(後續)
 - ~~記憶 markdown 雙持久化、consolidation/prune、可觀測性快照~~ ✅ v0.4.0
 
