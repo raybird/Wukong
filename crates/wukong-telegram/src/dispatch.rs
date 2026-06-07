@@ -6,8 +6,32 @@ use crate::parse::{is_allowed, scope_for_chat, TgMessage};
 use wukong_cli::run_turn;
 use wukong_gateway::backend::AiBackend;
 use wukong_gateway::config::GatewayConfig;
+use wukong_gateway::StreamEvent;
 use wukong_memory::Memory;
 use wukong_orchestrator::Role;
+
+/// Progress updates fed to the single status bubble.
+enum Progress {
+    Role(Role),
+    Reasoning(String),
+}
+
+/// Compose the status-bubble text from the current role and accumulated
+/// reasoning (showing only the tail to keep the bubble small).
+fn bubble_text(role: Option<&str>, reasoning: &str) -> String {
+    let base = match role {
+        Some(r) => format!("🐵 悟空·{r} 思考中…"),
+        None => "🐵 思考中…".to_string(),
+    };
+    let r = reasoning.trim();
+    if r.is_empty() {
+        return base;
+    }
+    let chars: Vec<char> = r.chars().collect();
+    let start = chars.len().saturating_sub(200);
+    let tail: String = chars[start..].iter().collect();
+    format!("{base}\n💭 {tail}")
+}
 
 /// Handle one incoming message: enforce the allowlist, classify, run the turn,
 /// and reply. Errors are reported to the chat and swallowed (the loop goes on).
@@ -68,24 +92,60 @@ pub async fn handle_message<C, B>(
                 })
             };
 
-            // Per-role progress edits the single status bubble (no new bubbles).
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Role>();
+            // Per-role + reasoning progress edits the single status bubble.
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
             let progress = {
                 let c = client.clone();
                 tokio::spawn(async move {
-                    while let Some(role) = rx.recv().await {
-                        let _ = c
-                            .edit_message_text(chat_id, mid, &format!("🐵 悟空·{} 思考中…", role.name()))
-                            .await;
+                    let mut role: Option<String> = None;
+                    let mut reasoning = String::new();
+                    let mut last_reasoning_edit: Option<std::time::Instant> = None;
+                    while let Some(msg) = rx.recv().await {
+                        match msg {
+                            Progress::Role(r) => {
+                                role = Some(r.name().to_string());
+                                let _ = c
+                                    .edit_message_text(chat_id, mid, &bubble_text(role.as_deref(), &reasoning))
+                                    .await;
+                            }
+                            Progress::Reasoning(t) => {
+                                reasoning.push_str(&t);
+                                // Throttle reasoning edits (~1.5s) but never block
+                                // the first one (so it always shows up promptly).
+                                let due = last_reasoning_edit
+                                    .is_none_or(|i| i.elapsed() >= std::time::Duration::from_millis(1500));
+                                if due {
+                                    let _ = c
+                                        .edit_message_text(chat_id, mid, &bubble_text(role.as_deref(), &reasoning))
+                                        .await;
+                                    last_reasoning_edit = Some(std::time::Instant::now());
+                                }
+                            }
+                        }
                     }
                 })
             };
 
-            let result = run_turn(mem, backend, &cfg, &input, &mut |_| {}, &mut |r| {
-                let _ = tx.send(r);
-            })
+            let tx_ev = tx.clone();
+            let result = run_turn(
+                mem,
+                backend,
+                &cfg,
+                &input,
+                &mut |ev| {
+                    if let StreamEvent::Reasoning(t) = ev {
+                        if !t.trim().is_empty() {
+                            let _ = tx_ev.send(Progress::Reasoning(t));
+                        }
+                    }
+                },
+                &mut |r| {
+                    let _ = tx.send(Progress::Role(r));
+                },
+            )
             .await;
             drop(tx);
+            drop(tx_ev);
             let _ = progress.await;
             typing.abort();
 
@@ -197,6 +257,35 @@ mod tests {
             .await
             .unwrap();
         assert!(r.data.iter().any(|h| h.text.contains("User: 什麼是 BM25")));
+    }
+
+    struct ReasoningBackend;
+    impl AiBackend for ReasoningBackend {
+        async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+            Ok(AgentResponse { text: "答案".to_string(), session_id: None })
+        }
+        async fn run_streaming(
+            &self,
+            req: AgentRequest,
+            on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
+        ) -> Result<AgentResponse, GatewayError> {
+            on_event(wukong_gateway::StreamEvent::Reasoning("想一下".to_string()));
+            self.run(req).await
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_appears_in_status_bubble() {
+        let client = MockTgClient::default();
+        let mem = open_memory().await;
+        let backend = ReasoningBackend;
+        let msg = TgMessage { update_id: 1, chat_id: 12, text: "hi".to_string() };
+        handle_message(&client, &mem, &base_cfg(), &backend, &[12], &msg).await;
+        let edits = client.edits.lock().unwrap();
+        assert!(
+            edits.iter().any(|(_, _, t)| t.contains("💭") && t.contains("想一下")),
+            "no reasoning edit: {edits:?}"
+        );
     }
 
     #[tokio::test]
