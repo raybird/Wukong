@@ -44,6 +44,12 @@ async fn main() {
         command: cfg.agent_command.clone(),
     };
 
+    if cli.new_session {
+        if let Err(e) = memory.clear_agent_session(&cfg.scope).await {
+            eprintln!("warning: failed to reset session: {e}");
+        }
+    }
+
     if let Some(Command::Memory { op }) = &cli.command {
         if let Err(e) = run_memory_op(&memory, &backend, &cfg, op).await {
             eprintln!("error: {e}");

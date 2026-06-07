@@ -186,6 +186,15 @@ curl -s http://127.0.0.1:3917/v1/health        # {"status":"ok"}
 
 ---
 
+## opencode session 控制
+
+- 預設以**每 scope 持久的 opencode session** 接續對話(顯式 `-s <id>`,從 JSON 擷取),並帶 `--thinking`。
+- `/new`:開新 context(清掉該 scope 的 session)。REPL / Telegram / Web 皆可;一次性 CLI 用 `wukong --new "…"`。
+- `/compact`:把 `/compact` passthrough 給目前 session(REPL / Telegram / Web)。
+- `--no-thinking` 或 `WUKONG_THINKING=0` 關閉 thinking。
+
+---
+
 ## Telegram bot（選用）
 
 `wukong-telegram` 把對話引擎接上 Telegram:long-poll 收訊息 → 白名單過濾 → 每 chat 一個 scope（`user:tg-<id>`）→ 重用 `run_turn` → 回覆。進度為**單一狀態泡泡**(原地隨角色更新、全程 typing),完成後刪除並發答案;答案經 `wukong-render` 以 HTML 渲染(粗體/code block/表格降級)。
