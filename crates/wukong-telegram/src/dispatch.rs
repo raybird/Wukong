@@ -37,13 +37,14 @@ pub async fn handle_message<C, B>(
             let mut cfg = base_cfg.clone();
             cfg.scope = scope_for_chat(chat_id);
 
-            // Instant acknowledgement: kills the dead gap before the (slow,
-            // non-streaming) planner call where nothing else would appear.
-            let _ = client.send_message(chat_id, "🐵 收到，思考中…").await;
+            // Single status bubble, edited in place as the turn progresses.
+            let mid = match client.send_message(chat_id, "🐵 收到，思考中…").await {
+                Ok(id) => id,
+                Err(_) => return, // can't even post a status bubble; give up quietly
+            };
 
-            // Sustained "typing…": opencode calls run for tens of seconds with
-            // no token streaming, and Telegram's typing indicator lasts only ~5s.
-            // A background task re-sends it until the turn completes.
+            // Sustained "typing…": opencode runs for tens of seconds with no
+            // token streaming; Telegram's typing indicator lasts only ~5s.
             let typing = {
                 let c = client.clone();
                 tokio::spawn(async move {
@@ -54,14 +55,15 @@ pub async fn handle_message<C, B>(
                 })
             };
 
-            // Per-role milestones from a side task so the sync on_role callback
-            // never blocks on network I/O.
+            // Per-role progress edits the single status bubble (no new bubbles).
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Role>();
             let progress = {
                 let c = client.clone();
                 tokio::spawn(async move {
                     while let Some(role) = rx.recv().await {
-                        let _ = c.send_message(chat_id, &format!("🐵 悟空·{}", role.name())).await;
+                        let _ = c
+                            .edit_message_text(chat_id, mid, &format!("🐵 悟空·{} 思考中…", role.name()))
+                            .await;
                     }
                 })
             };
@@ -76,10 +78,20 @@ pub async fn handle_message<C, B>(
 
             match result {
                 Ok(out) => {
-                    let _ = client.send_message(chat_id, &out.text).await;
+                    let chunks = wukong_render::to_telegram_html(&out.text);
+                    let _ = client.delete_message(chat_id, mid).await;
+                    if chunks.is_empty() {
+                        let _ = client.send_message(chat_id, "(無內容)").await;
+                    } else {
+                        for c in &chunks {
+                            let _ = client.send_message_html(chat_id, c).await;
+                        }
+                    }
                 }
                 Err(e) => {
-                    let _ = client.send_message(chat_id, &format!("⚠️ 處理失敗：{e}")).await;
+                    let _ = client
+                        .edit_message_text(chat_id, mid, &format!("⚠️ 處理失敗：{e}"))
+                        .await;
                 }
             }
         }
@@ -141,19 +153,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_runs_and_replies_in_chat_scope() {
+    async fn turn_renders_answer_and_consolidates_messages() {
         let client = MockTgClient::default();
         let mem = open_memory().await;
-        // planner -> single role; then execute answer.
-        let backend = MockBackend::new(&["oracle", "答案來了"]);
+        // planner -> single role; then execute answer with markdown.
+        let backend = MockBackend::new(&["oracle", "**重點** 答案"]);
         let msg = TgMessage { update_id: 1, chat_id: 12, text: "什麼是 BM25".to_string() };
         handle_message(&client, &mem, &base_cfg(), &backend, &[12], &msg).await;
 
-        // Final answer was sent to the right chat. Scope the guard so it is
-        // released before the await below.
+        // Status bubble edited per role, then deleted.
+        assert!(!client.edits.lock().unwrap().is_empty());
+        assert!(!client.deletes.lock().unwrap().is_empty());
+
+        // Final answer sent as rendered HTML.
         {
             let sent = client.sent.lock().unwrap();
-            assert!(sent.iter().any(|(c, t)| *c == 12 && t == "答案來了"));
+            assert!(sent.iter().any(|s| s.html && s.text.contains("<b>重點</b>")));
         }
 
         // Stored under the per-chat scope.
@@ -170,21 +185,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_sends_immediate_ack_and_typing() {
+    async fn turn_sends_status_bubble_and_typing() {
         let client = MockTgClient::default();
         let mem = open_memory().await;
         let backend = MockBackend::new(&["oracle", "答案"]);
         let msg = TgMessage { update_id: 1, chat_id: 12, text: "hi".to_string() };
         handle_message(&client, &mem, &base_cfg(), &backend, &[12], &msg).await;
 
-        let sent = client.sent.lock().unwrap();
-        // An immediate acknowledgement is sent before the (slow) planner call.
-        assert!(sent.iter().any(|(c, t)| *c == 12 && t.contains("思考中")));
-        // The final answer still arrives.
-        assert!(sent.iter().any(|(c, t)| *c == 12 && t == "答案"));
-        drop(sent);
-        // At least one typing action was emitted (sustained-typing refresher).
-        assert!(!client.actions.lock().unwrap().is_empty());
+        // The first send is the plain status bubble.
+        {
+            let sent = client.sent.lock().unwrap();
+            assert!(sent.iter().any(|s| !s.html && s.text.contains("思考中")));
+        }
+        assert!(!client.actions.lock().unwrap().is_empty()); // typing emitted
     }
 
     #[tokio::test]
@@ -195,6 +208,6 @@ mod tests {
         let msg = TgMessage { update_id: 1, chat_id: 12, text: "/reset".to_string() };
         handle_message(&client, &mem, &base_cfg(), &backend, &[12], &msg).await;
         let sent = client.sent.lock().unwrap();
-        assert!(sent.iter().any(|(c, t)| *c == 12 && t.contains("尚未支援")));
+        assert!(sent.iter().any(|s| s.chat_id == 12 && s.text.contains("尚未支援")));
     }
 }
