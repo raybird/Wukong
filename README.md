@@ -192,6 +192,7 @@ curl -s http://127.0.0.1:3917/v1/health        # {"status":"ok"}
 - `/new`:開新 context(清掉該 scope 的 session)。REPL / Telegram / Web 皆可;一次性 CLI 用 `wukong --new "…"`。
 - `/compact`:把 `/compact` passthrough 給目前 session(REPL / Telegram / Web)。
 - `--no-thinking` 或 `WUKONG_THINKING=0` 關閉 thinking。
+- thinking 顯示:REPL 以 `💭` 印出;Telegram 在狀態泡泡即時顯示;Web 以可折疊「💭 思考過程」呈現。**只在模型吐明文推理時才有內容**(OpenAI 系推理模型的推理為加密,不會顯示)。
 
 ---
 
