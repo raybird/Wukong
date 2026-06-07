@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/wukong-memory", "crates/wukong-memoryd", "crates/wukong-gateway", "crates/wukong-orchestrator", "crates/wukong-cli", "crates/wukong-telegram", "crates/wukong-render"]
+members = ["crates/wukong-memory", "crates/wukong-memoryd", "crates/wukong-gateway", "crates/wukong-orchestrator", "crates/wukong-cli", "crates/wukong-telegram", "crates/wukong-render", "crates/wukong-web"]
 
 [workspace.package]
 edition = "2021"
@@ -18,3 +18,4 @@ tempfile = "3"
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 pulldown-cmark = { version = "0.12", default-features = false }
+tokio-stream = "0.1"

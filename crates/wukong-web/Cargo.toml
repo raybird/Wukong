@@ -1,0 +1,29 @@
+[package]
+name = "wukong-web"
+edition.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "wukong-web"
+path = "src/main.rs"
+
+[lib]
+name = "wukong_web"
+path = "src/lib.rs"
+
+[dependencies]
+wukong-memory = { path = "../wukong-memory" }
+wukong-gateway = { path = "../wukong-gateway" }
+wukong-cli = { path = "../wukong-cli" }
+wukong-orchestrator = { path = "../wukong-orchestrator" }
+wukong-render = { path = "../wukong-render" }
+axum = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tower = { workspace = true }
+
+[features]
+embed = ["wukong-memory/embed", "wukong-cli/embed"]
