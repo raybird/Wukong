@@ -29,9 +29,22 @@ pub async fn handle_message<C, B>(
     let chat_id = msg.chat_id;
     match classify_message(&msg.text) {
         MessageAction::Command { name, .. } => {
-            let _ = client
-                .send_message(chat_id, &format!("指令 /{name} 尚未支援"))
-                .await;
+            let mut cfg = base_cfg.clone();
+            cfg.scope = scope_for_chat(chat_id);
+            match wukong_cli::parse_session_command(&name) {
+                Some(cmd) => {
+                    let reply = match wukong_cli::run_session_command(mem, backend, &cfg, cmd).await {
+                        Ok(t) => t,
+                        Err(e) => format!("⚠️ 失敗：{e}"),
+                    };
+                    let _ = client.send_message(chat_id, &reply).await;
+                }
+                None => {
+                    let _ = client
+                        .send_message(chat_id, &format!("指令 /{name} 尚未支援"))
+                        .await;
+                }
+            }
         }
         MessageAction::Turn(input) => {
             let mut cfg = base_cfg.clone();
@@ -200,6 +213,32 @@ mod tests {
             assert!(sent.iter().any(|s| !s.html && s.text.contains("思考中")));
         }
         assert!(!client.actions.lock().unwrap().is_empty()); // typing emitted
+    }
+
+    #[tokio::test]
+    async fn new_command_clears_session_and_replies() {
+        let client = MockTgClient::default();
+        let mem = open_memory().await;
+        mem.set_agent_session(&scope_for_chat(12), "ses_1").await.unwrap();
+        let backend = MockBackend::new(&[]);
+        let msg = TgMessage { update_id: 1, chat_id: 12, text: "/new".to_string() };
+        handle_message(&client, &mem, &base_cfg(), &backend, &[12], &msg).await;
+        {
+            let sent = client.sent.lock().unwrap();
+            assert!(sent.iter().any(|s| s.text.contains("已開新")));
+        }
+        assert_eq!(mem.agent_session(&scope_for_chat(12)).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn unknown_command_still_unsupported() {
+        let client = MockTgClient::default();
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&[]);
+        let msg = TgMessage { update_id: 1, chat_id: 12, text: "/model gpt".to_string() };
+        handle_message(&client, &mem, &base_cfg(), &backend, &[12], &msg).await;
+        let sent = client.sent.lock().unwrap();
+        assert!(sent.iter().any(|s| s.text.contains("尚未支援")));
     }
 
     #[tokio::test]
