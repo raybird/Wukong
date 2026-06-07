@@ -106,9 +106,9 @@ fn render_table(rows: &[Vec<String>]) -> String {
     let mut s = String::from("<pre>");
     for r in rows {
         let mut line = String::new();
-        for i in 0..cols {
+        for (i, w) in widths.iter().enumerate() {
             let cellv = r.get(i).map(|x| x.as_str()).unwrap_or("");
-            let pad = widths[i].saturating_sub(cellv.chars().count());
+            let pad = w.saturating_sub(cellv.chars().count());
             line.push_str(cellv);
             line.push_str(&" ".repeat(pad));
             if i + 1 < cols {

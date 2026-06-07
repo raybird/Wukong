@@ -29,7 +29,8 @@ cargo run -p wukong-telegram
 
 - **存取控制**:白名單外的 chat 一律靜默忽略。
 - **記憶 scope**:每個 chat → `user:tg-<chat_id>`(依階層 fallback 自動含 `global`)。
-- **進度呈現**:處理時持續發 `typing`;協作鏈每進一棒發一條「🐵 悟空·<role>」狀態;完成後送最終答案。
+- **進度呈現(單泡泡)**:收到訊息先發一個「🐵 收到,思考中…」狀態泡泡;處理期間每 ~4 秒補送 `typing`(opencode 慢且不吐 token,Telegram typing 僅約 5 秒);協作鏈每進一棒**原地 edit** 該泡泡為「🐵 悟空·<role> 思考中…」;完成後**刪除狀態泡泡**,再發答案。
+- **Markdown 渲染**:答案經 `wukong-render` 轉成 Telegram HTML(`parse_mode=HTML`)——粗體/斜體/行內 code/code block(`<pre>`)/連結/清單/引用正確顯示,**表格降級為等寬 `<pre>`**,超過 4096 字自動分段。
 - **錯誤**:單則訊息失敗 → 回 `⚠️ 處理失敗` 並續跑,bot 不崩;getUpdates 網路錯誤 → 退避重試。
 
 ## Slash 指令(可擴充接縫)
