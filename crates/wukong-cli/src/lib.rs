@@ -52,18 +52,31 @@ pub async fn run_turn(
     let roles = wukong_orchestrator::plan_chain(backend, input).await?;
 
     // 3. Run each role in order, accumulating prior outputs into the prompt.
+    let stored = memory.agent_session(&cfg.scope).await?;
+    let n_roles = roles.len();
     let mut prior: Vec<wukong_orchestrator::Outcome> = Vec::new();
-    for role in roles {
+    let mut captured_session: Option<String> = None;
+    for (i, role) in roles.into_iter().enumerate() {
         on_role(role);
         let augmented = format!("{input}{}", wukong_orchestrator::chain_context(&prior));
         let prompt = persona::build_prompt(role, &recall.data, &augmented);
+        let is_final = i + 1 == n_roles;
+        let session_id = if is_final { stored.clone() } else { None };
         let resp = backend
             .run_streaming(
-                AgentRequest { prompt, session_id: None, thinking: cfg.thinking },
+                AgentRequest { prompt, session_id, thinking: cfg.thinking },
                 on_event,
             )
             .await?;
+        if is_final {
+            captured_session = resp.session_id.clone();
+        }
         prior.push(wukong_orchestrator::Outcome { role, output: resp.text });
+    }
+
+    // Persist the (possibly new) opencode session id for this scope.
+    if let Some(id) = captured_session {
+        memory.set_agent_session(&cfg.scope, &id).await?;
     }
 
     // 4. Final output = last step. Fall back safely if the chain was empty.
@@ -186,6 +199,39 @@ mod tests {
         assert_eq!(prompts.len(), 2);
         assert!(prompts[1].contains("孫悟空"));
         assert!(prompts[1].contains("你是 Fixer"));
+    }
+
+    #[tokio::test]
+    async fn run_turn_threads_session_into_final_step() {
+        let mem = open_memory().await;
+        mem.set_agent_session("project:T", "ses_old").await.unwrap();
+        // planner -> single role; execute returns text.
+        let backend = MockBackend::new(&["oracle", "answer"]);
+        run_turn(&mem, &backend, &test_cfg("project:T"), "hi", &mut |_| {}, &mut |_| {})
+            .await
+            .unwrap();
+        {
+            let ids = backend.session_ids.lock().unwrap();
+            // [0] planner = None, [1] final execute = stored session.
+            assert_eq!(ids[0], None);
+            assert_eq!(ids[1], Some("ses_old".to_string()));
+        }
+        // Returned id persisted.
+        assert_eq!(mem.agent_session("project:T").await.unwrap(), Some("ses_new".to_string()));
+    }
+
+    #[tokio::test]
+    async fn run_turn_threads_only_final_chain_step() {
+        let mem = open_memory().await;
+        mem.set_agent_session("project:T", "ses_old").await.unwrap();
+        // planner -> explorer, fixer ; explorer output ; fixer output (final).
+        let backend = MockBackend::new(&["explorer, fixer", "e1", "f2"]);
+        run_turn(&mem, &backend, &test_cfg("project:T"), "go", &mut |_| {}, &mut |_| {})
+            .await
+            .unwrap();
+        let ids = backend.session_ids.lock().unwrap();
+        // [0] planner None, [1] explorer None, [2] fixer (final) = stored.
+        assert_eq!(ids.clone(), vec![None, None, Some("ses_old".to_string())]);
     }
 
     #[tokio::test]
