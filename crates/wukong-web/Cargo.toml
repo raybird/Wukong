@@ -20,6 +20,7 @@ wukong-render = { path = "../wukong-render" }
 axum = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
