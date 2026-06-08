@@ -5,3 +5,4 @@ Cargo.lock
 *.db-wal
 .wukong/
 .fastembed_cache/
+.gitnexus
