@@ -48,35 +48,47 @@
 
 ### 一回合的資料流
 
-```
-你: wukong "幫我修這個 bug"
-      │
-      ▼
-┌─────────────────────── wukong-cli (金箍棒) ───────────────────────┐
-│                                                                    │
-│  1. recall ───────────────►  wukong-memory     回想此 scope 的相關記憶
-│                              （SQLite + FTS5）   ◄─── hits[]
-│                                                                    │
-│  2. plan_chain ───────────►  wukong-orchestrator  第 1 次 agent 呼叫：
-│      （規劃角色鏈）              └─► agent CLI       「要哪幾個角色、什麼順序？」
-│                                                  ◄─── [Fixer]（簡單）或多角色（cap 3）
-│                                                                    │
-│  3. 逐棒執行：build_prompt = 人格(悟空) + 角色卡 + 記憶 hits + 你的輸入 + 前序協作 │
-│                                                                    │
-│  4. execute×N ────────────►  wukong-gateway      每棒一次 agent 呼叫：
-│                              └─► agent CLI         以該角色執行、輸出累加給下一棒
-│                                                  ◄─── 回答文字
-│                                                                    │
-│  5. remember ─────────────►  wukong-memory      落盤 User + 最終 Assistant 輸出
-│                                                                    │
-└────────────────────────────────────────────────────────────────────┘
-      │
-      ▼
-  stderr: 🐵 悟空·fixer
-  stdout: <回答>
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as 使用者
+    participant CLI as wukong-cli (金箍棒)
+    participant Mem as wukong-memory (本我)
+    participant Orch as wukong-orchestrator (分身)
+    participant GW as wukong-gateway (肉身)
+    participant Agent as Agent CLI (opencode)
+
+    User->>CLI: 輸入: wukong "幫我修這個 bug"
+    activate CLI
+    
+    CLI->>Mem: 1. recall (回想此 scope 相關記憶)
+    Mem-->>CLI: 回傳 hits[] (相關記憶)
+    
+    CLI->>Orch: 2. plan_chain (規劃角色協作鏈)
+    Orch->>Agent: 呼叫 routing planner
+    Agent-->>Orch: 回傳角色鏈 (例如 [Fixer])
+    Orch-->>CLI: 傳回執行角色鏈
+    
+    Note over CLI, Agent: 3. 逐棒接力執行 (最多 3 棒)
+    loop 每一個角色 (例如 Fixer)
+        CLI->>GW: 4. execute (人格 + 角色卡 + 記憶 hits + 前序協作)
+        GW->>Agent: 以該角色執行 (帶 session_id 與 thinking)
+        Agent-->>GW: 回傳回答與新 session_id
+        GW-->>CLI: 傳回執行結果
+    end
+    
+    CLI->>Mem: 5. remember (落盤 User + 最終 Assistant 輸出)
+    
+    CLI-->>User: 輸出結果 (stderr: 角色狀態 / stdout: 回答)
+    deactivate CLI
 ```
 
 > 每回合對底層 agent 進行兩次呼叫（路由 + 執行）。各 crate 另有自己的 README。
+
+### 角色協作鏈 (Collaboration Chain) 與會話隔離
+
+- **輸入接力與前序協作**：當 planner 規劃出多角色協作鏈（例如 `explorer, fixer`）時，前一個步驟角色的輸出會被以 `[前序協作]` 格式標記，並拼接到下一步的 Task 輸入中，實現接力分析。
+- **會話狀態隔離 (Session Isolation)**：為避免中間角色步驟的暫存輸出污染對話歷史，**只有最後一棒的執行才會帶入並更新該 Scope 的 `session_id`**，前面的所有輔助步驟皆為無狀態（Stateless）執行，確保最終對話的連貫與乾淨。
 
 ---
 
@@ -163,6 +175,11 @@ wukong memory export --dir ./mem-md          # 依 DB 全量重建 markdown 鏡�
 | `memory prune [--scope X] [--dry-run]` | 刪除「已被摘要」或「老舊+未取用+低重要度」的記憶；`Decision`/`Skill`/`Summary` 永不刪；`--dry-run` 只列清單 |
 | `memory export [--dir D]` | 依 DB 全量重建 markdown 鏡像（DB 為唯一真相來源，markdown 單向衍生） |
 
+### 歸檔與剪枝安全機制
+
+- **歸檔分群規則 (Consolidation)**：執行 `consolidate` 時，系統會將擁有相同 `session_id` 的 Event/Note 記憶強制分在同一個 Batch 以維持對話脈絡；無 Session 的零碎筆記則依 `batch_size` 順序切塊。
+- **安全剪枝防護 (Prune Guard)**：`prune` 操作只會安全刪除「已被歸檔 (consolidated) 的記憶」，或者是「老舊、未被召回且重要性低於閥值（預設 $< 0.5$）的 Event/Note」。**`Decision`（決策）、`Skill`（技能）與 `Summary`（摘要）這三種類型的記憶在任何情況下皆受到保護，永不被 prune 刪除。**
+
 ---
 
 ## 記憶服務（選用）
@@ -228,6 +245,11 @@ WUKONG_AGENT_CMD="opencode run" cargo run -p wukong-web
 
 安全預設:只綁 `127.0.0.1`;伺服器端 `wukong-render::to_web_html` 把原始 HTML 跳脫防 XSS。
 
+### 執行緒隔離與 Token 安全驗證
+
+- **非 Send Future 隔離機制**：由於對話引擎 `run_turn` 產生的 Future 內含非 `Send` 屬性（因為 `AiBackend` 包含 dynamic 的 `FnMut` 串流回呼），無法在 Axum 的異步調度中直接執行。Web 後端在處理對話請求時，會透過 `std::thread::spawn` 獨立出作業系統實體執行緒，並在內部以 `current_thread` 執行器運行 `block_on(run_turn)`，隨後將進度透過安全通道（mpsc channel）以 SSE 方式回傳。
+- **Token 動態置換驗證**：若配置了 `WUKONG_WEB_TOKEN`，伺服器端在載入內嵌的 `index.html` 時，會動態將 token 置換寫入 `window.WUKONG_TOKEN` 進行 SPA 端與 API 端的雙向安全比對，以防範未授權的瀏覽器訪問。
+
 ---
 
 ## 專案結構
@@ -253,9 +275,16 @@ wukong/
 
 ## 記憶模型
 
-- **儲存**：SQLite + FTS5（BM25 關鍵字檢索），啟用 WAL。
+- **儲存**：SQLite + FTS5（BM25 關鍵字檢索），啟用 WAL。 FTS5 的關鍵字匹配會將輸入的 token 以 `OR` 連接查詢。
 - **召回模式**：`keyword`（FTS5）、`tree`（依 scope 階層取近期）、`hybrid`（合併重排，預設）。
-- **排序**：`score = α·詞彙相關 + δ·語意相似 + β·時間衰減 + γ·重要度`，時間衰減半衰期 90 天，常被取用者加成。
+- **排序**：採用混合正規化計分：
+  - **Min-Max 正規化**：因 BM25（越小越好）與 Cosine 語意相似度（越大越好）量綱不同，排序前會先對所有候選人進行 Min-Max 正規化至 $[0, 1]$ 區間。
+  - **權重公式**：
+    $$\text{Score} = \alpha \cdot \text{Lexical} + \delta \cdot \text{Semantic} + \beta \cdot \text{Decay} + \gamma \cdot \text{Importance}$$
+    （預設 $\alpha=0.4$、$\delta=0.2$、$\beta=0.25$、$\gamma=0.15$）。其中時間衰減 $\text{Decay}$ 半衰期為 90 天。
+  - **對數熱點加成**：常被召回的熱點記憶會獲得對數加成：
+    $$\text{Score}_{\text{final}} = \text{Score}_{\text{base}} + 0.02 \cdot \ln(1 + \text{recall\_count})$$
+    同時觸發 `touch_recalled` 更新其 `last_recalled_at` 時間戳記以延緩衰減。
 - **語意向量召回（選用增強層）**：cargo feature `embed` + `WUKONG_EMBED=1` 啟用本機 embedding（fastembed `all-MiniLM-L6-v2`，384 維，離線）。向量存同一 SQLite、純 Rust cosine、併入 Hybrid 綜合分；未啟用或模型載入失敗即優雅退回 BM25。既有記憶開機背景補齊。
 - **Scope 階層**：`project:X` / `agent:X` / `user:X` 召回時自動含 `global`。
 - **Adaptive gate**：過短／全停用詞的瑣碎查詢直接略過召回。
