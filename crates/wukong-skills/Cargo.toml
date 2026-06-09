@@ -1,0 +1,11 @@
+[package]
+name = "wukong-skills"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "wukong_skills"
+path = "src/lib.rs"
+
+[dependencies]
+wukong-orchestrator = { path = "../wukong-orchestrator" }

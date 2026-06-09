@@ -65,6 +65,132 @@ pub fn parse_chain(response: &str) -> Vec<Role> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Skill-aware planning types and helpers
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy)]
+pub struct SkillRouteOption {
+    pub skill_name: &'static str,
+    pub description: &'static str,
+    pub primary_role: Role,
+    pub collaborator_role: Option<Role>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedStep {
+    pub role: Role,
+    pub skill_name: Option<String>,
+}
+
+const KNOWN_SKILLS: &[&str] = &[
+    "brainstorming",
+    "writing-plans",
+    "executing-plans",
+    "test-driven-development",
+    "systematic-debugging",
+    "verification-before-completion",
+    "requesting-code-review",
+    "receiving-code-review",
+];
+
+fn parse_role_name(name: &str) -> Option<Role> {
+    let lower = name.trim().to_ascii_lowercase();
+    Role::all().into_iter().find(|role| lower == role.name())
+}
+
+fn normalize_skill_name(name: &str) -> Option<String> {
+    let lower = name.trim().to_ascii_lowercase();
+    if lower.is_empty() || lower == "none" {
+        return None;
+    }
+    KNOWN_SKILLS
+        .iter()
+        .find(|skill| **skill == lower)
+        .map(|skill| (*skill).to_string())
+}
+
+pub fn parse_skill_chain(response: &str) -> Vec<PlannedStep> {
+    let mut steps = Vec::new();
+
+    for line in response.lines() {
+        if steps.len() >= 3 {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut parts = trimmed.splitn(2, '|');
+        let role_part = parts.next().unwrap_or_default();
+        let skill_part = parts.next().unwrap_or_default();
+        if let Some(role) = parse_role_name(role_part) {
+            steps.push(PlannedStep {
+                role,
+                skill_name: normalize_skill_name(skill_part),
+            });
+        }
+    }
+
+    if steps.is_empty() {
+        let roles = parse_chain(response);
+        return roles
+            .into_iter()
+            .take(3)
+            .map(|role| PlannedStep { role, skill_name: None })
+            .collect();
+    }
+
+    steps
+}
+
+pub fn skill_planning_prompt(task: &str, skills: &[SkillRouteOption]) -> String {
+    let mut s = String::from(
+        "You are a planner. Decide which roles should collaborate on the task, \
+         and which Superpowers skill each role should follow.\nRoles:\n",
+    );
+    for role in Role::all() {
+        s.push_str(&format!("- {}: {}\n", role.name(), role.description()));
+    }
+    s.push_str("\nSkills:\n");
+    for skill in skills {
+        let collaborator = skill
+            .collaborator_role
+            .map(|role| role.name())
+            .unwrap_or("none");
+        s.push_str(&format!(
+            "- {}: {} (primary: {}, collaborator: {})\n",
+            skill.skill_name,
+            skill.description,
+            skill.primary_role.name(),
+            collaborator
+        ));
+    }
+    s.push_str(
+        "\nReply with ONLY one step per line in this exact format:\n\
+         <role>|<skill-or-none>\n\
+         Use lowercase role names and skill names. Use none when no listed skill fits. \
+         Use a single step for simple tasks; at most three steps. No explanation.\n\n[Task]\n",
+    );
+    s.push_str(task);
+    s
+}
+
+pub async fn plan_skill_chain(
+    backend: &impl AiBackend,
+    task: &str,
+    skills: &[SkillRouteOption],
+) -> Result<Vec<PlannedStep>, OrchestratorError> {
+    let resp = backend
+        .run(AgentRequest {
+            prompt: skill_planning_prompt(task, skills),
+            session_id: None,
+            thinking: false,
+        })
+        .await?;
+    Ok(parse_skill_chain(&resp.text))
+}
+
 /// Phase 1: ask the backend which role should handle the task.
 pub async fn route(backend: &impl AiBackend, task: &str) -> Result<Role, OrchestratorError> {
     let resp = backend
@@ -160,5 +286,57 @@ mod tests {
     #[test]
     fn parse_chain_falls_back_to_oracle() {
         assert_eq!(parse_chain("no role mentioned here"), vec![Role::Oracle]);
+    }
+
+    #[test]
+    fn parse_skill_chain_reads_role_and_skill() {
+        let steps = parse_skill_chain("fixer|test-driven-development");
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].role, Role::Fixer);
+        assert_eq!(steps[0].skill_name.as_deref(), Some("test-driven-development"));
+    }
+
+    #[test]
+    fn parse_skill_chain_keeps_order_and_caps_at_three() {
+        let steps = parse_skill_chain(
+            "oracle|brainstorming\nfixer|test-driven-development\nlibrarian|requesting-code-review\ndesigner|none",
+        );
+        assert_eq!(steps.len(), 3);
+        assert_eq!(steps[0].role, Role::Oracle);
+        assert_eq!(steps[1].role, Role::Fixer);
+        assert_eq!(steps[2].role, Role::Librarian);
+    }
+
+    #[test]
+    fn parse_skill_chain_none_empty_and_unknown_skill_become_none() {
+        let steps = parse_skill_chain("oracle|none\nfixer|\nlibrarian|unknown-skill");
+        assert_eq!(steps.len(), 3);
+        assert_eq!(steps[0].skill_name, None);
+        assert_eq!(steps[1].skill_name, None);
+        assert_eq!(steps[2].skill_name, None);
+    }
+
+    #[test]
+    fn parse_skill_chain_falls_back_to_oracle() {
+        let steps = parse_skill_chain("no usable routing output");
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].role, Role::Oracle);
+        assert_eq!(steps[0].skill_name, None);
+    }
+
+    #[test]
+    fn skill_planning_prompt_lists_roles_skills_and_task() {
+        let skills = vec![SkillRouteOption {
+            skill_name: "test-driven-development",
+            description: "新功能或 bugfix 的測試先行實作",
+            primary_role: Role::Fixer,
+            collaborator_role: Some(Role::Oracle),
+        }];
+        let p = skill_planning_prompt("fix the bug", &skills);
+        assert!(p.contains("fixer"));
+        assert!(p.contains("test-driven-development"));
+        assert!(p.contains("新功能或 bugfix"));
+        assert!(p.contains("fix the bug"));
+        assert!(p.contains("<role>|<skill-or-none>"));
     }
 }

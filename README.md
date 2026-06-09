@@ -64,9 +64,9 @@ sequenceDiagram
     CLI->>Mem: 1. recall (回想此 scope 相關記憶)
     Mem-->>CLI: 回傳 hits[] (相關記憶)
     
-    CLI->>Orch: 2. plan_chain (規劃角色協作鏈)
+    CLI->>Orch: 2. plan_skill_chain (規劃角色 + 技能協作鏈)
     Orch->>Agent: 呼叫 routing planner
-    Agent-->>Orch: 回傳角色鏈 (例如 [Fixer])
+    Agent-->>Orch: 回傳角色與技能鏈 (例如 [Fixer + test-driven-development])
     Orch-->>CLI: 傳回執行角色鏈
     
     Note over CLI, Agent: 3. 逐棒接力執行 (最多 3 棒)
@@ -89,6 +89,13 @@ sequenceDiagram
 
 - **輸入接力與前序協作**：當 planner 規劃出多角色協作鏈（例如 `explorer, fixer`）時，前一個步驟角色的輸出會被以 `[前序協作]` 格式標記，並拼接到下一步的 Task 輸入中，實現接力分析。
 - **會話狀態隔離 (Session Isolation)**：為避免中間角色步驟的暫存輸出污染對話歷史，**只有最後一棒的執行才會帶入並更新該 Scope 的 `session_id`**，前面的所有輔助步驟皆為無狀態（Stateless）執行，確保最終對話的連貫與乾淨。
+
+### 技能路由 (Skill Routing)
+
+- **本地技能庫**：Wukong 內建 selected Superpowers 技能於 `crates/wukong-skills/assets/superpowers/`，由 `wukong-skills` catalog 以 `include_str!` 內嵌進 runtime。
+- **角色 + 技能規劃**：每回合 planner 回傳最多三個步驟，每步包含角色與可選技能，例如 `fixer|test-driven-development`。
+- **Prompt 注入**：執行每棒時，若技能可解析，`wukong-cli` 會把對應 `SKILL.md` 放入 `[技能規範]` 區塊，再接上人格、角色卡、記憶與任務。
+- **更新來源**：使用 `scripts/sync-superpowers.sh <commit-or-tag> --dry-run` 預覽，再用 `scripts/sync-superpowers.sh <commit-or-tag>` 同步上游 Superpowers；來源版本記錄於 `crates/wukong-skills/assets/superpowers/SOURCE.md`。
 
 ---
 
@@ -309,7 +316,7 @@ cargo run -p wukong-orchestrator --bin wukong-orchestrate -- --agent-cmd "printf
 ## Roadmap（v2+）
 
 - ~~Telegram bot 進入點~~ ✅ v0.6.0;~~Web Console 進入點~~ ✅(TeleNexus 完整願景,持續)
-- ~~角色協作鏈（多角色依序接力）~~ ✅ v0.5.0;平行多角色調度、技能路由(後續)
+- ~~角色協作鏈（多角色依序接力）~~ ✅ v0.5.0;~~技能路由（Superpowers 本地技能注入）~~ ✅;平行多角色調度(後續)
 - ~~記憶 markdown 雙持久化、consolidation/prune、可觀測性快照~~ ✅ v0.4.0
 
 ---

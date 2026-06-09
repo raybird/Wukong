@@ -12,6 +12,7 @@ use wukong_gateway::backend::{AgentRequest, AiBackend};
 use wukong_gateway::config::GatewayConfig;
 use wukong_memory::{Memory, MemoryItem, MemoryKind, RecallMode, RecallQuery, RememberInput};
 use wukong_orchestrator::Role;
+use wukong_skills::{find as find_skill, route_options};
 
 /// All errors produced by the unified turn.
 #[derive(Debug, Error)]
@@ -51,19 +52,21 @@ pub async fn run_turn(
         })
         .await?;
 
-    // 2. Plan an ordered role chain (replaces single-role routing).
-    let roles = wukong_orchestrator::plan_chain(backend, input).await?;
+    // 2. Plan an ordered role + skill chain.
+    let steps = wukong_orchestrator::plan_skill_chain(backend, input, &route_options()).await?;
 
-    // 3. Run each role in order, accumulating prior outputs into the prompt.
+    // 3. Run each step in order, accumulating prior outputs into the prompt.
     let stored = memory.agent_session(&cfg.scope).await?;
-    let n_roles = roles.len();
+    let n_steps = steps.len();
     let mut prior: Vec<wukong_orchestrator::Outcome> = Vec::new();
     let mut captured_session: Option<String> = None;
-    for (i, role) in roles.into_iter().enumerate() {
+    for (i, step) in steps.into_iter().enumerate() {
+        let role = step.role;
         on_role(role);
+        let skill = step.skill_name.as_deref().and_then(find_skill);
         let augmented = format!("{input}{}", wukong_orchestrator::chain_context(&prior));
-        let prompt = persona::build_prompt(role, &recall.data, &augmented);
-        let is_final = i + 1 == n_roles;
+        let prompt = persona::build_prompt_with_skill(role, skill, &recall.data, &augmented);
+        let is_final = i + 1 == n_steps;
         let session_id = if is_final { stored.clone() } else { None };
         let resp = backend
             .run_streaming(
@@ -184,6 +187,50 @@ mod tests {
             recall_top_k: 5,
             stream: true,
         }
+    }
+
+    #[tokio::test]
+    async fn run_turn_injects_planned_skill_into_execute_prompt() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["fixer|test-driven-development", "done"]);
+        let out = run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "fix the bug",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.role, Role::Fixer);
+        assert_eq!(out.text, "done");
+        let prompts = backend.prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 2);
+        assert!(prompts[0].contains("test-driven-development"));
+        assert!(prompts[1].contains("[技能規範]"));
+        assert!(prompts[1].contains("test-driven-development"));
+        assert!(prompts[1].contains("你是 Fixer"));
+    }
+
+    #[tokio::test]
+    async fn run_turn_ignores_unknown_planned_skill() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["oracle|unknown-skill", "answer"]);
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "think",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        let prompts = backend.prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 2);
+        assert!(!prompts[1].contains("[技能規範]"));
+        assert!(prompts[1].contains("你是 Oracle"));
     }
 
     #[tokio::test]

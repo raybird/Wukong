@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/wukong-memory", "crates/wukong-memoryd", "crates/wukong-gateway", "crates/wukong-orchestrator", "crates/wukong-cli", "crates/wukong-telegram", "crates/wukong-render", "crates/wukong-web"]
+members = ["crates/wukong-memory", "crates/wukong-memoryd", "crates/wukong-gateway", "crates/wukong-orchestrator", "crates/wukong-skills", "crates/wukong-cli", "crates/wukong-telegram", "crates/wukong-render", "crates/wukong-web"]
 
 [workspace.package]
 edition = "2021"

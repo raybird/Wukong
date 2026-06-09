@@ -2,7 +2,7 @@
 
 > 柱 4 ──「修成正果・金箍棒」：統一 CLI（`wukong` 二進位）
 
-把三柱合為一個產品。一回合 = recall → **plan_chain** → execute×N（人格 + 角色 + 記憶 + 前序協作）→ remember。
+把三柱合為一個產品。一回合 = recall → **plan_skill_chain** → execute×N（人格 + 角色 + 技能 + 記憶 + 前序協作）→ remember。
 
 > 一回合走**協作鏈**:planner 自動決定要哪幾個角色、什麼順序(簡單任務單角色 = 今日行為;複雜任務最多 3 棒)。每棒在 stderr 印自己的角色 header,前一棒輸出累加餵給後一棒;記憶只存最終輸出。
 
@@ -53,10 +53,22 @@ use wukong_cli::repl::run_repl_loop;
 
 - `persona::WUKONG_PERSONA` — 孫悟空人格系統 prompt
 - `persona::build_prompt(role, hits, input)` — 人格 + 角色卡 + 記憶 context + 輸入
+- `persona::build_prompt_with_skill(role, skill, hits, input)` — 同上，另加 `[技能規範]` 區塊
 - `render::StreamRenderer` — 事件 → stdout/stderr 分流
 - `repl::{run_repl_loop, classify_line, LineAction}` — REPL 迴圈與行解析
 - `WukongError` — 收斂 memory / orchestrator / backend 三柱錯誤
 
-依賴：`wukong-cli → { wukong-memory, wukong-gateway, wukong-orchestrator }`（單向，頂層）。
+依賴：`wukong-cli → { wukong-memory, wukong-gateway, wukong-orchestrator, wukong-skills }`（單向，頂層）。
+
+## 技能路由
+
+`run_turn` 會呼叫 `wukong-orchestrator::plan_skill_chain` 規劃角色與技能。若 planner 回傳的技能存在於 `wukong-skills` catalog，該技能的 `SKILL.md` 會被注入 `[技能規範]` 區塊。
+
+同步 selected Superpowers 技能：
+
+```bash
+scripts/sync-superpowers.sh <commit-or-tag> --dry-run
+scripts/sync-superpowers.sh <commit-or-tag>
+```
 
 詳見 [`docs/superpowers/specs/2026-06-05-wukong-cli-design.md`](../../docs/superpowers/specs/2026-06-05-wukong-cli-design.md)。

@@ -6,7 +6,10 @@ pub mod router;
 
 pub use error::OrchestratorError;
 pub use role::Role;
-pub use router::{parse_chain, parse_role, plan_chain, planning_prompt, route, routing_prompt};
+pub use router::{
+    parse_chain, parse_role, parse_skill_chain, plan_chain, plan_skill_chain, planning_prompt,
+    route, routing_prompt, skill_planning_prompt, PlannedStep, SkillRouteOption,
+};
 
 use wukong_gateway::backend::{AgentRequest, AiBackend};
 
@@ -149,6 +152,24 @@ mod tests {
         let backend = MockBackend::new(&["explorer, fixer"]);
         let chain = plan_chain(&backend, "build a thing").await.unwrap();
         assert_eq!(chain, vec![Role::Explorer, Role::Fixer]);
+    }
+
+    #[tokio::test]
+    async fn plan_skill_chain_parses_backend_reply() {
+        let backend = MockBackend::new(&["fixer|test-driven-development"]);
+        let skills = vec![SkillRouteOption {
+            skill_name: "test-driven-development",
+            description: "新功能或 bugfix 的測試先行實作",
+            primary_role: Role::Fixer,
+            collaborator_role: Some(Role::Oracle),
+        }];
+        let steps = plan_skill_chain(&backend, "fix the bug", &skills).await.unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].role, Role::Fixer);
+        assert_eq!(steps[0].skill_name.as_deref(), Some("test-driven-development"));
+
+        let prompts = backend.prompts.lock().unwrap();
+        assert!(prompts[0].contains("test-driven-development"));
     }
 
     #[tokio::test]

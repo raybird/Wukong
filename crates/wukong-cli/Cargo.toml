@@ -15,6 +15,7 @@ path = "src/main.rs"
 wukong-memory = { path = "../wukong-memory" }
 wukong-gateway = { path = "../wukong-gateway" }
 wukong-orchestrator = { path = "../wukong-orchestrator" }
+wukong-skills = { path = "../wukong-skills" }
 tokio = { workspace = true }
 clap = { workspace = true }
 thiserror = { workspace = true }

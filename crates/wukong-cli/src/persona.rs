@@ -1,5 +1,6 @@
 use wukong_memory::RecallHit;
 use wukong_orchestrator::Role;
+use wukong_skills::SkillSpec;
 
 /// The light-touch Sun Wukong persona, prepended to every execution prompt.
 pub const WUKONG_PERSONA: &str =
@@ -11,6 +12,25 @@ pub const WUKONG_PERSONA: &str =
 pub fn build_prompt(role: Role, hits: &[RecallHit], input: &str) -> String {
     let body = wukong_gateway::prompt::compose_prompt(hits, input);
     format!("{WUKONG_PERSONA}\n\n{}\n\n{body}", role.card())
+}
+
+pub fn build_prompt_with_skill(
+    role: Role,
+    skill: Option<&SkillSpec>,
+    hits: &[RecallHit],
+    input: &str,
+) -> String {
+    let body = wukong_gateway::prompt::compose_prompt(hits, input);
+    let mut prompt = format!("{WUKONG_PERSONA}\n\n{}", role.card());
+    if let Some(skill) = skill {
+        prompt.push_str(&format!(
+            "\n\n[技能規範]\n你必須遵循 `{}` 的流程。以下是技能文件：\n{}",
+            skill.name, skill.content
+        ));
+    }
+    prompt.push_str("\n\n");
+    prompt.push_str(&body);
+    prompt
 }
 
 #[cfg(test)]
@@ -43,5 +63,23 @@ mod tests {
         assert!(p.contains("[相關記憶]"));
         assert!(p.contains("earlier decision"));
         assert!(p.contains("你是 Oracle"));
+    }
+
+    #[test]
+    fn build_prompt_with_skill_includes_skill_block() {
+        let skill = wukong_skills::find("test-driven-development").unwrap();
+        let p = build_prompt_with_skill(Role::Fixer, Some(skill), &[], "fix the bug");
+        assert!(p.contains("[技能規範]"));
+        assert!(p.contains("test-driven-development"));
+        assert!(p.contains("你是 Fixer"));
+        assert!(p.contains("fix the bug"));
+    }
+
+    #[test]
+    fn build_prompt_with_skill_omits_skill_block_when_absent() {
+        let p = build_prompt_with_skill(Role::Oracle, None, &[], "think about it");
+        assert!(!p.contains("[技能規範]"));
+        assert!(p.contains("你是 Oracle"));
+        assert!(p.contains("think about it"));
     }
 }
