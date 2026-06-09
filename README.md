@@ -110,11 +110,35 @@ sequenceDiagram
   ```
 - 一個可用的 **AI agent CLI**（預設 `opencode run`；可用 `--agent-cmd` 換成其他）。
 
-### 建置與測試
+### 快速安裝
 
 ```bash
-cargo build            # 編譯整個 workspace
-cargo test             # 全部測試（v1：63 passing）
+curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash
+```
+
+腳本會自動偵測平台（Linux / macOS），下載最新預編譯 binary，並以互動問答設定 Telegram / Web / 記憶等選項。
+
+手動選項：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash -s -- --version v0.11.0
+
+# Linux 可選 linking flavor：
+curl -fsSL ... | bash -s -- --flavor gnu   # glibc (動態)
+curl -fsSL ... | bash -s -- --flavor musl  # musl  (靜態，預設，跨 distro)
+```
+
+### 從原始碼建置
+
+如果不想用預編譯 binary，也可以直接編譯：
+
+### 從原始碼建置
+
+如果不想用預編譯 binary，也可以直接編譯：
+
+```bash
+cargo build --release  # 編譯整個 workspace（含 wukong + wukong-telegram + wukong-web）
+cargo test             # 全部測試
 cargo clippy --all-targets -- -D warnings
 ```
 
