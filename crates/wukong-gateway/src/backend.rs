@@ -1,5 +1,6 @@
 use crate::error::GatewayError;
 use crate::stream::{parse_event, parse_session_id, StreamEvent};
+use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -63,16 +64,20 @@ pub fn assemble_argv(
 /// Drives a configurable agent CLI as a subprocess (run-and-capture, no shell).
 pub struct AgentCliBackend {
     pub command: Vec<String>,
+    /// Working directory for the agent subprocess. Defaults to the process CWD
+    /// when None; set to `~/.wukong/workspace` to isolate agent side-effects.
+    pub workspace: Option<PathBuf>,
 }
 
 impl AiBackend for AgentCliBackend {
     async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
         let argv = assemble_argv(&self.command, req.session_id.as_deref(), req.thinking, &req.prompt);
-        let output = Command::new(&argv[0])
-            .args(&argv[1..])
-            .stdin(Stdio::null())
-            .output()
-            .await?;
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..]).stdin(Stdio::null());
+        if let Some(ws) = &self.workspace {
+            cmd.current_dir(ws);
+        }
+        let output = cmd.output().await?;
         if !output.status.success() {
             return Err(GatewayError::AgentFailed {
                 code: output.status.code(),
@@ -97,12 +102,15 @@ impl AiBackend for AgentCliBackend {
         argv.push("json".to_string());
         argv.push(prompt);
 
-        let mut child = Command::new(&argv[0])
-            .args(&argv[1..])
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        if let Some(ws) = &self.workspace {
+            cmd.current_dir(ws);
+        }
+        let mut child = cmd.spawn()?;
 
         // Drain stderr concurrently so a large stderr can't deadlock us while
         // we read stdout line-by-line.
@@ -173,7 +181,10 @@ mod tests {
     #[tokio::test]
     async fn agent_cli_backend_captures_stdout() {
         // `echo <prompt>` prints the prompt back; verifies capture + trim.
-        let backend = AgentCliBackend { command: vec!["echo".to_string()] };
+        let backend = AgentCliBackend {
+            command: vec!["echo".to_string()],
+            workspace: None,
+        };
         let resp = backend
             .run(AgentRequest {
                 prompt: "hello wukong".to_string(),
@@ -188,7 +199,10 @@ mod tests {
     #[tokio::test]
     async fn agent_cli_backend_reports_failure() {
         // `false` exits non-zero with no output.
-        let backend = AgentCliBackend { command: vec!["false".to_string()] };
+        let backend = AgentCliBackend {
+            command: vec!["false".to_string()],
+            workspace: None,
+        };
         let err = backend
             .run(AgentRequest {
                 prompt: "x".to_string(),
@@ -235,6 +249,7 @@ mod tests {
                 r#"{"type":"text","part":{"type":"text","text":"hello"}}"#.to_string(),
                 r#"{"type":"step_finish"}"#.to_string(),
             ],
+            workspace: None,
         };
         let mut events = Vec::new();
         let resp = backend

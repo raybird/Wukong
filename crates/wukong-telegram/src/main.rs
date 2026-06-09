@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use wukong_gateway::backend::AgentCliBackend;
 use wukong_gateway::config::GatewayConfig;
+use wukong_gateway::workspace_dir;
 use wukong_memory::Memory;
 use wukong_telegram::client::{ReqwestTgClient, TgClient};
 use wukong_telegram::dispatch::handle_message;
@@ -58,7 +59,10 @@ async fn main() {
         .map(|s| s.split_whitespace().map(|t| t.to_string()).collect::<Vec<_>>())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| vec!["opencode".to_string(), "run".to_string()]);
-    let backend = AgentCliBackend { command: agent_command };
+    let backend = AgentCliBackend {
+        command: agent_command,
+        workspace: workspace_dir(),
+    };
 
     let base_cfg = GatewayConfig {
         scope: String::new(),

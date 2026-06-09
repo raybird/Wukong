@@ -6,6 +6,7 @@ use wukong_gateway::backend::AgentCliBackend;
 use wukong_gateway::cli::{Cli, Command, MemoryOp};
 use wukong_gateway::config::GatewayConfig;
 use wukong_gateway::summarize::OpencodeSummarizer;
+use wukong_gateway::workspace_dir;
 use wukong_gateway::StreamEvent;
 use wukong_memory::{ConsolidatePolicy, Memory, PrunePolicy};
 
@@ -42,6 +43,7 @@ async fn main() {
 
     let backend = AgentCliBackend {
         command: cfg.agent_command.clone(),
+        workspace: workspace_dir(),
     };
 
     if cli.new_session {

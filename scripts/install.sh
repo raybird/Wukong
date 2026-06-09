@@ -214,11 +214,15 @@ fi
 echo ""
 echo "$(bold '記憶設定')"
 read -r -p "  記憶資料庫位置 [${HOME}/.wukong/memory.db]: " MEM_DB
+read -r -p "  Agent 工作目錄 [${HOME}/.wukong/workspace]: " WS_DIR
 read -r -p "  啟用語意搜尋？(y/N): " EMBED
 read -r -p "  Markdown 鏡像目錄（選填，留空停用）: " MD_DIR
 
 if [[ -n "$MEM_DB" ]]; then
   echo "WUKONG_MEMORY_DB=\"${MEM_DB}\"" >> "$CONFIG_FILE"
+fi
+if [[ -n "$WS_DIR" ]]; then
+  echo "WUKONG_WORKSPACE=\"${WS_DIR}\"" >> "$CONFIG_FILE"
 fi
 EMBED_LOWER="$(echo "${EMBED:-n}" | tr '[:upper:]' '[:lower:]')"
 case "$EMBED_LOWER" in

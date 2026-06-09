@@ -8,6 +8,8 @@ pub mod pipeline;
 pub mod prompt;
 pub mod stream;
 pub mod summarize;
+pub mod workspace;
 
 pub use error::GatewayError;
 pub use stream::StreamEvent;
+pub use workspace::workspace_dir;

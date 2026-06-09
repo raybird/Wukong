@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use wukong_gateway::backend::AgentCliBackend;
+use wukong_gateway::workspace_dir;
 use wukong_memory::Memory;
 use wukong_web::{build_router, AppState};
 
@@ -47,7 +48,10 @@ async fn main() {
         .map(|s| s.split_whitespace().map(|t| t.to_string()).collect::<Vec<_>>())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| vec!["opencode".to_string(), "run".to_string()]);
-    let backend = AgentCliBackend { command: agent_command };
+    let backend = AgentCliBackend {
+        command: agent_command,
+        workspace: workspace_dir(),
+    };
 
     let state = AppState {
         memory: Arc::new(memory),
