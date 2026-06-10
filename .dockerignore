@@ -1,0 +1,31 @@
+# Build artifacts
+target/
+*.tar.gz
+
+# Development
+.env
+.env.local
+*.log
+
+# Git
+.git/
+.gitignore
+
+# CI / Scripts
+.github/
+scripts/*.sh
+!scripts/docker-entrypoint.sh
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS files
+.DS_Store
+Thumbs.db

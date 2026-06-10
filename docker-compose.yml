@@ -1,0 +1,90 @@
+version: "3.8"
+
+services:
+  # ── CLI / REPL ──
+  wukong:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: wukong:latest
+    container_name: wukong-cli
+    # Run with host-matching UID/GID to avoid permission issues on mounts
+    environment:
+      - USER_ID=${USER_ID:-1000}
+      - GROUP_ID=${GROUP_ID:-1000}
+      # Agent backend configuration
+      - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run}
+      - WUKONG_WORKSPACE=/workspace
+      - WUKONG_MEMORY_DB=sqlite:///data/memory.db
+      - WUKONG_THINKING=${WUKONG_THINKING:-1}
+      - WUKONG_EMBED=${WUKONG_EMBED:-0}
+    volumes:
+      # Host working directory → opencode workspace
+      - ${WUKONG_HOST_WORKSPACE:-./workspace}:/workspace
+      # Dedicated volume for opencode config (isolated from host ~/.config)
+      - opencode-config:/home/wukong/.config/opencode
+      # Persistent memory database
+      - wukong-data:/data
+    # Default to interactive shell / REPL
+    stdin_open: true
+    tty: true
+    command: ["wukong"]
+
+  # ── Telegram Bot ──
+  wukong-telegram:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: wukong:latest
+    container_name: wukong-telegram
+    environment:
+      - USER_ID=${USER_ID:-1000}
+      - GROUP_ID=${GROUP_ID:-1000}
+      - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run}
+      - WUKONG_WORKSPACE=/workspace
+      - WUKONG_MEMORY_DB=sqlite:///data/memory.db
+      - WUKONG_THINKING=${WUKONG_THINKING:-1}
+      # Telegram-specific
+      - WUKONG_TG_TOKEN=${WUKONG_TG_TOKEN:-}
+      - WUKONG_TG_ALLOWED=${WUKONG_TG_ALLOWED:-}
+    volumes:
+      - ${WUKONG_HOST_WORKSPACE:-./workspace}:/workspace
+      - opencode-config:/home/wukong/.config/opencode
+      - wukong-data:/data
+    command: ["wukong-telegram"]
+    restart: unless-stopped
+
+  # ── Web Console ──
+  wukong-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: wukong:latest
+    container_name: wukong-web
+    ports:
+      - "${WUKONG_WEB_PORT:-8787}:8787"
+    environment:
+      - USER_ID=${USER_ID:-1000}
+      - GROUP_ID=${GROUP_ID:-1000}
+      - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run}
+      - WUKONG_WORKSPACE=/workspace
+      - WUKONG_MEMORY_DB=sqlite:///data/memory.db
+      - WUKONG_THINKING=${WUKONG_THINKING:-1}
+      # Web-specific
+      - WUKONG_WEB_HOST=${WUKONG_WEB_HOST:-0.0.0.0}
+      - WUKONG_WEB_PORT=${WUKONG_WEB_PORT:-8787}
+      - WUKONG_WEB_TOKEN=${WUKONG_WEB_TOKEN:-}
+    volumes:
+      - ${WUKONG_HOST_WORKSPACE:-./workspace}:/workspace
+      - opencode-config:/home/wukong/.config/opencode
+      - wukong-data:/data
+    command: ["wukong-web"]
+    restart: unless-stopped
+
+volumes:
+  # Isolated opencode configuration (not mounted from host)
+  opencode-config:
+    driver: local
+  # Persistent wukong memory database
+  wukong-data:
+    driver: local

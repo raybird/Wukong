@@ -128,9 +128,62 @@ curl -fsSL ... | bash -s -- --flavor gnu   # glibc (動態)
 curl -fsSL ... | bash -s -- --flavor musl  # musl  (靜態，預設，跨 distro)
 ```
 
-### 從原始碼建置
+### Docker 容器化執行
 
-如果不想用預編譯 binary，也可以直接編譯：
+提供完整的 Docker / Docker Compose 配置，隔離 host 環境，同時滿足 opencode 工作空間掛載與設定隔離需求。
+
+**特點：**
+- **Host 工作目錄掛載**：opencode 工作空間透過 volume 掛載 host 路徑
+- **opencode 設定隔離**：`~/.config/opencode` 存放在 Docker volume 中，不污染 host
+- **UID/GID 對齊**：runtime user 與 host 一致，避免檔案權限問題
+- **三種模式**：CLI / REPL、Telegram Bot、Web Console 均可透過 docker-compose 啟動
+
+**快速開始：**
+
+```bash
+# 1. 複製環境範例並編輯
+cp .env.example .env
+# 編輯 .env 填入你的設定（TOKEN、USER_ID/GROUP_ID 等）
+
+# 2. 建置並啟動
+
+# CLI / REPL 模式
+docker-compose run --rm wukong
+
+# Telegram Bot（背景常駐）
+docker-compose up -d wukong-telegram
+
+# Web Console（背景常駐，預設 port 8787）
+docker-compose up -d wukong-web
+```
+
+**環境變數說明（.env）：**
+
+| 變數 | 說明 | 預設 |
+| :--- | :--- | :--- |
+| `USER_ID` / `GROUP_ID` | 與 host 對齊的 UID/GID，避免 volume 權限問題 | `1000` |
+| `WUKONG_HOST_WORKSPACE` | Host 工作目錄路徑（opencode workspace） | `./workspace` |
+| `WUKONG_AGENT_CMD` | AI agent 指令 | `opencode run` |
+| `WUKONG_TG_TOKEN` | Telegram Bot Token（選用） | — |
+| `WUKONG_TG_ALLOWED` | 允許的 Telegram chat ID（選用） | — |
+| `WUKONG_WEB_HOST` / `WUKONG_WEB_PORT` | Web Console 綁定位址與埠 | `0.0.0.0:8787` |
+| `WUKONG_WEB_TOKEN` | Web Console 存取密鑰（選用） | — |
+| `WUKONG_THINKING` | 啟用思考過程顯示 | `1` |
+| `WUKONG_EMBED` | 啟用語意向量召回 | `0` |
+
+**Volume 架構：**
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Host                      │  Container                │
+├─────────────────────────────────────────────────────────┤
+│  ./workspace               →  /workspace                │  (opencode 工作空間)
+│  Docker Volume:            →  /home/wukong/.config/   │  (opencode 設定隔離)
+│    opencode-config            opencode/                 │
+│  Docker Volume:              →  /data/                  │  (wukong 記憶資料庫)
+│    wukong-data                                           │
+└─────────────────────────────────────────────────────────┘
+```
 
 ### 從原始碼建置
 
