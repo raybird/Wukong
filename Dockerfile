@@ -1,20 +1,22 @@
 # syntax=docker/dockerfile:1
-# ── Build stage ──
-FROM rust:1.96-slim-bookworm AS builder
+# ── Build stage: download release binaries ──
+ARG VERSION=v0.13.0
+ARG TARGET=x86_64-unknown-linux-musl
+ARG REPO=raybird/Wukong
+FROM debian:bookworm-slim AS downloader
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev && \
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-WORKDIR /build
-COPY . .
+WORKDIR /bins
 
-# Build all workspace binaries in release mode
-RUN cargo build --release --workspace && \
-    mkdir -p /bins && \
-    cp target/release/wukong /bins/ && \
-    cp target/release/wukong-telegram /bins/ && \
-    cp target/release/wukong-web /bins/
+RUN for bin in wukong wukong-telegram wukong-web; do \
+      tarball="${bin}-${TARGET}.tar.gz"; \
+      curl -fsSL "https://github.com/${REPO}/releases/download/${VERSION}/${tarball}" -o "/tmp/${tarball}"; \
+      tar -xzf "/tmp/${tarball}" -C /bins "${bin}"; \
+      chmod +x "/bins/${bin}"; \
+      rm -f "/tmp/${tarball}"; \
+    done
 
 # ── Runtime stage ──
 FROM debian:bookworm-slim
@@ -34,8 +36,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fi && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy wukong binaries
-COPY --from=builder /bins/* /usr/local/bin/
+# Copy wukong binaries from downloader stage
+COPY --from=downloader /bins/* /usr/local/bin/
 
 # Create non-root user (UID/GID will be remapped at runtime via entrypoint)
 RUN useradd -m -s /bin/bash wukong

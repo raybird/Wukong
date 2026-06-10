@@ -157,6 +157,26 @@ docker-compose up -d wukong-telegram
 docker-compose up -d wukong-web
 ```
 
+**自訂建構版本（可選）：**
+
+```bash
+# 指定版本（預設 v0.13.0）
+docker-compose build --build-arg VERSION=v0.12.1
+
+# 指定 target（預設 musl 靜態編譯，跨 distro 相容）
+docker-compose build --build-arg TARGET=x86_64-unknown-linux-gnu  # glibc 動態連結
+```
+
+或在 `docker-compose.yml` 永久設定：
+```yaml
+services:
+  wukong:
+    build:
+      args:
+        VERSION: v0.13.0
+        TARGET: x86_64-unknown-linux-musl
+```
+
 **環境變數說明（.env）：**
 
 | 變數 | 說明 | 預設 |
