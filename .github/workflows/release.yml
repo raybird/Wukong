@@ -52,6 +52,7 @@ jobs:
           cp Dockerfile dist/wukong-docker/Dockerfile
           cp scripts/docker-entrypoint.sh dist/wukong-docker/scripts/docker-entrypoint.sh
           cp docker-compose.yml dist/wukong-docker/docker-compose.yml
+          cp -r workspace dist/wukong-docker/workspace
           cd dist
           tar -czf wukong-docker.tar.gz wukong-docker
           rm -rf wukong-docker
