@@ -47,11 +47,11 @@ jobs:
       - name: Package Docker compose bundle
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
-          mkdir -p dist/wukong-docker
+          mkdir -p dist/wukong-docker/scripts
           cp .env.example dist/wukong-docker/.env.example
-          # Remove build block and update image tag
-          sed -e '/build:/,/dockerfile:/d' docker-compose.yml > dist/wukong-docker/docker-compose.yml
-          sed -i 's|image: wukong:latest|image: raybird/wukong:${{ github.ref_name }}|g' dist/wukong-docker/docker-compose.yml
+          cp Dockerfile dist/wukong-docker/Dockerfile
+          cp scripts/docker-entrypoint.sh dist/wukong-docker/scripts/docker-entrypoint.sh
+          cp docker-compose.yml dist/wukong-docker/docker-compose.yml
           cd dist
           tar -czf wukong-docker.tar.gz wukong-docker
           rm -rf wukong-docker
