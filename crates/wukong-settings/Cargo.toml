@@ -1,0 +1,16 @@
+[package]
+name = "wukong-settings"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "wukong_settings"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

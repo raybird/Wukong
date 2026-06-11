@@ -17,10 +17,12 @@ wukong-gateway = { path = "../wukong-gateway" }
 wukong-cli = { path = "../wukong-cli" }
 wukong-orchestrator = { path = "../wukong-orchestrator" }
 wukong-render = { path = "../wukong-render" }
+wukong-settings = { path = "../wukong-settings" }
 axum = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

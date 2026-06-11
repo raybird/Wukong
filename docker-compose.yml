@@ -1,8 +1,7 @@
-version: "3.8"
-
 services:
   # ── CLI / REPL ──
   wukong:
+    profiles: ["cli"]
     build:
       context: .
       dockerfile: Dockerfile

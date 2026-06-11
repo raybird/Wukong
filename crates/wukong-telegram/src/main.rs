@@ -7,18 +7,28 @@ use wukong_telegram::client::{ReqwestTgClient, TgClient};
 use wukong_telegram::dispatch::handle_message;
 use wukong_telegram::parse::{highest_update_id, parse_allowlist, parse_updates};
 
+fn load_effective_telegram_settings() -> wukong_settings::TelegramSettings {
+    let path = wukong_settings::default_settings_path();
+    let file = wukong_settings::load_settings(&path).unwrap_or_default();
+    wukong_settings::effective_telegram_settings(&file)
+}
+
+fn has_token(settings: &wukong_settings::TelegramSettings) -> bool {
+    !settings.token.trim().is_empty()
+}
+
 #[tokio::main]
 async fn main() {
-    let token = match std::env::var("WUKONG_TG_TOKEN") {
-        Ok(t) if !t.is_empty() => t,
-        _ => {
-            eprintln!("error: WUKONG_TG_TOKEN is required");
-            std::process::exit(1);
-        }
-    };
-    let allow = parse_allowlist(&std::env::var("WUKONG_TG_ALLOWED").unwrap_or_default());
+    let mut tg_settings = load_effective_telegram_settings();
+    while !has_token(&tg_settings) {
+        eprintln!("🐵 wukong-telegram 等待設定：請在 Web /settings 填入 Telegram bot token。或設定 WUKONG_TG_TOKEN。每 5 秒重新檢查。");
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tg_settings = load_effective_telegram_settings();
+    }
+    let mut token = tg_settings.token.clone();
+    let mut allow = parse_allowlist(&tg_settings.allowed);
     if allow.is_empty() {
-        eprintln!("warning: WUKONG_TG_ALLOWED is empty — all messages will be ignored");
+        eprintln!("warning: WUKONG_TG_ALLOWED/shared allowed is empty — all messages will be ignored");
     }
 
     let db_url = std::env::var("WUKONG_MEMORY_DB").unwrap_or_else(|_| {
@@ -73,11 +83,20 @@ async fn main() {
         stream: false,
     };
 
-    let client = ReqwestTgClient::new(&token);
+    let mut client = ReqwestTgClient::new(&token);
     eprintln!("🐵 wukong-telegram 上線（long-poll）。允許 {} 個 chat。", allow.len());
 
     let mut offset: i64 = 0;
     loop {
+        let latest = load_effective_telegram_settings();
+        if has_token(&latest) && (latest.token != token || latest.allowed != tg_settings.allowed) {
+            eprintln!("🐵 wukong-telegram 偵測到設定更新，套用新的 token/allowlist。");
+            token = latest.token.clone();
+            allow = parse_allowlist(&latest.allowed);
+            tg_settings = latest;
+            client = ReqwestTgClient::new(&token);
+            offset = 0;
+        }
         match client.get_updates(offset).await {
             Ok(json) => {
                 if let Some(max) = highest_update_id(&json) {
@@ -92,5 +111,30 @@ async fn main() {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn has_token_rejects_empty_token() {
+        let settings = wukong_settings::TelegramSettings {
+            token: "   ".to_string(),
+            allowed: String::new(),
+        };
+
+        assert!(!has_token(&settings));
+    }
+
+    #[test]
+    fn has_token_accepts_non_empty_token() {
+        let settings = wukong_settings::TelegramSettings {
+            token: "123:abc".to_string(),
+            allowed: String::new(),
+        };
+
+        assert!(has_token(&settings));
     }
 }

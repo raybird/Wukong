@@ -2,7 +2,9 @@
 //! streams role progress + the rendered answer over SSE.
 
 use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
+use axum::Json;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -11,6 +13,7 @@ use wukong_cli::run_turn;
 use wukong_gateway::backend::AiBackend;
 use wukong_gateway::config::GatewayConfig;
 use wukong_memory::Memory;
+use wukong_settings::{Settings, TelegramSettings};
 
 /// Shared router state. Generic over the backend so tests inject a mock.
 pub struct AppState<B: AiBackend> {
@@ -18,6 +21,7 @@ pub struct AppState<B: AiBackend> {
     pub backend: Arc<B>,
     pub scope: String,
     pub token: Option<String>,
+    pub settings_path: std::path::PathBuf,
 }
 
 // Manual Clone: Arc fields clone cheaply and B need not be Clone.
@@ -28,6 +32,7 @@ impl<B: AiBackend> Clone for AppState<B> {
             backend: self.backend.clone(),
             scope: self.scope.clone(),
             token: self.token.clone(),
+            settings_path: self.settings_path.clone(),
         }
     }
 }
@@ -37,6 +42,7 @@ const INDEX_HTML: &str = include_str!("../static/index.html");
 const APP_JS: &str = include_str!("../static/app.js");
 const HTML_JS: &str = include_str!("../static/lib/html.js");
 const CHAT_JS: &str = include_str!("../static/components/wukong-chat.js");
+const SETTINGS_JS: &str = include_str!("../static/components/wukong-settings.js");
 const STYLES_CSS: &str = include_str!("../static/styles.css");
 
 const JS: &str = "application/javascript";
@@ -73,6 +79,7 @@ fn asset(content_type: &'static str, body: &'static str) -> axum::response::Resp
 async fn app_js() -> axum::response::Response { asset(JS, APP_JS) }
 async fn html_js() -> axum::response::Response { asset(JS, HTML_JS) }
 async fn chat_js() -> axum::response::Response { asset(JS, CHAT_JS) }
+async fn settings_js() -> axum::response::Response { asset(JS, SETTINGS_JS) }
 async fn styles_css() -> axum::response::Response { asset(CSS, STYLES_CSS) }
 
 /// Messages pushed from the turn task to the SSE stream.
@@ -102,6 +109,35 @@ struct ChatQuery {
     token: Option<String>,
 }
 
+#[derive(serde::Deserialize)]
+struct SettingsQuery {
+    token: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct SettingsResponse {
+    telegram: TelegramSettingsResponse,
+}
+
+#[derive(serde::Serialize)]
+struct TelegramSettingsResponse {
+    configured: bool,
+    token: String,
+    allowed: String,
+}
+
+#[derive(serde::Deserialize)]
+struct SaveSettingsRequest {
+    telegram: TelegramSettings,
+}
+
+fn authorized(expected: &Option<String>, provided: Option<&str>) -> bool {
+    match expected {
+        Some(t) => provided == Some(t.as_str()),
+        None => true,
+    }
+}
+
 /// `GET /chat?q=` — run a turn, streaming role progress then the rendered answer.
 async fn chat<B>(
     State(state): State<AppState<B>>,
@@ -112,10 +148,8 @@ where
 {
     use axum::response::IntoResponse;
 
-    if let Some(expected) = &state.token {
-        if params.token.as_deref() != Some(expected.as_str()) {
-            return axum::http::StatusCode::UNAUTHORIZED.into_response();
-        }
+    if !authorized(&state.token, params.token.as_deref()) {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
 
     let q = params.q.unwrap_or_default();
@@ -203,6 +237,56 @@ where
     Sse::new(stream).into_response()
 }
 
+async fn get_settings<B>(
+    State(state): State<AppState<B>>,
+    Query(params): Query<SettingsQuery>,
+) -> axum::response::Response
+where
+    B: AiBackend + Send + Sync + 'static,
+{
+    use axum::response::IntoResponse;
+
+    if !authorized(&state.token, params.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    match wukong_settings::load_settings(&state.settings_path) {
+        Ok(settings) => {
+            let telegram = settings.telegram;
+            Json(SettingsResponse {
+                telegram: TelegramSettingsResponse {
+                    configured: !telegram.token.trim().is_empty(),
+                    token: wukong_settings::redact_token(&telegram.token),
+                    allowed: telegram.allowed,
+                },
+            })
+            .into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn post_settings<B>(
+    State(state): State<AppState<B>>,
+    Query(params): Query<SettingsQuery>,
+    Json(req): Json<SaveSettingsRequest>,
+) -> axum::response::Response
+where
+    B: AiBackend + Send + Sync + 'static,
+{
+    use axum::response::IntoResponse;
+
+    if !authorized(&state.token, params.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let settings = Settings { telegram: req.telegram };
+    match wukong_settings::save_settings(&state.settings_path, &settings) {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 /// Build the application router from shared state.
 pub fn build_router<B>(state: AppState<B>) -> axum::Router
 where
@@ -213,8 +297,11 @@ where
         .route("/app.js", axum::routing::get(app_js))
         .route("/lib/html.js", axum::routing::get(html_js))
         .route("/components/wukong-chat.js", axum::routing::get(chat_js))
+        .route("/components/wukong-settings.js", axum::routing::get(settings_js))
         .route("/styles.css", axum::routing::get(styles_css))
+        .route("/settings", axum::routing::get(index::<B>))
         .route("/chat", axum::routing::get(chat::<B>))
+        .route("/api/settings", axum::routing::get(get_settings::<B>).post(post_settings::<B>))
         .with_state(state)
 }
 
@@ -256,6 +343,7 @@ mod tests {
             backend: Arc::new(MockBackend::new(replies)),
             scope: "global".to_string(),
             token: token.map(|s| s.to_string()),
+            settings_path: tempfile::NamedTempFile::new().unwrap().path().to_path_buf(),
         }
     }
 
@@ -287,6 +375,9 @@ mod tests {
             .await
             .contains("javascript"));
         assert!(content_type(build_router(state(None, &[]).await), "/components/wukong-chat.js")
+            .await
+            .contains("javascript"));
+        assert!(content_type(build_router(state(None, &[]).await), "/components/wukong-settings.js")
             .await
             .contains("javascript"));
         assert!(content_type(build_router(state(None, &[]).await), "/styles.css")
@@ -374,7 +465,58 @@ mod tests {
             backend: Arc::new(ReasoningBackend { reasoning }),
             scope: "global".to_string(),
             token: None,
+            settings_path: tempfile::NamedTempFile::new().unwrap().path().to_path_buf(),
         }
+    }
+
+    #[tokio::test]
+    async fn settings_get_returns_default_state() {
+        let app = build_router(state(None, &[]).await);
+        let resp = app
+            .oneshot(Request::builder().uri("/api/settings").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains(r#""configured":false"#), "body: {body}");
+        assert!(body.contains(r#""allowed":"""#), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn settings_post_writes_telegram_settings() {
+        let app_state = state(None, &[]).await;
+        let settings_path = app_state.settings_path.clone();
+        let app = build_router(app_state);
+        let body = r#"{"telegram":{"token":"123:abc","allowed":"42 99"}}"#;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/settings")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let saved = wukong_settings::load_settings(&settings_path).unwrap();
+        assert_eq!(saved.telegram.token, "123:abc");
+        assert_eq!(saved.telegram.allowed, "42 99");
+    }
+
+    #[tokio::test]
+    async fn settings_requires_token_when_set() {
+        let app = build_router(state(Some("sekret"), &[]).await);
+
+        let resp = app
+            .oneshot(Request::builder().uri("/api/settings").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -426,5 +568,17 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         assert!(body.contains("<wukong-chat>"));
+    }
+
+    #[tokio::test]
+    async fn settings_route_serves_the_shell() {
+        let app = build_router(state(None, &[]).await);
+        let resp = app
+            .oneshot(Request::builder().uri("/settings").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains("<wukong-settings>"));
     }
 }

@@ -58,6 +58,7 @@ async fn main() {
         backend: Arc::new(backend),
         scope,
         token,
+        settings_path: wukong_settings::default_settings_path(),
     };
     let app = build_router(state);
 

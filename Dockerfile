@@ -1,43 +1,29 @@
 # syntax=docker/dockerfile:1
-# ── Build stage: download release binaries ──
-ARG VERSION=v0.13.1
-ARG TARGET=x86_64-unknown-linux-musl
-ARG REPO=raybird/Wukong
-FROM debian:bookworm-slim AS downloader
+# ── Build stage: compile local workspace binaries ──
+FROM rust:1-bookworm AS builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates pkg-config libssl-dev libsqlite3-dev && \
     rm -rf /var/lib/apt/lists/*
 
-WORKDIR /bins
-
-RUN for bin in wukong wukong-telegram wukong-web; do \
-      tarball="${bin}-${TARGET}.tar.gz"; \
-      curl -fsSL "https://github.com/${REPO}/releases/download/${VERSION}/${tarball}" -o "/tmp/${tarball}"; \
-      tar -xzf "/tmp/${tarball}" -C /bins "${bin}"; \
-      chmod +x "/bins/${bin}"; \
-      rm -f "/tmp/${tarball}"; \
-    done
+WORKDIR /src
+COPY . .
+RUN cargo build --release --locked -p wukong-cli -p wukong-telegram -p wukong-web
 
 # ── Runtime stage ──
 FROM debian:bookworm-slim
 
-# Install runtime deps + gosu + opencode
+# Install runtime deps + gosu + current opencode npm package
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl git gosu && \
-    # Install opencode via official install script (installs to /root/.local/bin by default)
-    curl -fsSL https://raw.githubusercontent.com/opencode-ai/opencode/refs/heads/main/install | bash && \
-    # Move opencode binary to globally accessible location for all users
-    if [ -f "/root/.local/bin/opencode" ]; then \
-        cp /root/.local/bin/opencode /usr/local/bin/opencode; \
-        chmod +x /usr/local/bin/opencode; \
-    elif command -v opencode >/dev/null 2>&1; then \
-        cp "$(command -v opencode)" /usr/local/bin/opencode; \
-        chmod +x /usr/local/bin/opencode; \
-    fi && \
-    rm -rf /var/lib/apt/lists/*
+    ca-certificates curl git gosu nodejs npm ripgrep fzf && \
+    npm install -g opencode-ai@latest && \
+    opencode --version && \
+    rm -rf /var/lib/apt/lists/* /root/.npm
 
-# Copy wukong binaries from downloader stage
-COPY --from=downloader /bins/* /usr/local/bin/
+# Copy wukong binaries from builder stage
+COPY --from=builder /src/target/release/wukong /usr/local/bin/wukong
+COPY --from=builder /src/target/release/wukong-telegram /usr/local/bin/wukong-telegram
+COPY --from=builder /src/target/release/wukong-web /usr/local/bin/wukong-web
 
 # Create non-root user (UID/GID will be remapped at runtime via entrypoint)
 RUN useradd -m -s /bin/bash wukong

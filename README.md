@@ -136,26 +136,27 @@ curl -fsSL ... | bash -s -- --flavor musl  # musl  (靜態，預設，跨 distro
 - **Host 工作目錄掛載**：opencode 工作空間透過 volume 掛載 host 路徑
 - **opencode 設定隔離**：`~/.config/opencode` 存放在 Docker volume 中，不污染 host
 - **UID/GID 對齊**：runtime user 與 host 一致，避免檔案權限問題
-- **三種模式**：CLI / REPL、Telegram Bot、Web Console 均可透過 docker-compose 啟動
+- **預設 Web + Telegram**：`docker compose up -d` 會啟動 Web Console 與 Telegram Bot；CLI / REPL 透過被動 `run` 使用
 
 **快速開始：**
 
 ```bash
-# 1. 複製環境範例並編輯
+# 1. 複製環境範例（Telegram token 可稍後透過 Web 設定）
 cp .env.example .env
-# 編輯 .env 填入你的設定（TOKEN、USER_ID/GROUP_ID 等）
+# 可選：編輯 .env 調整 USER_ID/GROUP_ID、Web port 等
 
-# 2. 建置並啟動
+# 2. 建置並啟動 Web Console + Telegram Bot
+docker compose up -d
 
-# CLI / REPL 模式
-docker-compose run --rm wukong
+# 3. 開啟 Web Console，必要時在設定區填入 Telegram bot token / allowed IDs
+open http://localhost:8787/
 
-# Telegram Bot（背景常駐）
-docker-compose up -d wukong-telegram
-
-# Web Console（背景常駐，預設 port 8787）
-docker-compose up -d wukong-web
+# CLI / opencode 只在需要時被動執行
+docker compose run --rm wukong opencode
+docker compose run --rm wukong wukong
 ```
+
+第一次啟動時，`wukong-telegram` 會保持待命而不是因缺少 token 重啟。開啟 Web Console 的設定區，填入 Telegram bot token 與允許的 chat/user ID 後，Telegram 服務會自動套用設定並開始 long-poll。
 
 **自訂建構版本（可選）：**
 
@@ -187,14 +188,14 @@ services:
     *   **方式一：進入 TUI 進行連線設定**
         執行以下指令開啟 `opencode` 互動視窗：
         ```bash
-        docker-compose run --rm wukong opencode
+        docker compose run --rm wukong opencode
         ```
         進入介面後，輸入 `/connect` 並按 Enter，即可根據畫面 UI 提示選擇您的 Provider（如 NVIDIA NIM, OpenAI, Anthropic）並貼入 API Key。
         
     *   **方式二：進行 OAuth 帳號登入**
         如果使用的是官方雲端服務：
         ```bash
-        docker-compose run --rm wukong opencode auth login
+        docker compose run --rm wukong opencode auth login
         ```
         畫面上會顯示驗證網址與驗證碼，請在主機瀏覽器中開啟並完成登入。
     
@@ -213,8 +214,8 @@ services:
 | `USER_ID` / `GROUP_ID` | 與 host 對齊的 UID/GID，避免 volume 權限問題 | `1000` |
 | `WUKONG_HOST_WORKSPACE` | Host 工作目錄路徑（opencode workspace） | `./workspace` |
 | `WUKONG_AGENT_CMD` | AI agent 指令 | `opencode run` |
-| `WUKONG_TG_TOKEN` | Telegram Bot Token（選用） | — |
-| `WUKONG_TG_ALLOWED` | 允許的 Telegram chat ID（選用） | — |
+| `WUKONG_TG_TOKEN` | Telegram Bot Token（選用；可由 Web `/settings` 設定，env 優先） | — |
+| `WUKONG_TG_ALLOWED` | 允許的 Telegram chat ID（選用；可由 Web `/settings` 設定，env 優先） | — |
 | `WUKONG_WEB_HOST` / `WUKONG_WEB_PORT` | Web Console 綁定位址與埠 | `0.0.0.0:8787` |
 | `WUKONG_WEB_TOKEN` | Web Console 存取密鑰（選用） | — |
 | `WUKONG_THINKING` | 啟用思考過程顯示 | `1` |
@@ -229,7 +230,7 @@ services:
 │  ./workspace               →  /workspace                │  (opencode 工作空間)
 │  Docker Volume:            →  /home/wukong/.config/   │  (opencode 設定隔離)
 │    opencode-config            opencode/                 │
-│  Docker Volume:              →  /data/                  │  (wukong 記憶資料庫)
+│  Docker Volume:              →  /data/                  │  (wukong 記憶資料庫與設定)
 │    wukong-data                                           │
 └─────────────────────────────────────────────────────────┘
 ```

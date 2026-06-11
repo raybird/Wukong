@@ -48,6 +48,10 @@ OPENCODE_CONFIG="/home/wukong/.config/opencode"
 mkdir -p "$OPENCODE_CONFIG"
 chown -R wukong:wukong /home/wukong/.config 2>/dev/null || true
 
+# Ensure persistent data volume is writable by the runtime user.
+mkdir -p /data
+chown -R wukong:wukong /data 2>/dev/null || true
+
 # ── Dispatch ──
 # If first arg is a known wukong binary name, run it directly.
 # Otherwise default to 'wukong' (CLI/REPL mode).
@@ -56,6 +60,10 @@ chown -R wukong:wukong /home/wukong/.config 2>/dev/null || true
 case "${1:-}" in
     wukong|wukong-telegram|wukong-web)
         # Run as wukong user, preserving environment
+        exec gosu wukong "$@"
+        ;;
+    opencode)
+        # Allow `docker compose run --rm wukong opencode ...` for auth/config setup.
         exec gosu wukong "$@"
         ;;
     *)
