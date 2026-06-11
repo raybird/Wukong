@@ -208,8 +208,9 @@ mod tests {
         let prompts = backend.prompts.lock().unwrap();
         assert_eq!(prompts.len(), 2);
         assert!(prompts[0].contains("test-driven-development"));
-        assert!(prompts[1].contains("[技能規範]"));
+        assert!(prompts[1].contains("[技能規範指引]"));
         assert!(prompts[1].contains("test-driven-development"));
+        assert!(prompts[1].contains("crates/wukong-skills/assets/superpowers/test-driven-development/SKILL.md"));
         assert!(prompts[1].contains("你是 Fixer"));
     }
 
@@ -229,7 +230,7 @@ mod tests {
         .unwrap();
         let prompts = backend.prompts.lock().unwrap();
         assert_eq!(prompts.len(), 2);
-        assert!(!prompts[1].contains("[技能規範]"));
+        assert!(!prompts[1].contains("[技能規範指引]"));
         assert!(prompts[1].contains("你是 Oracle"));
     }
 
@@ -257,7 +258,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execution_prompt_carries_persona_and_role() {
+    async fn execution_prompt_carries_role_and_not_persona() {
         let mem = open_memory().await;
         let backend = MockBackend::new(&["fixer", "done"]);
         run_turn(&mem, &backend, &test_cfg("project:T"), "fix the bug", &mut |_| {}, &mut |_| {})
@@ -266,7 +267,7 @@ mod tests {
         let prompts = backend.prompts.lock().unwrap();
         // [0] routing prompt, [1] execution prompt.
         assert_eq!(prompts.len(), 2);
-        assert!(prompts[1].contains("孫悟空"));
+        assert!(!prompts[1].contains("孫悟空")); // Now managed at the system level (SOUL.md)
         assert!(prompts[1].contains("你是 Fixer"));
     }
 

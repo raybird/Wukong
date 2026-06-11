@@ -221,8 +221,18 @@ read -r -p "  Markdown 鏡像目錄（選填，留空停用）: " MD_DIR
 if [[ -n "$MEM_DB" ]]; then
   echo "WUKONG_MEMORY_DB=\"${MEM_DB}\"" >> "$CONFIG_FILE"
 fi
-if [[ -n "$WS_DIR" ]]; then
-  echo "WUKONG_WORKSPACE=\"${WS_DIR}\"" >> "$CONFIG_FILE"
+WS_DIR="${WS_DIR:-${HOME}/.wukong/workspace}"
+echo "WUKONG_WORKSPACE=\"${WS_DIR}\"" >> "$CONFIG_FILE"
+
+# ── Initialize local workspace templates ──
+mkdir -p "${WS_DIR}"
+if [[ ! -f "${WS_DIR}/SOUL.md" ]]; then
+  info "初始化本地 SOUL.md..."
+  curl -fsSL "${GITHUB}/${REPO}/raw/${VERSION}/workspace/SOUL.md" -o "${WS_DIR}/SOUL.md" 2>/dev/null || true
+fi
+if [[ ! -f "${WS_DIR}/AGENTS.md" ]]; then
+  info "初始化本地 AGENTS.md..."
+  curl -fsSL "${GITHUB}/${REPO}/raw/${VERSION}/workspace/AGENTS.md" -o "${WS_DIR}/AGENTS.md" 2>/dev/null || true
 fi
 EMBED_LOWER="$(echo "${EMBED:-n}" | tr '[:upper:]' '[:lower:]')"
 case "$EMBED_LOWER" in

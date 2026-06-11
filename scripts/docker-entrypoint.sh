@@ -29,6 +29,18 @@ fi
 if [[ -n "${WUKONG_WORKSPACE:-}" ]]; then
     mkdir -p "$WUKONG_WORKSPACE"
     chown wukong:wukong "$WUKONG_WORKSPACE" 2>/dev/null || true
+
+    # ── Auto-initialize workspace templates if missing ──
+    if [[ ! -f "$WUKONG_WORKSPACE/SOUL.md" && -f "/usr/local/share/wukong/SOUL.md" ]]; then
+        echo "[wukong] Workspace SOUL.md is missing. Initializing from template..."
+        cp "/usr/local/share/wukong/SOUL.md" "$WUKONG_WORKSPACE/SOUL.md"
+        chown wukong:wukong "$WUKONG_WORKSPACE/SOUL.md" 2>/dev/null || true
+    fi
+    if [[ ! -f "$WUKONG_WORKSPACE/AGENTS.md" && -f "/usr/local/share/wukong/AGENTS.md" ]]; then
+        echo "[wukong] Workspace AGENTS.md is missing. Initializing from template..."
+        cp "/usr/local/share/wukong/AGENTS.md" "$WUKONG_WORKSPACE/AGENTS.md"
+        chown wukong:wukong "$WUKONG_WORKSPACE/AGENTS.md" 2>/dev/null || true
+    fi
 fi
 
 # Ensure opencode config dir exists (backed by Docker volume)

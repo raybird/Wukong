@@ -6,3 +6,5 @@ Cargo.lock
 .wukong/
 .fastembed_cache/
 .gitnexus
+
+.antigravitycli/

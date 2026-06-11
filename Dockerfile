@@ -42,6 +42,10 @@ COPY --from=downloader /bins/* /usr/local/bin/
 # Create non-root user (UID/GID will be remapped at runtime via entrypoint)
 RUN useradd -m -s /bin/bash wukong
 
+# Copy default workspace templates (SOUL.md, AGENTS.md)
+RUN mkdir -p /usr/local/share/wukong
+COPY workspace/SOUL.md workspace/AGENTS.md /usr/local/share/wukong/
+
 # Prepare directories and entrypoint
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
