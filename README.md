@@ -177,6 +177,35 @@ services:
         TARGET: x86_64-unknown-linux-musl
 ```
 
+**AI Agent (OpenCode) 授權與多 Provider 設定：**
+
+由於 Wukong 底層是由 `opencode` 驅動，您可以透過以下兩種方式在 Docker 環境中處理 AI 模型的授權與 Provider 設定：
+
+*   **方法 A：互動式認證與 TUI 設定（推薦多 Provider 混合使用或 OAuth 帳號）**
+    對於需要帳號驗證的服務（如 `opencode go` 雲端、GitHub Copilot）或想透過互動引導來新增 Provider（如 OpenAI、NVIDIA 等 API Key）：
+    
+    *   **方式一：進入 TUI 進行連線設定**
+        執行以下指令開啟 `opencode` 互動視窗：
+        ```bash
+        docker-compose run --rm wukong opencode
+        ```
+        進入介面後，輸入 `/connect` 並按 Enter，即可根據畫面 UI 提示選擇您的 Provider（如 NVIDIA NIM, OpenAI, Anthropic）並貼入 API Key。
+        
+    *   **方式二：進行 OAuth 帳號登入**
+        如果使用的是官方雲端服務：
+        ```bash
+        docker-compose run --rm wukong opencode auth login
+        ```
+        畫面上會顯示驗證網址與驗證碼，請在主機瀏覽器中開啟並完成登入。
+    
+    > [!NOTE]  
+    > 以上互動式設定都會自動保存至 `opencode-config` 持久化 Volume 中。之後背景啟動 `wukong-web` 或 `wukong-telegram` 時會自動共享此授權狀態，不需重複設定。
+
+*   **方法 B：直接透過環境變數注入（適用於 OpenAI / Anthropic / NVIDIA 等單一 API Key）**
+    如果不希望手動在 UI 輸入，可以直接將 API Key 透過環境變數注入容器：
+    1. 在 `.env` 中加入您的金鑰（例如 `OPENAI_API_KEY=sk-...` 或 `NVIDIA_API_KEY=nvapi-...`）。
+    2. 編輯 `docker-compose.yml`，在您需要啟動的服務（如 `wukong-web`、`wukong` 等）的 `environment` 區段中加上對應的環境變數名稱（例如 `- OPENAI_API_KEY` 或 `- NVIDIA_API_KEY`），Docker Compose 即會自動載入。
+
 **環境變數說明（.env）：**
 
 | 變數 | 說明 | 預設 |
