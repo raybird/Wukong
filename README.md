@@ -116,16 +116,23 @@ sequenceDiagram
 curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash
 ```
 
-腳本會自動偵測平台（Linux / macOS），下載最新預編譯 binary，並以互動問答設定 Telegram / Web / 記憶等選項。
+腳本會自動偵測版本，並詢問使用 Docker mode 或 Binary mode：
+
+- **Docker mode（推薦）**：在目前目錄下載 release Docker bundle，產生 `docker-compose.yml`、`.env.example`、`.env`、`Dockerfile`、entrypoint 與 workspace templates，並透過 Docker 建立隔離執行環境。Dockerfile 會下載 release binaries，不會在本機編譯 Rust。
+- **Binary mode**：下載最新預編譯 binary 到 `~/.local/bin`，並以互動問答設定 Telegram / Web / 記憶等選項。
 
 手動選項：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash -s -- --version v0.11.0
+# 指定 Docker 模式部署到目前目錄
+curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash -s -- --mode docker --version v0.13.1
 
-# Linux 可選 linking flavor：
-curl -fsSL ... | bash -s -- --flavor gnu   # glibc (動態)
-curl -fsSL ... | bash -s -- --flavor musl  # musl  (靜態，預設，跨 distro)
+# 指定 Binary 模式安裝到 ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash -s -- --mode binary --version v0.13.1
+
+# Linux binary mode 可選 linking flavor：
+curl -fsSL ... | bash -s -- --mode binary --flavor gnu   # glibc (動態)
+curl -fsSL ... | bash -s -- --mode binary --flavor musl  # musl  (靜態，預設，跨 distro)
 ```
 
 ### Docker 容器化執行
@@ -139,6 +146,17 @@ curl -fsSL ... | bash -s -- --flavor musl  # musl  (靜態，預設，跨 distro
 - **預設 Web + Telegram**：`docker compose up -d` 會啟動 Web Console 與 Telegram Bot；CLI / REPL 透過被動 `run` 使用
 
 **快速開始：**
+
+若你不是從 Git repository 使用，而是在空目錄部署，建議直接使用 installer：
+
+```bash
+mkdir wukong-docker && cd wukong-docker
+curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash -s -- --mode docker
+```
+
+installer 會從 GitHub Release 下載 Docker bundle；bundle 內的 Dockerfile 會再下載同版本 Wukong binaries，因此不需要 Rust 或原始碼。
+
+若你已經在 Git repository 中，也可以直接使用隨附的 compose 檔案：
 
 ```bash
 # 1. 複製環境範例（Telegram token 可稍後透過 Web 設定）
