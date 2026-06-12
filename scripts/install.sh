@@ -64,14 +64,14 @@ install_docker_bundle() {
   command -v docker >/dev/null 2>&1 || abort "需要 Docker，請先安裝 Docker"
   has_docker_compose || abort "需要 Docker Compose v2（docker compose）"
 
-  ensure_no_conflicts
-
   if $DRY_RUN; then
     info "dry-run: 會下載 ${url}"
     info "dry-run: 會解壓到目前目錄 $(pwd)"
     copy_env_if_needed
     return 0
   fi
+
+  ensure_no_conflicts
 
   step "下載 ${bundle} ..."
   curl -fsSL "$url" -o "/tmp/${bundle}" || abort "無法下載 Docker bundle: ${bundle}"
@@ -179,14 +179,6 @@ if ! command -v uname >/dev/null 2>&1; then
   abort "需要 uname"
 fi
 
-mkdir -p "$INSTALL_DIR"
-
-if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-  info "${INSTALL_DIR} 不在 PATH，正在加到 ~/.bashrc"
-  printf '\n# Wukong\nexport PATH="%s:$PATH"\n' "$INSTALL_DIR" >> "${HOME}/.bashrc"
-  export PATH="$INSTALL_DIR:$PATH"
-fi
-
 # --- resolve version --------------------------------------------------------
 
 if [[ -z "$VERSION" ]]; then
@@ -198,13 +190,51 @@ if [[ -z "$VERSION" ]]; then
 fi
 info "版本: ${VERSION}"
 
+if [[ -z "$MODE" ]]; then
+  echo ""
+  echo "$(bold '安裝模式')"
+  echo "  [1] Docker mode（推薦，部署到目前目錄）"
+  echo "  [2] Binary mode（安裝到 ~/.local/bin）"
+  read -r -p "選擇 [1-2] (預設 1): " MODE_CHOICE
+  case "${MODE_CHOICE:-1}" in
+    1) MODE="docker" ;;
+    2) MODE="binary" ;;
+    *) abort "請輸入 1 或 2" ;;
+  esac
+fi
+
 # --- download & verify -------------------------------------------------------
 
 BASE_URL="${GITHUB}/${REPO}/releases/download/${VERSION}"
 
+if [[ "$MODE" == "docker" ]]; then
+  install_docker_bundle
+  exit 0
+fi
+
+if $DRY_RUN; then
+  info "dry-run: 會確認/建立 ${INSTALL_DIR}"
+  if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+    info "dry-run: 會將 ${INSTALL_DIR} 加到 ~/.bashrc"
+  fi
+else
+  mkdir -p "$INSTALL_DIR"
+
+  if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+    info "${INSTALL_DIR} 不在 PATH，正在加到 ~/.bashrc"
+    printf '\n# Wukong\nexport PATH="%s:$PATH"\n' "$INSTALL_DIR" >> "${HOME}/.bashrc"
+    export PATH="$INSTALL_DIR:$PATH"
+  fi
+fi
+
 download_and_verify() {
   local name="$1"
   local tarball="${name}-${TARGET}.tar.gz"
+
+  if $DRY_RUN; then
+    info "dry-run: 會下載並驗證 ${BASE_URL}/${tarball}"
+    return 0
+  fi
 
   step "下載 ${tarball} ..."
   curl -fsSL "${BASE_URL}/${tarball}" -o "/tmp/${tarball}"
