@@ -24,31 +24,122 @@ abort() { printf '%s\n' "$(red "✗") $*" >&2; exit 1; }
 info()  { printf '  %s %s\n' "$(green "✓")" "$*"; }
 step()  { printf '\n%s\n' "$(bold "→ $*")"; }
 
+has_docker_compose() {
+  docker compose version >/dev/null 2>&1
+}
+
+copy_env_if_needed() {
+  if [[ -f ".env" ]]; then
+    info ".env 已存在，保留現有設定"
+    return 0
+  fi
+  if $DRY_RUN; then
+    info "dry-run: 會由 .env.example 建立 .env"
+    return 0
+  fi
+  cp .env.example .env
+  info "已建立 .env，請依需求編輯"
+}
+
+ensure_no_conflicts() {
+  local conflicts=()
+  local path
+  for path in docker-compose.yml Dockerfile .env.example scripts/docker-entrypoint.sh workspace/SOUL.md workspace/AGENTS.md; do
+    if [[ -e "$path" && "$path" != ".env" ]]; then
+      conflicts+=("$path")
+    fi
+  done
+  if (( ${#conflicts[@]} > 0 )) && ! $FORCE; then
+    printf '%s\n' "$(red "✗") 目前目錄已有 Docker 部署檔案，避免覆蓋：" >&2
+    printf '  - %s\n' "${conflicts[@]}" >&2
+    abort "若要覆蓋，請加 --force"
+  fi
+}
+
+install_docker_bundle() {
+  local bundle="wukong-docker-${VERSION}.tar.gz"
+  local url="${BASE_URL}/${bundle}"
+
+  step "準備 Docker 模式部署..."
+  command -v docker >/dev/null 2>&1 || abort "需要 Docker，請先安裝 Docker"
+  has_docker_compose || abort "需要 Docker Compose v2（docker compose）"
+
+  ensure_no_conflicts
+
+  if $DRY_RUN; then
+    info "dry-run: 會下載 ${url}"
+    info "dry-run: 會解壓到目前目錄 $(pwd)"
+    copy_env_if_needed
+    return 0
+  fi
+
+  step "下載 ${bundle} ..."
+  curl -fsSL "$url" -o "/tmp/${bundle}" || abort "無法下載 Docker bundle: ${bundle}"
+
+  step "解壓 Docker 部署檔案..."
+  tar -xzf "/tmp/${bundle}" --strip-components=1
+  rm -f "/tmp/${bundle}"
+
+  copy_env_if_needed
+
+  info "Docker 部署檔案已建立於 $(pwd)"
+  echo ""
+  echo "下一步："
+  echo "  1. 視需求編輯 .env"
+  echo "  2. 執行 docker compose up -d"
+  echo "  3. 開啟 http://localhost:8787/"
+  echo ""
+
+  read -r -p "是否現在啟動 docker compose up -d？(y/N): " START_DOCKER
+  case "$(printf '%s' "${START_DOCKER:-n}" | tr '[:upper:]' '[:lower:]')" in
+    y|yes)
+      docker compose up -d
+      ;;
+    *)
+      info "略過啟動，可稍後執行 docker compose up -d"
+      ;;
+  esac
+}
+
 # --- argument parsing -------------------------------------------------------
 
 VERSION=""
 FLAVOR="musl"    # Linux default: static musl
+MODE=""
+FORCE=false
+DRY_RUN=false
 
 usage() {
   cat <<'USAGE'
-Usage: install.sh [--version v0.12.0] [--flavor gnu|musl]
+Usage: install.sh [--mode docker|binary] [--version v0.13.1] [--flavor gnu|musl] [--force] [--dry-run]
 
 Options:
-  --version <tag>   Install a specific version (default: latest)
-  --flavor  <name>  Linux only: gnu (glibc) or musl (static, default)
-  --help            Show this help
+  --mode <name>    docker: deploy Docker bundle into current directory; binary: install host binaries
+  --version <tag>  Install a specific version (default: latest)
+  --flavor <name>  Binary mode Linux only: gnu (glibc) or musl (static, default)
+  --force          Docker mode only: overwrite generated bundle files except .env
+  --dry-run        Print planned actions without writing files or starting services
+  --help           Show this help
 USAGE
   exit 0
 }
 
 while (($#)); do
   case "$1" in
+    --mode)    MODE="${2:?missing mode}"; shift 2 ;;
     --version) VERSION="${2:?missing version}"; shift 2 ;;
     --flavor)  FLAVOR="${2:?missing flavor}"; shift 2 ;;
+    --force)   FORCE=true; shift ;;
+    --dry-run) DRY_RUN=true; shift ;;
     --help)    usage ;;
     *)         abort "未知選項: $1" ;;
   esac
 done
+
+case "$MODE" in
+  ""|docker|binary) ;;
+  *) abort "--mode 必須是 docker 或 binary，收到: $MODE" ;;
+esac
 
 # --- detect platform --------------------------------------------------------
 
