@@ -47,14 +47,16 @@ jobs:
       - name: Package Docker compose bundle
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
-          mkdir -p dist/wukong-docker/scripts
+          VERSION="${GITHUB_REF_NAME}"
+          mkdir -p dist/wukong-docker/scripts dist/wukong-docker/workspace
           cp .env.example dist/wukong-docker/.env.example
           cp Dockerfile dist/wukong-docker/Dockerfile
           cp scripts/docker-entrypoint.sh dist/wukong-docker/scripts/docker-entrypoint.sh
           cp docker-compose.yml dist/wukong-docker/docker-compose.yml
-          cp -r workspace dist/wukong-docker/workspace
+          cp workspace/SOUL.md dist/wukong-docker/workspace/SOUL.md
+          cp workspace/AGENTS.md dist/wukong-docker/workspace/AGENTS.md
           cd dist
-          tar -czf wukong-docker.tar.gz wukong-docker
+          tar -czf "wukong-docker-${VERSION}.tar.gz" wukong-docker
           rm -rf wukong-docker
 
       - name: Upload to release
