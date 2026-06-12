@@ -1,14 +1,29 @@
 # syntax=docker/dockerfile:1
-# ── Build stage: compile local workspace binaries ──
-FROM rust:1-bookworm AS builder
+# ── Build stage: download release binaries ──
+ARG VERSION=v0.13.1
+ARG TARGET=x86_64-unknown-linux-musl
+ARG REPO=raybird/Wukong
+FROM debian:bookworm-slim AS downloader
+
+ARG VERSION
+ARG TARGET
+ARG REPO
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates pkg-config libssl-dev libsqlite3-dev && \
+    ca-certificates curl tar && \
     rm -rf /var/lib/apt/lists/*
 
-WORKDIR /src
-COPY . .
-RUN cargo build --release --locked -p wukong-cli -p wukong-telegram -p wukong-web
+WORKDIR /bins
+
+RUN set -eux; \
+    base_url="https://github.com/${REPO}/releases/download/${VERSION}"; \
+    for bin in wukong wukong-telegram wukong-web; do \
+      tarball="${bin}-${TARGET}.tar.gz"; \
+      curl -fsSL "${base_url}/${tarball}" -o "/tmp/${tarball}"; \
+      tar -xzf "/tmp/${tarball}" -C /bins "${bin}"; \
+      chmod +x "/bins/${bin}"; \
+      rm -f "/tmp/${tarball}"; \
+    done
 
 # ── Runtime stage ──
 FROM debian:bookworm-slim
@@ -20,10 +35,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     opencode --version && \
     rm -rf /var/lib/apt/lists/* /root/.npm
 
-# Copy wukong binaries from builder stage
-COPY --from=builder /src/target/release/wukong /usr/local/bin/wukong
-COPY --from=builder /src/target/release/wukong-telegram /usr/local/bin/wukong-telegram
-COPY --from=builder /src/target/release/wukong-web /usr/local/bin/wukong-web
+# Copy wukong binaries from downloader stage
+COPY --from=downloader /bins/wukong /usr/local/bin/wukong
+COPY --from=downloader /bins/wukong-telegram /usr/local/bin/wukong-telegram
+COPY --from=downloader /bins/wukong-web /usr/local/bin/wukong-web
 
 # Create non-root user (UID/GID will be remapped at runtime via entrypoint)
 RUN useradd -m -s /bin/bash wukong
