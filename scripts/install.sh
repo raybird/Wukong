@@ -111,7 +111,7 @@ DRY_RUN=false
 
 usage() {
   cat <<'USAGE'
-Usage: install.sh [--mode docker|binary] [--version v0.13.1] [--flavor gnu|musl] [--force] [--dry-run]
+Usage: install.sh [--mode docker|binary] [--version v0.13.4] [--flavor gnu|musl] [--force] [--dry-run]
 
 Options:
   --mode <name>    docker: deploy Docker bundle into current directory; binary: install host binaries

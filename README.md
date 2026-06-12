@@ -125,10 +125,10 @@ curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install
 
 ```bash
 # 指定 Docker 模式部署到目前目錄
-curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash -s -- --mode docker --version v0.13.1
+curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash -s -- --mode docker --version v0.13.4
 
 # 指定 Binary 模式安裝到 ~/.local/bin
-curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash -s -- --mode binary --version v0.13.1
+curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash -s -- --mode binary --version v0.13.4
 
 # Linux binary mode 可選 linking flavor：
 curl -fsSL ... | bash -s -- --mode binary --flavor gnu   # glibc (動態)
@@ -179,7 +179,7 @@ docker compose run --rm wukong wukong
 **自訂建構版本（可選）：**
 
 ```bash
-# 指定版本（預設 v0.13.0）
+# 指定版本（預設 v0.13.4）
 docker-compose build --build-arg VERSION=v0.12.1
 
 # 指定 target（預設 musl 靜態編譯，跨 distro 相容）
@@ -192,7 +192,7 @@ services:
   wukong:
     build:
       args:
-        VERSION: v0.13.0
+        VERSION: v0.13.4
         TARGET: x86_64-unknown-linux-musl
 ```
 
