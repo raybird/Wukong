@@ -258,7 +258,7 @@ services:
 如果不想用預編譯 binary，也可以直接編譯：
 
 ```bash
-cargo build --release  # 編譯整個 workspace（含 wukong + wukong-telegram + wukong-web）
+cargo build --release  # 編譯整個 workspace（含 wukong + wukong-telegram + wukong-web + wukong-schedulerd）
 cargo test             # 全部測試
 cargo clippy --all-targets -- -D warnings
 ```
@@ -278,9 +278,6 @@ wukong "幫我重構這個函式"
 # 指定底層 agent 指令
 wukong --agent-cmd "opencode run" "這段程式為什麼會 panic？"
 
-# 接續底層 agent 的上一個 session
-wukong -c "那再幫我補上單元測試"
-
 # 覆寫記憶 scope（預設依工作目錄為 project:<資料夾名>）
 wukong --scope "global" "記住：我偏好 4 空格縮排"
 
@@ -292,6 +289,22 @@ wukong memory snapshot                       # 健康快照（總數/類型/年�
 wukong memory consolidate --scope project:X  # 用 opencode 把零碎 event 聚合成 Summary
 wukong memory prune --dry-run                # 預覽將刪的低價值/已摘要記憶
 wukong memory export --dir ./mem-md          # 依 DB 全量重建 markdown 鏡像
+
+# 排程（需要 wukong-schedulerd 常駐才會按 cron 自動執行）
+wukong schedule add-turn \
+  --name "daily project check" \
+  --cron "0 9 * * 1-5" \
+  --scope project:Wukong \
+  --prompt "Review recent memories and suggest today's highest-impact task."
+
+wukong schedule add-maintenance \
+  --name "nightly consolidate" \
+  --cron "0 2 * * *" \
+  --scope project:Wukong \
+  --task consolidate
+
+wukong schedule list
+wukong-schedulerd
 ```
 
 > **活動渲染**：預設開啟，execute 以 `opencode run --format json` 即時呈現——文字到 stdout、工具活動（`▸ 使用工具 …`）到 stderr。`--no-stream` / `WUKONG_STREAM=0` 退回純文字。（opencode 目前不吐逐 token，故顆粒度為片段／步驟級而非逐字。）
@@ -310,13 +323,12 @@ wukong memory export --dir ./mem-md          # 依 DB 全量重建 markdown 鏡�
 | 參數 | 說明 | 預設 |
 | :--- | :--- | :--- |
 | `[PROMPT]...` | 要問的內容（位置參數，以空白接回）；**留空則進入互動 REPL** | 選填 |
-| `-c`, `--continue` | 把接續旗標透傳給底層 agent CLI | off |
 | `--scope <SCOPE>` | 記憶 scope（`global` / `project:X` / `agent:X` / `user:X`） | `project:<cwd 資料夾名>` |
 | `--db <URL>` | 記憶資料庫位置 | `$HOME/.wukong/memory.db` |
 | `--agent-cmd <CMD>` | agent 指令（空白分隔） | `opencode run` |
 | `--no-stream` | 關閉活動渲染，純文字一次輸出 | off（預設串流） |
 
-環境變數：`WUKONG_MEMORY_DB`、`WUKONG_AGENT_CMD`、`WUKONG_AGENT_CONTINUE_ARGS`、`WUKONG_STREAM`（設 `0` 等同 `--no-stream`）、`WUKONG_MD_DIR`（設定後每次 remember 同步把記憶鏡像成 per-scope markdown）。
+環境變數：`WUKONG_MEMORY_DB`、`WUKONG_AGENT_CMD`、`WUKONG_STREAM`（設 `0` 等同 `--no-stream`）、`WUKONG_MD_DIR`（設定後每次 remember 同步把記憶鏡像成 per-scope markdown）。
 
 ### 記憶維護子命令
 
@@ -326,6 +338,33 @@ wukong memory export --dir ./mem-md          # 依 DB 全量重建 markdown 鏡�
 | `memory consolidate [--scope X] [--dry-run]` | 把該 scope 的零碎 event/note 聚合成 `Summary`（經 opencode 摘要），來源標記為已摘要；`--dry-run` 只列批次 |
 | `memory prune [--scope X] [--dry-run]` | 刪除「已被摘要」或「老舊+未取用+低重要度」的記憶；`Decision`/`Skill`/`Summary` 永不刪；`--dry-run` 只列清單 |
 | `memory export [--dir D]` | 依 DB 全量重建 markdown 鏡像（DB 為唯一真相來源，markdown 單向衍生） |
+
+### 排程子命令
+
+`wukong schedule` 會把排程定義存在同一個 SQLite 記憶資料庫。Cron job 只有在 `wukong-schedulerd` daemon 執行時才會自動觸發；`trigger` 可在沒有 daemon 的情況下立即執行單一 job。
+
+| 子命令 | 說明 |
+| :--- | :--- |
+| `schedule list` | 列出所有排程 job |
+| `schedule add-turn --name N --cron C --scope S --prompt P` | 新增定時 Wukong turn，執行時沿用既有 planner 自動選 role/skill |
+| `schedule add-maintenance --name N --cron C --task snapshot\|consolidate\|prune [--scope S]` | 新增定時記憶維護 job |
+| `schedule rm --id ID` | 刪除排程 job |
+| `schedule enable --id ID` / `schedule disable --id ID` | 啟用或停用排程 job |
+| `schedule trigger --id ID` | 立即執行單一 job，並記錄 run history |
+| `schedule runs [--id ID] [--limit N]` | 查看最近執行紀錄 |
+
+排程語意：
+
+- Cron 使用 5 欄格式：`minute hour day-of-month month day-of-week`。
+- V1 以 UTC 評估 cron，避免容器與 host timezone 不一致。
+- 多個 daemon 同時執行時會用 DB lease claim job，避免同一輪 due job 被重複執行。
+- Scheduled turn 需要底層 OpenCode provider/auth 已設定；Docker 模式會使用共用的 `opencode-config` volume。
+
+Docker 模式下 schedulerd 預設不啟動。要啟用排程 daemon：
+
+```bash
+docker compose --profile scheduler up -d
+```
 
 ### 歸檔與剪枝安全機制
 

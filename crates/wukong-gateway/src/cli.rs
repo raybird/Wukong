@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 /// Wukong assistant gateway (one-shot CLI).
 #[derive(Parser, Debug)]
@@ -57,6 +57,11 @@ pub enum Command {
         #[command(subcommand)]
         op: MemoryOp,
     },
+    /// Scheduled job management.
+    Schedule {
+        #[command(subcommand)]
+        op: ScheduleOp,
+    },
 }
 
 /// `wukong memory <op>`.
@@ -86,6 +91,69 @@ pub enum MemoryOp {
         #[arg(long)]
         dir: Option<String>,
     },
+}
+
+/// `wukong schedule <op>`.
+#[derive(Subcommand, Debug)]
+pub enum ScheduleOp {
+    /// List all scheduled jobs.
+    List,
+    /// Add a scheduled Wukong turn.
+    AddTurn {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        cron: String,
+        #[arg(long)]
+        scope: String,
+        #[arg(long)]
+        prompt: String,
+    },
+    /// Add a scheduled memory maintenance job.
+    AddMaintenance {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        cron: String,
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        task: ScheduleMaintenanceTaskArg,
+    },
+    /// Remove a scheduled job.
+    Rm {
+        #[arg(long)]
+        id: String,
+    },
+    /// Enable a scheduled job.
+    Enable {
+        #[arg(long)]
+        id: String,
+    },
+    /// Disable a scheduled job.
+    Disable {
+        #[arg(long)]
+        id: String,
+    },
+    /// Trigger a scheduled job immediately.
+    Trigger {
+        #[arg(long)]
+        id: String,
+    },
+    /// Show recent scheduled job runs.
+    Runs {
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: i64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ScheduleMaintenanceTaskArg {
+    Snapshot,
+    Consolidate,
+    Prune,
 }
 
 #[cfg(test)]
@@ -153,5 +221,78 @@ mod tests {
         let cli = Cli::try_parse_from(["wukong", "--agent-cmd", "opencode run", "hi"]).unwrap();
         assert_eq!(cli.agent_cmd.as_deref(), Some("opencode run"));
         assert_eq!(cli.prompt_text(), "hi");
+    }
+
+    #[test]
+    fn parses_schedule_add_turn() {
+        let cli = Cli::try_parse_from([
+            "wukong",
+            "schedule",
+            "add-turn",
+            "--name",
+            "daily",
+            "--cron",
+            "0 9 * * *",
+            "--scope",
+            "project:X",
+            "--prompt",
+            "review",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Schedule { op: ScheduleOp::AddTurn { name, cron, scope, prompt } }) => {
+                assert_eq!(name, "daily");
+                assert_eq!(cron, "0 9 * * *");
+                assert_eq!(scope, "project:X");
+                assert_eq!(prompt, "review");
+            }
+            _ => panic!("expected schedule add-turn"),
+        }
+    }
+
+    #[test]
+    fn parses_schedule_add_maintenance() {
+        let cli = Cli::try_parse_from([
+            "wukong",
+            "schedule",
+            "add-maintenance",
+            "--name",
+            "nightly",
+            "--cron",
+            "0 2 * * *",
+            "--task",
+            "consolidate",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Schedule { op: ScheduleOp::AddMaintenance { task, scope, .. } }) => {
+                assert_eq!(task, ScheduleMaintenanceTaskArg::Consolidate);
+                assert_eq!(scope, None);
+            }
+            _ => panic!("expected schedule add-maintenance"),
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_schedule_task() {
+        assert!(Cli::try_parse_from([
+            "wukong",
+            "schedule",
+            "add-maintenance",
+            "--name",
+            "bad",
+            "--cron",
+            "* * * * *",
+            "--task",
+            "unknown",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn schedule_command_does_not_conflict_with_prompt_args() {
+        let cli = Cli::try_parse_from(["wukong", "schedule", "list"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Schedule { op: ScheduleOp::List })));
+        assert!(cli.prompt_text().is_empty());
     }
 }

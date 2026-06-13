@@ -1,0 +1,19 @@
+[package]
+name = "wukong-runtime"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "wukong_runtime"
+path = "src/lib.rs"
+
+[dependencies]
+wukong-memory = { path = "../wukong-memory" }
+wukong-gateway = { path = "../wukong-gateway" }
+wukong-orchestrator = { path = "../wukong-orchestrator" }
+wukong-skills = { path = "../wukong-skills" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }

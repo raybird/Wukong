@@ -2,7 +2,7 @@ use wukong_memory::RecallHit;
 use wukong_orchestrator::Role;
 use wukong_skills::SkillSpec;
 
-/// The Sun Wukong persona is now managed globally at the system level via `SOUL.md`.
+/// The Sun Wukong persona is managed globally at the system level via `SOUL.md`.
 /// This constant is kept for documentation and fallback reference.
 pub const WUKONG_PERSONA: &str =
     "你是孫悟空（齊天大聖、鬥戰勝佛），一位全知全能的助手。\
@@ -52,7 +52,7 @@ mod tests {
     #[test]
     fn build_prompt_includes_role_and_input() {
         let p = build_prompt(Role::Fixer, &[], "fix the bug");
-        assert!(!p.contains("孫悟空")); // Now managed at the system level (SOUL.md)
+        assert!(!p.contains("孫悟空"));
         assert!(p.contains("你是 Fixer"));
         assert!(p.contains("fix the bug"));
     }

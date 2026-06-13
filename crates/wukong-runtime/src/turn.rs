@@ -1,0 +1,313 @@
+use crate::persona;
+use thiserror::Error;
+use wukong_gateway::backend::{AgentRequest, AiBackend};
+use wukong_gateway::config::GatewayConfig;
+use wukong_memory::{Memory, MemoryItem, MemoryKind, RecallMode, RecallQuery, RememberInput};
+use wukong_orchestrator::Role;
+use wukong_skills::{find as find_skill, route_options};
+
+/// All errors produced by the unified turn.
+#[derive(Debug, Error)]
+pub enum WukongError {
+    #[error("memory error: {0}")]
+    Memory(#[from] wukong_memory::MemoryError),
+    #[error("orchestrator error: {0}")]
+    Orchestrator(#[from] wukong_orchestrator::OrchestratorError),
+    #[error("backend error: {0}")]
+    Backend(#[from] wukong_gateway::GatewayError),
+}
+
+/// The result of one unified turn.
+#[derive(Debug, Clone)]
+pub struct TurnOutput {
+    pub role: Role,
+    pub text: String,
+}
+
+/// One unified Wukong turn: recall → route → execute (persona + role + memory)
+/// → remember. Makes two backend calls (route, then execute).
+pub async fn run_turn(
+    memory: &Memory,
+    backend: &impl AiBackend,
+    cfg: &GatewayConfig,
+    input: &str,
+    on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
+    on_role: &mut dyn FnMut(Role),
+) -> Result<TurnOutput, WukongError> {
+    let recall = memory
+        .recall(RecallQuery {
+            query: input.to_string(),
+            top_k: cfg.recall_top_k,
+            scope: Some(cfg.scope.clone()),
+            mode: RecallMode::Hybrid,
+        })
+        .await?;
+
+    let steps = wukong_orchestrator::plan_skill_chain(backend, input, &route_options()).await?;
+
+    let stored = memory.agent_session(&cfg.scope).await?;
+    let n_steps = steps.len();
+    let mut prior: Vec<wukong_orchestrator::Outcome> = Vec::new();
+    let mut captured_session: Option<String> = None;
+    for (i, step) in steps.into_iter().enumerate() {
+        let role = step.role;
+        on_role(role);
+        let skill = step.skill_name.as_deref().and_then(find_skill);
+        let augmented = format!("{input}{}", wukong_orchestrator::chain_context(&prior));
+        let prompt = persona::build_prompt_with_skill(role, skill, &recall.data, &augmented);
+        let is_final = i + 1 == n_steps;
+        let session_id = if is_final { stored.clone() } else { None };
+        let resp = backend
+            .run_streaming(
+                AgentRequest { prompt, session_id, thinking: cfg.thinking },
+                on_event,
+            )
+            .await?;
+        if is_final {
+            captured_session = resp.session_id.clone();
+        }
+        prior.push(wukong_orchestrator::Outcome { role, output: resp.text });
+    }
+
+    if let Some(id) = captured_session {
+        memory.set_agent_session(&cfg.scope, &id).await?;
+    }
+
+    let last = prior
+        .last()
+        .cloned()
+        .unwrap_or(wukong_orchestrator::Outcome { role: Role::Oracle, output: String::new() });
+
+    memory
+        .remember(RememberInput {
+            scope: cfg.scope.clone(),
+            session_id: None,
+            items: vec![
+                MemoryItem {
+                    kind: MemoryKind::Event,
+                    text: format!("User: {input}"),
+                    importance: None,
+                },
+                MemoryItem {
+                    kind: MemoryKind::Event,
+                    text: format!("Assistant: {}", last.output),
+                    importance: None,
+                },
+            ],
+        })
+        .await?;
+
+    Ok(TurnOutput { role: last.role, text: last.output })
+}
+
+/// Send a raw `/compact` message to a specific opencode session (no planner,
+/// no persona) and return its text reply.
+pub async fn run_turn_session_passthrough(
+    backend: &impl AiBackend,
+    session_id: &str,
+) -> Result<String, WukongError> {
+    let resp = backend
+        .run_streaming(
+            AgentRequest {
+                prompt: "/compact".to_string(),
+                session_id: Some(session_id.to_string()),
+                thinking: false,
+            },
+            &mut |_| {},
+        )
+        .await?;
+    Ok(resp.text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+    use tempfile::NamedTempFile;
+    use wukong_gateway::backend::{AgentResponse, AgentRequest};
+    use wukong_gateway::GatewayError;
+
+    struct MockBackend {
+        replies: Mutex<VecDeque<String>>,
+        prompts: Mutex<Vec<String>>,
+        session_ids: Mutex<Vec<Option<String>>>,
+    }
+
+    impl MockBackend {
+        fn new(replies: &[&str]) -> MockBackend {
+            MockBackend {
+                replies: Mutex::new(replies.iter().map(|s| s.to_string()).collect()),
+                prompts: Mutex::new(Vec::new()),
+                session_ids: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl AiBackend for MockBackend {
+        async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+            self.prompts.lock().unwrap().push(req.prompt);
+            self.session_ids.lock().unwrap().push(req.session_id);
+            let text = self.replies.lock().unwrap().pop_front().unwrap_or_default();
+            Ok(AgentResponse { text, session_id: Some("ses_new".to_string()) })
+        }
+    }
+
+    async fn open_memory() -> Memory {
+        let file = NamedTempFile::new().unwrap();
+        let url = format!("sqlite://{}", file.path().display());
+        std::mem::forget(file);
+        Memory::open(&url).await.unwrap()
+    }
+
+    fn test_cfg(scope: &str) -> GatewayConfig {
+        GatewayConfig {
+            scope: scope.to_string(),
+            db_url: String::new(),
+            agent_command: vec![],
+            thinking: true,
+            recall_top_k: 5,
+            stream: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn run_turn_injects_planned_skill_into_execute_prompt() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["fixer|test-driven-development", "done"]);
+        let out = run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "fix the bug",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.role, Role::Fixer);
+        assert_eq!(out.text, "done");
+        let prompts = backend.prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 2);
+        assert!(prompts[0].contains("test-driven-development"));
+        assert!(prompts[1].contains("[技能規範指引]"));
+        assert!(prompts[1].contains("test-driven-development"));
+        assert!(prompts[1].contains("crates/wukong-skills/assets/superpowers/test-driven-development/SKILL.md"));
+        assert!(prompts[1].contains("你是 Fixer"));
+    }
+
+    #[tokio::test]
+    async fn run_turn_ignores_unknown_planned_skill() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["oracle|unknown-skill", "answer"]);
+        run_turn(&mem, &backend, &test_cfg("project:T"), "think", &mut |_| {}, &mut |_| {})
+            .await
+            .unwrap();
+        let prompts = backend.prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 2);
+        assert!(!prompts[1].contains("[技能規範指引]"));
+        assert!(prompts[1].contains("你是 Oracle"));
+    }
+
+    #[tokio::test]
+    async fn run_turn_routes_executes_and_persists() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["fixer", "done"]);
+        let out = run_turn(&mem, &backend, &test_cfg("project:T"), "fix the bug", &mut |_| {}, &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(out.role, Role::Fixer);
+        assert_eq!(out.text, "done");
+
+        let r = mem
+            .recall(RecallQuery {
+                query: "fix the bug".to_string(),
+                top_k: 10,
+                scope: Some("project:T".to_string()),
+                mode: RecallMode::Hybrid,
+            })
+            .await
+            .unwrap();
+        assert!(r.data.iter().any(|h| h.text.contains("User: fix the bug")));
+    }
+
+    #[tokio::test]
+    async fn execution_prompt_carries_role_and_not_persona() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["fixer", "done"]);
+        run_turn(&mem, &backend, &test_cfg("project:T"), "fix the bug", &mut |_| {}, &mut |_| {})
+            .await
+            .unwrap();
+        let prompts = backend.prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 2);
+        assert!(!prompts[1].contains("孫悟空"));
+        assert!(prompts[1].contains("你是 Fixer"));
+    }
+
+    #[tokio::test]
+    async fn run_turn_threads_session_into_final_step() {
+        let mem = open_memory().await;
+        mem.set_agent_session("project:T", "ses_old").await.unwrap();
+        let backend = MockBackend::new(&["oracle", "answer"]);
+        run_turn(&mem, &backend, &test_cfg("project:T"), "hi", &mut |_| {}, &mut |_| {})
+            .await
+            .unwrap();
+        {
+            let ids = backend.session_ids.lock().unwrap();
+            assert_eq!(ids[0], None);
+            assert_eq!(ids[1], Some("ses_old".to_string()));
+        }
+        assert_eq!(mem.agent_session("project:T").await.unwrap(), Some("ses_new".to_string()));
+    }
+
+    #[tokio::test]
+    async fn run_turn_threads_only_final_chain_step() {
+        let mem = open_memory().await;
+        mem.set_agent_session("project:T", "ses_old").await.unwrap();
+        let backend = MockBackend::new(&["explorer, fixer", "e1", "f2"]);
+        run_turn(&mem, &backend, &test_cfg("project:T"), "go", &mut |_| {}, &mut |_| {})
+            .await
+            .unwrap();
+        let ids = backend.session_ids.lock().unwrap();
+        assert_eq!(ids.clone(), vec![None, None, Some("ses_old".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn run_turn_runs_multi_role_chain() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["explorer, fixer", "f1", "f2"]);
+        let mut roles_seen: Vec<Role> = Vec::new();
+        let out = run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "build and fix",
+            &mut |_| {},
+            &mut |r| roles_seen.push(r),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(roles_seen, vec![Role::Explorer, Role::Fixer]);
+        assert_eq!(out.text, "f2");
+        assert_eq!(out.role, Role::Fixer);
+
+        {
+            let prompts = backend.prompts.lock().unwrap();
+            assert_eq!(prompts.len(), 3);
+            assert!(prompts[2].contains("f1"));
+        }
+
+        let r = mem
+            .recall(RecallQuery {
+                query: "build and fix".to_string(),
+                top_k: 10,
+                scope: Some("project:T".to_string()),
+                mode: RecallMode::Hybrid,
+            })
+            .await
+            .unwrap();
+        assert!(r.data.iter().any(|h| h.text.contains("Assistant: f2")));
+        assert!(!r.data.iter().any(|h| h.text.contains("Assistant: f1")));
+    }
+}

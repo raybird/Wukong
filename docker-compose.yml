@@ -80,6 +80,29 @@ services:
     command: ["wukong-web"]
     restart: unless-stopped
 
+  # ── Scheduler Daemon (opt-in) ──
+  wukong-schedulerd:
+    profiles: ["scheduler"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: wukong:latest
+    container_name: wukong-schedulerd
+    environment:
+      - USER_ID=${USER_ID:-1000}
+      - GROUP_ID=${GROUP_ID:-1000}
+      - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run}
+      - WUKONG_WORKSPACE=/workspace
+      - WUKONG_MEMORY_DB=sqlite:///data/memory.db
+      - WUKONG_THINKING=${WUKONG_THINKING:-1}
+      - WUKONG_EMBED=${WUKONG_EMBED:-0}
+    volumes:
+      - ${WUKONG_HOST_WORKSPACE:-./workspace}:/workspace
+      - opencode-config:/home/wukong/.config/opencode
+      - wukong-data:/data
+    command: ["wukong-schedulerd"]
+    restart: unless-stopped
+
 volumes:
   # Isolated opencode configuration (not mounted from host)
   opencode-config:

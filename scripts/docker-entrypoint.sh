@@ -58,7 +58,7 @@ chown -R wukong:wukong /data 2>/dev/null || true
 # ───────────────────────────────
 
 case "${1:-}" in
-    wukong|wukong-telegram|wukong-web)
+    wukong|wukong-telegram|wukong-web|wukong-schedulerd)
         # Run as wukong user, preserving environment
         exec gosu wukong "$@"
         ;;

@@ -3,12 +3,13 @@ use std::io::{BufRead, Write};
 use wukong_cli::repl::{classify_line, LineAction};
 use wukong_cli::run_turn;
 use wukong_gateway::backend::AgentCliBackend;
-use wukong_gateway::cli::{Cli, Command, MemoryOp};
+use wukong_gateway::cli::{Cli, Command, MemoryOp, ScheduleMaintenanceTaskArg, ScheduleOp};
 use wukong_gateway::config::GatewayConfig;
-use wukong_gateway::summarize::OpencodeSummarizer;
 use wukong_gateway::workspace_dir;
 use wukong_gateway::StreamEvent;
-use wukong_memory::{ConsolidatePolicy, Memory, PrunePolicy};
+use wukong_memory::Memory;
+use wukong_runtime::maintenance::{memory_consolidate, memory_prune, memory_snapshot};
+use wukong_scheduler::{execute_job, ExecutionContext, Job, JobKind, MaintenanceTask, NewJob, RunStatus, SchedulerStore};
 
 #[tokio::main]
 async fn main() {
@@ -60,6 +61,14 @@ async fn main() {
         return;
     }
 
+    if let Some(Command::Schedule { op }) = &cli.command {
+        if let Err(e) = run_schedule_op(&memory, &backend, &cfg, op).await {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let prompt = cli.prompt_text();
 
     if prompt.is_empty() {
@@ -102,6 +111,149 @@ async fn main() {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+}
+
+async fn run_schedule_op(
+    memory: &Memory,
+    backend: &AgentCliBackend,
+    cfg: &GatewayConfig,
+    op: &ScheduleOp,
+) -> Result<(), wukong_cli::WukongError> {
+    let store = SchedulerStore::open(&cfg.db_url)
+        .await
+        .map_err(to_wukong_error)?;
+    match op {
+        ScheduleOp::List => {
+            for job in store.list_jobs().await.map_err(to_wukong_error)? {
+                println!(
+                    "{}\tenabled={}\tcron={}\tnext={}\tname={}\tkind={}",
+                    job.id,
+                    job.enabled,
+                    job.cron,
+                    format_opt_ts(job.next_run_at),
+                    job.name,
+                    describe_job_kind(&job.kind),
+                );
+            }
+        }
+        ScheduleOp::AddTurn { name, cron, scope, prompt } => {
+            let job = store
+                .add_job(NewJob {
+                    name: name.clone(),
+                    kind: JobKind::Turn { scope: scope.clone(), prompt: prompt.clone() },
+                    cron: cron.clone(),
+                })
+                .await
+                .map_err(to_wukong_error)?;
+            println!("已建立排程: {} next={}", job.id, format_opt_ts(job.next_run_at));
+        }
+        ScheduleOp::AddMaintenance { name, cron, scope, task } => {
+            let job = store
+                .add_job(NewJob {
+                    name: name.clone(),
+                    kind: JobKind::Maintenance { scope: scope.clone(), task: map_maintenance_task(*task) },
+                    cron: cron.clone(),
+                })
+                .await
+                .map_err(to_wukong_error)?;
+            println!("已建立排程: {} next={}", job.id, format_opt_ts(job.next_run_at));
+        }
+        ScheduleOp::Rm { id } => {
+            let removed = store.remove_job(id).await.map_err(to_wukong_error)?;
+            println!("{}", if removed { "已刪除排程" } else { "找不到排程" });
+        }
+        ScheduleOp::Enable { id } => {
+            let changed = store.set_enabled(id, true).await.map_err(to_wukong_error)?;
+            println!("{}", if changed { "已啟用排程" } else { "找不到排程" });
+        }
+        ScheduleOp::Disable { id } => {
+            let changed = store.set_enabled(id, false).await.map_err(to_wukong_error)?;
+            println!("{}", if changed { "已停用排程" } else { "找不到排程" });
+        }
+        ScheduleOp::Trigger { id } => {
+            let worker_id = format!("manual-{}", std::process::id());
+            let Some(job) = store.claim_job(id, now_unix(), &worker_id, 300).await.map_err(to_wukong_error)? else {
+                println!("找不到排程");
+                return Ok(());
+            };
+            trigger_job(&store, memory, backend, cfg, &job, &worker_id).await?;
+        }
+        ScheduleOp::Runs { id, limit } => {
+            for run in store.recent_runs(id.as_deref(), *limit).await.map_err(to_wukong_error)? {
+                println!(
+                    "{}\tjob={}\tstatus={}\tstarted={}\tfinished={}\t{}",
+                    run.id,
+                    run.job_id,
+                    run.status.as_str(),
+                    run.started_at,
+                    format_opt_ts(run.finished_at),
+                    run.message.replace('\n', " "),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn trigger_job(
+    store: &SchedulerStore,
+    memory: &Memory,
+    backend: &AgentCliBackend,
+    cfg: &GatewayConfig,
+    job: &Job,
+    worker_id: &str,
+) -> Result<(), wukong_cli::WukongError> {
+    let started_at = now_unix();
+    let run_id = store.start_run(&job.id, started_at).await.map_err(to_wukong_error)?;
+    let ctx = ExecutionContext { memory, backend, base_config: cfg };
+    let output = execute_job(&ctx, job).await;
+    let finished_at = now_unix();
+    let status = if output.success { RunStatus::Success } else { RunStatus::Failure };
+    store
+        .finish_run(run_id, status, &output.message, finished_at)
+        .await
+        .map_err(to_wukong_error)?;
+    if !store.complete_claimed_job(job, worker_id, finished_at).await.map_err(to_wukong_error)? {
+        return Err(to_wukong_error_string("排程 lease 已被其他 worker 接手".to_string()));
+    }
+    println!("{}", output.message);
+    if output.success { Ok(()) } else { Err(to_wukong_error_string(output.message)) }
+}
+
+fn map_maintenance_task(task: ScheduleMaintenanceTaskArg) -> MaintenanceTask {
+    match task {
+        ScheduleMaintenanceTaskArg::Snapshot => MaintenanceTask::Snapshot,
+        ScheduleMaintenanceTaskArg::Consolidate => MaintenanceTask::Consolidate,
+        ScheduleMaintenanceTaskArg::Prune => MaintenanceTask::Prune,
+    }
+}
+
+fn describe_job_kind(kind: &JobKind) -> String {
+    match kind {
+        JobKind::Turn { scope, .. } => format!("turn(scope={scope})"),
+        JobKind::Maintenance { scope, task } => {
+            format!("maintenance(task={task:?},scope={})", scope.as_deref().unwrap_or("<all>"))
+        }
+    }
+}
+
+fn format_opt_ts(ts: Option<i64>) -> String {
+    ts.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string())
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn to_wukong_error(err: wukong_scheduler::SchedulerError) -> wukong_cli::WukongError {
+    to_wukong_error_string(err.to_string())
+}
+
+fn to_wukong_error_string(message: String) -> wukong_cli::WukongError {
+    wukong_cli::WukongError::from(wukong_memory::MemoryError::Other(message))
 }
 
 /// Run one turn, rendering per `cfg.stream`. The role header prints to stderr
@@ -151,48 +303,14 @@ async fn run_memory_op(
 ) -> Result<(), wukong_cli::WukongError> {
     match op {
         MemoryOp::Snapshot { scope } => {
-            let snap = memory.snapshot(scope.as_deref()).await?;
-            println!("總計: {}", snap.total);
-            println!("依範圍:");
-            for s in &snap.by_scope {
-                println!("  {} = {}", s.scope, s.count);
-            }
-            println!("依類型:");
-            for k in &snap.by_kind {
-                println!("  {} = {}", k.kind.as_str(), k.count);
-            }
-            println!(
-                "年齡: <1d={} <7d={} <30d={} older={}",
-                snap.age.last_day, snap.age.last_week, snap.age.last_month, snap.age.older
-            );
-            println!("embedding 覆蓋: {}/{}", snap.embedding.embedded, snap.embedding.total);
-            println!("consolidation 候選: {}", snap.consolidation_candidates);
-            println!("prune 候選: {}", snap.prune_candidates);
+            println!("{}", memory_snapshot(memory, scope.as_deref()).await?);
         }
         MemoryOp::Consolidate { scope, dry_run } => {
             let scope = scope.clone().unwrap_or_else(|| cfg.scope.clone());
-            let policy = ConsolidatePolicy::default();
-            if *dry_run {
-                let plan = memory.plan_consolidation(&scope, &policy).await?;
-                println!("[dry-run] 將產生 {} 筆摘要:", plan.batches.len());
-                for (i, b) in plan.batches.iter().enumerate() {
-                    println!("  批 {}: {} 筆來源 {:?}", i + 1, b.len(), b);
-                }
-            } else {
-                let summarizer = OpencodeSummarizer::new(backend);
-                let ids = memory.consolidate(&scope, &policy, &summarizer).await?;
-                println!("已建立 {} 筆摘要: {:?}", ids.len(), ids);
-            }
+            println!("{}", memory_consolidate(memory, backend, &scope, *dry_run).await?);
         }
         MemoryOp::Prune { scope, dry_run } => {
-            let policy = PrunePolicy::default();
-            if *dry_run {
-                let ids = memory.plan_prune(scope.as_deref(), &policy).await?;
-                println!("[dry-run] 將刪除 {} 筆: {:?}", ids.len(), ids);
-            } else {
-                let n = memory.prune(scope.as_deref(), &policy).await?;
-                println!("已刪除 {n} 筆");
-            }
+            println!("{}", memory_prune(memory, scope.as_deref(), *dry_run).await?);
         }
         MemoryOp::Export { dir } => {
             let dir = dir

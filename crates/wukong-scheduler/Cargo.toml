@@ -1,26 +1,24 @@
 [package]
-name = "wukong-cli"
+name = "wukong-scheduler"
 edition.workspace = true
 version.workspace = true
 
 [lib]
-name = "wukong_cli"
+name = "wukong_scheduler"
 path = "src/lib.rs"
-
-[[bin]]
-name = "wukong"
-path = "src/main.rs"
 
 [dependencies]
 wukong-runtime = { path = "../wukong-runtime" }
-wukong-scheduler = { path = "../wukong-scheduler" }
 wukong-memory = { path = "../wukong-memory" }
 wukong-gateway = { path = "../wukong-gateway" }
-tokio = { workspace = true }
-clap = { workspace = true }
-
-[features]
-embed = ["wukong-memory/embed"]
+chrono = { workspace = true }
+cron = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true }

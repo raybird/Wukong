@@ -1,0 +1,20 @@
+[package]
+name = "wukong-schedulerd"
+edition.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "wukong-schedulerd"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+wukong-gateway = { path = "../wukong-gateway" }
+wukong-memory = { path = "../wukong-memory" }
+wukong-runtime = { path = "../wukong-runtime" }
+wukong-scheduler = { path = "../wukong-scheduler" }
+
+[features]
+embed = ["wukong-memory/embed"]

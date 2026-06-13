@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # ── Build stage: download release binaries ──
-ARG VERSION=v0.13.5
+ARG VERSION=v0.14.0
 ARG TARGET=x86_64-unknown-linux-musl
 ARG REPO=raybird/Wukong
 FROM debian:bookworm-slim AS downloader
@@ -17,7 +17,7 @@ WORKDIR /bins
 
 RUN set -eux; \
     base_url="https://github.com/${REPO}/releases/download/${VERSION}"; \
-    for bin in wukong wukong-telegram wukong-web; do \
+    for bin in wukong wukong-telegram wukong-web wukong-schedulerd; do \
       tarball="${bin}-${TARGET}.tar.gz"; \
       curl -fsSL "${base_url}/${tarball}" -o "/tmp/${tarball}"; \
       tar -xzf "/tmp/${tarball}" -C /bins "${bin}"; \
@@ -39,6 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=downloader /bins/wukong /usr/local/bin/wukong
 COPY --from=downloader /bins/wukong-telegram /usr/local/bin/wukong-telegram
 COPY --from=downloader /bins/wukong-web /usr/local/bin/wukong-web
+COPY --from=downloader /bins/wukong-schedulerd /usr/local/bin/wukong-schedulerd
 
 # Create non-root user (UID/GID will be remapped at runtime via entrypoint)
 RUN useradd -m -s /bin/bash wukong

@@ -37,7 +37,7 @@ jobs:
         run: |
           mkdir -p dist
           cd target/${{ matrix.target }}/release
-          for bin in wukong wukong-telegram wukong-web; do
+          for bin in wukong wukong-telegram wukong-web wukong-schedulerd; do
             cp $bin ../../../dist/
             tar -czf ../../../dist/$bin-${{ matrix.target }}.tar.gz $bin
           done
@@ -90,7 +90,7 @@ jobs:
         run: |
           mkdir -p dist
           cd target/${{ matrix.target }}/release
-          for bin in wukong wukong-telegram wukong-web; do
+          for bin in wukong wukong-telegram wukong-web wukong-schedulerd; do
             cp $bin ../../../dist/
             tar -czf ../../../dist/$bin-${{ matrix.target }}.tar.gz $bin
           done
