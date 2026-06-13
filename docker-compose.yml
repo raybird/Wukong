@@ -44,8 +44,8 @@ services:
       - WUKONG_MEMORY_DB=sqlite:///data/memory.db
       - WUKONG_THINKING=${WUKONG_THINKING:-1}
       # Telegram-specific
-      - WUKONG_TG_TOKEN=${WUKONG_TG_TOKEN:-}
-      - WUKONG_TG_ALLOWED=${WUKONG_TG_ALLOWED:-}
+      - WUKONG_TG_TOKEN
+      - WUKONG_TG_ALLOWED
     volumes:
       - ${WUKONG_HOST_WORKSPACE:-./workspace}:/workspace
       - opencode-config:/home/wukong/.config/opencode
