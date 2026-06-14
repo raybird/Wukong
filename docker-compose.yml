@@ -22,6 +22,8 @@ services:
       - ${WUKONG_HOST_WORKSPACE:-./workspace}:/workspace
       # Dedicated volume for opencode config (isolated from host ~/.config)
       - opencode-config:/home/wukong/.config/opencode
+      # Persistent opencode sessions/state (paired with Wukong agent_sessions)
+      - opencode-state:/home/wukong/.local/share/opencode
       # Persistent memory database
       - wukong-data:/data
     # Default to interactive shell / REPL
@@ -49,6 +51,7 @@ services:
     volumes:
       - ${WUKONG_HOST_WORKSPACE:-./workspace}:/workspace
       - opencode-config:/home/wukong/.config/opencode
+      - opencode-state:/home/wukong/.local/share/opencode
       - wukong-data:/data
     command: ["wukong-telegram"]
     restart: unless-stopped
@@ -76,6 +79,7 @@ services:
     volumes:
       - ${WUKONG_HOST_WORKSPACE:-./workspace}:/workspace
       - opencode-config:/home/wukong/.config/opencode
+      - opencode-state:/home/wukong/.local/share/opencode
       - wukong-data:/data
     command: ["wukong-web"]
     restart: unless-stopped
@@ -99,6 +103,7 @@ services:
     volumes:
       - ${WUKONG_HOST_WORKSPACE:-./workspace}:/workspace
       - opencode-config:/home/wukong/.config/opencode
+      - opencode-state:/home/wukong/.local/share/opencode
       - wukong-data:/data
     command: ["wukong-schedulerd"]
     restart: unless-stopped
@@ -106,6 +111,9 @@ services:
 volumes:
   # Isolated opencode configuration (not mounted from host)
   opencode-config:
+    driver: local
+  # Persistent opencode sessions/state (not mounted from host)
+  opencode-state:
     driver: local
   # Persistent wukong memory database
   wukong-data:

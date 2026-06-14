@@ -48,6 +48,12 @@ OPENCODE_CONFIG="/home/wukong/.config/opencode"
 mkdir -p "$OPENCODE_CONFIG"
 chown -R wukong:wukong /home/wukong/.config 2>/dev/null || true
 
+# Ensure opencode session/runtime dirs exist and are writable before gosu.
+OPENCODE_STATE="/home/wukong/.local/share/opencode"
+OPENCODE_RUNTIME="/home/wukong/.local/state"
+mkdir -p "$OPENCODE_STATE" "$OPENCODE_RUNTIME"
+chown -R wukong:wukong /home/wukong/.local 2>/dev/null || true
+
 # Ensure persistent data volume is writable by the runtime user.
 mkdir -p /data
 chown -R wukong:wukong /data 2>/dev/null || true

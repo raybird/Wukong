@@ -125,10 +125,10 @@ curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install
 
 ```bash
 # 指定 Docker 模式部署到目前目錄
-curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash -s -- --mode docker --version v0.13.4
+curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash -s -- --mode docker --version v0.14.1
 
 # 指定 Binary 模式安裝到 ~/.local/bin
-curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash -s -- --mode binary --version v0.13.4
+curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash -s -- --mode binary --version v0.14.1
 
 # Linux binary mode 可選 linking flavor：
 curl -fsSL ... | bash -s -- --mode binary --flavor gnu   # glibc (動態)
@@ -141,7 +141,7 @@ curl -fsSL ... | bash -s -- --mode binary --flavor musl  # musl  (靜態，預�
 
 **特點：**
 - **Host 工作目錄掛載**：opencode 工作空間透過 volume 掛載 host 路徑
-- **opencode 設定隔離**：`~/.config/opencode` 存放在 Docker volume 中，不污染 host
+- **opencode 設定與 session 隔離**：`~/.config/opencode` 與 `~/.local/share/opencode` 都存放在 Docker volume 中，不污染 host，且可跨容器升級保留 session
 - **UID/GID 對齊**：runtime user 與 host 一致，避免檔案權限問題
 - **預設 Web + Telegram**：`docker compose up -d` 會啟動 Web Console 與 Telegram Bot；CLI / REPL 透過被動 `run` 使用
 
@@ -155,6 +155,27 @@ curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install
 ```
 
 installer 會從 GitHub Release 下載 Docker bundle；bundle 內的 Dockerfile 會再下載同版本 Wukong binaries，因此不需要 Rust 或原始碼。
+
+**升級既有 installer Docker 部署：**
+
+若你當初是用 `install.sh --mode docker` 在空目錄產生部署檔案，請在同一個部署目錄重新下載新版 Docker bundle。`.env` 會保留；`--upgrade` 會覆蓋 bundle 內的 `docker-compose.yml`、`Dockerfile`、entrypoint 與 workspace templates。
+
+```bash
+cd /path/to/wukong-docker
+
+curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh \
+  | bash -s -- --upgrade
+
+docker compose up -d --build
+```
+
+升級時請不要使用 `docker compose down -v`，避免刪除 `wukong-data`、`opencode-config`、`opencode-state` 等持久化 volume。若你是從舊版升級且容器還在，想盡量保留尚未持久化的 opencode session，可先備份：
+
+```bash
+docker cp wukong-telegram:/home/wukong/.local/share/opencode ./opencode-session-backup
+```
+
+從 v0.14.1 起，Docker bundle 會額外持久化 `/home/wukong/.local/share/opencode`，讓 Wukong 的 `/data/memory.db` 中 `agent_sessions` 與 opencode 本身的 session 檔案一起跨容器保留；entrypoint 也會在降權前建立並修正 `/home/wukong/.local`、`/home/wukong/.local/share/opencode`、`/home/wukong/.local/state` 權限。
 
 若你已經在 Git repository 中，也可以直接使用隨附的 compose 檔案：
 
@@ -179,8 +200,8 @@ docker compose run --rm wukong wukong
 **自訂建構版本（可選）：**
 
 ```bash
-# 指定版本（預設 v0.13.4）
-docker-compose build --build-arg VERSION=v0.12.1
+# 指定版本（預設 v0.14.1）
+docker-compose build --build-arg VERSION=v0.14.1
 
 # 指定 target（預設 musl 靜態編譯，跨 distro 相容）
 docker-compose build --build-arg TARGET=x86_64-unknown-linux-gnu  # glibc 動態連結
@@ -192,7 +213,7 @@ services:
   wukong:
     build:
       args:
-        VERSION: v0.13.4
+        VERSION: v0.14.1
         TARGET: x86_64-unknown-linux-musl
 ```
 
@@ -248,6 +269,8 @@ services:
 │  ./workspace               →  /workspace                │  (opencode 工作空間)
 │  Docker Volume:            →  /home/wukong/.config/   │  (opencode 設定隔離)
 │    opencode-config            opencode/                 │
+│  Docker Volume:            →  /home/wukong/.local/    │  (opencode session)
+│    opencode-state             share/opencode/           │
 │  Docker Volume:              →  /data/                  │  (wukong 記憶資料庫與設定)
 │    wukong-data                                           │
 └─────────────────────────────────────────────────────────┘

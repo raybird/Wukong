@@ -108,16 +108,18 @@ FLAVOR="musl"    # Linux default: static musl
 MODE=""
 FORCE=false
 DRY_RUN=false
+UPGRADE=false
 
 usage() {
   cat <<'USAGE'
-Usage: install.sh [--mode docker|binary] [--version v0.13.4] [--flavor gnu|musl] [--force] [--dry-run]
+Usage: install.sh [--mode docker|binary] [--version v0.14.1] [--flavor gnu|musl] [--force] [--upgrade] [--dry-run]
 
 Options:
   --mode <name>    docker: deploy Docker bundle into current directory; binary: install host binaries
   --version <tag>  Install a specific version (default: latest)
   --flavor <name>  Binary mode Linux only: gnu (glibc) or musl (static, default)
   --force          Docker mode only: overwrite generated bundle files except .env
+  --upgrade        Shortcut for Docker upgrades: same as --mode docker --force
   --dry-run        Print planned actions without writing files or starting services
   --help           Show this help
 USAGE
@@ -130,11 +132,20 @@ while (($#)); do
     --version) VERSION="${2:?missing version}"; shift 2 ;;
     --flavor)  FLAVOR="${2:?missing flavor}"; shift 2 ;;
     --force)   FORCE=true; shift ;;
+    --upgrade) UPGRADE=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
     --help)    usage ;;
     *)         abort "未知選項: $1" ;;
   esac
 done
+
+if $UPGRADE; then
+  if [[ -n "$MODE" && "$MODE" != "docker" ]]; then
+    abort "--upgrade 只能用於 Docker mode"
+  fi
+  MODE="docker"
+  FORCE=true
+fi
 
 case "$MODE" in
   ""|docker|binary) ;;
