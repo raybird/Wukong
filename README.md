@@ -419,17 +419,24 @@ curl -s http://127.0.0.1:3917/v1/health        # {"status":"ok"}
 
 ## opencode session 控制
 
-- 預設以**每 scope 持久的 opencode session** 接續對話(顯式 `-s <id>`,從 JSON 擷取),並帶 `--thinking`。
-- `/new`:開新 context(清掉該 scope 的 session)。REPL / Telegram / Web 皆可;一次性 CLI 用 `wukong --new "…"`。
-- `/compact`:把 `/compact` passthrough 給目前 session(REPL / Telegram / Web)。
-- `--no-thinking` 或 `WUKONG_THINKING=0` 關閉 thinking。
-- thinking 顯示:REPL 以 `💭` 印出;Telegram 在狀態泡泡即時顯示;Web 以可折疊「💭 思考過程」呈現。**只在模型吐明文推理時才有內容**(OpenAI 系推理模型的推理為加密,不會顯示)。
+- **Session 接續**：預設以**每 scope 持久的 opencode session** 接續對話（透過 `-s <id>` 顯式指定並從 JSON 擷取），並預設帶入 `--thinking` 思考過程。
+- **清除上下文 (`/new`)**：在 REPL、Telegram 或 Web 輸入 `/new` 可以清空該 scope 的 session 以開啟全新對話；一次性 CLI 則可使用 `wukong --new "…"`。
+- **會話壓縮 (`/compact`)**：支援將 `/compact` passthrough 給當前 session（適用於 REPL、Telegram 與 Web）。
+- **停用思考過程**：使用 `--no-thinking` 參數或設定環境變數 `WUKONG_THINKING=0` 可關閉思考過程顯示。
+- **思考過程顯示效果**：
+  - **REPL**：以 `💭` 符號即時印出思考內容。
+  - **Telegram**：在狀態泡泡中即時更新顯示。
+  - **Web**：以可折疊的「💭 思考過程」區塊呈現。
+  - *注意：此功能僅在模型輸出明文推理時生效（例如 OpenAI 系推理模型的推理過程如為加密傳輸則無法顯示）。*
 
 ---
 
 ## Telegram bot（選用）
 
-`wukong-telegram` 把對話引擎接上 Telegram:long-poll 收訊息 → 白名單過濾 → 每 chat 一個 scope（`user:tg-<id>`）→ 重用 `run_turn` → 回覆。進度為**單一狀態泡泡**(原地隨角色更新、全程 typing),完成後刪除並發答案;答案經 `wukong-render` 以 HTML 渲染(粗體/code block/表格降級)。
+`wukong-telegram` 將對話引擎無縫串接至 Telegram，其內部運作流程如下：
+- **基本流程**：透過 Long-Polling 接收訊息 $\rightarrow$ 白名單過濾過後 $\rightarrow$ 依據對話群組指派獨立 Scope（`user:tg-<id>`） $\rightarrow$ 重用核心的 `run_turn` $\rightarrow$ 回覆答案。
+- **即時狀態回饋**：執行期間會建立一個**單一狀態泡泡**（原地隨調度角色即時更新狀態並保持 Typing 狀態），任務完成後該狀態泡泡會自動刪除並送出最終回答。
+- **格式渲染**：最終答案會經由 `wukong-render` 渲染為 Telegram 支援的 HTML 格式（支援粗體、程式碼區塊、表格自動降級呈現）。
 
 ```bash
 export WUKONG_TG_TOKEN="<BotFather token>"
@@ -437,13 +444,16 @@ export WUKONG_TG_ALLOWED="<你的 chat id>"   # 空 = 忽略所有訊息(安全�
 cargo run -p wukong-telegram
 ```
 
-`/指令` 目前回「尚未支援」,已預留分派接縫供未來加 `/reset`、`/compact`、`/model` 等。詳見 [`crates/wukong-telegram/README.md`](crates/wukong-telegram/README.md)。
+`/指令` 目前回「尚未支援」，但已預留分派接縫，未來可輕鬆擴充 `/reset`、`/compact`、`/model` 等功能。詳見 [`crates/wukong-telegram/README.md`](crates/wukong-telegram/README.md)。
 
 ---
 
 ## Web Console（選用）
 
-`wukong-web` 是零建置的瀏覽器進入點:重用同一套 `run_turn` 與記憶,透過 SSE 串流角色進度與渲染後的答案。前端為原生 ES Modules + `<wukong-chat>` custom element(採 `raybird/plainvanillaweb` 核心慣例的 SafeHTML),由 axum 以 `include_str!` 內嵌,單一可執行檔自帶前端。
+`wukong-web` 提供了零建置、隨開即用的瀏覽器進入點：
+- **核心設計**：重用與 CLI 相同的 `run_turn` 引擎與記憶資料庫，透過 Server-Sent Events (SSE) 即時串流專家角色的執行進度與渲染後的答案。
+- **前端實作**：採用原生 ES Modules 與自定義的 `<wukong-chat>` Custom Element（遵循 `raybird/plainvanillaweb` 核心慣例之 SafeHTML 設計）。
+- **打包部署**：所有靜態資源由 Axum 透過 `include_str!` 巨集直接內嵌於 binary 中，單一執行檔即自帶完整前端，無需額外外部部署。
 
 ```bash
 WUKONG_AGENT_CMD="opencode run" cargo run -p wukong-web
@@ -470,19 +480,24 @@ WUKONG_AGENT_CMD="opencode run" cargo run -p wukong-web
 
 ```
 wukong/
-├── Cargo.toml                      # workspace
+├── Cargo.toml                      # workspace 設定檔
 ├── crates/
 │   ├── wukong-memory/              # 柱1：記憶核心（lib）
 │   ├── wukong-memoryd/             # 記憶 HTTP 服務（bin）
 │   ├── wukong-gateway/             # 柱2：執行閘道（lib）
-│   ├── wukong-orchestrator/        # 柱3：角色調度（lib + demo bin wukong-orchestrate）
-│   ├── wukong-cli/                 # 柱4：統一 CLI（lib + bin wukong）
-│   ├── wukong-render/              # 渲染層：markdown → 傳輸格式（lib）
+│   ├── wukong-orchestrator/        # 柱3：角色調度與規劃（lib + demo bin wukong-orchestrate）
+│   ├── wukong-skills/              # 技能管理庫：內嵌 Superpowers 技能（lib）
+│   ├── wukong-settings/            # 專案設定檔管理（lib）
+│   ├── wukong-scheduler/           # 任務排程核心（lib）
+│   ├── wukong-schedulerd/          # 任務排程守護行程（bin）
+│   ├── wukong-runtime/             # 悟空執行時期：串聯記憶與協作鏈（lib）
+│   ├── wukong-cli/                 # 柱4：統一 CLI 進入點（lib + bin wukong）
+│   ├── wukong-render/              # 渲染層：markdown → HTML/Telegram HTML（lib）
 │   ├── wukong-telegram/            # 進入點：Telegram bot（lib + bin wukong-telegram）
 │   └── wukong-web/                 # 進入點：Web Console（lib + bin wukong-web）
 └── docs/superpowers/
-    ├── specs/                      # 各柱設計 spec
-    └── plans/                      # 各柱逐步實作計畫
+    ├── specs/                      # 各模組詳細設計規格書
+    └── plans/                      # 各模組逐步開發計畫
 ```
 
 ---
