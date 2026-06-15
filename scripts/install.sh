@@ -204,8 +204,8 @@ info "版本: ${VERSION}"
 if [[ -z "$MODE" ]]; then
   echo ""
   echo "$(bold '安裝模式')"
-  echo "  [1] Docker mode（推薦，部署到目前目錄）"
-  echo "  [2] Binary mode（安裝到 ~/.local/bin）"
+  echo "  [1] Docker mode（常駐服務 Telegram/Web，部署到目前目錄）"
+  echo "  [2] Binary mode（本機 CLI 互動開發，安裝到 ~/.local/bin）"
   read -r -p "選擇 [1-2] (預設 1): " MODE_CHOICE
   case "${MODE_CHOICE:-1}" in
     1) MODE="docker" ;;
