@@ -55,6 +55,13 @@ pub fn scope_for_chat(chat_id: i64) -> String {
     format!("user:tg-{chat_id}")
 }
 
+/// Recover the Telegram chat id from a scope produced by `scope_for_chat`.
+/// Returns None for scopes that are not Telegram-originated (e.g. `project:X`),
+/// so non-Telegram scheduled jobs are never mistakenly delivered to a chat.
+pub fn chat_id_from_scope(scope: &str) -> Option<i64> {
+    scope.strip_prefix("user:tg-").and_then(|s| s.parse::<i64>().ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,6 +84,18 @@ mod tests {
     fn scope_for_chat_formats_id() {
         assert_eq!(scope_for_chat(42), "user:tg-42");
         assert_eq!(scope_for_chat(-100), "user:tg--100");
+    }
+
+    #[test]
+    fn chat_id_from_scope_round_trips_and_rejects_other_scopes() {
+        assert_eq!(chat_id_from_scope("user:tg-42"), Some(42));
+        // Group chats have negative ids.
+        assert_eq!(chat_id_from_scope("user:tg--100"), Some(-100));
+        assert_eq!(chat_id_from_scope(&scope_for_chat(123)), Some(123));
+        // Non-Telegram scopes must not resolve to a chat.
+        assert_eq!(chat_id_from_scope("project:Wukong"), None);
+        assert_eq!(chat_id_from_scope("global"), None);
+        assert_eq!(chat_id_from_scope("user:tg-abc"), None);
     }
 
     #[test]

@@ -1,3 +1,5 @@
+mod notify;
+
 use clap::Parser;
 use std::io::Write;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -7,6 +9,7 @@ use wukong_gateway::config::{default_scope, GatewayConfig};
 use wukong_gateway::workspace_dir;
 use wukong_memory::Memory;
 use wukong_scheduler::{execute_job, ExecutionContext, RunStatus, SchedulerStore};
+use wukong_tg_client::client::ReqwestTgClient;
 
 #[derive(Debug, Parser)]
 #[command(name = "wukong-schedulerd", about = "Wukong scheduler daemon")]
@@ -49,9 +52,10 @@ async fn run(cli: Cli) -> Result<(), String> {
     let backend = AgentCliBackend { command: cfg.agent_command.clone(), workspace: workspace_dir() };
     let store = SchedulerStore::open(&cfg.db_url).await.map_err(|e| e.to_string())?;
     let worker_id = format!("schedulerd-{}-{}", std::process::id(), uuid::Uuid::new_v4());
+    let notifier = build_notifier();
 
     if cli.once {
-        run_scan(&store, &memory, &backend, &cfg, &worker_id, cli.lease_secs, cli.limit).await?;
+        run_scan(&store, &memory, &backend, &cfg, &worker_id, cli.lease_secs, cli.limit, notifier.as_ref()).await?;
         return Ok(());
     }
 
@@ -59,7 +63,7 @@ async fn run(cli: Cli) -> Result<(), String> {
     loop {
         tokio::select! {
             _ = ticks.tick() => {
-                if let Err(e) = run_scan(&store, &memory, &backend, &cfg, &worker_id, cli.lease_secs, cli.limit).await {
+                if let Err(e) = run_scan(&store, &memory, &backend, &cfg, &worker_id, cli.lease_secs, cli.limit, notifier.as_ref()).await {
                     eprintln!("warning: scheduler scan failed: {e}");
                 }
             }
@@ -72,6 +76,7 @@ async fn run(cli: Cli) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_scan(
     store: &SchedulerStore,
     memory: &Memory,
@@ -80,6 +85,7 @@ async fn run_scan(
     worker_id: &str,
     lease_secs: i64,
     limit: i64,
+    notifier: Option<&ReqwestTgClient>,
 ) -> Result<(), String> {
     let now = now_unix();
     let jobs = store.claim_due_jobs(now, worker_id, lease_secs, limit).await.map_err(|e| e.to_string())?;
@@ -103,9 +109,36 @@ async fn run_scan(
         } else {
             eprintln!("job {} failed: {}", job.id, output.message);
         }
+        // Best-effort delivery to the originating Telegram chat; a push failure
+        // must not fail the job (which already ran and is recorded).
+        if let Some(client) = notifier {
+            match notify::notify_turn_result(client, &job, &output).await {
+                Ok(true) => eprintln!("job {} result delivered to telegram", job.id),
+                Ok(false) => {}
+                Err(e) => eprintln!("warning: telegram delivery for job {} failed: {e}", job.id),
+            }
+        }
         let _ = std::io::stderr().flush();
     }
     Ok(())
+}
+
+/// Build the optional Telegram notifier. Disabled when `WUKONG_SCHED_NOTIFY=0`
+/// or when no Telegram token is configured (the daemon still runs all jobs).
+fn build_notifier() -> Option<ReqwestTgClient> {
+    if std::env::var("WUKONG_SCHED_NOTIFY").as_deref() == Ok("0") {
+        eprintln!("🐵 scheduler 通知停用：WUKONG_SCHED_NOTIFY=0");
+        return None;
+    }
+    let path = wukong_settings::default_settings_path();
+    let file = wukong_settings::load_settings(&path).unwrap_or_default();
+    let token = wukong_settings::effective_telegram_settings(&file).token.trim().to_string();
+    if token.is_empty() {
+        eprintln!("🐵 scheduler 通知停用：未設定 Telegram token（WUKONG_TG_TOKEN 或 settings）");
+        None
+    } else {
+        Some(ReqwestTgClient::new(&token))
+    }
 }
 
 async fn shutdown_signal() {

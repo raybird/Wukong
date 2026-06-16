@@ -6,7 +6,7 @@
 <p align="center">
   <img alt="lang" src="https://img.shields.io/badge/lang-Rust-orange">
   <img alt="status" src="https://img.shields.io/badge/status-v1%20四柱完成-brightgreen">
-  <img alt="tests" src="https://img.shields.io/badge/tests-63%20passing-blue">
+  <img alt="tests" src="https://img.shields.io/badge/tests-242%20passing-blue">
 </p>
 
 ---
@@ -271,6 +271,8 @@ services:
 | `WUKONG_WEB_TOKEN` | Web Console 存取密鑰（選用） | — |
 | `WUKONG_THINKING` | 啟用思考過程顯示 | `1` |
 | `WUKONG_EMBED` | 啟用語意向量召回 | `0` |
+| `WUKONG_BIN` | 注入排程能力提示詞時使用的 `wukong` 指令路徑（agent 自行建排程時用） | `wukong` |
+| `WUKONG_SCHED_NOTIFY` | schedulerd 是否把排程結果回送 Telegram（`0` 關閉） | `1` |
 
 **Volume 架構：**
 
@@ -363,7 +365,7 @@ wukong-schedulerd
 | `--agent-cmd <CMD>` | agent 指令（空白分隔） | `opencode run` |
 | `--no-stream` | 關閉活動渲染，純文字一次輸出 | off（預設串流） |
 
-環境變數：`WUKONG_MEMORY_DB`、`WUKONG_AGENT_CMD`、`WUKONG_STREAM`（設 `0` 等同 `--no-stream`）、`WUKONG_MD_DIR`（設定後每次 remember 同步把記憶鏡像成 per-scope markdown）。
+環境變數：`WUKONG_MEMORY_DB`、`WUKONG_AGENT_CMD`、`WUKONG_STREAM`（設 `0` 等同 `--no-stream`）、`WUKONG_MD_DIR`（設定後每次 remember 同步把記憶鏡像成 per-scope markdown）、`WUKONG_BIN`（注入「排程能力」提示詞時使用的 `wukong` 指令路徑，預設 `wukong`）。
 
 ### 記憶維護子命令
 
@@ -400,6 +402,19 @@ Docker 模式下 schedulerd 預設不啟動。要啟用排程 daemon：
 ```bash
 docker compose --profile scheduler up -d
 ```
+
+### 用自然語言建立排程（Telegram / 對話）
+
+除了手動下 `schedule add-turn`，**助手本身也知道自己具備排程能力**：每回合執行的系統提示詞會常駐注入一段「排程能力」說明（含當前 scope 與實際指令），所以你可以在 REPL / Telegram / Web 直接用自然語言交辦：
+
+> 「每天早上九點幫我做一次專案回顧」
+
+助手會透過底層 opencode 的 shell 能力，自行執行對應的 `wukong schedule add-turn --scope <當前 scope> --cron "0 9 * * *" --prompt "…"`（cron 由它換算）。
+
+- **前提**：底層 agent（opencode）需具備 shell 執行權限，且 `wukong` 在其 PATH 上。若 `wukong` 不在 PATH，設定 `WUKONG_BIN=/絕對/路徑/wukong`，注入的指令會改用該路徑。
+- **結果回送 Telegram**：當排程是從 Telegram 建立的（scope 形如 `user:tg-<chat_id>`），`wukong-schedulerd` 觸發後會把該回合結果**主動推回原聊天室**——成功送渲染後的 HTML、失敗送一行簡短錯誤。daemon 需設定 `WUKONG_TG_TOKEN` 才能投遞；設 `WUKONG_SCHED_NOTIFY=0` 可全域關閉。
+- 投遞為 best-effort：推送失敗只記 log，不影響 job 本身的成功狀態（仍記於 `schedule runs`）。
+- 共用的 Telegram 傳輸層（client + scope 解析）抽於 `wukong-tg-client` crate，由 bot 與排程 daemon 共用。
 
 ### 歸檔與剪枝安全機制
 
@@ -449,6 +464,7 @@ curl -s http://127.0.0.1:3917/v1/health        # {"status":"ok"}
 - **基本流程**：透過 Long-Polling 接收訊息 $\rightarrow$ 白名單過濾過後 $\rightarrow$ 依據對話群組指派獨立 Scope（`user:tg-<id>`） $\rightarrow$ 重用核心的 `run_turn` $\rightarrow$ 回覆答案。
 - **即時狀態回饋**：執行期間會建立一個**單一狀態泡泡**（原地隨調度角色即時更新狀態並保持 Typing 狀態），任務完成後該狀態泡泡會自動刪除並送出最終回答。
 - **格式渲染**：最終答案會經由 `wukong-render` 渲染為 Telegram 支援的 HTML 格式（支援粗體、程式碼區塊、表格自動降級呈現）。
+- **建立並回送排程**：可直接用自然語言請助手建立定時任務（見〈用自然語言建立排程〉）；之後 `wukong-schedulerd` 觸發時，會把該回合結果主動推回原聊天室。傳輸層由共用的 `wukong-tg-client` crate 提供，daemon 與 bot 共用同一個 `WUKONG_TG_TOKEN`。
 
 ```bash
 export WUKONG_TG_TOKEN="<BotFather token>"
@@ -505,6 +521,7 @@ wukong/
 │   ├── wukong-runtime/             # 悟空執行時期：串聯記憶與協作鏈（lib）
 │   ├── wukong-cli/                 # 柱4：統一 CLI 進入點（lib + bin wukong）
 │   ├── wukong-render/              # 渲染層：markdown → HTML/Telegram HTML（lib）
+│   ├── wukong-tg-client/           # Telegram 傳輸層：Bot API client + scope 解析（lib，bot/daemon 共用）
 │   ├── wukong-telegram/            # 進入點：Telegram bot（lib + bin wukong-telegram）
 │   └── wukong-web/                 # 進入點：Web Console（lib + bin wukong-web）
 └── docs/superpowers/
@@ -552,6 +569,7 @@ cargo run -p wukong-orchestrator --bin wukong-orchestrate -- --agent-cmd "printf
 - ~~Telegram bot 進入點~~ ✅ v0.6.0;~~Web Console 進入點~~ ✅(TeleNexus 完整願景,持續)
 - ~~角色協作鏈（多角色依序接力）~~ ✅ v0.5.0;~~技能路由（Superpowers 本地技能注入）~~ ✅;平行多角色調度(後續)
 - ~~記憶 markdown 雙持久化、consolidation/prune、可觀測性快照~~ ✅ v0.4.0
+- ~~助手自然語言建立排程（提示詞注入排程能力）+ 排程結果回送 Telegram~~ ✅ 2026-06-16
 
 ---
 

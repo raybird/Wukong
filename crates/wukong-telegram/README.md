@@ -45,6 +45,6 @@ cargo run -p wukong-telegram
 
 webhook、行內鍵盤/按鈕/多媒體、訊息 4096 字切分、Web Console(F2 另開)。
 
-依賴方向:`wukong-telegram → { wukong-cli, wukong-memory, wukong-gateway }`(單向,進入點層)。
+依賴方向:`wukong-telegram → { wukong-cli, wukong-memory, wukong-gateway, wukong-tg-client }`(單向,進入點層)。Telegram 傳輸層(Bot API client、`parse`/`scope` 純函式、`MockTgClient`)已抽到零內部依賴的 `wukong-tg-client`,由本 crate `pub use` 轉出(`crate::client`/`crate::parse`/`crate::error` 路徑不變),並與 `wukong-schedulerd` 共用。
 
 詳見 [`docs/superpowers/specs/2026-06-07-telegram-bot-design.md`](../../docs/superpowers/specs/2026-06-07-telegram-bot-design.md)。

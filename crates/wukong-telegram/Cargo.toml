@@ -18,6 +18,7 @@ wukong-cli = { path = "../wukong-cli" }
 wukong-orchestrator = { path = "../wukong-orchestrator" }
 wukong-render = { path = "../wukong-render" }
 wukong-settings = { path = "../wukong-settings" }
+wukong-tg-client = { path = "../wukong-tg-client" }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
@@ -25,6 +26,8 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Enables MockTgClient (defined in wukong-tg-client) for this crate's tests.
+wukong-tg-client = { path = "../wukong-tg-client", features = ["mock"] }
 
 [features]
 embed = ["wukong-memory/embed", "wukong-cli/embed"]

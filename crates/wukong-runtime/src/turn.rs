@@ -54,8 +54,17 @@ pub async fn run_turn(
         on_role(role);
         let skill = step.skill_name.as_deref().and_then(find_skill);
         let augmented = format!("{input}{}", wukong_orchestrator::chain_context(&prior));
-        let prompt = persona::build_prompt_with_skill(role, skill, &recall.data, &augmented);
         let is_final = i + 1 == n_steps;
+        let mut prompt = persona::build_prompt_with_skill(role, skill, &recall.data, &augmented);
+        // Advertise the scheduling capability only on the user-facing final step,
+        // so stateless helper steps never take a side-effecting schedule action.
+        if is_final {
+            prompt.push_str("\n\n");
+            prompt.push_str(&persona::scheduling_capability_hint(
+                &cfg.scope,
+                &persona::scheduling_bin(),
+            ));
+        }
         let session_id = if is_final { stored.clone() } else { None };
         let resp = backend
             .run_streaming(
@@ -194,6 +203,22 @@ mod tests {
         assert!(prompts[1].contains("test-driven-development"));
         assert!(prompts[1].contains("crates/wukong-skills/assets/superpowers/test-driven-development/SKILL.md"));
         assert!(prompts[1].contains("你是 Fixer"));
+    }
+
+    #[tokio::test]
+    async fn run_turn_injects_scheduling_capability_into_final_step_only() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["explorer, fixer", "e1", "f2"]);
+        run_turn(&mem, &backend, &test_cfg("project:T"), "schedule it", &mut |_| {}, &mut |_| {})
+            .await
+            .unwrap();
+        let prompts = backend.prompts.lock().unwrap();
+        // prompts[0] = planner, [1] = explorer (helper), [2] = fixer (final).
+        assert_eq!(prompts.len(), 3);
+        assert!(!prompts[1].contains("[排程能力]"));
+        assert!(prompts[2].contains("[排程能力]"));
+        assert!(prompts[2].contains("schedule add-turn"));
+        assert!(prompts[2].contains("--scope \"project:T\""));
     }
 
     #[tokio::test]

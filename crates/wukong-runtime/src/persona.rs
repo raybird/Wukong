@@ -34,6 +34,34 @@ pub fn build_prompt_with_skill(
     prompt
 }
 
+/// Resolve the `wukong` binary name used inside the scheduling capability hint.
+/// Defaults to `wukong` (assumes it is on PATH in the agent runtime); override
+/// with `WUKONG_BIN` (e.g. an absolute path) when it is not.
+pub fn scheduling_bin() -> String {
+    std::env::var("WUKONG_BIN")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "wukong".to_string())
+}
+
+/// An always-on capability block telling the agent it can create and manage
+/// scheduled (cron) jobs by shelling out to the `wukong schedule` CLI. `scope`
+/// is the current turn's memory scope so scheduled turns land in the same place.
+pub fn scheduling_capability_hint(scope: &str, bin: &str) -> String {
+    format!(
+        "[排程能力]\n\
+         你具備為使用者建立與管理定時排程（cron）的真實能力。當使用者要求「定時、每天、每隔、提醒、排程、固定時間執行」之類任務時，\
+         請直接在終端機執行下列指令完成設定——這是可用的內建功能，不要拒絕，也不要只用文字描述而不執行：\n\
+         - 新增定時對話：`{bin} schedule add-turn --name \"<名稱>\" --cron \"<分 時 日 月 週>\" --scope \"{scope}\" --prompt \"<到時要執行的提示詞>\"`\n\
+         - 列出所有排程：`{bin} schedule list`\n\
+         - 立即觸發一次：`{bin} schedule trigger --id <id>`\n\
+         - 停用／啟用／刪除：`{bin} schedule disable|enable|rm --id <id>`\n\
+         規則：cron 為標準 5 欄位（分 時 日 月 週）。除非使用者另外指定 scope，否則一律沿用上面的 `--scope`。\
+         建立完成後，用一句話回報排程名稱、cron 設定與用途即可。"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,5 +111,27 @@ mod tests {
         assert!(!p.contains("[技能規範指引]"));
         assert!(p.contains("你是 Oracle"));
         assert!(p.contains("think about it"));
+    }
+
+    #[test]
+    fn scheduling_hint_embeds_scope_bin_and_command() {
+        let hint = scheduling_capability_hint("project:Wukong", "wukong");
+        assert!(hint.contains("[排程能力]"));
+        assert!(hint.contains("schedule add-turn"));
+        assert!(hint.contains("--scope \"project:Wukong\""));
+        assert!(hint.contains("`wukong schedule list`"));
+    }
+
+    #[test]
+    fn scheduling_hint_honors_custom_bin() {
+        let hint = scheduling_capability_hint("global", "/opt/wukong");
+        assert!(hint.contains("`/opt/wukong schedule add-turn"));
+    }
+
+    #[test]
+    fn scheduling_bin_defaults_to_wukong() {
+        // No env override in test => default name.
+        std::env::remove_var("WUKONG_BIN");
+        assert_eq!(scheduling_bin(), "wukong");
     }
 }

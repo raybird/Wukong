@@ -1,9 +1,9 @@
-//! Telegram Bot API client. A trait so the dispatcher is testable without
-//! network; ReqwestTgClient is the real long-poll implementation.
+//! Telegram Bot API client. A trait so callers are testable without network;
+//! ReqwestTgClient is the real long-poll/send implementation.
 
 use crate::error::TgError;
 
-/// The slice of the Telegram Bot API the bot needs.
+/// The slice of the Telegram Bot API the bot and daemon need.
 pub trait TgClient {
     /// Long-poll for updates starting at `offset` (timeout baked in).
     fn get_updates(
@@ -129,7 +129,9 @@ impl TgClient for ReqwestTgClient {
     }
 }
 
-#[cfg(test)]
+/// In-memory client for tests. Gated so dependent crates can opt in via the
+/// `mock` feature (their dev-dependency) while it stays out of release builds.
+#[cfg(any(test, feature = "mock"))]
 pub mod mock {
     use super::*;
     use std::sync::{Arc, Mutex};
@@ -187,6 +189,7 @@ pub mod mock {
         }
     }
 
+    #[cfg(test)]
     #[tokio::test]
     async fn mock_allocates_ids_and_records() {
         let c = MockTgClient::default();

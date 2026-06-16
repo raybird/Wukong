@@ -15,6 +15,13 @@ wukong-gateway = { path = "../wukong-gateway" }
 wukong-memory = { path = "../wukong-memory" }
 wukong-runtime = { path = "../wukong-runtime" }
 wukong-scheduler = { path = "../wukong-scheduler" }
+wukong-tg-client = { path = "../wukong-tg-client" }
+wukong-render = { path = "../wukong-render" }
+wukong-settings = { path = "../wukong-settings" }
+
+[dev-dependencies]
+# Enables MockTgClient (defined in wukong-tg-client) for notify tests.
+wukong-tg-client = { path = "../wukong-tg-client", features = ["mock"] }
 
 [features]
 embed = ["wukong-memory/embed"]

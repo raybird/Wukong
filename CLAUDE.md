@@ -38,7 +38,7 @@ scripts/sync-superpowers.sh <commit-or-tag> --dry-run
 
 ## 架構
 
-Wukong 是 Rust Workspace，包含 13 個 crate，分為四柱核心與周邊進入點。
+Wukong 是 Rust Workspace，包含 14 個 crate，分為四柱核心與周邊進入點。
 
 ### 四柱核心（依賴方向單向）
 
@@ -66,7 +66,8 @@ wukong-orchestrator → wukong-gateway → wukong-memory
 | `wukong-schedulerd` | 排程 daemon binary |
 | `wukong-memoryd` | 記憶 HTTP 服務（`/v1/recall`、`/v1/remember` 等） |
 | `wukong-render` | Markdown → HTML / Telegram HTML 渲染（含 SafeHTML 防 XSS） |
-| `wukong-telegram` | Telegram Long-Polling bot；重用 `run_turn` |
+| `wukong-tg-client` | Telegram 傳輸層（Bot API client + scope 解析）；零內部依賴，`wukong-telegram` 與 `wukong-schedulerd` 共用；`mock` feature 供測試 |
+| `wukong-telegram` | Telegram Long-Polling bot；重用 `run_turn`；transport 來自 `wukong-tg-client` |
 | `wukong-web` | Axum Web Console；SSE 串流；前端以 `include_str!` 內嵌單一 binary |
 
 ### 一回合資料流（`run_turn`）
@@ -84,11 +85,13 @@ wukong-orchestrator → wukong-gateway → wukong-memory
 - **embedding 選用**：cargo feature `embed` + `WUKONG_EMBED=1` 啟用本機 embedding（fastembed all-MiniLM-L6-v2），未啟用則退回 BM25。
 - **Web 執行緒隔離**：`run_turn` 含非 `Send` callback，Web 後端以 `std::thread::spawn` + `current_thread` 隔離，進度透過 mpsc channel → SSE 回傳。
 - **Superpowers 來源**：`crates/wukong-skills/assets/superpowers/SOURCE.md` 記錄上游版本；以 `scripts/sync-superpowers.sh` 更新。
+- **排程能力注入**：`run_turn` 最後一棒的 prompt 會常駐注入「排程能力」區塊（`persona::scheduling_capability_hint`，帶當前 scope），讓 agent 透過 opencode shell 自行執行 `wukong schedule add-turn`。`wukong` 指令路徑可用 `WUKONG_BIN` 覆寫。
+- **排程結果回送**：`wukong-schedulerd` 觸發 Turn job 後，若 scope 可由 `chat_id_from_scope` 還原成 `user:tg-<id>`，透過 `wukong-tg-client` 把結果回送 Telegram（成功 HTML、失敗一行）；best-effort 不影響 job 狀態。`WUKONG_SCHED_NOTIFY=0` 關閉，需 `WUKONG_TG_TOKEN`。
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **Wukong** (2344 symbols, 4631 relationships, 199 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **Wukong** (2378 symbols, 4728 relationships, 202 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
