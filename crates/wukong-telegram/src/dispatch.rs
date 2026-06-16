@@ -19,9 +19,11 @@ enum Progress {
 /// Compose the status-bubble text from the current role and accumulated
 /// reasoning (showing only the tail to keep the bubble small).
 fn bubble_text(role: Option<&str>, reasoning: &str) -> String {
+    // Full-width space (U+3000) after each emoji so the glyph doesn't visually
+    // crowd / obscure the first CJK character on some Telegram clients.
     let base = match role {
-        Some(r) => format!("🐵 悟空·{r} 思考中…"),
-        None => "🐵 思考中…".to_string(),
+        Some(r) => format!("🐵　悟空·{r} 思考中…"),
+        None => "🐵　思考中…".to_string(),
     };
     let r = reasoning.trim();
     if r.is_empty() {
@@ -30,7 +32,10 @@ fn bubble_text(role: Option<&str>, reasoning: &str) -> String {
     let chars: Vec<char> = r.chars().collect();
     let start = chars.len().saturating_sub(200);
     let tail: String = chars[start..].iter().collect();
-    format!("{base}\n💭 {tail}")
+    // Lead with an ellipsis when the head was dropped, so the truncated tail
+    // doesn't read as "the first few characters went missing".
+    let ellipsis = if start > 0 { "…" } else { "" };
+    format!("{base}\n💭　{ellipsis}{tail}")
 }
 
 /// Handle one incoming message: enforce the allowlist, classify, run the turn,
