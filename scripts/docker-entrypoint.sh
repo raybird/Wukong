@@ -46,6 +46,45 @@ fi
 # Ensure opencode config dir exists (backed by Docker volume)
 OPENCODE_CONFIG="/home/wukong/.config/opencode"
 mkdir -p "$OPENCODE_CONFIG"
+
+# ── Seed a default opencode config with a destructive-command guard ──
+# Wukong always drives `opencode run` with stdin=null, so opencode can never
+# receive an interactive permission answer (REPL, Web, Telegram, Scheduler all
+# alike). We therefore run with `--dangerously-skip-permissions` (set in
+# WUKONG_AGENT_CMD) to auto-approve prompts — but that flag still honours any
+# explicit `deny`, so this config keeps a denylist that blocks catastrophic
+# recursive deletes of absolute paths while still allowing deletes inside
+# /workspace. Only written when missing; drop your own opencode.json into the
+# `opencode-config` volume to override.
+OPENCODE_CONFIG_FILE="$OPENCODE_CONFIG/opencode.json"
+if [[ ! -f "$OPENCODE_CONFIG_FILE" ]]; then
+    echo "[wukong] Seeding default opencode.json (destructive-rm guard)..."
+    cat > "$OPENCODE_CONFIG_FILE" <<'OPENCODE_JSON'
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "bash": {
+      "*": "allow",
+      "*rm -rf /*": "deny",
+      "*rm -fr /*": "deny",
+      "*rm -Rf /*": "deny",
+      "*rm -rF /*": "deny",
+      "*rm -r -f /*": "deny",
+      "*rm -f -r /*": "deny",
+      "*rm -r /*": "deny",
+      "*rm -R /*": "deny",
+      "*rm --recursive*": "deny",
+      "*rm --force* /*": "deny",
+      "*rm -rf ~*": "deny",
+      "*rm -rf $HOME*": "deny",
+      "*sudo rm *": "deny",
+      "*rm * /workspace/*": "allow"
+    }
+  }
+}
+OPENCODE_JSON
+fi
+
 chown -R wukong:wukong /home/wukong/.config 2>/dev/null || true
 
 # Ensure opencode session/runtime dirs exist and are writable before gosu.

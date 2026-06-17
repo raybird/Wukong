@@ -12,7 +12,7 @@ services:
       - USER_ID=${USER_ID:-1000}
       - GROUP_ID=${GROUP_ID:-1000}
       # Agent backend configuration
-      - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run}
+      - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run --dangerously-skip-permissions}
       - WUKONG_WORKSPACE=/workspace
       - WUKONG_MEMORY_DB=sqlite:///data/memory.db
       - WUKONG_THINKING=${WUKONG_THINKING:-1}
@@ -41,7 +41,7 @@ services:
     environment:
       - USER_ID=${USER_ID:-1000}
       - GROUP_ID=${GROUP_ID:-1000}
-      - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run}
+      - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run --dangerously-skip-permissions}
       - WUKONG_WORKSPACE=/workspace
       - WUKONG_MEMORY_DB=sqlite:///data/memory.db
       - WUKONG_THINKING=${WUKONG_THINKING:-1}
@@ -68,7 +68,7 @@ services:
     environment:
       - USER_ID=${USER_ID:-1000}
       - GROUP_ID=${GROUP_ID:-1000}
-      - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run}
+      - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run --dangerously-skip-permissions}
       - WUKONG_WORKSPACE=/workspace
       - WUKONG_MEMORY_DB=sqlite:///data/memory.db
       - WUKONG_THINKING=${WUKONG_THINKING:-1}
@@ -95,7 +95,7 @@ services:
     environment:
       - USER_ID=${USER_ID:-1000}
       - GROUP_ID=${GROUP_ID:-1000}
-      - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run}
+      - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run --dangerously-skip-permissions}
       - WUKONG_WORKSPACE=/workspace
       - WUKONG_MEMORY_DB=sqlite:///data/memory.db
       - WUKONG_THINKING=${WUKONG_THINKING:-1}

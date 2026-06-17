@@ -86,17 +86,19 @@ install_docker_bundle() {
   echo ""
   echo "下一步："
   echo "  1. 視需求編輯 .env"
-  echo "  2. 執行 docker compose up -d"
+  echo "  2. 執行 docker compose up -d --build"
   echo "  3. 開啟 http://localhost:8787/"
   echo ""
 
-  read -r -p "是否現在啟動 docker compose up -d？(y/N): " START_DOCKER
+  read -r -p "是否現在啟動 docker compose up -d --build？(y/N): " START_DOCKER
   case "$(printf '%s' "${START_DOCKER:-n}" | tr '[:upper:]' '[:lower:]')" in
     y|yes)
-      docker compose up -d
+      # 一律 --build：升級時 image 已存在，沒有 --build 會沿用舊 image，
+      # 新的 Dockerfile / entrypoint 不會被套用（fresh install 則本來就會 build）。
+      docker compose up -d --build
       ;;
     *)
-      info "略過啟動，可稍後執行 docker compose up -d"
+      info "略過啟動，可稍後執行 docker compose up -d --build"
       ;;
   esac
 }

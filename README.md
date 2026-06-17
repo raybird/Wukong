@@ -156,6 +156,7 @@ curl -fsSL ... | bash -s -- --mode binary --flavor musl  # musl  (靜態，預�
 - **opencode 設定與 session 隔離**：`~/.config/opencode` 與 `~/.local/share/opencode` 都存放在 Docker volume 中，不污染 host，且可跨容器升級保留 session
 - **UID/GID 對齊**：runtime user 與 host 一致，避免檔案權限問題
 - **預設 Web + Telegram**：`docker compose up -d` 會啟動 Web Console 與 Telegram Bot；CLI / REPL 透過被動 `run` 使用
+- **非互動權限處理**：Wukong 驅動 `opencode run` 時 stdin 永遠為空（CLI/Web/Telegram/Scheduler 皆然），opencode 無法回應互動式權限詢問。因此容器內 `WUKONG_AGENT_CMD` 預設帶 `--dangerously-skip-permissions`（自動核准詢問），並由 entrypoint 在缺檔時 seed 一份 `~/.config/opencode/opencode.json`：該旗標仍尊重 `deny` 規則，故內含一組黑名單擋下對絕對路徑的毀滅性遞迴刪除（`rm -rf /…`、`sudo rm`、家目錄等變形），同時放行 `/workspace` 內的刪除。這是 **防呆/防幻覺護欄而非資安牆**（glob 字串比對擋不住 `find -delete`、變數展開等繞法），真正的隔離邊界仍是 container 本身與 host 掛載目錄的範圍。要自訂規則，直接把你的 `opencode.json` 放進 `opencode-config` volume 即可覆蓋（缺檔才會 seed）。
 
 **快速開始：**
 
@@ -264,7 +265,7 @@ services:
 | :--- | :--- | :--- |
 | `USER_ID` / `GROUP_ID` | 與 host 對齊的 UID/GID，避免 volume 權限問題 | `1000` |
 | `WUKONG_HOST_WORKSPACE` | Host 工作目錄路徑（opencode workspace） | `./workspace` |
-| `WUKONG_AGENT_CMD` | AI agent 指令 | `opencode run` |
+| `WUKONG_AGENT_CMD` | AI agent 指令（容器內預設帶 `--dangerously-skip-permissions`，見下方說明） | `opencode run --dangerously-skip-permissions` |
 | `WUKONG_TG_TOKEN` | Telegram Bot Token（選用；可由 Web `/settings` 設定，env 優先） | — |
 | `WUKONG_TG_ALLOWED` | 允許的 Telegram chat ID（選用；可由 Web `/settings` 設定，env 優先） | — |
 | `WUKONG_WEB_HOST` / `WUKONG_WEB_PORT` | Web Console 綁定位址與埠 | `0.0.0.0:8787` |
