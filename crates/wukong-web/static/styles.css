@@ -48,6 +48,13 @@ wukong-chat { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .settings-tabs { padding: 0.75rem 1rem; border-bottom: 1px solid #8884; }
 .settings-tabs a.active, header nav a.active { opacity: 1; text-decoration: underline; }
 .settings-outlet { flex: 1; overflow: auto; }
+.schedule-card { border: 1px solid #8884; border-radius: 0.75rem; padding: 0.75rem; margin: 0.75rem 0; }
+.schedule-card h3 { margin: 0 0 0.5rem; }
+.schedule-card p { margin: 0.25rem 0; }
+.schedule-actions { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
+.system-list { display: grid; grid-template-columns: max-content 1fr; gap: 0.5rem 1rem; }
+.system-list dt { font-weight: 700; }
+.system-list dd { margin: 0; }
 @media (max-width: 760px) {
   body { height: auto; min-height: 100vh; }
   main { flex-direction: column; }
