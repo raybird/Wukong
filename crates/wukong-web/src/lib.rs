@@ -2,9 +2,11 @@
 //! streams role progress + the rendered answer over SSE.
 
 pub mod chat_history;
+pub mod schedule_api;
+pub mod system_api;
 
 use chat_history::ChatHistoryStore;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::Json;
@@ -17,6 +19,7 @@ use wukong_cli::run_turn;
 use wukong_gateway::backend::AiBackend;
 use wukong_gateway::config::GatewayConfig;
 use wukong_memory::Memory;
+use wukong_scheduler::SchedulerStore;
 use wukong_settings::{Settings, TelegramSettings};
 
 /// Shared router state. Generic over the backend so tests inject a mock.
@@ -413,6 +416,110 @@ where
     }
 }
 
+async fn list_schedules<B>(
+    State(state): State<AppState<B>>,
+    Query(params): Query<SettingsQuery>,
+) -> axum::response::Response
+where
+    B: AiBackend + Send + Sync + 'static,
+{
+    use axum::response::IntoResponse;
+
+    if !authorized(&state.token, params.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let store = match SchedulerStore::open(&state.db_url).await {
+        Ok(store) => store,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    match store.list_jobs().await {
+        Ok(jobs) => Json(jobs.into_iter().map(schedule_api::job_response).collect::<Vec<_>>()).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn set_schedule_enabled<B>(
+    State(state): State<AppState<B>>,
+    Path((id, action)): Path<(String, String)>,
+    Query(params): Query<SettingsQuery>,
+) -> axum::response::Response
+where
+    B: AiBackend + Send + Sync + 'static,
+{
+    use axum::response::IntoResponse;
+
+    if !authorized(&state.token, params.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let enabled = match action.as_str() {
+        "enable" => true,
+        "disable" => false,
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let store = match SchedulerStore::open(&state.db_url).await {
+        Ok(store) => store,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    match store.set_enabled(&id, enabled).await {
+        Ok(true) => StatusCode::OK.into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn delete_schedule<B>(
+    State(state): State<AppState<B>>,
+    Path(id): Path<String>,
+    Query(params): Query<SettingsQuery>,
+) -> axum::response::Response
+where
+    B: AiBackend + Send + Sync + 'static,
+{
+    use axum::response::IntoResponse;
+
+    if !authorized(&state.token, params.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let store = match SchedulerStore::open(&state.db_url).await {
+        Ok(store) => store,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    match store.remove_job(&id).await {
+        Ok(true) => StatusCode::OK.into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn get_system<B>(
+    State(state): State<AppState<B>>,
+    Query(params): Query<SettingsQuery>,
+) -> axum::response::Response
+where
+    B: AiBackend + Send + Sync + 'static,
+{
+    use axum::response::IntoResponse;
+
+    if !authorized(&state.token, params.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let store = match SchedulerStore::open(&state.db_url).await {
+        Ok(store) => store,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    match store.list_jobs().await {
+        Ok(jobs) => Json(system_api::system_response(
+            &state.scope,
+            state.token.is_some(),
+            &state.db_url,
+            &jobs,
+        ))
+        .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 /// Build the application router from shared state.
 pub fn build_router<B>(state: AppState<B>) -> axum::Router
 where
@@ -429,6 +536,10 @@ where
         .route("/chat", axum::routing::get(chat::<B>))
         .route("/api/chat/messages", axum::routing::get(get_chat_messages::<B>))
         .route("/api/settings", axum::routing::get(get_settings::<B>).post(post_settings::<B>))
+        .route("/api/schedules", axum::routing::get(list_schedules::<B>))
+        .route("/api/schedules/:id/:action", axum::routing::post(set_schedule_enabled::<B>))
+        .route("/api/schedules/:id", axum::routing::delete(delete_schedule::<B>))
+        .route("/api/system", axum::routing::get(get_system::<B>))
         .with_state(state)
 }
 
@@ -733,6 +844,112 @@ mod tests {
                 && m.content == "**ans**"
                 && m.content_html.as_deref() == Some("<p><strong>ans</strong></p>")
         }));
+    }
+
+    #[tokio::test]
+    async fn schedules_requires_token_when_set() {
+        let app = build_router(state(Some("sekret"), &[]).await);
+        let resp = app
+            .oneshot(Request::builder().uri("/api/schedules").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn schedules_list_enable_disable_delete() {
+        let app_state = state(None, &[]).await;
+        let store = wukong_scheduler::SchedulerStore::open(&app_state.db_url).await.unwrap();
+        let job = store
+            .add_job(wukong_scheduler::NewJob {
+                name: "morning".to_string(),
+                kind: wukong_scheduler::JobKind::Turn {
+                    scope: "global".to_string(),
+                    prompt: "hi".to_string(),
+                },
+                cron: "0 9 * * *".to_string(),
+            })
+            .await
+            .unwrap();
+        let app = build_router(app_state);
+
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri("/api/schedules").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains("morning"), "body: {body}");
+        assert!(body.contains("turn"), "body: {body}");
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/schedules/{}/disable", job.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!store.get_job(&job.id).await.unwrap().unwrap().enabled);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/schedules/{}/enable", job.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(store.get_job(&job.id).await.unwrap().unwrap().enabled);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/schedules/{}", job.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(store.get_job(&job.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn system_returns_summary() {
+        let app_state = state(Some("sekret"), &[]).await;
+        let store = wukong_scheduler::SchedulerStore::open(&app_state.db_url).await.unwrap();
+        store
+            .add_job(wukong_scheduler::NewJob {
+                name: "prune".to_string(),
+                kind: wukong_scheduler::JobKind::Maintenance {
+                    scope: Some("global".to_string()),
+                    task: wukong_scheduler::MaintenanceTask::Prune,
+                },
+                cron: "0 3 * * *".to_string(),
+            })
+            .await
+            .unwrap();
+        let app = build_router(app_state);
+        let resp = app
+            .oneshot(Request::builder().uri("/api/system?token=sekret").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains(r#""scope":"global""#), "body: {body}");
+        assert!(body.contains(r#""token_enabled":true"#), "body: {body}");
+        assert!(body.contains(r#""schedule_total":1"#), "body: {body}");
     }
 
     #[tokio::test]
