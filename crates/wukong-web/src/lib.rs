@@ -52,6 +52,8 @@ const APP_JS: &str = include_str!("../static/app.js");
 const HTML_JS: &str = include_str!("../static/lib/html.js");
 const CHAT_JS: &str = include_str!("../static/components/wukong-chat.js");
 const SETTINGS_JS: &str = include_str!("../static/components/wukong-settings.js");
+const SCHEDULES_JS: &str = include_str!("../static/components/wukong-schedules.js");
+const SYSTEM_JS: &str = include_str!("../static/components/wukong-system.js");
 const STYLES_CSS: &str = include_str!("../static/styles.css");
 
 const JS: &str = "application/javascript";
@@ -89,6 +91,8 @@ async fn app_js() -> axum::response::Response { asset(JS, APP_JS) }
 async fn html_js() -> axum::response::Response { asset(JS, HTML_JS) }
 async fn chat_js() -> axum::response::Response { asset(JS, CHAT_JS) }
 async fn settings_js() -> axum::response::Response { asset(JS, SETTINGS_JS) }
+async fn schedules_js() -> axum::response::Response { asset(JS, SCHEDULES_JS) }
+async fn system_js() -> axum::response::Response { asset(JS, SYSTEM_JS) }
 async fn styles_css() -> axum::response::Response { asset(CSS, STYLES_CSS) }
 
 /// Messages pushed from the turn task to the SSE stream.
@@ -531,6 +535,8 @@ where
         .route("/lib/html.js", axum::routing::get(html_js))
         .route("/components/wukong-chat.js", axum::routing::get(chat_js))
         .route("/components/wukong-settings.js", axum::routing::get(settings_js))
+        .route("/components/wukong-schedules.js", axum::routing::get(schedules_js))
+        .route("/components/wukong-system.js", axum::routing::get(system_js))
         .route("/styles.css", axum::routing::get(styles_css))
         .route("/settings", axum::routing::get(index::<B>))
         .route("/chat", axum::routing::get(chat::<B>))
@@ -617,6 +623,12 @@ mod tests {
             .await
             .contains("javascript"));
         assert!(content_type(build_router(state(None, &[]).await), "/components/wukong-settings.js")
+            .await
+            .contains("javascript"));
+        assert!(content_type(build_router(state(None, &[]).await), "/components/wukong-schedules.js")
+            .await
+            .contains("javascript"));
+        assert!(content_type(build_router(state(None, &[]).await), "/components/wukong-system.js")
             .await
             .contains("javascript"));
         assert!(content_type(build_router(state(None, &[]).await), "/styles.css")
@@ -1000,7 +1012,8 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
-        assert!(body.contains("<wukong-chat>"));
+        assert!(body.contains(r#"id="app""#));
+        assert!(body.contains(r##"href="#/chat""##));
     }
 
     #[tokio::test]
@@ -1012,6 +1025,6 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
-        assert!(body.contains("<wukong-settings>"));
+        assert!(body.contains(r#"id="app""#));
     }
 }
