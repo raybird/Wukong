@@ -3,10 +3,12 @@
 
 pub mod chat_history;
 
+use chat_history::ChatHistoryStore;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::Json;
+use chrono::{NaiveDate, TimeZone, Utc};
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -22,6 +24,7 @@ pub struct AppState<B: AiBackend> {
     pub memory: Arc<Memory>,
     pub backend: Arc<B>,
     pub scope: String,
+    pub db_url: String,
     pub token: Option<String>,
     pub settings_path: std::path::PathBuf,
 }
@@ -33,6 +36,7 @@ impl<B: AiBackend> Clone for AppState<B> {
             memory: self.memory.clone(),
             backend: self.backend.clone(),
             scope: self.scope.clone(),
+            db_url: self.db_url.clone(),
             token: self.token.clone(),
             settings_path: self.settings_path.clone(),
         }
@@ -112,6 +116,20 @@ struct ChatQuery {
 }
 
 #[derive(serde::Deserialize)]
+struct ChatMessagesQuery {
+    token: Option<String>,
+    before: Option<i64>,
+    date: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(serde::Serialize)]
+struct ChatMessagesResponse {
+    messages: Vec<chat_history::ChatMessage>,
+    has_more: bool,
+}
+
+#[derive(serde::Deserialize)]
 struct SettingsQuery {
     token: Option<String>,
 }
@@ -140,6 +158,28 @@ fn authorized(expected: &Option<String>, provided: Option<&str>) -> bool {
     }
 }
 
+fn capped_limit(limit: Option<i64>) -> i64 {
+    limit.unwrap_or(10).clamp(1, 50)
+}
+
+fn date_bounds_utc(date: &str) -> Result<(i64, i64), String> {
+    let day = NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|e| e.to_string())?;
+    let start = day.and_hms_opt(0, 0, 0).ok_or_else(|| "invalid date".to_string())?;
+    let end = day
+        .succ_opt()
+        .ok_or_else(|| "invalid date".to_string())?
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| "invalid date".to_string())?;
+    Ok((Utc.from_utc_datetime(&start).timestamp(), Utc.from_utc_datetime(&end).timestamp()))
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// `GET /chat?q=` — run a turn, streaming role progress then the rendered answer.
 async fn chat<B>(
     State(state): State<AppState<B>>,
@@ -161,9 +201,22 @@ where
         let _ = tx.send(SseMsg::Error("空白訊息".to_string()));
         let _ = tx.send(SseMsg::Done);
     } else {
+        let store = match ChatHistoryStore::open(&state.db_url).await {
+            Ok(store) => store,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        };
+        let thread = match store.default_thread(&state.scope).await {
+            Ok(thread) => thread,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        };
+        if let Err(e) = store.insert_message(&thread, "user", &q, None, "complete", now_unix()).await {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+
         let mem = state.memory.clone();
         let backend = state.backend.clone();
         let scope = state.scope.clone();
+        let db_url = state.db_url.clone();
         // run_turn's future is not Send (AiBackend uses async_fn_in_trait and the
         // callbacks are dyn FnMut), so it can't ride tokio::spawn or the axum
         // handler future. Drive it on a dedicated thread with its own
@@ -197,7 +250,13 @@ where
                         },
                         None => format!("指令 /{name} 尚未支援"),
                     };
-                    let _ = tx.send(SseMsg::Answer(wukong_render::to_web_html(&reply)));
+                    let html = wukong_render::to_web_html(&reply);
+                    if let Ok(store) = ChatHistoryStore::open(&db_url).await {
+                        let _ = store
+                            .insert_message(&thread, "assistant", &reply, Some(&html), "complete", now_unix())
+                            .await;
+                    }
+                    let _ = tx.send(SseMsg::Answer(html));
                     let _ = tx.send(SseMsg::Done);
                     return;
                 }
@@ -223,10 +282,29 @@ where
                 .await;
                 match result {
                     Ok(out) => {
-                        let _ = tx.send(SseMsg::Answer(wukong_render::to_web_html(&out.text)));
+                        let html = wukong_render::to_web_html(&out.text);
+                        if let Ok(store) = ChatHistoryStore::open(&db_url).await {
+                            let _ = store
+                                .insert_message(
+                                    &thread,
+                                    "assistant",
+                                    &out.text,
+                                    Some(&html),
+                                    "complete",
+                                    now_unix(),
+                                )
+                                .await;
+                        }
+                        let _ = tx.send(SseMsg::Answer(html));
                     }
                     Err(e) => {
-                        let _ = tx.send(SseMsg::Error(e.to_string()));
+                        let msg = e.to_string();
+                        if let Ok(store) = ChatHistoryStore::open(&db_url).await {
+                            let _ = store
+                                .insert_message(&thread, "assistant", &msg, None, "error", now_unix())
+                                .await;
+                        }
+                        let _ = tx.send(SseMsg::Error(msg));
                     }
                 }
                 let _ = tx.send(SseMsg::Done);
@@ -237,6 +315,52 @@ where
     let stream = UnboundedReceiverStream::new(rx)
         .map(|m| Ok::<Event, Infallible>(m.into_event()));
     Sse::new(stream).into_response()
+}
+
+async fn get_chat_messages<B>(
+    State(state): State<AppState<B>>,
+    Query(params): Query<ChatMessagesQuery>,
+) -> axum::response::Response
+where
+    B: AiBackend + Send + Sync + 'static,
+{
+    use axum::response::IntoResponse;
+
+    if !authorized(&state.token, params.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let limit = capped_limit(params.limit);
+    let store = match ChatHistoryStore::open(&state.db_url).await {
+        Ok(store) => store,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let thread = match store.default_thread(&state.scope).await {
+        Ok(thread) => thread,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    let result = if let Some(date) = params.date.as_deref() {
+        match date_bounds_utc(date) {
+            Ok((start, end)) => store.messages_for_date(&thread, start, end, limit + 1).await,
+            Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+        }
+    } else if let Some(before) = params.before {
+        store.messages_before(&thread, before, limit + 1).await
+    } else {
+        store.latest_messages(&thread, limit + 1).await
+    };
+
+    match result {
+        Ok(mut messages) => {
+            let has_more = messages.len() as i64 > limit;
+            if has_more {
+                messages.remove(0);
+            }
+            Json(ChatMessagesResponse { messages, has_more }).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 async fn get_settings<B>(
@@ -303,6 +427,7 @@ where
         .route("/styles.css", axum::routing::get(styles_css))
         .route("/settings", axum::routing::get(index::<B>))
         .route("/chat", axum::routing::get(chat::<B>))
+        .route("/api/chat/messages", axum::routing::get(get_chat_messages::<B>))
         .route("/api/settings", axum::routing::get(get_settings::<B>).post(post_settings::<B>))
         .with_state(state)
 }
@@ -344,6 +469,7 @@ mod tests {
             memory: Arc::new(Memory::open(&url).await.unwrap()),
             backend: Arc::new(MockBackend::new(replies)),
             scope: "global".to_string(),
+            db_url: url,
             token: token.map(|s| s.to_string()),
             settings_path: tempfile::NamedTempFile::new().unwrap().path().to_path_buf(),
         }
@@ -466,6 +592,7 @@ mod tests {
             memory: Arc::new(Memory::open(&url).await.unwrap()),
             backend: Arc::new(ReasoningBackend { reasoning }),
             scope: "global".to_string(),
+            db_url: url,
             token: None,
             settings_path: tempfile::NamedTempFile::new().unwrap().path().to_path_buf(),
         }
@@ -519,6 +646,93 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn chat_messages_requires_token_when_set() {
+        let app = build_router(state(Some("sekret"), &[]).await);
+        let resp = app
+            .oneshot(Request::builder().uri("/api/chat/messages").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn chat_messages_returns_latest_ten() {
+        let app_state = state(None, &[]).await;
+        let store = crate::chat_history::ChatHistoryStore::open(&app_state.db_url).await.unwrap();
+        let thread = store.default_thread(&app_state.scope).await.unwrap();
+        for i in 0..12 {
+            store
+                .insert_message(&thread, "user", &format!("m{i}"), None, "complete", 100 + i)
+                .await
+                .unwrap();
+        }
+        let app = build_router(app_state);
+        let resp = app
+            .oneshot(Request::builder().uri("/api/chat/messages").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(!body.contains("m0"), "body should omit oldest rows: {body}");
+        assert!(body.contains("m2"), "body should include first returned row: {body}");
+        assert!(body.contains("m11"), "body should include newest row: {body}");
+    }
+
+    #[tokio::test]
+    async fn chat_messages_before_returns_older_ten() {
+        let app_state = state(None, &[]).await;
+        let store = crate::chat_history::ChatHistoryStore::open(&app_state.db_url).await.unwrap();
+        let thread = store.default_thread(&app_state.scope).await.unwrap();
+        let mut ids = Vec::new();
+        for i in 0..12 {
+            ids.push(
+                store
+                    .insert_message(&thread, "user", &format!("m{i}"), None, "complete", 100 + i)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let app = build_router(app_state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/chat/messages?before={}", ids[10]))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains("m0"), "body: {body}");
+        assert!(body.contains("m9"), "body: {body}");
+        assert!(!body.contains("m10"), "body should omit boundary row: {body}");
+    }
+
+    #[tokio::test]
+    async fn chat_turn_records_user_and_assistant_messages() {
+        let app_state = state(None, &["oracle", "**ans**"]).await;
+        let db_url = app_state.db_url.clone();
+        let app = build_router(app_state.clone());
+        let resp = app
+            .oneshot(Request::builder().uri("/chat?q=hi").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let _ = body_string(resp).await;
+
+        let store = crate::chat_history::ChatHistoryStore::open(&db_url).await.unwrap();
+        let thread = store.default_thread("global").await.unwrap();
+        let messages = store.latest_messages(&thread, 10).await.unwrap();
+        assert!(messages.iter().any(|m| m.role == "user" && m.content == "hi"));
+        assert!(messages.iter().any(|m| {
+            m.role == "assistant"
+                && m.content == "**ans**"
+                && m.content_html.as_deref() == Some("<p><strong>ans</strong></p>")
+        }));
     }
 
     #[tokio::test]

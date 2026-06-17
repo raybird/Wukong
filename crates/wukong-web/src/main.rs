@@ -57,6 +57,7 @@ async fn main() {
         memory: Arc::new(memory),
         backend: Arc::new(backend),
         scope,
+        db_url,
         token,
         settings_path: wukong_settings::default_settings_path(),
     };
