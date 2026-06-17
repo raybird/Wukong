@@ -18,11 +18,14 @@ wukong-cli = { path = "../wukong-cli" }
 wukong-orchestrator = { path = "../wukong-orchestrator" }
 wukong-render = { path = "../wukong-render" }
 wukong-settings = { path = "../wukong-settings" }
+wukong-scheduler = { path = "../wukong-scheduler" }
 axum = { workspace = true }
+chrono = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sqlx = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

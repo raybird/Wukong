@@ -1,6 +1,8 @@
 //! wukong-web: a zero-build browser console for Wukong. Reuses run_turn and
 //! streams role progress + the rendered answer over SSE.
 
+pub mod chat_history;
+
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
