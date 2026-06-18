@@ -36,8 +36,10 @@ pub fn classify_line(line: &str) -> LineAction {
                     LineAction::SetScope(s.to_string())
                 }
             } else if let Some(rest) = t.strip_prefix('/') {
-                let name = rest.split_whitespace().next().unwrap_or("");
-                match parse_session_command(name) {
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                let name = parts.next().unwrap_or("");
+                let args = parts.next().unwrap_or("").trim();
+                match parse_session_command(name, args) {
                     Some(cmd) => LineAction::Command(cmd),
                     None => LineAction::Skip, // unknown meta-command
                 }
@@ -72,7 +74,8 @@ where
                 cfg.scope = s;
             }
             LineAction::Command(cmd) => {
-                let reply = run_session_command(memory, backend, &cfg, cmd).await?;
+                let settings_path = wukong_settings::default_settings_path();
+                let reply = run_session_command(memory, backend, &cfg, &settings_path, cmd).await?;
                 on_event(StreamEvent::Text(format!("{reply}\n")));
             }
             LineAction::Turn(input) => {
@@ -110,7 +113,10 @@ mod tests {
     impl AiBackend for MockBackend {
         async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
             let text = self.replies.lock().unwrap().pop_front().unwrap_or_default();
-            Ok(AgentResponse { text, session_id: None })
+            Ok(AgentResponse {
+                text,
+                session_id: None,
+            })
         }
     }
 
@@ -137,9 +143,15 @@ mod tests {
         assert_eq!(classify_line("  "), LineAction::Skip);
         assert_eq!(classify_line("/exit"), LineAction::Exit);
         assert_eq!(classify_line("/quit"), LineAction::Exit);
-        assert_eq!(classify_line("/scope global"), LineAction::SetScope("global".to_string()));
+        assert_eq!(
+            classify_line("/scope global"),
+            LineAction::SetScope("global".to_string())
+        );
         assert_eq!(classify_line("/scope   "), LineAction::Skip);
-        assert_eq!(classify_line("fix the bug"), LineAction::Turn("fix the bug".to_string()));
+        assert_eq!(
+            classify_line("fix the bug"),
+            LineAction::Turn("fix the bug".to_string())
+        );
     }
 
     #[tokio::test]
@@ -155,14 +167,9 @@ mod tests {
             "ignored after exit".to_string(),
         ];
         let mut roles = Vec::new();
-        let turns = run_repl_loop(
-            &mem,
-            &backend,
-            &cfg(),
-            lines,
-            &mut |_| {},
-            &mut |r| roles.push(r.to_string()),
-        )
+        let turns = run_repl_loop(&mem, &backend, &cfg(), lines, &mut |_| {}, &mut |r| {
+            roles.push(r.to_string())
+        })
         .await
         .unwrap();
         assert_eq!(turns, 2);
@@ -172,8 +179,28 @@ mod tests {
 
     #[test]
     fn classify_line_recognizes_session_commands() {
-        assert_eq!(classify_line("/new"), LineAction::Command(SessionCommand::New));
-        assert_eq!(classify_line("/compact"), LineAction::Command(SessionCommand::Compact));
+        assert_eq!(
+            classify_line("/new"),
+            LineAction::Command(SessionCommand::New)
+        );
+        assert_eq!(
+            classify_line("/compact"),
+            LineAction::Command(SessionCommand::Compact)
+        );
+        assert_eq!(
+            classify_line("/providers"),
+            LineAction::Command(SessionCommand::Providers)
+        );
+        assert_eq!(
+            classify_line("/models"),
+            LineAction::Command(SessionCommand::Models)
+        );
+        assert_eq!(
+            classify_line("/set_models opencode/deepseek-v4-flash-free"),
+            LineAction::Command(SessionCommand::SetModels(
+                "opencode/deepseek-v4-flash-free".to_string()
+            ))
+        );
         assert_eq!(classify_line("/model gpt"), LineAction::Skip); // unknown slash → skip
     }
 
@@ -183,9 +210,12 @@ mod tests {
         mem.set_agent_session("project:T", "ses_1").await.unwrap();
         let backend = MockBackend::new(&[]);
         let turns = run_repl_loop(
-            &mem, &backend, &cfg(),
+            &mem,
+            &backend,
+            &cfg(),
             vec!["/new".to_string(), "/exit".to_string()],
-            &mut |_| {}, &mut |_| {},
+            &mut |_| {},
+            &mut |_| {},
         )
         .await
         .unwrap();
@@ -197,9 +227,16 @@ mod tests {
     async fn turn_persists_memory_across_loop() {
         let mem = open_memory().await;
         let backend = MockBackend::new(&["fixer", "done"]);
-        run_repl_loop(&mem, &backend, &cfg(), vec!["fix it".to_string(), "/exit".to_string()], &mut |_| {}, &mut |_| {})
-            .await
-            .unwrap();
+        run_repl_loop(
+            &mem,
+            &backend,
+            &cfg(),
+            vec!["fix it".to_string(), "/exit".to_string()],
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
         let r = mem
             .recall(wukong_memory::RecallQuery {
                 query: "fix it".to_string(),

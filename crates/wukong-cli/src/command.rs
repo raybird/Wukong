@@ -1,8 +1,10 @@
 //! Session control commands shared by every surface (REPL, Telegram, Web, CLI).
 
 use crate::{run_turn_session_passthrough, WukongError};
-use wukong_gateway::backend::AiBackend;
+use std::path::Path;
+use wukong_gateway::backend::{AiBackend, OpencodeUtility};
 use wukong_gateway::config::GatewayConfig;
+use wukong_gateway::GatewayError;
 use wukong_memory::Memory;
 
 /// A session control command parsed from a leading-slash input.
@@ -12,13 +14,22 @@ pub enum SessionCommand {
     New,
     /// Passthrough `/compact` to the current opencode session.
     Compact,
+    /// List opencode providers.
+    Providers,
+    /// List opencode models.
+    Models,
+    /// Persist the system-wide default opencode model.
+    SetModels(String),
 }
 
 /// Map a command name (without the leading '/') to a SessionCommand.
-pub fn parse_session_command(name: &str) -> Option<SessionCommand> {
+pub fn parse_session_command(name: &str, args: &str) -> Option<SessionCommand> {
     match name {
         "new" => Some(SessionCommand::New),
         "compact" => Some(SessionCommand::Compact),
+        "providers" => Some(SessionCommand::Providers),
+        "models" => Some(SessionCommand::Models),
+        "set_models" => Some(SessionCommand::SetModels(args.trim().to_string())),
         _ => None,
     }
 }
@@ -28,6 +39,7 @@ pub async fn run_session_command(
     memory: &Memory,
     backend: &impl AiBackend,
     cfg: &GatewayConfig,
+    settings_path: &Path,
     cmd: SessionCommand,
 ) -> Result<String, WukongError> {
     match cmd {
@@ -42,7 +54,39 @@ pub async fn run_session_command(
                 Ok(format!("🐵 已送出壓縮指令：\n{text}"))
             }
         },
+        SessionCommand::Providers => {
+            let util = OpencodeUtility::from_agent_command(
+                &cfg.agent_command,
+                wukong_gateway::workspace_dir(),
+            );
+            Ok(util.run_fixed(&["providers", "list"]).await?)
+        }
+        SessionCommand::Models => {
+            let util = OpencodeUtility::from_agent_command(
+                &cfg.agent_command,
+                wukong_gateway::workspace_dir(),
+            );
+            Ok(util.run_fixed(&["models"]).await?)
+        }
+        SessionCommand::SetModels(model) => {
+            let model = model.trim();
+            if model.is_empty() {
+                return Ok("用法：/set_models opencode/deepseek-v4-flash-free".to_string());
+            }
+            let mut settings =
+                wukong_settings::load_settings(settings_path).map_err(settings_error)?;
+            settings.agent.default_model = Some(model.to_string());
+            wukong_settings::save_settings(settings_path, &settings).map_err(settings_error)?;
+            Ok(format!("🐵 已設定預設模型：{model}"))
+        }
     }
+}
+
+fn settings_error(e: wukong_settings::SettingsError) -> WukongError {
+    WukongError::Backend(GatewayError::AgentFailed {
+        code: None,
+        stderr: e.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -73,7 +117,10 @@ mod tests {
             self.prompts.lock().unwrap().push(req.prompt);
             self.sessions.lock().unwrap().push(req.session_id);
             let text = self.replies.lock().unwrap().pop_front().unwrap_or_default();
-            Ok(AgentResponse { text, session_id: None })
+            Ok(AgentResponse {
+                text,
+                session_id: None,
+            })
         }
     }
 
@@ -97,9 +144,78 @@ mod tests {
 
     #[test]
     fn parses_known_commands() {
-        assert_eq!(parse_session_command("new"), Some(SessionCommand::New));
-        assert_eq!(parse_session_command("compact"), Some(SessionCommand::Compact));
-        assert_eq!(parse_session_command("model"), None);
+        assert_eq!(parse_session_command("new", ""), Some(SessionCommand::New));
+        assert_eq!(
+            parse_session_command("compact", ""),
+            Some(SessionCommand::Compact)
+        );
+        assert_eq!(
+            parse_session_command("providers", ""),
+            Some(SessionCommand::Providers)
+        );
+        assert_eq!(
+            parse_session_command("models", ""),
+            Some(SessionCommand::Models)
+        );
+        assert_eq!(
+            parse_session_command("set_models", "opencode/deepseek-v4-flash-free"),
+            Some(SessionCommand::SetModels(
+                "opencode/deepseek-v4-flash-free".to_string()
+            ))
+        );
+        assert_eq!(parse_session_command("model", "gpt"), None);
+    }
+
+    #[tokio::test]
+    async fn set_models_persists_default_model() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&[]);
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+
+        let reply = run_session_command(
+            &mem,
+            &backend,
+            &cfg(),
+            &settings_path,
+            SessionCommand::SetModels("opencode/deepseek-v4-flash-free".to_string()),
+        )
+        .await
+        .unwrap();
+
+        assert!(reply.contains("opencode/deepseek-v4-flash-free"));
+        let saved = wukong_settings::load_settings(&settings_path).unwrap();
+        assert_eq!(
+            saved.agent.default_model.as_deref(),
+            Some("opencode/deepseek-v4-flash-free")
+        );
+    }
+
+    #[tokio::test]
+    async fn set_models_without_model_returns_usage() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&[]);
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+
+        let reply = run_session_command(
+            &mem,
+            &backend,
+            &cfg(),
+            &settings_path,
+            SessionCommand::SetModels(String::new()),
+        )
+        .await
+        .unwrap();
+
+        assert!(reply.contains("用法：/set_models"));
+        assert_eq!(
+            wukong_settings::load_settings(&settings_path)
+                .unwrap()
+                .agent
+                .default_model,
+            None
+        );
     }
 
     #[tokio::test]
@@ -107,7 +223,11 @@ mod tests {
         let mem = open_memory().await;
         mem.set_agent_session("global", "ses_1").await.unwrap();
         let backend = MockBackend::new(&[]);
-        let reply = run_session_command(&mem, &backend, &cfg(), SessionCommand::New).await.unwrap();
+        let settings_path = tempfile::NamedTempFile::new().unwrap().path().to_path_buf();
+        let reply =
+            run_session_command(&mem, &backend, &cfg(), &settings_path, SessionCommand::New)
+                .await
+                .unwrap();
         assert!(reply.contains("已開新"));
         assert_eq!(mem.agent_session("global").await.unwrap(), None);
         assert!(backend.prompts.lock().unwrap().is_empty()); // no model call
@@ -117,7 +237,16 @@ mod tests {
     async fn compact_without_session_does_not_call_backend() {
         let mem = open_memory().await;
         let backend = MockBackend::new(&["ignored"]);
-        let reply = run_session_command(&mem, &backend, &cfg(), SessionCommand::Compact).await.unwrap();
+        let settings_path = tempfile::NamedTempFile::new().unwrap().path().to_path_buf();
+        let reply = run_session_command(
+            &mem,
+            &backend,
+            &cfg(),
+            &settings_path,
+            SessionCommand::Compact,
+        )
+        .await
+        .unwrap();
         assert!(reply.contains("尚無對話"));
         assert!(backend.prompts.lock().unwrap().is_empty());
     }
@@ -127,7 +256,16 @@ mod tests {
         let mem = open_memory().await;
         mem.set_agent_session("global", "ses_42").await.unwrap();
         let backend = MockBackend::new(&["compacted ok"]);
-        let reply = run_session_command(&mem, &backend, &cfg(), SessionCommand::Compact).await.unwrap();
+        let settings_path = tempfile::NamedTempFile::new().unwrap().path().to_path_buf();
+        let reply = run_session_command(
+            &mem,
+            &backend,
+            &cfg(),
+            &settings_path,
+            SessionCommand::Compact,
+        )
+        .await
+        .unwrap();
         assert!(reply.contains("compacted ok"));
         {
             let prompts = backend.prompts.lock().unwrap();

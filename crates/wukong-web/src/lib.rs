@@ -13,13 +13,13 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt;
+use wukong_chat_history::{ChatHistoryStore, ChatMessage};
 use wukong_cli::run_turn;
 use wukong_gateway::backend::AiBackend;
 use wukong_gateway::config::GatewayConfig;
 use wukong_memory::Memory;
 use wukong_scheduler::SchedulerStore;
 use wukong_settings::TelegramSettings;
-use wukong_chat_history::{ChatHistoryStore, ChatMessage};
 
 /// Shared router state. Generic over the backend so tests inject a mock.
 pub struct AppState<B: AiBackend> {
@@ -86,13 +86,27 @@ fn asset(content_type: &'static str, body: &'static str) -> axum::response::Resp
     ([(CONTENT_TYPE, content_type)], body).into_response()
 }
 
-async fn app_js() -> axum::response::Response { asset(JS, APP_JS) }
-async fn html_js() -> axum::response::Response { asset(JS, HTML_JS) }
-async fn chat_js() -> axum::response::Response { asset(JS, CHAT_JS) }
-async fn settings_js() -> axum::response::Response { asset(JS, SETTINGS_JS) }
-async fn schedules_js() -> axum::response::Response { asset(JS, SCHEDULES_JS) }
-async fn system_js() -> axum::response::Response { asset(JS, SYSTEM_JS) }
-async fn styles_css() -> axum::response::Response { asset(CSS, STYLES_CSS) }
+async fn app_js() -> axum::response::Response {
+    asset(JS, APP_JS)
+}
+async fn html_js() -> axum::response::Response {
+    asset(JS, HTML_JS)
+}
+async fn chat_js() -> axum::response::Response {
+    asset(JS, CHAT_JS)
+}
+async fn settings_js() -> axum::response::Response {
+    asset(JS, SETTINGS_JS)
+}
+async fn schedules_js() -> axum::response::Response {
+    asset(JS, SCHEDULES_JS)
+}
+async fn system_js() -> axum::response::Response {
+    asset(JS, SYSTEM_JS)
+}
+async fn styles_css() -> axum::response::Response {
+    asset(CSS, STYLES_CSS)
+}
 
 /// Messages pushed from the turn task to the SSE stream.
 enum SseMsg {
@@ -179,13 +193,18 @@ fn selected_scope(default_scope: &str, requested: Option<String>) -> String {
 
 fn date_bounds_utc(date: &str) -> Result<(i64, i64), String> {
     let day = NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|e| e.to_string())?;
-    let start = day.and_hms_opt(0, 0, 0).ok_or_else(|| "invalid date".to_string())?;
+    let start = day
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| "invalid date".to_string())?;
     let end = day
         .succ_opt()
         .ok_or_else(|| "invalid date".to_string())?
         .and_hms_opt(0, 0, 0)
         .ok_or_else(|| "invalid date".to_string())?;
-    Ok((Utc.from_utc_datetime(&start).timestamp(), Utc.from_utc_datetime(&end).timestamp()))
+    Ok((
+        Utc.from_utc_datetime(&start).timestamp(),
+        Utc.from_utc_datetime(&end).timestamp(),
+    ))
 }
 
 fn now_unix() -> i64 {
@@ -225,19 +244,26 @@ where
             Ok(thread) => thread,
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         };
-        if let Err(e) = store.insert_message(&thread, "user", &q, None, "complete", now_unix()).await {
+        if let Err(e) = store
+            .insert_message(&thread, "user", &q, None, "complete", now_unix())
+            .await
+        {
             return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
         }
 
         let mem = state.memory.clone();
         let backend = state.backend.clone();
         let db_url = state.db_url.clone();
+        let settings_path = state.settings_path.clone();
         // run_turn's future is not Send (AiBackend uses async_fn_in_trait and the
         // callbacks are dyn FnMut), so it can't ride tokio::spawn or the axum
         // handler future. Drive it on a dedicated thread with its own
         // current-thread runtime; only the Send channel crosses back.
         std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
                 Ok(rt) => rt,
                 Err(e) => {
                     let _ = tx.send(SseMsg::Error(format!("runtime: {e}")));
@@ -257,9 +283,19 @@ where
                 // Leading-slash inputs are session commands, not turns.
                 let trimmed = q.trim();
                 if let Some(rest) = trimmed.strip_prefix('/') {
-                    let name = rest.split_whitespace().next().unwrap_or("").to_string();
-                    let reply = match wukong_cli::parse_session_command(&name) {
-                        Some(cmd) => match wukong_cli::run_session_command(mem.as_ref(), backend.as_ref(), &cfg, cmd).await {
+                    let mut parts = rest.splitn(2, char::is_whitespace);
+                    let name = parts.next().unwrap_or("").to_string();
+                    let args = parts.next().unwrap_or("").trim().to_string();
+                    let reply = match wukong_cli::parse_session_command(&name, &args) {
+                        Some(cmd) => match wukong_cli::run_session_command(
+                            mem.as_ref(),
+                            backend.as_ref(),
+                            &cfg,
+                            &settings_path,
+                            cmd,
+                        )
+                        .await
+                        {
                             Ok(t) => t,
                             Err(e) => format!("⚠️ 失敗：{e}"),
                         },
@@ -268,7 +304,14 @@ where
                     let html = wukong_render::to_web_html(&reply);
                     if let Ok(store) = ChatHistoryStore::open(&db_url).await {
                         let _ = store
-                            .insert_message(&thread, "assistant", &reply, Some(&html), "complete", now_unix())
+                            .insert_message(
+                                &thread,
+                                "assistant",
+                                &reply,
+                                Some(&html),
+                                "complete",
+                                now_unix(),
+                            )
                             .await;
                     }
                     let _ = tx.send(SseMsg::Answer(html));
@@ -316,7 +359,14 @@ where
                         let msg = e.to_string();
                         if let Ok(store) = ChatHistoryStore::open(&db_url).await {
                             let _ = store
-                                .insert_message(&thread, "assistant", &msg, None, "error", now_unix())
+                                .insert_message(
+                                    &thread,
+                                    "assistant",
+                                    &msg,
+                                    None,
+                                    "error",
+                                    now_unix(),
+                                )
                                 .await;
                         }
                         let _ = tx.send(SseMsg::Error(msg));
@@ -327,8 +377,7 @@ where
         });
     }
 
-    let stream = UnboundedReceiverStream::new(rx)
-        .map(|m| Ok::<Event, Infallible>(m.into_event()));
+    let stream = UnboundedReceiverStream::new(rx).map(|m| Ok::<Event, Infallible>(m.into_event()));
     Sse::new(stream).into_response()
 }
 
@@ -358,7 +407,11 @@ where
 
     let result = if let Some(date) = params.date.as_deref() {
         match date_bounds_utc(date) {
-            Ok((start, end)) => store.messages_for_date(&thread, start, end, limit + 1).await,
+            Ok((start, end)) => {
+                store
+                    .messages_for_date(&thread, start, end, limit + 1)
+                    .await
+            }
             Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
         }
     } else if let Some(before) = params.before {
@@ -471,7 +524,12 @@ where
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
     match store.list_jobs().await {
-        Ok(jobs) => Json(jobs.into_iter().map(schedule_api::job_response).collect::<Vec<_>>()).into_response(),
+        Ok(jobs) => Json(
+            jobs.into_iter()
+                .map(schedule_api::job_response)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -567,18 +625,39 @@ where
         .route("/app.js", axum::routing::get(app_js))
         .route("/lib/html.js", axum::routing::get(html_js))
         .route("/components/wukong-chat.js", axum::routing::get(chat_js))
-        .route("/components/wukong-settings.js", axum::routing::get(settings_js))
-        .route("/components/wukong-schedules.js", axum::routing::get(schedules_js))
-        .route("/components/wukong-system.js", axum::routing::get(system_js))
+        .route(
+            "/components/wukong-settings.js",
+            axum::routing::get(settings_js),
+        )
+        .route(
+            "/components/wukong-schedules.js",
+            axum::routing::get(schedules_js),
+        )
+        .route(
+            "/components/wukong-system.js",
+            axum::routing::get(system_js),
+        )
         .route("/styles.css", axum::routing::get(styles_css))
         .route("/settings", axum::routing::get(index::<B>))
         .route("/chat", axum::routing::get(chat::<B>))
         .route("/api/chat/scopes", axum::routing::get(get_chat_scopes::<B>))
-        .route("/api/chat/messages", axum::routing::get(get_chat_messages::<B>))
-        .route("/api/settings", axum::routing::get(get_settings::<B>).post(post_settings::<B>))
+        .route(
+            "/api/chat/messages",
+            axum::routing::get(get_chat_messages::<B>),
+        )
+        .route(
+            "/api/settings",
+            axum::routing::get(get_settings::<B>).post(post_settings::<B>),
+        )
         .route("/api/schedules", axum::routing::get(list_schedules::<B>))
-        .route("/api/schedules/:id/:action", axum::routing::post(set_schedule_enabled::<B>))
-        .route("/api/schedules/:id", axum::routing::delete(delete_schedule::<B>))
+        .route(
+            "/api/schedules/:id/:action",
+            axum::routing::post(set_schedule_enabled::<B>),
+        )
+        .route(
+            "/api/schedules/:id",
+            axum::routing::delete(delete_schedule::<B>),
+        )
         .route("/api/system", axum::routing::get(get_system::<B>))
         .with_state(state)
 }
@@ -600,7 +679,9 @@ mod tests {
     }
     impl MockBackend {
         fn new(r: &[&str]) -> Self {
-            Self { replies: Mutex::new(r.iter().map(|s| s.to_string()).collect()) }
+            Self {
+                replies: Mutex::new(r.iter().map(|s| s.to_string()).collect()),
+            }
         }
     }
     impl AiBackend for MockBackend {
@@ -627,7 +708,9 @@ mod tests {
     }
 
     async fn body_string(resp: axum::response::Response) -> String {
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         String::from_utf8(bytes.to_vec()).unwrap()
     }
 
@@ -647,34 +730,57 @@ mod tests {
 
     #[tokio::test]
     async fn serves_static_assets_with_content_types() {
-        assert!(content_type(build_router(state(None, &[]).await), "/app.js")
-            .await
-            .contains("javascript"));
-        assert!(content_type(build_router(state(None, &[]).await), "/lib/html.js")
-            .await
-            .contains("javascript"));
-        assert!(content_type(build_router(state(None, &[]).await), "/components/wukong-chat.js")
-            .await
-            .contains("javascript"));
-        assert!(content_type(build_router(state(None, &[]).await), "/components/wukong-settings.js")
-            .await
-            .contains("javascript"));
-        assert!(content_type(build_router(state(None, &[]).await), "/components/wukong-schedules.js")
-            .await
-            .contains("javascript"));
-        assert!(content_type(build_router(state(None, &[]).await), "/components/wukong-system.js")
-            .await
-            .contains("javascript"));
-        assert!(content_type(build_router(state(None, &[]).await), "/styles.css")
-            .await
-            .contains("css"));
+        assert!(
+            content_type(build_router(state(None, &[]).await), "/app.js")
+                .await
+                .contains("javascript")
+        );
+        assert!(
+            content_type(build_router(state(None, &[]).await), "/lib/html.js")
+                .await
+                .contains("javascript")
+        );
+        assert!(content_type(
+            build_router(state(None, &[]).await),
+            "/components/wukong-chat.js"
+        )
+        .await
+        .contains("javascript"));
+        assert!(content_type(
+            build_router(state(None, &[]).await),
+            "/components/wukong-settings.js"
+        )
+        .await
+        .contains("javascript"));
+        assert!(content_type(
+            build_router(state(None, &[]).await),
+            "/components/wukong-schedules.js"
+        )
+        .await
+        .contains("javascript"));
+        assert!(content_type(
+            build_router(state(None, &[]).await),
+            "/components/wukong-system.js"
+        )
+        .await
+        .contains("javascript"));
+        assert!(
+            content_type(build_router(state(None, &[]).await), "/styles.css")
+                .await
+                .contains("css")
+        );
     }
 
     #[tokio::test]
     async fn chat_requires_token_when_set() {
         let app = build_router(state(Some("sekret"), &["oracle", "ans"]).await);
         let resp = app
-            .oneshot(Request::builder().uri("/chat?q=hi").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/chat?q=hi")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -703,25 +809,43 @@ mod tests {
             .await
             .unwrap();
         let body = body_string(resp).await;
-        assert!(body.contains(r#"window.WUKONG_TOKEN = "sekret""#), "token not injected:\n{body}");
+        assert!(
+            body.contains(r#"window.WUKONG_TOKEN = "sekret""#),
+            "token not injected:\n{body}"
+        );
     }
 
     #[tokio::test]
     async fn chat_new_command_clears_session() {
         let app_state = state(None, &[]).await;
-        app_state.memory.set_agent_session("global", "ses_1").await.unwrap();
+        app_state
+            .memory
+            .set_agent_session("global", "ses_1")
+            .await
+            .unwrap();
         let app = build_router(app_state.clone());
         let resp = app
-            .oneshot(Request::builder().uri("/chat?q=/new").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/chat?q=/new")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         assert!(body.contains("event: answer"), "missing answer:\n{body}");
         assert!(body.contains("已開新"), "missing reply:\n{body}");
-        assert!(!body.contains("event: role"), "should not run a turn:\n{body}");
+        assert!(
+            !body.contains("event: role"),
+            "should not run a turn:\n{body}"
+        );
         assert!(body.contains("event: done"));
-        assert_eq!(app_state.memory.agent_session("global").await.unwrap(), None);
+        assert_eq!(
+            app_state.memory.agent_session("global").await.unwrap(),
+            None
+        );
     }
 
     struct ReasoningBackend {
@@ -729,14 +853,19 @@ mod tests {
     }
     impl AiBackend for ReasoningBackend {
         async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
-            Ok(AgentResponse { text: "答案".to_string(), session_id: None })
+            Ok(AgentResponse {
+                text: "答案".to_string(),
+                session_id: None,
+            })
         }
         async fn run_streaming(
             &self,
             req: AgentRequest,
             on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
         ) -> Result<AgentResponse, GatewayError> {
-            on_event(wukong_gateway::StreamEvent::Reasoning(self.reasoning.to_string()));
+            on_event(wukong_gateway::StreamEvent::Reasoning(
+                self.reasoning.to_string(),
+            ));
             self.run(req).await
         }
     }
@@ -759,7 +888,12 @@ mod tests {
     async fn settings_get_returns_default_state() {
         let app = build_router(state(None, &[]).await);
         let resp = app
-            .oneshot(Request::builder().uri("/api/settings").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -825,7 +959,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let saved = wukong_settings::load_settings(&settings_path).unwrap();
         assert_eq!(saved.telegram.token, "123:abc");
-        assert_eq!(saved.agent.default_model.as_deref(), Some("opencode/deepseek-v4-flash-free"));
+        assert_eq!(
+            saved.agent.default_model.as_deref(),
+            Some("opencode/deepseek-v4-flash-free")
+        );
     }
 
     #[tokio::test]
@@ -833,7 +970,12 @@ mod tests {
         let app = build_router(state(Some("sekret"), &[]).await);
 
         let resp = app
-            .oneshot(Request::builder().uri("/api/settings").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -844,7 +986,12 @@ mod tests {
     async fn chat_messages_requires_token_when_set() {
         let app = build_router(state(Some("sekret"), &[]).await);
         let resp = app
-            .oneshot(Request::builder().uri("/api/chat/messages").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/chat/messages")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -863,14 +1010,25 @@ mod tests {
         }
         let app = build_router(app_state);
         let resp = app
-            .oneshot(Request::builder().uri("/api/chat/messages").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/chat/messages")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         assert!(!body.contains("m0"), "body should omit oldest rows: {body}");
-        assert!(body.contains("m2"), "body should include first returned row: {body}");
-        assert!(body.contains("m11"), "body should include newest row: {body}");
+        assert!(
+            body.contains("m2"),
+            "body should include first returned row: {body}"
+        );
+        assert!(
+            body.contains("m11"),
+            "body should include newest row: {body}"
+        );
     }
 
     #[tokio::test]
@@ -901,7 +1059,10 @@ mod tests {
         let body = body_string(resp).await;
         assert!(body.contains("m0"), "body: {body}");
         assert!(body.contains("m9"), "body: {body}");
-        assert!(!body.contains("m10"), "body should omit boundary row: {body}");
+        assert!(
+            !body.contains("m10"),
+            "body should omit boundary row: {body}"
+        );
     }
 
     #[tokio::test]
@@ -910,7 +1071,12 @@ mod tests {
         let db_url = app_state.db_url.clone();
         let app = build_router(app_state.clone());
         let resp = app
-            .oneshot(Request::builder().uri("/chat?q=hi").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/chat?q=hi")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -919,7 +1085,9 @@ mod tests {
         let store = ChatHistoryStore::open(&db_url).await.unwrap();
         let thread = store.default_thread("global").await.unwrap();
         let messages = store.latest_messages(&thread, 10).await.unwrap();
-        assert!(messages.iter().any(|m| m.role == "user" && m.content == "hi"));
+        assert!(messages
+            .iter()
+            .any(|m| m.role == "user" && m.content == "hi"));
         assert!(messages.iter().any(|m| {
             m.role == "assistant"
                 && m.content == "**ans**"
@@ -932,11 +1100,19 @@ mod tests {
         let app_state = state(None, &[]).await;
         let store = ChatHistoryStore::open(&app_state.db_url).await.unwrap();
         let tg_thread = store.default_thread("user:tg-915354960").await.unwrap();
-        store.insert_message(&tg_thread, "user", "from tg", None, "complete", 123).await.unwrap();
+        store
+            .insert_message(&tg_thread, "user", "from tg", None, "complete", 123)
+            .await
+            .unwrap();
 
         let app = build_router(app_state);
         let resp = app
-            .oneshot(Request::builder().uri("/api/chat/scopes").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/chat/scopes")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -953,8 +1129,14 @@ mod tests {
         let store = ChatHistoryStore::open(&app_state.db_url).await.unwrap();
         let default_thread = store.default_thread(&app_state.scope).await.unwrap();
         let tg_thread = store.default_thread("user:tg-915354960").await.unwrap();
-        store.insert_message(&default_thread, "user", "from web", None, "complete", 100).await.unwrap();
-        store.insert_message(&tg_thread, "user", "from telegram", None, "complete", 101).await.unwrap();
+        store
+            .insert_message(&default_thread, "user", "from web", None, "complete", 100)
+            .await
+            .unwrap();
+        store
+            .insert_message(&tg_thread, "user", "from telegram", None, "complete", 101)
+            .await
+            .unwrap();
 
         let app = build_router(app_state);
         let resp = app
@@ -993,15 +1175,24 @@ mod tests {
         let store = ChatHistoryStore::open(&db_url).await.unwrap();
         let tg_thread = store.default_thread("user:tg-915354960").await.unwrap();
         let messages = store.latest_messages(&tg_thread, 10).await.unwrap();
-        assert!(messages.iter().any(|m| m.role == "user" && m.content == "hi"));
-        assert!(messages.iter().any(|m| m.role == "assistant" && m.content == "scoped answer"));
+        assert!(messages
+            .iter()
+            .any(|m| m.role == "user" && m.content == "hi"));
+        assert!(messages
+            .iter()
+            .any(|m| m.role == "assistant" && m.content == "scoped answer"));
     }
 
     #[tokio::test]
     async fn schedules_requires_token_when_set() {
         let app = build_router(state(Some("sekret"), &[]).await);
         let resp = app
-            .oneshot(Request::builder().uri("/api/schedules").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/schedules")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -1010,7 +1201,9 @@ mod tests {
     #[tokio::test]
     async fn schedules_list_enable_disable_delete() {
         let app_state = state(None, &[]).await;
-        let store = wukong_scheduler::SchedulerStore::open(&app_state.db_url).await.unwrap();
+        let store = wukong_scheduler::SchedulerStore::open(&app_state.db_url)
+            .await
+            .unwrap();
         let job = store
             .add_job(wukong_scheduler::NewJob {
                 name: "morning".to_string(),
@@ -1026,7 +1219,12 @@ mod tests {
 
         let resp = app
             .clone()
-            .oneshot(Request::builder().uri("/api/schedules").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/schedules")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1079,7 +1277,9 @@ mod tests {
     #[tokio::test]
     async fn system_returns_summary() {
         let app_state = state(Some("sekret"), &[]).await;
-        let store = wukong_scheduler::SchedulerStore::open(&app_state.db_url).await.unwrap();
+        let store = wukong_scheduler::SchedulerStore::open(&app_state.db_url)
+            .await
+            .unwrap();
         store
             .add_job(wukong_scheduler::NewJob {
                 name: "prune".to_string(),
@@ -1093,7 +1293,12 @@ mod tests {
             .unwrap();
         let app = build_router(app_state);
         let resp = app
-            .oneshot(Request::builder().uri("/api/system?token=sekret").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/system?token=sekret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1107,11 +1312,19 @@ mod tests {
     async fn chat_streams_reasoning_event() {
         let app = build_router(reasoning_state("想一下").await);
         let resp = app
-            .oneshot(Request::builder().uri("/chat?q=hi").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/chat?q=hi")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let body = body_string(resp).await;
-        assert!(body.contains("event: reasoning"), "missing reasoning event:\n{body}");
+        assert!(
+            body.contains("event: reasoning"),
+            "missing reasoning event:\n{body}"
+        );
         assert!(body.contains("想一下"), "missing reasoning text:\n{body}");
     }
 
@@ -1119,11 +1332,19 @@ mod tests {
     async fn chat_skips_empty_reasoning() {
         let app = build_router(reasoning_state("").await);
         let resp = app
-            .oneshot(Request::builder().uri("/chat?q=hi").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/chat?q=hi")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let body = body_string(resp).await;
-        assert!(!body.contains("event: reasoning"), "empty reasoning should be skipped:\n{body}");
+        assert!(
+            !body.contains("event: reasoning"),
+            "empty reasoning should be skipped:\n{body}"
+        );
     }
 
     #[tokio::test]
@@ -1131,14 +1352,25 @@ mod tests {
         // [0] planner -> "oracle" => single Oracle step; [1] execute -> markdown.
         let app = build_router(state(None, &["oracle", "**ans**"]).await);
         let resp = app
-            .oneshot(Request::builder().uri("/chat?q=hi").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/chat?q=hi")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         assert!(body.contains("event: role"), "missing role event:\n{body}");
-        assert!(body.contains("event: answer"), "missing answer event:\n{body}");
-        assert!(body.contains("<strong>ans</strong>"), "answer not rendered:\n{body}");
+        assert!(
+            body.contains("event: answer"),
+            "missing answer event:\n{body}"
+        );
+        assert!(
+            body.contains("<strong>ans</strong>"),
+            "answer not rendered:\n{body}"
+        );
         assert!(body.contains("event: done"), "missing done event:\n{body}");
     }
 
@@ -1159,7 +1391,12 @@ mod tests {
     async fn settings_route_serves_the_shell() {
         let app = build_router(state(None, &[]).await);
         let resp = app
-            .oneshot(Request::builder().uri("/settings").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/settings")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);

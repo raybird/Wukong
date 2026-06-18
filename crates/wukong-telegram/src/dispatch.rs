@@ -3,11 +3,11 @@
 use crate::client::TgClient;
 use crate::command::{classify_message, MessageAction};
 use crate::parse::{is_allowed, scope_for_chat, TgMessage};
+use wukong_chat_history::ChatHistoryStore;
 use wukong_cli::run_turn;
 use wukong_gateway::backend::AiBackend;
 use wukong_gateway::config::GatewayConfig;
 use wukong_gateway::StreamEvent;
-use wukong_chat_history::ChatHistoryStore;
 use wukong_memory::Memory;
 use wukong_orchestrator::Role;
 
@@ -54,7 +54,9 @@ async fn record_chat(
     content_html: Option<&str>,
     status: &str,
 ) {
-    let Some(history) = history else { return; };
+    let Some(history) = history else {
+        return;
+    };
     match history.default_thread(scope).await {
         Ok(thread) => {
             if let Err(e) = history
@@ -88,13 +90,22 @@ pub async fn handle_message<C, B>(
     }
     let chat_id = msg.chat_id;
     match classify_message(&msg.text) {
-        MessageAction::Command { name, .. } => {
+        MessageAction::Command { name, args } => {
             let mut cfg = base_cfg.clone();
             cfg.scope = scope_for_chat(chat_id);
             record_chat(history, &cfg.scope, "user", &msg.text, None, "complete").await;
-            match wukong_cli::parse_session_command(&name) {
+            let settings_path = wukong_settings::default_settings_path();
+            match wukong_cli::parse_session_command(&name, &args) {
                 Some(cmd) => {
-                    let reply = match wukong_cli::run_session_command(mem, backend, &cfg, cmd).await {
+                    let reply = match wukong_cli::run_session_command(
+                        mem,
+                        backend,
+                        &cfg,
+                        &settings_path,
+                        cmd,
+                    )
+                    .await
+                    {
                         Ok(t) => t,
                         Err(e) => format!("⚠️ 失敗：{e}"),
                     };
@@ -144,18 +155,27 @@ pub async fn handle_message<C, B>(
                             Progress::Role(r) => {
                                 role = Some(r.name().to_string());
                                 let _ = c
-                                    .edit_message_text(chat_id, mid, &bubble_text(role.as_deref(), &reasoning))
+                                    .edit_message_text(
+                                        chat_id,
+                                        mid,
+                                        &bubble_text(role.as_deref(), &reasoning),
+                                    )
                                     .await;
                             }
                             Progress::Reasoning(t) => {
                                 reasoning.push_str(&t);
                                 // Throttle reasoning edits (~1.5s) but never block
                                 // the first one (so it always shows up promptly).
-                                let due = last_reasoning_edit
-                                    .is_none_or(|i| i.elapsed() >= std::time::Duration::from_millis(1500));
+                                let due = last_reasoning_edit.is_none_or(|i| {
+                                    i.elapsed() >= std::time::Duration::from_millis(1500)
+                                });
                                 if due {
                                     let _ = c
-                                        .edit_message_text(chat_id, mid, &bubble_text(role.as_deref(), &reasoning))
+                                        .edit_message_text(
+                                            chat_id,
+                                            mid,
+                                            &bubble_text(role.as_deref(), &reasoning),
+                                        )
                                         .await;
                                     last_reasoning_edit = Some(std::time::Instant::now());
                                 }
@@ -191,7 +211,15 @@ pub async fn handle_message<C, B>(
             match result {
                 Ok(out) => {
                     let html = wukong_render::to_web_html(&out.text);
-                    record_chat(history, &cfg.scope, "assistant", &out.text, Some(&html), "complete").await;
+                    record_chat(
+                        history,
+                        &cfg.scope,
+                        "assistant",
+                        &out.text,
+                        Some(&html),
+                        "complete",
+                    )
+                    .await;
                     let chunks = wukong_render::to_telegram_html(&out.text);
                     let _ = client.delete_message(chat_id, mid).await;
                     if chunks.is_empty() {
@@ -227,7 +255,9 @@ mod tests {
     }
     impl MockBackend {
         fn new(r: &[&str]) -> Self {
-            Self { replies: Mutex::new(r.iter().map(|s| s.to_string()).collect()) }
+            Self {
+                replies: Mutex::new(r.iter().map(|s| s.to_string()).collect()),
+            }
         }
     }
     impl AiBackend for MockBackend {
@@ -266,7 +296,11 @@ mod tests {
         let client = MockTgClient::default();
         let mem = open_memory().await;
         let backend = MockBackend::new(&["oracle", "answer"]);
-        let msg = TgMessage { update_id: 1, chat_id: 999, text: "hi".to_string() };
+        let msg = TgMessage {
+            update_id: 1,
+            chat_id: 999,
+            text: "hi".to_string(),
+        };
         handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
         // No reply, no work.
         assert!(client.sent.lock().unwrap().is_empty());
@@ -278,7 +312,11 @@ mod tests {
         let mem = open_memory().await;
         // planner -> single role; then execute answer with markdown.
         let backend = MockBackend::new(&["oracle", "**重點** 答案"]);
-        let msg = TgMessage { update_id: 1, chat_id: 12, text: "什麼是 BM25".to_string() };
+        let msg = TgMessage {
+            update_id: 1,
+            chat_id: 12,
+            text: "什麼是 BM25".to_string(),
+        };
         handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
 
         // Status bubble edited per role, then deleted.
@@ -288,7 +326,9 @@ mod tests {
         // Final answer sent as rendered HTML.
         {
             let sent = client.sent.lock().unwrap();
-            assert!(sent.iter().any(|s| s.html && s.text.contains("<b>重點</b>")));
+            assert!(sent
+                .iter()
+                .any(|s| s.html && s.text.contains("<b>重點</b>")));
         }
 
         // Stored under the per-chat scope.
@@ -308,38 +348,79 @@ mod tests {
     async fn turn_records_telegram_user_and_assistant_messages_in_chat_history() {
         let client = MockTgClient::default();
         let (mem, db_url) = open_memory_with_url().await;
-        let history = wukong_chat_history::ChatHistoryStore::open(&db_url).await.unwrap();
+        let history = wukong_chat_history::ChatHistoryStore::open(&db_url)
+            .await
+            .unwrap();
         let backend = MockBackend::new(&["oracle", "telegram answer"]);
-        let msg = TgMessage { update_id: 1, chat_id: 12, text: "hello from tg".to_string() };
+        let msg = TgMessage {
+            update_id: 1,
+            chat_id: 12,
+            text: "hello from tg".to_string(),
+        };
 
-        handle_message(&client, &mem, &base_cfg(), &backend, Some(&history), &[12], &msg).await;
+        handle_message(
+            &client,
+            &mem,
+            &base_cfg(),
+            &backend,
+            Some(&history),
+            &[12],
+            &msg,
+        )
+        .await;
 
         let thread = history.default_thread(&scope_for_chat(12)).await.unwrap();
         let messages = history.latest_messages(&thread, 10).await.unwrap();
-        assert!(messages.iter().any(|m| m.role == "user" && m.content == "hello from tg"));
-        assert!(messages.iter().any(|m| m.role == "assistant" && m.content == "telegram answer"));
+        assert!(messages
+            .iter()
+            .any(|m| m.role == "user" && m.content == "hello from tg"));
+        assert!(messages
+            .iter()
+            .any(|m| m.role == "assistant" && m.content == "telegram answer"));
     }
 
     #[tokio::test]
     async fn command_records_telegram_user_and_reply_messages_in_chat_history() {
         let client = MockTgClient::default();
         let (mem, db_url) = open_memory_with_url().await;
-        let history = wukong_chat_history::ChatHistoryStore::open(&db_url).await.unwrap();
+        let history = wukong_chat_history::ChatHistoryStore::open(&db_url)
+            .await
+            .unwrap();
         let backend = MockBackend::new(&[]);
-        let msg = TgMessage { update_id: 1, chat_id: 12, text: "/new".to_string() };
+        let msg = TgMessage {
+            update_id: 1,
+            chat_id: 12,
+            text: "/new".to_string(),
+        };
 
-        handle_message(&client, &mem, &base_cfg(), &backend, Some(&history), &[12], &msg).await;
+        handle_message(
+            &client,
+            &mem,
+            &base_cfg(),
+            &backend,
+            Some(&history),
+            &[12],
+            &msg,
+        )
+        .await;
 
         let thread = history.default_thread(&scope_for_chat(12)).await.unwrap();
         let messages = history.latest_messages(&thread, 10).await.unwrap();
-        assert!(messages.iter().any(|m| m.role == "user" && m.content == "/new"));
-        assert!(messages.iter().any(|m| m.role == "assistant" && m.content.contains("已開新")));
+        assert!(messages
+            .iter()
+            .any(|m| m.role == "user" && m.content == "/new"));
+        assert!(messages
+            .iter()
+            .any(|m| m.role == "assistant" && m.content.contains("已開新")));
     }
 
     struct ReasoningBackend;
     impl AiBackend for ReasoningBackend {
         async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
-            Ok(AgentResponse { text: "答案".to_string(), session_id: None })
+            Ok(AgentResponse {
+                text: "答案".to_string(),
+                session_id: None,
+            })
         }
         async fn run_streaming(
             &self,
@@ -356,11 +437,17 @@ mod tests {
         let client = MockTgClient::default();
         let mem = open_memory().await;
         let backend = ReasoningBackend;
-        let msg = TgMessage { update_id: 1, chat_id: 12, text: "hi".to_string() };
+        let msg = TgMessage {
+            update_id: 1,
+            chat_id: 12,
+            text: "hi".to_string(),
+        };
         handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
         let edits = client.edits.lock().unwrap();
         assert!(
-            edits.iter().any(|(_, _, t)| t.contains("💭") && t.contains("想一下")),
+            edits
+                .iter()
+                .any(|(_, _, t)| t.contains("💭") && t.contains("想一下")),
             "no reasoning edit: {edits:?}"
         );
     }
@@ -370,7 +457,11 @@ mod tests {
         let client = MockTgClient::default();
         let mem = open_memory().await;
         let backend = MockBackend::new(&["oracle", "答案"]);
-        let msg = TgMessage { update_id: 1, chat_id: 12, text: "hi".to_string() };
+        let msg = TgMessage {
+            update_id: 1,
+            chat_id: 12,
+            text: "hi".to_string(),
+        };
         handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
 
         // The first send is the plain status bubble.
@@ -385,9 +476,15 @@ mod tests {
     async fn new_command_clears_session_and_replies() {
         let client = MockTgClient::default();
         let mem = open_memory().await;
-        mem.set_agent_session(&scope_for_chat(12), "ses_1").await.unwrap();
+        mem.set_agent_session(&scope_for_chat(12), "ses_1")
+            .await
+            .unwrap();
         let backend = MockBackend::new(&[]);
-        let msg = TgMessage { update_id: 1, chat_id: 12, text: "/new".to_string() };
+        let msg = TgMessage {
+            update_id: 1,
+            chat_id: 12,
+            text: "/new".to_string(),
+        };
         handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
         {
             let sent = client.sent.lock().unwrap();
@@ -401,7 +498,11 @@ mod tests {
         let client = MockTgClient::default();
         let mem = open_memory().await;
         let backend = MockBackend::new(&[]);
-        let msg = TgMessage { update_id: 1, chat_id: 12, text: "/model gpt".to_string() };
+        let msg = TgMessage {
+            update_id: 1,
+            chat_id: 12,
+            text: "/model gpt".to_string(),
+        };
         handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
         let sent = client.sent.lock().unwrap();
         assert!(sent.iter().any(|s| s.text.contains("尚未支援")));
@@ -412,9 +513,15 @@ mod tests {
         let client = MockTgClient::default();
         let mem = open_memory().await;
         let backend = MockBackend::new(&[]);
-        let msg = TgMessage { update_id: 1, chat_id: 12, text: "/reset".to_string() };
+        let msg = TgMessage {
+            update_id: 1,
+            chat_id: 12,
+            text: "/reset".to_string(),
+        };
         handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
         let sent = client.sent.lock().unwrap();
-        assert!(sent.iter().any(|s| s.chat_id == 12 && s.text.contains("尚未支援")));
+        assert!(sent
+            .iter()
+            .any(|s| s.chat_id == 12 && s.text.contains("尚未支援")));
     }
 }

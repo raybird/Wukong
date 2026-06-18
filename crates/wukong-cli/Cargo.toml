@@ -16,6 +16,7 @@ wukong-runtime = { path = "../wukong-runtime" }
 wukong-scheduler = { path = "../wukong-scheduler" }
 wukong-memory = { path = "../wukong-memory" }
 wukong-gateway = { path = "../wukong-gateway" }
+wukong-settings = { path = "../wukong-settings" }
 tokio = { workspace = true }
 clap = { workspace = true }
 

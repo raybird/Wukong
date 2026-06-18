@@ -9,7 +9,9 @@ use wukong_gateway::workspace_dir;
 use wukong_gateway::StreamEvent;
 use wukong_memory::Memory;
 use wukong_runtime::maintenance::{memory_consolidate, memory_prune, memory_snapshot};
-use wukong_scheduler::{execute_job, ExecutionContext, Job, JobKind, MaintenanceTask, NewJob, RunStatus, SchedulerStore};
+use wukong_scheduler::{
+    execute_job, ExecutionContext, Job, JobKind, MaintenanceTask, NewJob, RunStatus, SchedulerStore,
+};
 
 #[tokio::main]
 async fn main() {
@@ -91,7 +93,16 @@ async fn main() {
                     cfg_repl.scope = s;
                 }
                 LineAction::Command(cmd) => {
-                    match wukong_cli::run_session_command(&memory, &backend, &cfg_repl, cmd).await {
+                    let settings_path = wukong_settings::default_settings_path();
+                    match wukong_cli::run_session_command(
+                        &memory,
+                        &backend,
+                        &cfg_repl,
+                        &settings_path,
+                        cmd,
+                    )
+                    .await
+                    {
                         Ok(reply) => println!("{reply}"),
                         Err(e) => eprintln!("error: {e}"),
                     }
@@ -136,50 +147,106 @@ async fn run_schedule_op(
                 );
             }
         }
-        ScheduleOp::AddTurn { name, cron, scope, prompt } => {
+        ScheduleOp::AddTurn {
+            name,
+            cron,
+            scope,
+            prompt,
+        } => {
             let job = store
                 .add_job(NewJob {
                     name: name.clone(),
-                    kind: JobKind::Turn { scope: scope.clone(), prompt: prompt.clone() },
+                    kind: JobKind::Turn {
+                        scope: scope.clone(),
+                        prompt: prompt.clone(),
+                    },
                     cron: cron.clone(),
                 })
                 .await
                 .map_err(to_wukong_error)?;
-            println!("已建立排程: {} next={}", job.id, format_opt_ts(job.next_run_at));
+            println!(
+                "已建立排程: {} next={}",
+                job.id,
+                format_opt_ts(job.next_run_at)
+            );
         }
-        ScheduleOp::AddMaintenance { name, cron, scope, task } => {
+        ScheduleOp::AddMaintenance {
+            name,
+            cron,
+            scope,
+            task,
+        } => {
             let job = store
                 .add_job(NewJob {
                     name: name.clone(),
-                    kind: JobKind::Maintenance { scope: scope.clone(), task: map_maintenance_task(*task) },
+                    kind: JobKind::Maintenance {
+                        scope: scope.clone(),
+                        task: map_maintenance_task(*task),
+                    },
                     cron: cron.clone(),
                 })
                 .await
                 .map_err(to_wukong_error)?;
-            println!("已建立排程: {} next={}", job.id, format_opt_ts(job.next_run_at));
+            println!(
+                "已建立排程: {} next={}",
+                job.id,
+                format_opt_ts(job.next_run_at)
+            );
         }
         ScheduleOp::Rm { id } => {
             let removed = store.remove_job(id).await.map_err(to_wukong_error)?;
-            println!("{}", if removed { "已刪除排程" } else { "找不到排程" });
+            println!(
+                "{}",
+                if removed {
+                    "已刪除排程"
+                } else {
+                    "找不到排程"
+                }
+            );
         }
         ScheduleOp::Enable { id } => {
             let changed = store.set_enabled(id, true).await.map_err(to_wukong_error)?;
-            println!("{}", if changed { "已啟用排程" } else { "找不到排程" });
+            println!(
+                "{}",
+                if changed {
+                    "已啟用排程"
+                } else {
+                    "找不到排程"
+                }
+            );
         }
         ScheduleOp::Disable { id } => {
-            let changed = store.set_enabled(id, false).await.map_err(to_wukong_error)?;
-            println!("{}", if changed { "已停用排程" } else { "找不到排程" });
+            let changed = store
+                .set_enabled(id, false)
+                .await
+                .map_err(to_wukong_error)?;
+            println!(
+                "{}",
+                if changed {
+                    "已停用排程"
+                } else {
+                    "找不到排程"
+                }
+            );
         }
         ScheduleOp::Trigger { id } => {
             let worker_id = format!("manual-{}", std::process::id());
-            let Some(job) = store.claim_job(id, now_unix(), &worker_id, 300).await.map_err(to_wukong_error)? else {
+            let Some(job) = store
+                .claim_job(id, now_unix(), &worker_id, 300)
+                .await
+                .map_err(to_wukong_error)?
+            else {
                 println!("找不到排程");
                 return Ok(());
             };
             trigger_job(&store, memory, backend, cfg, &job, &worker_id).await?;
         }
         ScheduleOp::Runs { id, limit } => {
-            for run in store.recent_runs(id.as_deref(), *limit).await.map_err(to_wukong_error)? {
+            for run in store
+                .recent_runs(id.as_deref(), *limit)
+                .await
+                .map_err(to_wukong_error)?
+            {
                 println!(
                     "{}\tjob={}\tstatus={}\tstarted={}\tfinished={}\t{}",
                     run.id,
@@ -204,20 +271,41 @@ async fn trigger_job(
     worker_id: &str,
 ) -> Result<(), wukong_cli::WukongError> {
     let started_at = now_unix();
-    let run_id = store.start_run(&job.id, started_at).await.map_err(to_wukong_error)?;
-    let ctx = ExecutionContext { memory, backend, base_config: cfg };
+    let run_id = store
+        .start_run(&job.id, started_at)
+        .await
+        .map_err(to_wukong_error)?;
+    let ctx = ExecutionContext {
+        memory,
+        backend,
+        base_config: cfg,
+    };
     let output = execute_job(&ctx, job).await;
     let finished_at = now_unix();
-    let status = if output.success { RunStatus::Success } else { RunStatus::Failure };
+    let status = if output.success {
+        RunStatus::Success
+    } else {
+        RunStatus::Failure
+    };
     store
         .finish_run(run_id, status, &output.message, finished_at)
         .await
         .map_err(to_wukong_error)?;
-    if !store.complete_claimed_job(job, worker_id, finished_at).await.map_err(to_wukong_error)? {
-        return Err(to_wukong_error_string("排程 lease 已被其他 worker 接手".to_string()));
+    if !store
+        .complete_claimed_job(job, worker_id, finished_at)
+        .await
+        .map_err(to_wukong_error)?
+    {
+        return Err(to_wukong_error_string(
+            "排程 lease 已被其他 worker 接手".to_string(),
+        ));
     }
     println!("{}", output.message);
-    if output.success { Ok(()) } else { Err(to_wukong_error_string(output.message)) }
+    if output.success {
+        Ok(())
+    } else {
+        Err(to_wukong_error_string(output.message))
+    }
 }
 
 fn map_maintenance_task(task: ScheduleMaintenanceTaskArg) -> MaintenanceTask {
@@ -232,7 +320,10 @@ fn describe_job_kind(kind: &JobKind) -> String {
     match kind {
         JobKind::Turn { scope, .. } => format!("turn(scope={scope})"),
         JobKind::Maintenance { scope, task } => {
-            format!("maintenance(task={task:?},scope={})", scope.as_deref().unwrap_or("<all>"))
+            format!(
+                "maintenance(task={task:?},scope={})",
+                scope.as_deref().unwrap_or("<all>")
+            )
         }
     }
 }
@@ -307,10 +398,16 @@ async fn run_memory_op(
         }
         MemoryOp::Consolidate { scope, dry_run } => {
             let scope = scope.clone().unwrap_or_else(|| cfg.scope.clone());
-            println!("{}", memory_consolidate(memory, backend, &scope, *dry_run).await?);
+            println!(
+                "{}",
+                memory_consolidate(memory, backend, &scope, *dry_run).await?
+            );
         }
         MemoryOp::Prune { scope, dry_run } => {
-            println!("{}", memory_prune(memory, scope.as_deref(), *dry_run).await?);
+            println!(
+                "{}",
+                memory_prune(memory, scope.as_deref(), *dry_run).await?
+            );
         }
         MemoryOp::Export { dir } => {
             let dir = dir
