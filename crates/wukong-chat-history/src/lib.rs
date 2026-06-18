@@ -12,6 +12,14 @@ pub struct ChatMessage {
     pub created_at: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChatScope {
+    pub scope: String,
+    pub label: String,
+    pub message_count: i64,
+    pub updated_at: i64,
+}
+
 pub struct ChatHistoryStore {
     pool: SqlitePool,
 }
@@ -106,11 +114,7 @@ impl ChatHistoryStore {
         Ok(row.get("id"))
     }
 
-    pub async fn latest_messages(
-        &self,
-        thread_id: &str,
-        limit: i64,
-    ) -> Result<Vec<ChatMessage>, sqlx::Error> {
+    pub async fn latest_messages(&self, thread_id: &str, limit: i64) -> Result<Vec<ChatMessage>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT * FROM (
                  SELECT id, thread_id, role, content, content_html, status, created_at
@@ -172,6 +176,56 @@ impl ChatHistoryStore {
         .await?;
         Ok(rows.into_iter().map(row_to_message).collect())
     }
+
+    pub async fn list_scopes(&self, default_scope: &str) -> Result<Vec<ChatScope>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT t.scope AS scope,
+                    COALESCE(MAX(t.updated_at), 0) AS updated_at,
+                    COUNT(m.id) AS message_count
+             FROM chat_threads t
+             LEFT JOIN chat_messages m ON m.thread_id = t.id
+             GROUP BY t.scope
+             ORDER BY updated_at DESC, scope ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut scopes: Vec<ChatScope> = rows
+            .into_iter()
+            .map(|row| {
+                let scope: String = row.get("scope");
+                ChatScope {
+                    label: scope_label(&scope),
+                    scope,
+                    message_count: row.get("message_count"),
+                    updated_at: row.get("updated_at"),
+                }
+            })
+            .collect();
+
+        if !scopes.iter().any(|s| s.scope == default_scope) {
+            scopes.push(ChatScope {
+                scope: default_scope.to_string(),
+                label: scope_label(default_scope),
+                message_count: 0,
+                updated_at: 0,
+            });
+        }
+
+        Ok(scopes)
+    }
+}
+
+pub fn scope_label(scope: &str) -> String {
+    if let Some(id) = scope.strip_prefix("user:tg-") {
+        format!("Telegram {id}")
+    } else if let Some(project) = scope.strip_prefix("project:") {
+        format!("Project {project}")
+    } else if scope == "global" {
+        "Global".to_string()
+    } else {
+        scope.to_string()
+    }
 }
 
 fn row_to_message(row: sqlx::sqlite::SqliteRow) -> ChatMessage {
@@ -219,10 +273,7 @@ mod tests {
         let store = store().await;
         let thread = store.default_thread("global").await.unwrap();
         for i in 0..12 {
-            store
-                .insert_message(&thread, "user", &format!("m{i}"), None, "complete", 100 + i)
-                .await
-                .unwrap();
+            store.insert_message(&thread, "user", &format!("m{i}"), None, "complete", 100 + i).await.unwrap();
         }
 
         let messages = store.latest_messages(&thread, 10).await.unwrap();
@@ -237,10 +288,7 @@ mod tests {
         let thread = store.default_thread("global").await.unwrap();
         let mut ids = Vec::new();
         for i in 0..12 {
-            let id = store
-                .insert_message(&thread, "user", &format!("m{i}"), None, "complete", 100 + i)
-                .await
-                .unwrap();
+            let id = store.insert_message(&thread, "user", &format!("m{i}"), None, "complete", 100 + i).await.unwrap();
             ids.push(id);
         }
 
@@ -257,23 +305,35 @@ mod tests {
         store.insert_message(&thread, "user", "old", None, "complete", 9).await.unwrap();
         store.insert_message(&thread, "user", "in", None, "complete", 10).await.unwrap();
         store
-            .insert_message(
-                &thread,
-                "assistant",
-                "also in",
-                Some("<p>also in</p>"),
-                "complete",
-                19,
-            )
+            .insert_message(&thread, "assistant", "also in", Some("<p>also in</p>"), "complete", 19)
             .await
             .unwrap();
         store.insert_message(&thread, "user", "new", None, "complete", 20).await.unwrap();
 
         let messages = store.messages_for_date(&thread, 10, 20, 10).await.unwrap();
-        assert_eq!(
-            messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(),
-            vec!["in", "also in"]
-        );
+        assert_eq!(messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), vec!["in", "also in"]);
         assert_eq!(messages[1].content_html.as_deref(), Some("<p>also in</p>"));
+    }
+
+    #[tokio::test]
+    async fn list_scopes_includes_existing_and_empty_default() {
+        let store = store().await;
+        let tg = store.default_thread("user:tg-915354960").await.unwrap();
+        store.insert_message(&tg, "user", "hi", None, "complete", 10).await.unwrap();
+
+        let scopes = store.list_scopes("global").await.unwrap();
+
+        assert!(scopes.iter().any(|s| {
+            s.scope == "user:tg-915354960" && s.label == "Telegram 915354960" && s.message_count == 1 && s.updated_at == 10
+        }));
+        assert!(scopes.iter().any(|s| s.scope == "global" && s.label == "Global" && s.message_count == 0));
+    }
+
+    #[test]
+    fn labels_known_scope_prefixes() {
+        assert_eq!(scope_label("user:tg-12"), "Telegram 12");
+        assert_eq!(scope_label("project:Wukong"), "Project Wukong");
+        assert_eq!(scope_label("global"), "Global");
+        assert_eq!(scope_label("agent:fixer"), "agent:fixer");
     }
 }

@@ -1,11 +1,9 @@
 //! wukong-web: a zero-build browser console for Wukong. Reuses run_turn and
 //! streams role progress + the rendered answer over SSE.
 
-pub mod chat_history;
 pub mod schedule_api;
 pub mod system_api;
 
-use chat_history::ChatHistoryStore;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
@@ -21,6 +19,7 @@ use wukong_gateway::config::GatewayConfig;
 use wukong_memory::Memory;
 use wukong_scheduler::SchedulerStore;
 use wukong_settings::{Settings, TelegramSettings};
+use wukong_chat_history::{ChatHistoryStore, ChatMessage};
 
 /// Shared router state. Generic over the backend so tests inject a mock.
 pub struct AppState<B: AiBackend> {
@@ -132,7 +131,7 @@ struct ChatMessagesQuery {
 
 #[derive(serde::Serialize)]
 struct ChatMessagesResponse {
-    messages: Vec<chat_history::ChatMessage>,
+    messages: Vec<ChatMessage>,
     has_more: bool,
 }
 
@@ -784,7 +783,7 @@ mod tests {
     #[tokio::test]
     async fn chat_messages_returns_latest_ten() {
         let app_state = state(None, &[]).await;
-        let store = crate::chat_history::ChatHistoryStore::open(&app_state.db_url).await.unwrap();
+        let store = ChatHistoryStore::open(&app_state.db_url).await.unwrap();
         let thread = store.default_thread(&app_state.scope).await.unwrap();
         for i in 0..12 {
             store
@@ -807,7 +806,7 @@ mod tests {
     #[tokio::test]
     async fn chat_messages_before_returns_older_ten() {
         let app_state = state(None, &[]).await;
-        let store = crate::chat_history::ChatHistoryStore::open(&app_state.db_url).await.unwrap();
+        let store = ChatHistoryStore::open(&app_state.db_url).await.unwrap();
         let thread = store.default_thread(&app_state.scope).await.unwrap();
         let mut ids = Vec::new();
         for i in 0..12 {
@@ -847,7 +846,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let _ = body_string(resp).await;
 
-        let store = crate::chat_history::ChatHistoryStore::open(&db_url).await.unwrap();
+        let store = ChatHistoryStore::open(&db_url).await.unwrap();
         let thread = store.default_thread("global").await.unwrap();
         let messages = store.latest_messages(&thread, 10).await.unwrap();
         assert!(messages.iter().any(|m| m.role == "user" && m.content == "hi"));

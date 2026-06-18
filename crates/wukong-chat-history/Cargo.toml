@@ -1,0 +1,16 @@
+[package]
+name = "wukong-chat-history"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "wukong_chat_history"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+sqlx = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }

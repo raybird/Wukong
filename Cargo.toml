@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/wukong-memory", "crates/wukong-memoryd", "crates/wukong-gateway", "crates/wukong-orchestrator", "crates/wukong-skills", "crates/wukong-runtime", "crates/wukong-scheduler", "crates/wukong-schedulerd", "crates/wukong-cli", "crates/wukong-telegram", "crates/wukong-tg-client", "crates/wukong-render", "crates/wukong-web", "crates/wukong-settings"]
+members = ["crates/wukong-memory", "crates/wukong-memoryd", "crates/wukong-gateway", "crates/wukong-orchestrator", "crates/wukong-skills", "crates/wukong-runtime", "crates/wukong-scheduler", "crates/wukong-schedulerd", "crates/wukong-cli", "crates/wukong-telegram", "crates/wukong-tg-client", "crates/wukong-render", "crates/wukong-web", "crates/wukong-settings", "crates/wukong-chat-history"]
 
 [workspace.package]
 edition = "2021"

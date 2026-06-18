@@ -19,6 +19,7 @@ wukong-orchestrator = { path = "../wukong-orchestrator" }
 wukong-render = { path = "../wukong-render" }
 wukong-settings = { path = "../wukong-settings" }
 wukong-scheduler = { path = "../wukong-scheduler" }
+wukong-chat-history = { path = "../wukong-chat-history" }
 axum = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true }
