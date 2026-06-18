@@ -6,6 +6,7 @@
 //! (e.g. `project:X` created from the CLI) are never delivered to a chat.
 
 use wukong_scheduler::{ExecutionOutput, Job, JobKind};
+use wukong_chat_history::ChatHistoryStore;
 use wukong_tg_client::client::TgClient;
 use wukong_tg_client::error::TgError;
 use wukong_tg_client::parse::chat_id_from_scope;
@@ -15,6 +16,29 @@ use wukong_tg_client::parse::chat_id_from_scope;
 fn failure_summary(message: &str) -> String {
     let line = message.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
     line.chars().take(300).collect()
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+async fn record_history(history: Option<&ChatHistoryStore>, scope: &str, content: &str, status: &str) {
+    let Some(history) = history else { return; };
+    match history.default_thread(scope).await {
+        Ok(thread) => {
+            let html = wukong_render::to_web_html(content);
+            if let Err(e) = history
+                .insert_message(&thread, "assistant", content, Some(&html), status, now_unix())
+                .await
+            {
+                eprintln!("warning: scheduler chat history insert failed: {e}");
+            }
+        }
+        Err(e) => eprintln!("warning: scheduler chat history thread failed: {e}"),
+    }
 }
 
 /// If `job` is a Telegram-originated Turn job, deliver its result to the chat.
@@ -58,6 +82,37 @@ pub async fn notify_turn_result<C: TgClient + Sync>(
     Ok(true)
 }
 
+pub async fn notify_turn_result_with_history<C: TgClient + Sync>(
+    client: &C,
+    history: Option<&ChatHistoryStore>,
+    job: &Job,
+    output: &ExecutionOutput,
+) -> Result<bool, TgError> {
+    let JobKind::Turn { scope, .. } = &job.kind else {
+        return Ok(false);
+    };
+    let Some(_chat_id) = chat_id_from_scope(scope) else {
+        return Ok(false);
+    };
+
+    let content = if output.success {
+        if output.message.trim().is_empty() {
+            format!("⏰ {}（無內容）", job.name)
+        } else {
+            format!("⏰ {}\n\n{}", job.name, output.message)
+        }
+    } else {
+        format!("⏰ {} 執行失敗：{}", job.name, failure_summary(&output.message))
+    };
+    let status = if output.success { "complete" } else { "error" };
+
+    let sent = notify_turn_result(client, job, output).await?;
+    if sent {
+        record_history(history, scope, &content, status).await;
+    }
+    Ok(sent)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,6 +135,13 @@ mod tests {
         ExecutionOutput { success: true, message: message.to_string() }
     }
 
+    async fn history() -> (wukong_chat_history::ChatHistoryStore, String) {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite://{}", f.path().display());
+        std::mem::forget(f);
+        (wukong_chat_history::ChatHistoryStore::open(&url).await.unwrap(), url)
+    }
+
     #[tokio::test]
     async fn delivers_success_result_as_html_with_header() {
         let client = MockTgClient::default();
@@ -93,6 +155,26 @@ mod tests {
         assert!(log[0].html);
         assert!(log[0].text.contains("⏰ 晨間報告"));
         assert!(log[0].text.contains("今天一切正常"));
+    }
+
+    #[tokio::test]
+    async fn records_scheduled_telegram_result_in_chat_history() {
+        let client = MockTgClient::default();
+        let (history, _url) = history().await;
+        let job = turn_job("user:tg-555");
+
+        let sent = notify_turn_result_with_history(&client, Some(&history), &job, &ok("今天一切正常"))
+            .await
+            .unwrap();
+
+        assert!(sent);
+        let thread = history.default_thread("user:tg-555").await.unwrap();
+        let messages = history.latest_messages(&thread, 10).await.unwrap();
+        assert!(messages.iter().any(|m| {
+            m.role == "assistant"
+                && m.content.contains("⏰ 晨間報告")
+                && m.content.contains("今天一切正常")
+        }));
     }
 
     #[tokio::test]

@@ -7,6 +7,7 @@ use tokio::time::interval;
 use wukong_gateway::backend::AgentCliBackend;
 use wukong_gateway::config::{default_scope, GatewayConfig};
 use wukong_gateway::workspace_dir;
+use wukong_chat_history::ChatHistoryStore;
 use wukong_memory::Memory;
 use wukong_scheduler::{execute_job, ExecutionContext, RunStatus, SchedulerStore};
 use wukong_tg_client::client::ReqwestTgClient;
@@ -51,11 +52,18 @@ async fn run(cli: Cli) -> Result<(), String> {
     let memory = open_memory(&cfg).await?;
     let backend = AgentCliBackend { command: cfg.agent_command.clone(), workspace: workspace_dir() };
     let store = SchedulerStore::open(&cfg.db_url).await.map_err(|e| e.to_string())?;
+    let history = match ChatHistoryStore::open(&cfg.db_url).await {
+        Ok(store) => Some(store),
+        Err(e) => {
+            eprintln!("warning: chat history disabled for scheduler: {e}");
+            None
+        }
+    };
     let worker_id = format!("schedulerd-{}-{}", std::process::id(), uuid::Uuid::new_v4());
     let notifier = build_notifier();
 
     if cli.once {
-        run_scan(&store, &memory, &backend, &cfg, &worker_id, cli.lease_secs, cli.limit, notifier.as_ref()).await?;
+        run_scan(&store, &memory, &backend, &cfg, &worker_id, cli.lease_secs, cli.limit, notifier.as_ref(), history.as_ref()).await?;
         return Ok(());
     }
 
@@ -63,7 +71,7 @@ async fn run(cli: Cli) -> Result<(), String> {
     loop {
         tokio::select! {
             _ = ticks.tick() => {
-                if let Err(e) = run_scan(&store, &memory, &backend, &cfg, &worker_id, cli.lease_secs, cli.limit, notifier.as_ref()).await {
+                if let Err(e) = run_scan(&store, &memory, &backend, &cfg, &worker_id, cli.lease_secs, cli.limit, notifier.as_ref(), history.as_ref()).await {
                     eprintln!("warning: scheduler scan failed: {e}");
                 }
             }
@@ -86,6 +94,7 @@ async fn run_scan(
     lease_secs: i64,
     limit: i64,
     notifier: Option<&ReqwestTgClient>,
+    history: Option<&ChatHistoryStore>,
 ) -> Result<(), String> {
     let now = now_unix();
     let jobs = store.claim_due_jobs(now, worker_id, lease_secs, limit).await.map_err(|e| e.to_string())?;
@@ -112,7 +121,7 @@ async fn run_scan(
         // Best-effort delivery to the originating Telegram chat; a push failure
         // must not fail the job (which already ran and is recorded).
         if let Some(client) = notifier {
-            match notify::notify_turn_result(client, &job, &output).await {
+            match notify::notify_turn_result_with_history(client, history, &job, &output).await {
                 Ok(true) => eprintln!("job {} result delivered to telegram", job.id),
                 Ok(false) => {}
                 Err(e) => eprintln!("warning: telegram delivery for job {} failed: {e}", job.id),
