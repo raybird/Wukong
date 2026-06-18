@@ -853,6 +853,44 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn chat_set_models_command_persists_model_and_records_history() {
+        let app_state = state(None, &[]).await;
+        let settings_path = app_state.settings_path.clone();
+        let db_url = app_state.db_url.clone();
+        let app = build_router(app_state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/chat?q=/set_models%20opencode/deepseek-v4-flash-free")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains("已設定預設模型"), "body: {body}");
+
+        let saved = wukong_settings::load_settings(&settings_path).unwrap();
+        assert_eq!(
+            saved.agent.default_model.as_deref(),
+            Some("opencode/deepseek-v4-flash-free")
+        );
+
+        let store = ChatHistoryStore::open(&db_url).await.unwrap();
+        let thread = store.default_thread("global").await.unwrap();
+        let messages = store.latest_messages(&thread, 10).await.unwrap();
+        assert!(messages
+            .iter()
+            .any(|m| m.role == "user" && m.content.contains("/set_models")));
+        assert!(messages
+            .iter()
+            .any(|m| m.role == "assistant" && m.content.contains("已設定預設模型")));
+    }
+
     struct ReasoningBackend {
         reasoning: &'static str,
     }
