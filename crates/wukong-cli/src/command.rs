@@ -38,7 +38,7 @@ pub async fn run_session_command(
         SessionCommand::Compact => match memory.agent_session(&cfg.scope).await? {
             None => Ok("🐵 尚無對話可壓縮".to_string()),
             Some(id) => {
-                let text = run_turn_session_passthrough(backend, &id).await?;
+                let text = run_turn_session_passthrough(backend, &id, "/compact").await?;
                 Ok(format!("🐵 已送出壓縮指令：\n{text}"))
             }
         },

@@ -114,11 +114,12 @@ pub async fn run_turn(
 pub async fn run_turn_session_passthrough(
     backend: &impl AiBackend,
     session_id: &str,
+    command: &str,
 ) -> Result<String, WukongError> {
     let resp = backend
         .run_streaming(
             AgentRequest {
-                prompt: "/compact".to_string(),
+                prompt: command.to_string(),
                 session_id: Some(session_id.to_string()),
                 thinking: false,
                 model: None,
@@ -168,6 +169,17 @@ mod tests {
         let url = format!("sqlite://{}", file.path().display());
         std::mem::forget(file);
         Memory::open(&url).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn passthrough_sends_requested_command_to_session() {
+        let backend = MockBackend::new(&["ok"]);
+
+        let text = run_turn_session_passthrough(&backend, "ses_42", "/compact").await.unwrap();
+
+        assert_eq!(text, "ok");
+        assert_eq!(backend.prompts.lock().unwrap()[0], "/compact");
+        assert_eq!(backend.session_ids.lock().unwrap()[0], Some("ses_42".to_string()));
     }
 
     fn test_cfg(scope: &str) -> GatewayConfig {
