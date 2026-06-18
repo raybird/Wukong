@@ -2,7 +2,7 @@ import { WukongChat } from '/components/wukong-chat.js';
 import { WukongSettings } from '/components/wukong-settings.js';
 import { WukongSchedules } from '/components/wukong-schedules.js';
 import { WukongSystem } from '/components/wukong-system.js';
-import { html } from '/lib/html.js';
+import { html, unsafe } from '/lib/html.js';
 
 customElements.define('wukong-chat', WukongChat);
 customElements.define('wukong-settings', WukongSettings);
@@ -33,11 +33,11 @@ function render() {
   if (route === '#/chat') {
     app.innerHTML = '<wukong-chat></wukong-chat>';
   } else if (route === '#/settings/telegram') {
-    app.innerHTML = settingsShell('telegram', '<wukong-settings></wukong-settings>');
+    app.innerHTML = settingsShell('telegram', unsafe('<wukong-settings></wukong-settings>'));
   } else if (route === '#/settings/system') {
-    app.innerHTML = settingsShell('system', '<wukong-system></wukong-system>');
+    app.innerHTML = settingsShell('system', unsafe('<wukong-system></wukong-system>'));
   } else if (route === '#/settings/schedules') {
-    app.innerHTML = settingsShell('schedules', '<wukong-schedules></wukong-schedules>');
+    app.innerHTML = settingsShell('schedules', unsafe('<wukong-schedules></wukong-schedules>'));
   } else {
     app.innerHTML = '<section class="empty-state"><h2>找不到頁面</h2><p><a href="#/chat">回到對話</a></p></section>';
   }
