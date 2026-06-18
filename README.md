@@ -179,7 +179,8 @@ cd /path/to/wukong-docker
 curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh \
   | bash -s -- --upgrade
 
-docker compose up -d --build
+docker compose build --no-cache
+docker compose up -d --force-recreate
 ```
 
 升級時請不要使用 `docker compose down -v`，避免刪除 `wukong-data`、`opencode-config`、`opencode-state` 等持久化 volume。若你是從舊版升級且容器還在，想盡量保留尚未持久化的 opencode session，可先備份：

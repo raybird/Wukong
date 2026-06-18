@@ -13,4 +13,14 @@ if [[ "$output" != *"dry-run: 會下載"* ]]; then
     exit 1
 fi
 
+if ! grep -q "docker compose build --no-cache" scripts/install.sh; then
+    echo "FAIL: --upgrade guidance should rebuild without Docker cache" >&2
+    exit 1
+fi
+
+if ! grep -q "docker compose up -d --force-recreate" scripts/install.sh; then
+    echo "FAIL: --upgrade guidance should recreate the running container" >&2
+    exit 1
+fi
+
 echo "installer upgrade checks passed"

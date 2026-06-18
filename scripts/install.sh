@@ -86,19 +86,21 @@ install_docker_bundle() {
   echo ""
   echo "下一步："
   echo "  1. 視需求編輯 .env"
-  echo "  2. 執行 docker compose up -d --build"
-  echo "  3. 開啟 http://localhost:8787/"
+  echo "  2. 執行 docker compose build --no-cache"
+  echo "  3. 執行 docker compose up -d --force-recreate"
+  echo "  4. 開啟 http://localhost:8787/"
   echo ""
 
-  read -r -p "是否現在啟動 docker compose up -d --build？(y/N): " START_DOCKER
+  read -r -p "是否現在重建並啟動 Docker 服務？(y/N): " START_DOCKER
   case "$(printf '%s' "${START_DOCKER:-n}" | tr '[:upper:]' '[:lower:]')" in
     y|yes)
-      # 一律 --build：升級時 image 已存在，沒有 --build 會沿用舊 image，
-      # 新的 Dockerfile / entrypoint 不會被套用（fresh install 則本來就會 build）。
-      docker compose up -d --build
+      # 升級時 release binary 下載層可能被 Docker cache 保留；先無快取重建，
+      # 再強制換掉既有容器，確保新的 bundle 與版本實際上線。
+      docker compose build --no-cache
+      docker compose up -d --force-recreate
       ;;
     *)
-      info "略過啟動，可稍後執行 docker compose up -d --build"
+      info "略過啟動，可稍後執行 docker compose build --no-cache && docker compose up -d --force-recreate"
       ;;
   esac
 }
