@@ -2,13 +2,21 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub struct Settings {
+    #[serde(default)]
     pub telegram: TelegramSettings,
+    #[serde(default)]
+    pub agent: AgentSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub struct TelegramSettings {
     pub token: String,
     pub allowed: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub struct AgentSettings {
+    pub default_model: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -50,6 +58,18 @@ pub fn effective_telegram_settings(file: &Settings) -> TelegramSettings {
     TelegramSettings { token, allowed }
 }
 
+pub fn effective_agent_settings(file: &Settings) -> AgentSettings {
+    AgentSettings {
+        default_model: file
+            .agent
+            .default_model
+            .as_ref()
+            .map(|m| m.trim())
+            .filter(|m| !m.is_empty())
+            .map(|m| m.to_string()),
+    }
+}
+
 pub fn redact_token(token: &str) -> String {
     if token.is_empty() {
         String::new()
@@ -83,12 +103,56 @@ mod tests {
                 token: "123:abc".to_string(),
                 allowed: "42 99".to_string(),
             },
+            agent: AgentSettings::default(),
         };
 
         save_settings(&path, &settings).unwrap();
         let loaded = load_settings(&path).unwrap();
 
         assert_eq!(loaded, settings);
+    }
+
+    #[test]
+    fn saves_and_loads_agent_default_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let settings = Settings {
+            telegram: TelegramSettings::default(),
+            agent: AgentSettings {
+                default_model: Some("opencode/deepseek-v4-flash-free".to_string()),
+            },
+        };
+
+        save_settings(&path, &settings).unwrap();
+        let loaded = load_settings(&path).unwrap();
+
+        assert_eq!(loaded.agent.default_model.as_deref(), Some("opencode/deepseek-v4-flash-free"));
+    }
+
+    #[test]
+    fn missing_agent_settings_defaults_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"telegram":{"token":"123:abc","allowed":"42"}}"#).unwrap();
+
+        let loaded = load_settings(&path).unwrap();
+
+        assert_eq!(loaded.telegram.token, "123:abc");
+        assert_eq!(loaded.agent.default_model, None);
+    }
+
+    #[test]
+    fn effective_agent_settings_uses_file_model() {
+        let settings = Settings {
+            telegram: TelegramSettings::default(),
+            agent: AgentSettings {
+                default_model: Some("opencode/deepseek-v4-flash-free".to_string()),
+            },
+        };
+
+        let effective = effective_agent_settings(&settings);
+
+        assert_eq!(effective.default_model.as_deref(), Some("opencode/deepseek-v4-flash-free"));
     }
 
     #[test]
@@ -100,6 +164,7 @@ mod tests {
                 token: "file-token".to_string(),
                 allowed: "42".to_string(),
             },
+            agent: AgentSettings::default(),
         };
 
         let effective = effective_telegram_settings(&file);
