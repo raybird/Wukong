@@ -18,7 +18,7 @@ use wukong_gateway::backend::AiBackend;
 use wukong_gateway::config::GatewayConfig;
 use wukong_memory::Memory;
 use wukong_scheduler::SchedulerStore;
-use wukong_settings::{Settings, TelegramSettings};
+use wukong_settings::TelegramSettings;
 use wukong_chat_history::{ChatHistoryStore, ChatMessage};
 
 /// Shared router state. Generic over the backend so tests inject a mock.
@@ -445,7 +445,8 @@ where
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let settings = Settings { telegram: req.telegram };
+    let mut settings = wukong_settings::load_settings(&state.settings_path).unwrap_or_default();
+    settings.telegram = req.telegram;
     match wukong_settings::save_settings(&state.settings_path, &settings) {
         Ok(()) => StatusCode::OK.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -790,6 +791,41 @@ mod tests {
         let saved = wukong_settings::load_settings(&settings_path).unwrap();
         assert_eq!(saved.telegram.token, "123:abc");
         assert_eq!(saved.telegram.allowed, "42 99");
+    }
+
+    #[tokio::test]
+    async fn settings_post_preserves_agent_settings() {
+        let app_state = state(None, &[]).await;
+        let settings_path = app_state.settings_path.clone();
+        wukong_settings::save_settings(
+            &settings_path,
+            &wukong_settings::Settings {
+                telegram: TelegramSettings::default(),
+                agent: wukong_settings::AgentSettings {
+                    default_model: Some("opencode/deepseek-v4-flash-free".to_string()),
+                },
+            },
+        )
+        .unwrap();
+        let app = build_router(app_state);
+        let body = r#"{"telegram":{"token":"123:abc","allowed":"42 99"}}"#;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/settings")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let saved = wukong_settings::load_settings(&settings_path).unwrap();
+        assert_eq!(saved.telegram.token, "123:abc");
+        assert_eq!(saved.agent.default_model.as_deref(), Some("opencode/deepseek-v4-flash-free"));
     }
 
     #[tokio::test]
