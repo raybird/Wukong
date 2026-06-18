@@ -496,6 +496,17 @@ WUKONG_AGENT_CMD="opencode run" cargo run -p wukong-web
 
 安全預設:只綁 `127.0.0.1`;伺服器端 `wukong-render::to_web_html` 把原始 HTML 跳脫防 XSS。
 
+### Chat control commands
+
+CLI/REPL、Web 與 Telegram 共用一組 allowlist 控制指令：
+
+- `/compact`：要求 opencode 壓縮目前 scope 的 stored session。
+- `/providers`：執行 `opencode providers list` 並回傳輸出。
+- `/models`：執行 `opencode models` 並回傳輸出。
+- `/set_models <model>`：持久化全系統預設模型，後續 Web、Telegram、Scheduler 與 CLI turns 都會套用。
+
+未知 slash command 不會自動 passthrough 給 opencode。
+
 ### 執行緒隔離與 Token 安全驗證
 
 - **非 Send Future 隔離機制**：由於對話引擎 `run_turn` 產生的 Future 內含非 `Send` 屬性（因為 `AiBackend` 包含 dynamic 的 `FnMut` 串流回呼），無法在 Axum 的異步調度中直接執行。Web 後端在處理對話請求時，會透過 `std::thread::spawn` 獨立出作業系統實體執行緒，並在內部以 `current_thread` 執行器運行 `block_on(run_turn)`，隨後將進度透過安全通道（mpsc channel）以 SSE 方式回傳。
