@@ -64,6 +64,7 @@ pub async fn orchestrate(
             prompt,
             session_id: None,
             thinking: false,
+            model: None,
         })
         .await?;
     Ok(Outcome {
@@ -83,7 +84,7 @@ pub async fn orchestrate_chain(
     for role in roles {
         let prompt = format!("{}\n\n[任務]\n{}{}", role.card(), task, chain_context(&steps));
         let resp = backend
-            .run(AgentRequest { prompt, session_id: None, thinking: false })
+            .run(AgentRequest { prompt, session_id: None, thinking: false, model: None })
             .await?;
         steps.push(Outcome { role, output: resp.text });
     }

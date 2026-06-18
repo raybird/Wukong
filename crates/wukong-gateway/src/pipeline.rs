@@ -28,6 +28,7 @@ pub async fn run_turn(
             prompt,
             session_id: None,
             thinking: cfg.thinking,
+            model: None,
         })
         .await?;
 

@@ -13,6 +13,8 @@ pub struct AgentRequest {
     pub session_id: Option<String>,
     /// Pass `--thinking` to surface reasoning blocks.
     pub thinking: bool,
+    /// Optional opencode model override for this request.
+    pub model: Option<String>,
 }
 
 /// The backend's textual response.
@@ -47,9 +49,10 @@ pub fn assemble_argv(
     command: &[String],
     session_id: Option<&str>,
     thinking: bool,
+    model: Option<&str>,
     prompt: &str,
 ) -> Vec<String> {
-    let mut argv: Vec<String> = command.to_vec();
+    let mut argv: Vec<String> = strip_model_args(command);
     if let Some(id) = session_id {
         argv.push("-s".to_string());
         argv.push(id.to_string());
@@ -57,8 +60,32 @@ pub fn assemble_argv(
     if thinking {
         argv.push("--thinking".to_string());
     }
+    if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
+        argv.push("--model".to_string());
+        argv.push(model.to_string());
+    }
     argv.push(prompt.to_string());
     argv
+}
+
+fn strip_model_args(command: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut iter = command.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--model" || arg == "-m" {
+            let _ = iter.next();
+            continue;
+        }
+        if arg.starts_with("--model=") {
+            continue;
+        }
+        out.push(arg.clone());
+    }
+    out
+}
+
+pub fn opencode_binary(command: &[String]) -> &str {
+    command.first().map(String::as_str).unwrap_or("opencode")
 }
 
 /// Drives a configurable agent CLI as a subprocess (run-and-capture, no shell).
@@ -69,9 +96,45 @@ pub struct AgentCliBackend {
     pub workspace: Option<PathBuf>,
 }
 
+pub struct OpencodeUtility {
+    pub binary: String,
+    pub workspace: Option<PathBuf>,
+}
+
+impl OpencodeUtility {
+    pub fn from_agent_command(command: &[String], workspace: Option<PathBuf>) -> Self {
+        Self {
+            binary: opencode_binary(command).to_string(),
+            workspace,
+        }
+    }
+
+    pub async fn run_fixed(&self, args: &[&str]) -> Result<String, GatewayError> {
+        let mut cmd = Command::new(&self.binary);
+        cmd.args(args).stdin(Stdio::null());
+        if let Some(ws) = &self.workspace {
+            cmd.current_dir(ws);
+        }
+        let output = cmd.output().await?;
+        if !output.status.success() {
+            return Err(GatewayError::AgentFailed {
+                code: output.status.code(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+}
+
 impl AiBackend for AgentCliBackend {
     async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
-        let argv = assemble_argv(&self.command, req.session_id.as_deref(), req.thinking, &req.prompt);
+        let argv = assemble_argv(
+            &self.command,
+            req.session_id.as_deref(),
+            req.thinking,
+            req.model.as_deref(),
+            &req.prompt,
+        );
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..]).stdin(Stdio::null());
         if let Some(ws) = &self.workspace {
@@ -96,7 +159,13 @@ impl AiBackend for AgentCliBackend {
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> Result<AgentResponse, GatewayError> {
         // Build argv then insert `--format json` before the prompt (last arg).
-        let mut argv = assemble_argv(&self.command, req.session_id.as_deref(), req.thinking, &req.prompt);
+        let mut argv = assemble_argv(
+            &self.command,
+            req.session_id.as_deref(),
+            req.thinking,
+            req.model.as_deref(),
+            &req.prompt,
+        );
         let prompt = argv.pop().expect("argv always ends with the prompt");
         argv.push("--format".to_string());
         argv.push("json".to_string());
@@ -163,7 +232,7 @@ mod tests {
 
     #[test]
     fn assemble_argv_plain() {
-        let argv = assemble_argv(&["opencode".to_string(), "run".to_string()], None, false, "hi");
+        let argv = assemble_argv(&["opencode".to_string(), "run".to_string()], None, false, None, "hi");
         assert_eq!(argv, vec!["opencode", "run", "hi"]);
     }
 
@@ -173,9 +242,45 @@ mod tests {
             &["opencode".to_string(), "run".to_string()],
             Some("ses_x"),
             true,
+            None,
             "hi",
         );
         assert_eq!(argv, vec!["opencode", "run", "-s", "ses_x", "--thinking", "hi"]);
+    }
+
+    #[test]
+    fn assemble_argv_adds_model_before_prompt() {
+        let argv = assemble_argv(
+            &["opencode".to_string(), "run".to_string()],
+            None,
+            false,
+            Some("opencode/deepseek-v4-flash-free"),
+            "hi",
+        );
+        assert_eq!(argv, vec!["opencode", "run", "--model", "opencode/deepseek-v4-flash-free", "hi"]);
+    }
+
+    #[test]
+    fn assemble_argv_replaces_existing_model_flag() {
+        let argv = assemble_argv(
+            &[
+                "opencode".to_string(),
+                "run".to_string(),
+                "--model".to_string(),
+                "old/model".to_string(),
+            ],
+            Some("ses_x"),
+            true,
+            Some("new/model"),
+            "hi",
+        );
+        assert_eq!(argv, vec!["opencode", "run", "-s", "ses_x", "--thinking", "--model", "new/model", "hi"]);
+    }
+
+    #[test]
+    fn opencode_binary_uses_first_base_command_arg() {
+        assert_eq!(opencode_binary(&["opencode".to_string(), "run".to_string()]), "opencode");
+        assert_eq!(opencode_binary(&["/usr/local/bin/opencode".to_string(), "run".to_string()]), "/usr/local/bin/opencode");
     }
 
     #[tokio::test]
@@ -190,6 +295,7 @@ mod tests {
                 prompt: "hello wukong".to_string(),
                 session_id: None,
                 thinking: false,
+                model: None,
             })
             .await
             .unwrap();
@@ -208,6 +314,7 @@ mod tests {
                 prompt: "x".to_string(),
                 session_id: None,
                 thinking: false,
+                model: None,
             })
             .await
             .unwrap_err();
@@ -226,7 +333,7 @@ mod tests {
         let mut events = Vec::new();
         let resp = Plain
             .run_streaming(
-                AgentRequest { prompt: "x".into(), session_id: None, thinking: false },
+                AgentRequest { prompt: "x".into(), session_id: None, thinking: false, model: None },
                 &mut |e| events.push(e),
             )
             .await
@@ -254,7 +361,7 @@ mod tests {
         let mut events = Vec::new();
         let resp = backend
             .run_streaming(
-                AgentRequest { prompt: "ignored".into(), session_id: None, thinking: false },
+                AgentRequest { prompt: "ignored".into(), session_id: None, thinking: false, model: None },
                 &mut |e| events.push(e),
             )
             .await

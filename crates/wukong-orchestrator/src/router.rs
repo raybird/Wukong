@@ -186,6 +186,7 @@ pub async fn plan_skill_chain(
             prompt: skill_planning_prompt(task, skills),
             session_id: None,
             thinking: false,
+            model: None,
         })
         .await?;
     Ok(parse_skill_chain(&resp.text))
@@ -198,6 +199,7 @@ pub async fn route(backend: &impl AiBackend, task: &str) -> Result<Role, Orchest
             prompt: routing_prompt(task),
             session_id: None,
             thinking: false,
+            model: None,
         })
         .await?;
     Ok(parse_role(&resp.text))
@@ -210,6 +212,7 @@ pub async fn plan_chain(backend: &impl AiBackend, task: &str) -> Result<Vec<Role
             prompt: planning_prompt(task),
             session_id: None,
             thinking: false,
+            model: None,
         })
         .await?;
     Ok(parse_chain(&resp.text))

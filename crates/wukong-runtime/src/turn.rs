@@ -68,7 +68,7 @@ pub async fn run_turn(
         let session_id = if is_final { stored.clone() } else { None };
         let resp = backend
             .run_streaming(
-                AgentRequest { prompt, session_id, thinking: cfg.thinking },
+                AgentRequest { prompt, session_id, thinking: cfg.thinking, model: None },
                 on_event,
             )
             .await?;
@@ -121,6 +121,7 @@ pub async fn run_turn_session_passthrough(
                 prompt: "/compact".to_string(),
                 session_id: Some(session_id.to_string()),
                 thinking: false,
+                model: None,
             },
             &mut |_| {},
         )
