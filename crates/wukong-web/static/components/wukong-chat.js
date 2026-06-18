@@ -4,8 +4,11 @@ import { html, unsafe, escapeHTML } from '/lib/html.js';
 // element (no router/services), per plainvanillaweb core conventions.
 export class WukongChat extends HTMLElement {
   connectedCallback() {
+    this.scopes = [];
+    this.selectedScope = '';
     this.innerHTML = html`
       <div class="chat-toolbar">
+        <label class="chat-source">來源 <select id="chat-scope"></select></label>
         <label>跳到日期 <input id="jump-date" type="date" /></label>
         <button id="jump-button" type="button">前往</button>
       </div>
@@ -17,9 +20,15 @@ export class WukongChat extends HTMLElement {
     `.toString();
     this.log = this.querySelector('#log');
     this.input = this.querySelector('#q');
+    this.scopeSelect = this.querySelector('#chat-scope');
     this.loadingOlder = false;
     this.hasMore = false;
     this.oldestId = null;
+    this.scopeSelect.addEventListener('change', () => {
+      this.selectedScope = this.scopeSelect.value;
+      this.resetMessages();
+      this.loadLatest();
+    });
     this.querySelector('#form').addEventListener('submit', (e) => {
       e.preventDefault();
       this.send();
@@ -28,16 +37,60 @@ export class WukongChat extends HTMLElement {
     this.log.addEventListener('scroll', () => {
       if (this.log.scrollTop < 80) this.loadOlder();
     });
-    this.loadLatest();
+    this.initialize();
   }
 
   tokenParam(prefix = '?') {
     return window.WUKONG_TOKEN ? prefix + 'token=' + encodeURIComponent(window.WUKONG_TOKEN) : '';
   }
 
+  scopeParam(prefix = '&') {
+    return this.selectedScope ? prefix + 'scope=' + encodeURIComponent(this.selectedScope) : '';
+  }
+
+  chatUrl(path, params = {}) {
+    const search = new URLSearchParams();
+    if (window.WUKONG_TOKEN) search.set('token', window.WUKONG_TOKEN);
+    if (this.selectedScope) search.set('scope', this.selectedScope);
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== '') search.set(key, value);
+    });
+    const qs = search.toString();
+    return qs ? path + '?' + qs : path;
+  }
+
+  async initialize() {
+    await this.loadScopes();
+    await this.loadLatest();
+  }
+
+  resetMessages() {
+    this.hasMore = false;
+    this.oldestId = null;
+    this.log.innerHTML = '';
+  }
+
+  async loadScopes() {
+    try {
+      const resp = await fetch('/api/chat/scopes' + this.tokenParam('?'));
+      if (!resp.ok) return;
+      this.scopes = await resp.json();
+      if (!this.selectedScope && this.scopes.length > 0) {
+        const global = this.scopes.find((s) => s.scope === 'global');
+        this.selectedScope = (global || this.scopes[0]).scope;
+      }
+      this.scopeSelect.innerHTML = this.scopes
+        .map((s) => `<option value="${escapeHTML(s.scope)}">${escapeHTML(s.label)}</option>`)
+        .join('');
+      this.scopeSelect.value = this.selectedScope;
+    } catch (_err) {
+      this.scopeSelect.innerHTML = '';
+    }
+  }
+
   async fetchMessages(params = '') {
-    const token = this.tokenParam(params ? '&' : '?');
-    const resp = await fetch('/api/chat/messages' + (params ? '?' + params : '') + token);
+    const parsed = new URLSearchParams(params);
+    const resp = await fetch('/api/chat/messages' + this.chatUrl('', Object.fromEntries(parsed.entries())));
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     return resp.json();
   }
@@ -150,10 +203,7 @@ export class WukongChat extends HTMLElement {
     const progress = this.bubble('status', '🐵 收到，思考中…');
     let thinking = null;
 
-    const tokenParam = window.WUKONG_TOKEN
-      ? '&token=' + encodeURIComponent(window.WUKONG_TOKEN)
-      : '';
-    const es = new EventSource('/chat?q=' + encodeURIComponent(text) + tokenParam);
+    const es = new EventSource(this.chatUrl('/chat', { q: text }));
 
     es.addEventListener('role', (ev) => {
       progress.innerHTML = '🐵 悟空·' + escapeHTML(ev.data) + ' 思考中…';
