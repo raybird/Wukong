@@ -422,6 +422,34 @@ mod tests {
             .any(|m| m.role == "assistant" && m.content.contains("已開新")));
     }
 
+    #[tokio::test]
+    async fn set_models_command_persists_and_replies() {
+        let client = MockTgClient::default();
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&[]);
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        std::env::set_var("WUKONG_SETTINGS_FILE", &settings_path);
+        let msg = TgMessage {
+            update_id: 1,
+            chat_id: 42,
+            text: "/set_models opencode/deepseek-v4-flash-free".to_string(),
+        };
+
+        handle_message(&client, &mem, &base_cfg(), &backend, None, &[42], &msg).await;
+        std::env::remove_var("WUKONG_SETTINGS_FILE");
+
+        let sent = client.sent.lock().unwrap();
+        assert!(sent.iter().any(|s| s.text.contains("已設定預設模型")));
+        drop(sent);
+
+        let saved = wukong_settings::load_settings(&settings_path).unwrap();
+        assert_eq!(
+            saved.agent.default_model.as_deref(),
+            Some("opencode/deepseek-v4-flash-free")
+        );
+    }
+
     struct ReasoningBackend;
     impl AiBackend for ReasoningBackend {
         async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
