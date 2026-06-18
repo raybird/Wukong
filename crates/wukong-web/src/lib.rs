@@ -119,6 +119,7 @@ impl SseMsg {
 struct ChatQuery {
     q: Option<String>,
     token: Option<String>,
+    scope: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -127,6 +128,7 @@ struct ChatMessagesQuery {
     before: Option<i64>,
     date: Option<String>,
     limit: Option<i64>,
+    scope: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -166,6 +168,13 @@ fn authorized(expected: &Option<String>, provided: Option<&str>) -> bool {
 
 fn capped_limit(limit: Option<i64>) -> i64 {
     limit.unwrap_or(10).clamp(1, 50)
+}
+
+fn selected_scope(default_scope: &str, requested: Option<String>) -> String {
+    requested
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default_scope.to_string())
 }
 
 fn date_bounds_utc(date: &str) -> Result<(i64, i64), String> {
@@ -211,7 +220,8 @@ where
             Ok(store) => store,
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         };
-        let thread = match store.default_thread(&state.scope).await {
+        let scope = selected_scope(&state.scope, params.scope.clone());
+        let thread = match store.default_thread(&scope).await {
             Ok(thread) => thread,
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         };
@@ -221,7 +231,6 @@ where
 
         let mem = state.memory.clone();
         let backend = state.backend.clone();
-        let scope = state.scope.clone();
         let db_url = state.db_url.clone();
         // run_turn's future is not Send (AiBackend uses async_fn_in_trait and the
         // callbacks are dyn FnMut), so it can't ride tokio::spawn or the axum
@@ -341,7 +350,8 @@ where
         Ok(store) => store,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    let thread = match store.default_thread(&state.scope).await {
+    let scope = selected_scope(&state.scope, params.scope.clone());
+    let thread = match store.default_thread(&scope).await {
         Ok(thread) => thread,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
@@ -365,6 +375,29 @@ where
             }
             Json(ChatMessagesResponse { messages, has_more }).into_response()
         }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn get_chat_scopes<B>(
+    State(state): State<AppState<B>>,
+    Query(params): Query<ChatMessagesQuery>,
+) -> axum::response::Response
+where
+    B: AiBackend + Send + Sync + 'static,
+{
+    use axum::response::IntoResponse;
+
+    if !authorized(&state.token, params.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let store = match ChatHistoryStore::open(&state.db_url).await {
+        Ok(store) => store,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    match store.list_scopes(&state.scope).await {
+        Ok(scopes) => Json(scopes).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -539,6 +572,7 @@ where
         .route("/styles.css", axum::routing::get(styles_css))
         .route("/settings", axum::routing::get(index::<B>))
         .route("/chat", axum::routing::get(chat::<B>))
+        .route("/api/chat/scopes", axum::routing::get(get_chat_scopes::<B>))
         .route("/api/chat/messages", axum::routing::get(get_chat_messages::<B>))
         .route("/api/settings", axum::routing::get(get_settings::<B>).post(post_settings::<B>))
         .route("/api/schedules", axum::routing::get(list_schedules::<B>))
@@ -855,6 +889,76 @@ mod tests {
                 && m.content == "**ans**"
                 && m.content_html.as_deref() == Some("<p><strong>ans</strong></p>")
         }));
+    }
+
+    #[tokio::test]
+    async fn chat_scopes_lists_default_and_telegram_scope() {
+        let app_state = state(None, &[]).await;
+        let store = ChatHistoryStore::open(&app_state.db_url).await.unwrap();
+        let tg_thread = store.default_thread("user:tg-915354960").await.unwrap();
+        store.insert_message(&tg_thread, "user", "from tg", None, "complete", 123).await.unwrap();
+
+        let app = build_router(app_state);
+        let resp = app
+            .oneshot(Request::builder().uri("/api/chat/scopes").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains("user:tg-915354960"), "body: {body}");
+        assert!(body.contains("Telegram 915354960"), "body: {body}");
+        assert!(body.contains("global"), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn chat_messages_reads_requested_scope() {
+        let app_state = state(None, &[]).await;
+        let store = ChatHistoryStore::open(&app_state.db_url).await.unwrap();
+        let default_thread = store.default_thread(&app_state.scope).await.unwrap();
+        let tg_thread = store.default_thread("user:tg-915354960").await.unwrap();
+        store.insert_message(&default_thread, "user", "from web", None, "complete", 100).await.unwrap();
+        store.insert_message(&tg_thread, "user", "from telegram", None, "complete", 101).await.unwrap();
+
+        let app = build_router(app_state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/chat/messages?scope=user%3Atg-915354960")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains("from telegram"), "body: {body}");
+        assert!(!body.contains("from web"), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn chat_turn_records_into_requested_scope() {
+        let app_state = state(None, &["oracle", "scoped answer"]).await;
+        let db_url = app_state.db_url.clone();
+        let app = build_router(app_state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/chat?q=hi&scope=user%3Atg-915354960")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let _ = body_string(resp).await;
+
+        let store = ChatHistoryStore::open(&db_url).await.unwrap();
+        let tg_thread = store.default_thread("user:tg-915354960").await.unwrap();
+        let messages = store.latest_messages(&tg_thread, 10).await.unwrap();
+        assert!(messages.iter().any(|m| m.role == "user" && m.content == "hi"));
+        assert!(messages.iter().any(|m| m.role == "assistant" && m.content == "scoped answer"));
     }
 
     #[tokio::test]
