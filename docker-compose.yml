@@ -84,9 +84,8 @@ services:
     command: ["wukong-web"]
     restart: unless-stopped
 
-  # ── Scheduler Daemon (opt-in) ──
+  # ── Scheduler Daemon ──
   wukong-schedulerd:
-    profiles: ["scheduler"]
     build:
       context: .
       dockerfile: Dockerfile

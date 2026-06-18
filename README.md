@@ -329,7 +329,7 @@ wukong memory consolidate --scope project:X  # 用 opencode 把零碎 event 聚�
 wukong memory prune --dry-run                # 預覽將刪的低價值/已摘要記憶
 wukong memory export --dir ./mem-md          # 依 DB 全量重建 markdown 鏡像
 
-# 排程（需要 wukong-schedulerd 常駐才會按 cron 自動執行）
+# 排程（Docker 模式會預設啟動 wukong-schedulerd，自動按 cron 執行）
 wukong schedule add-turn \
   --name "daily project check" \
   --cron "0 9 * * 1-5" \
@@ -380,7 +380,7 @@ wukong-schedulerd
 
 ### 排程子命令
 
-`wukong schedule` 會把排程定義存在同一個 SQLite 記憶資料庫。Cron job 只有在 `wukong-schedulerd` daemon 執行時才會自動觸發；`trigger` 可在沒有 daemon 的情況下立即執行單一 job。
+`wukong schedule` 會把排程定義存在同一個 SQLite 記憶資料庫。Cron job 由 `wukong-schedulerd` daemon 自動觸發；Docker 模式預設會啟動 daemon，`trigger` 可在沒有 daemon 的情況下立即執行單一 job。
 
 | 子命令 | 說明 |
 | :--- | :--- |
@@ -399,11 +399,7 @@ wukong-schedulerd
 - 多個 daemon 同時執行時會用 DB lease claim job，避免同一輪 due job 被重複執行。
 - Scheduled turn 需要底層 OpenCode provider/auth 已設定；Docker 模式會使用共用的 `opencode-config` volume。
 
-Docker 模式下 schedulerd 預設不啟動。要啟用排程 daemon：
-
-```bash
-docker compose --profile scheduler up -d
-```
+Docker 模式下 schedulerd 預設會隨 `docker compose up -d` 啟動，讓排程功能安裝後即可運作。若你不想執行排程 daemon，可手動停止該 service：`docker compose stop wukong-schedulerd`。
 
 ### 用自然語言建立排程（Telegram / 對話）
 

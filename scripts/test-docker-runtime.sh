@@ -29,4 +29,14 @@ require_in_file 'mkdir -p "$OPENCODE_STATE" "$OPENCODE_RUNTIME"' "$entrypoint" \
 require_in_file "chown -R wukong:wukong /home/wukong/.local" "$entrypoint" \
     "entrypoint must chown Docker-created .local directories"
 
+if awk '
+    /^  wukong-schedulerd:/ { in_scheduler = 1; next }
+    /^  [a-zA-Z0-9_-]+:/ { in_scheduler = 0 }
+    in_scheduler && /profiles:/ { found = 1 }
+    END { exit found ? 0 : 1 }
+' "$compose_file"; then
+    echo "FAIL: wukong-schedulerd must start by default, not only through a compose profile" >&2
+    exit 1
+fi
+
 echo "docker runtime persistence checks passed"
