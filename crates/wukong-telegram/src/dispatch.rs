@@ -7,6 +7,7 @@ use wukong_cli::run_turn;
 use wukong_gateway::backend::AiBackend;
 use wukong_gateway::config::GatewayConfig;
 use wukong_gateway::StreamEvent;
+use wukong_chat_history::ChatHistoryStore;
 use wukong_memory::Memory;
 use wukong_orchestrator::Role;
 
@@ -38,6 +39,35 @@ fn bubble_text(role: Option<&str>, reasoning: &str) -> String {
     format!("{base}\n💭　{ellipsis}{tail}")
 }
 
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+async fn record_chat(
+    history: Option<&ChatHistoryStore>,
+    scope: &str,
+    role: &str,
+    content: &str,
+    content_html: Option<&str>,
+    status: &str,
+) {
+    let Some(history) = history else { return; };
+    match history.default_thread(scope).await {
+        Ok(thread) => {
+            if let Err(e) = history
+                .insert_message(&thread, role, content, content_html, status, now_unix())
+                .await
+            {
+                eprintln!("warning: telegram chat history insert failed: {e}");
+            }
+        }
+        Err(e) => eprintln!("warning: telegram chat history thread failed: {e}"),
+    }
+}
+
 /// Handle one incoming message: enforce the allowlist, classify, run the turn,
 /// and reply. Errors are reported to the chat and swallowed (the loop goes on).
 /// `C` must be Clone + Send + 'static so a side task can stream role progress.
@@ -46,6 +76,7 @@ pub async fn handle_message<C, B>(
     mem: &Memory,
     base_cfg: &GatewayConfig,
     backend: &B,
+    history: Option<&ChatHistoryStore>,
     allow: &[i64],
     msg: &TgMessage,
 ) where
@@ -60,24 +91,27 @@ pub async fn handle_message<C, B>(
         MessageAction::Command { name, .. } => {
             let mut cfg = base_cfg.clone();
             cfg.scope = scope_for_chat(chat_id);
+            record_chat(history, &cfg.scope, "user", &msg.text, None, "complete").await;
             match wukong_cli::parse_session_command(&name) {
                 Some(cmd) => {
                     let reply = match wukong_cli::run_session_command(mem, backend, &cfg, cmd).await {
                         Ok(t) => t,
                         Err(e) => format!("⚠️ 失敗：{e}"),
                     };
+                    record_chat(history, &cfg.scope, "assistant", &reply, None, "complete").await;
                     let _ = client.send_message(chat_id, &reply).await;
                 }
                 None => {
-                    let _ = client
-                        .send_message(chat_id, &format!("指令 /{name} 尚未支援"))
-                        .await;
+                    let reply = format!("指令 /{name} 尚未支援");
+                    record_chat(history, &cfg.scope, "assistant", &reply, None, "complete").await;
+                    let _ = client.send_message(chat_id, &reply).await;
                 }
             }
         }
         MessageAction::Turn(input) => {
             let mut cfg = base_cfg.clone();
             cfg.scope = scope_for_chat(chat_id);
+            record_chat(history, &cfg.scope, "user", &input, None, "complete").await;
 
             // Single status bubble, edited in place as the turn progresses.
             let mid = match client.send_message(chat_id, "🐵 收到，思考中…").await {
@@ -156,6 +190,8 @@ pub async fn handle_message<C, B>(
 
             match result {
                 Ok(out) => {
+                    let html = wukong_render::to_web_html(&out.text);
+                    record_chat(history, &cfg.scope, "assistant", &out.text, Some(&html), "complete").await;
                     let chunks = wukong_render::to_telegram_html(&out.text);
                     let _ = client.delete_message(chat_id, mid).await;
                     if chunks.is_empty() {
@@ -167,9 +203,9 @@ pub async fn handle_message<C, B>(
                     }
                 }
                 Err(e) => {
-                    let _ = client
-                        .edit_message_text(chat_id, mid, &format!("⚠️ 處理失敗：{e}"))
-                        .await;
+                    let err = format!("⚠️ 處理失敗：{e}");
+                    record_chat(history, &cfg.scope, "assistant", &err, None, "error").await;
+                    let _ = client.edit_message_text(chat_id, mid, &err).await;
                 }
             }
         }
@@ -203,11 +239,15 @@ mod tests {
         }
     }
 
-    async fn open_memory() -> Memory {
+    async fn open_memory_with_url() -> (Memory, String) {
         let f = NamedTempFile::new().unwrap();
         let url = format!("sqlite://{}", f.path().display());
         std::mem::forget(f);
-        Memory::open(&url).await.unwrap()
+        (Memory::open(&url).await.unwrap(), url)
+    }
+
+    async fn open_memory() -> Memory {
+        open_memory_with_url().await.0
     }
 
     fn base_cfg() -> GatewayConfig {
@@ -227,7 +267,7 @@ mod tests {
         let mem = open_memory().await;
         let backend = MockBackend::new(&["oracle", "answer"]);
         let msg = TgMessage { update_id: 1, chat_id: 999, text: "hi".to_string() };
-        handle_message(&client, &mem, &base_cfg(), &backend, &[12], &msg).await;
+        handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
         // No reply, no work.
         assert!(client.sent.lock().unwrap().is_empty());
     }
@@ -239,7 +279,7 @@ mod tests {
         // planner -> single role; then execute answer with markdown.
         let backend = MockBackend::new(&["oracle", "**重點** 答案"]);
         let msg = TgMessage { update_id: 1, chat_id: 12, text: "什麼是 BM25".to_string() };
-        handle_message(&client, &mem, &base_cfg(), &backend, &[12], &msg).await;
+        handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
 
         // Status bubble edited per role, then deleted.
         assert!(!client.edits.lock().unwrap().is_empty());
@@ -264,6 +304,38 @@ mod tests {
         assert!(r.data.iter().any(|h| h.text.contains("User: 什麼是 BM25")));
     }
 
+    #[tokio::test]
+    async fn turn_records_telegram_user_and_assistant_messages_in_chat_history() {
+        let client = MockTgClient::default();
+        let (mem, db_url) = open_memory_with_url().await;
+        let history = wukong_chat_history::ChatHistoryStore::open(&db_url).await.unwrap();
+        let backend = MockBackend::new(&["oracle", "telegram answer"]);
+        let msg = TgMessage { update_id: 1, chat_id: 12, text: "hello from tg".to_string() };
+
+        handle_message(&client, &mem, &base_cfg(), &backend, Some(&history), &[12], &msg).await;
+
+        let thread = history.default_thread(&scope_for_chat(12)).await.unwrap();
+        let messages = history.latest_messages(&thread, 10).await.unwrap();
+        assert!(messages.iter().any(|m| m.role == "user" && m.content == "hello from tg"));
+        assert!(messages.iter().any(|m| m.role == "assistant" && m.content == "telegram answer"));
+    }
+
+    #[tokio::test]
+    async fn command_records_telegram_user_and_reply_messages_in_chat_history() {
+        let client = MockTgClient::default();
+        let (mem, db_url) = open_memory_with_url().await;
+        let history = wukong_chat_history::ChatHistoryStore::open(&db_url).await.unwrap();
+        let backend = MockBackend::new(&[]);
+        let msg = TgMessage { update_id: 1, chat_id: 12, text: "/new".to_string() };
+
+        handle_message(&client, &mem, &base_cfg(), &backend, Some(&history), &[12], &msg).await;
+
+        let thread = history.default_thread(&scope_for_chat(12)).await.unwrap();
+        let messages = history.latest_messages(&thread, 10).await.unwrap();
+        assert!(messages.iter().any(|m| m.role == "user" && m.content == "/new"));
+        assert!(messages.iter().any(|m| m.role == "assistant" && m.content.contains("已開新")));
+    }
+
     struct ReasoningBackend;
     impl AiBackend for ReasoningBackend {
         async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
@@ -285,7 +357,7 @@ mod tests {
         let mem = open_memory().await;
         let backend = ReasoningBackend;
         let msg = TgMessage { update_id: 1, chat_id: 12, text: "hi".to_string() };
-        handle_message(&client, &mem, &base_cfg(), &backend, &[12], &msg).await;
+        handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
         let edits = client.edits.lock().unwrap();
         assert!(
             edits.iter().any(|(_, _, t)| t.contains("💭") && t.contains("想一下")),
@@ -299,7 +371,7 @@ mod tests {
         let mem = open_memory().await;
         let backend = MockBackend::new(&["oracle", "答案"]);
         let msg = TgMessage { update_id: 1, chat_id: 12, text: "hi".to_string() };
-        handle_message(&client, &mem, &base_cfg(), &backend, &[12], &msg).await;
+        handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
 
         // The first send is the plain status bubble.
         {
@@ -316,7 +388,7 @@ mod tests {
         mem.set_agent_session(&scope_for_chat(12), "ses_1").await.unwrap();
         let backend = MockBackend::new(&[]);
         let msg = TgMessage { update_id: 1, chat_id: 12, text: "/new".to_string() };
-        handle_message(&client, &mem, &base_cfg(), &backend, &[12], &msg).await;
+        handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
         {
             let sent = client.sent.lock().unwrap();
             assert!(sent.iter().any(|s| s.text.contains("已開新")));
@@ -330,7 +402,7 @@ mod tests {
         let mem = open_memory().await;
         let backend = MockBackend::new(&[]);
         let msg = TgMessage { update_id: 1, chat_id: 12, text: "/model gpt".to_string() };
-        handle_message(&client, &mem, &base_cfg(), &backend, &[12], &msg).await;
+        handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
         let sent = client.sent.lock().unwrap();
         assert!(sent.iter().any(|s| s.text.contains("尚未支援")));
     }
@@ -341,7 +413,7 @@ mod tests {
         let mem = open_memory().await;
         let backend = MockBackend::new(&[]);
         let msg = TgMessage { update_id: 1, chat_id: 12, text: "/reset".to_string() };
-        handle_message(&client, &mem, &base_cfg(), &backend, &[12], &msg).await;
+        handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
         let sent = client.sent.lock().unwrap();
         assert!(sent.iter().any(|s| s.chat_id == 12 && s.text.contains("尚未支援")));
     }

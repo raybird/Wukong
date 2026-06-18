@@ -19,6 +19,7 @@ wukong-orchestrator = { path = "../wukong-orchestrator" }
 wukong-render = { path = "../wukong-render" }
 wukong-settings = { path = "../wukong-settings" }
 wukong-tg-client = { path = "../wukong-tg-client" }
+wukong-chat-history = { path = "../wukong-chat-history" }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }

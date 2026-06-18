@@ -2,6 +2,7 @@ use std::sync::Arc;
 use wukong_gateway::backend::AgentCliBackend;
 use wukong_gateway::config::GatewayConfig;
 use wukong_gateway::workspace_dir;
+use wukong_chat_history::ChatHistoryStore;
 use wukong_memory::Memory;
 use wukong_telegram::client::{ReqwestTgClient, TgClient};
 use wukong_telegram::dispatch::handle_message;
@@ -64,6 +65,14 @@ async fn main() {
     };
     let memory = Arc::new(memory);
 
+    let history = match ChatHistoryStore::open(&db_url).await {
+        Ok(store) => Some(store),
+        Err(e) => {
+            eprintln!("warning: chat history disabled for telegram: {e}");
+            None
+        }
+    };
+
     let agent_command = std::env::var("WUKONG_AGENT_CMD")
         .ok()
         .map(|s| s.split_whitespace().map(|t| t.to_string()).collect::<Vec<_>>())
@@ -103,7 +112,7 @@ async fn main() {
                     offset = max + 1;
                 }
                 for msg in parse_updates(&json) {
-                    handle_message(&client, &memory, &base_cfg, &backend, &allow, &msg).await;
+                    handle_message(&client, &memory, &base_cfg, &backend, history.as_ref(), &allow, &msg).await;
                 }
             }
             Err(e) => {
