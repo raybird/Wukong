@@ -93,8 +93,11 @@ pub async fn handle_message<C, B>(
         MessageAction::Command { name, args } => {
             let mut cfg = base_cfg.clone();
             cfg.scope = scope_for_chat(chat_id);
-            record_chat(history, &cfg.scope, "user", &msg.text, None, "complete").await;
             let settings_path = wukong_settings::default_settings_path();
+            let settings = wukong_settings::load_settings(&settings_path).unwrap_or_default();
+            let agent_settings = wukong_settings::effective_agent_settings(&settings);
+            cfg.apply_default_model(agent_settings.default_model.as_deref());
+            record_chat(history, &cfg.scope, "user", &msg.text, None, "complete").await;
             match wukong_cli::parse_session_command(&name, &args) {
                 Some(cmd) => {
                     let reply = match wukong_cli::run_session_command(
@@ -122,6 +125,10 @@ pub async fn handle_message<C, B>(
         MessageAction::Turn(input) => {
             let mut cfg = base_cfg.clone();
             cfg.scope = scope_for_chat(chat_id);
+            let settings_path = wukong_settings::default_settings_path();
+            let settings = wukong_settings::load_settings(&settings_path).unwrap_or_default();
+            let agent_settings = wukong_settings::effective_agent_settings(&settings);
+            cfg.apply_default_model(agent_settings.default_model.as_deref());
             record_chat(history, &cfg.scope, "user", &input, None, "complete").await;
 
             // Single status bubble, edited in place as the turn progresses.
@@ -285,6 +292,7 @@ mod tests {
             scope: String::new(),
             db_url: String::new(),
             agent_command: vec![],
+            default_model: None,
             thinking: true,
             recall_top_k: 5,
             stream: false,

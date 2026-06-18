@@ -276,10 +276,15 @@ where
                     scope,
                     db_url: String::new(),
                     agent_command: vec![],
+                    default_model: None,
                     thinking: true,
                     recall_top_k: 5,
                     stream: false,
                 };
+                let mut cfg = cfg;
+                let settings = wukong_settings::load_settings(&settings_path).unwrap_or_default();
+                let agent_settings = wukong_settings::effective_agent_settings(&settings);
+                cfg.apply_default_model(agent_settings.default_model.as_deref());
                 // Leading-slash inputs are session commands, not turns.
                 let trimmed = q.trim();
                 if let Some(rest) = trimmed.strip_prefix('/') {

@@ -68,7 +68,12 @@ pub async fn run_turn(
         let session_id = if is_final { stored.clone() } else { None };
         let resp = backend
             .run_streaming(
-                AgentRequest { prompt, session_id, thinking: cfg.thinking, model: None },
+                AgentRequest {
+                    prompt,
+                    session_id,
+                    thinking: cfg.thinking,
+                    model: if is_final { cfg.default_model.clone() } else { None },
+                },
                 on_event,
             )
             .await?;
@@ -143,6 +148,7 @@ mod tests {
         replies: Mutex<VecDeque<String>>,
         prompts: Mutex<Vec<String>>,
         session_ids: Mutex<Vec<Option<String>>>,
+        models: Mutex<Vec<Option<String>>>,
     }
 
     impl MockBackend {
@@ -151,6 +157,7 @@ mod tests {
                 replies: Mutex::new(replies.iter().map(|s| s.to_string()).collect()),
                 prompts: Mutex::new(Vec::new()),
                 session_ids: Mutex::new(Vec::new()),
+                models: Mutex::new(Vec::new()),
             }
         }
     }
@@ -159,6 +166,7 @@ mod tests {
         async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
             self.prompts.lock().unwrap().push(req.prompt);
             self.session_ids.lock().unwrap().push(req.session_id);
+            self.models.lock().unwrap().push(req.model);
             let text = self.replies.lock().unwrap().pop_front().unwrap_or_default();
             Ok(AgentResponse { text, session_id: Some("ses_new".to_string()) })
         }
@@ -182,11 +190,27 @@ mod tests {
         assert_eq!(backend.session_ids.lock().unwrap()[0], Some("ses_42".to_string()));
     }
 
+    #[tokio::test]
+    async fn run_turn_passes_default_model_to_final_step() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["oracle", "answer"]);
+        let mut cfg = test_cfg("project:T");
+        cfg.default_model = Some("opencode/deepseek-v4-flash-free".to_string());
+
+        run_turn(&mem, &backend, &cfg, "hello", &mut |_| {}, &mut |_| {})
+            .await
+            .unwrap();
+
+        let models = backend.models.lock().unwrap();
+        assert_eq!(models.last().and_then(Clone::clone).as_deref(), Some("opencode/deepseek-v4-flash-free"));
+    }
+
     fn test_cfg(scope: &str) -> GatewayConfig {
         GatewayConfig {
             scope: scope.to_string(),
             db_url: String::new(),
             agent_command: vec![],
+            default_model: None,
             thinking: true,
             recall_top_k: 5,
             stream: true,

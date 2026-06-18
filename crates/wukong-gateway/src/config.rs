@@ -6,6 +6,7 @@ pub struct GatewayConfig {
     pub scope: String,
     pub db_url: String,
     pub agent_command: Vec<String>,
+    pub default_model: Option<String>,
     /// Pass `--thinking` to opencode for conversational turns. Default true;
     /// off via `--no-thinking` or `WUKONG_THINKING=0`.
     pub thinking: bool,
@@ -41,10 +42,18 @@ impl GatewayConfig {
             scope,
             db_url,
             agent_command,
+            default_model: None,
             thinking,
             recall_top_k: 5,
             stream,
         }
+    }
+
+    pub fn apply_default_model(&mut self, model: Option<&str>) {
+        self.default_model = model
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(|m| m.to_string());
     }
 }
 
@@ -102,6 +111,23 @@ mod tests {
         let cli = Cli::try_parse_from(["wukong", "--no-stream", "hi"]).unwrap();
         let cfg = GatewayConfig::resolve(&cli);
         assert!(!cfg.stream);
+    }
+
+    #[test]
+    fn apply_default_model_sets_config_model() {
+        let mut cfg = GatewayConfig {
+            scope: "global".to_string(),
+            db_url: "sqlite://x.db".to_string(),
+            agent_command: vec!["opencode".to_string(), "run".to_string()],
+            default_model: None,
+            thinking: true,
+            recall_top_k: 5,
+            stream: false,
+        };
+
+        cfg.apply_default_model(Some("opencode/deepseek-v4-flash-free"));
+
+        assert_eq!(cfg.default_model.as_deref(), Some("opencode/deepseek-v4-flash-free"));
     }
 
     #[test]

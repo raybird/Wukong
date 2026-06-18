@@ -16,7 +16,11 @@ use wukong_scheduler::{
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let cfg = GatewayConfig::resolve(&cli);
+    let mut cfg = GatewayConfig::resolve(&cli);
+    let settings_path = wukong_settings::default_settings_path();
+    let settings = wukong_settings::load_settings(&settings_path).unwrap_or_default();
+    let agent_settings = wukong_settings::effective_agent_settings(&settings);
+    cfg.apply_default_model(agent_settings.default_model.as_deref());
 
     let memory = match Memory::open(&cfg.db_url).await {
         Ok(m) => m,

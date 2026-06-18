@@ -87,6 +87,7 @@ async fn main() {
         scope: String::new(),
         db_url,
         agent_command: vec![],
+        default_model: None,
         thinking: true,
         recall_top_k: 5,
         stream: false,

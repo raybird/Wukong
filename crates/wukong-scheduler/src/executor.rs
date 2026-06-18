@@ -100,6 +100,7 @@ mod tests {
             scope: scope.to_string(),
             db_url: String::new(),
             agent_command: vec![],
+            default_model: None,
             thinking: true,
             recall_top_k: 5,
             stream: false,

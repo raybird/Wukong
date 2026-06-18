@@ -48,7 +48,11 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<(), String> {
-    let cfg = resolve_config(&cli);
+    let mut cfg = resolve_config(&cli);
+    let settings_path = wukong_settings::default_settings_path();
+    let settings = wukong_settings::load_settings(&settings_path).unwrap_or_default();
+    let agent_settings = wukong_settings::effective_agent_settings(&settings);
+    cfg.apply_default_model(agent_settings.default_model.as_deref());
     let memory = open_memory(&cfg).await?;
     let backend = AgentCliBackend { command: cfg.agent_command.clone(), workspace: workspace_dir() };
     let store = SchedulerStore::open(&cfg.db_url).await.map_err(|e| e.to_string())?;
@@ -202,6 +206,7 @@ fn resolve_config(cli: &Cli) -> GatewayConfig {
             .map(|s| split_ws(&s))
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| vec!["opencode".to_string(), "run".to_string()]),
+        default_model: None,
         thinking: std::env::var("WUKONG_THINKING").as_deref() != Ok("0"),
         recall_top_k: 5,
         stream: false,
