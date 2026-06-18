@@ -155,7 +155,7 @@ curl -fsSL ... | bash -s -- --mode binary --flavor musl  # musl  (靜態，預�
 - **Host 工作目錄掛載**：opencode 工作空間透過 volume 掛載 host 路徑
 - **opencode 設定與 session 隔離**：`~/.config/opencode` 與 `~/.local/share/opencode` 都存放在 Docker volume 中，不污染 host，且可跨容器升級保留 session
 - **UID/GID 對齊**：runtime user 與 host 一致，避免檔案權限問題
-- **預設 Web + Telegram**：`docker compose up -d` 會啟動 Web Console 與 Telegram Bot；CLI / REPL 透過被動 `run` 使用
+- **預設 Web + Telegram + Scheduler**：`docker compose up -d` 會啟動 Web Console、Telegram Bot 與排程 daemon；CLI / REPL 透過被動 `run` 使用
 - **非互動權限處理**：Wukong 驅動 `opencode run` 時 stdin 永遠為空（CLI/Web/Telegram/Scheduler 皆然），opencode 無法回應互動式權限詢問。因此容器內 `WUKONG_AGENT_CMD` 預設帶 `--dangerously-skip-permissions`（自動核准詢問），並由 entrypoint 在缺檔時 seed 一份 `~/.config/opencode/opencode.json`：該旗標仍尊重 `deny` 規則，故內含一組黑名單擋下對絕對路徑的毀滅性遞迴刪除（`rm -rf /…`、`sudo rm`、家目錄等變形），同時放行 `/workspace` 內的刪除。這是 **防呆/防幻覺護欄而非資安牆**（glob 字串比對擋不住 `find -delete`、變數展開等繞法），真正的隔離邊界仍是 container 本身與 host 掛載目錄的範圍。要自訂規則，直接把你的 `opencode.json` 放進 `opencode-config` volume 即可覆蓋（缺檔才會 seed）。
 
 **快速開始：**
@@ -198,7 +198,7 @@ docker cp wukong-telegram:/home/wukong/.local/share/opencode ./opencode-session-
 cp .env.example .env
 # 可選：編輯 .env 調整 USER_ID/GROUP_ID、Web port 等
 
-# 2. 建置並啟動 Web Console + Telegram Bot
+# 2. 建置並啟動 Web Console + Telegram Bot + Scheduler
 docker compose up -d
 
 # 3. 開啟 Web Console，必要時在設定區填入 Telegram bot token / allowed IDs
@@ -479,6 +479,7 @@ cargo run -p wukong-telegram
 `wukong-web` 提供了零建置、隨開即用的瀏覽器進入點：
 - **核心設計**：重用與 CLI 相同的 `run_turn` 引擎與記憶資料庫，透過 Server-Sent Events (SSE) 即時串流專家角色的執行進度與渲染後的答案。
 - **前端實作**：採用原生 ES Modules 與自定義的 `<wukong-chat>` Custom Element（遵循 `raybird/plainvanillaweb` 核心慣例之 SafeHTML 設計）。
+- **共享對話歷史**：Web、Telegram 與 Scheduler 共用 scope-based chat history；Web 對話頁可從來源選單切換 `Global`、`Project ...` 或 `Telegram <chat_id>`，查看同一份對話脈絡與排程推送紀錄。
 - **打包部署**：所有靜態資源由 Axum 透過 `include_str!` 巨集直接內嵌於 binary 中，單一執行檔即自帶完整前端，無需額外外部部署。
 
 ```bash
