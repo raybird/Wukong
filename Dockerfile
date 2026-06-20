@@ -30,7 +30,7 @@ FROM debian:bookworm-slim
 
 # Install runtime deps + gosu + current opencode npm package
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl git gosu nodejs npm ripgrep fzf && \
+    ca-certificates curl git gh gosu nodejs npm python3 python3-pip pipx ripgrep fzf && \
     npm install -g opencode-ai@latest && \
     opencode --version && \
     rm -rf /var/lib/apt/lists/* /root/.npm
@@ -44,6 +44,17 @@ COPY --from=downloader /bins/wukong-schedulerd /usr/local/bin/wukong-schedulerd
 # Create non-root user (UID/GID will be remapped at runtime via entrypoint)
 RUN useradd -m -s /bin/bash wukong
 
+ENV HOME=/home/wukong
+ENV PIPX_HOME=/home/wukong/.local/pipx
+ENV PIPX_BIN_DIR=/home/wukong/.local/bin
+ENV PATH="/home/wukong/.local/bin:/usr/local/bin:${PATH}"
+
+# Preinstall Agent Reach CLI only; user-specific channel setup runs interactively.
+RUN mkdir -p "$PIPX_HOME" "$PIPX_BIN_DIR" && \
+    chown -R wukong:wukong /home/wukong/.local && \
+    gosu wukong pipx install https://github.com/Panniantong/agent-reach/archive/main.zip && \
+    gosu wukong agent-reach --help >/dev/null
+
 # Copy default workspace templates (SOUL.md, AGENTS.md)
 RUN mkdir -p /usr/local/share/wukong
 COPY workspace/SOUL.md workspace/AGENTS.md /usr/local/share/wukong/
@@ -54,8 +65,6 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # Default environment
 ENV WUKONG_WORKSPACE=/workspace
-ENV HOME=/home/wukong
-ENV PATH="/home/wukong/.local/bin:/usr/local/bin:${PATH}"
 
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

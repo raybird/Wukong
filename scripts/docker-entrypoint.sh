@@ -107,8 +107,8 @@ case "${1:-}" in
         # Run as wukong user, preserving environment
         exec gosu wukong "$@"
         ;;
-    opencode)
-        # Allow `docker compose run --rm wukong opencode ...` for auth/config setup.
+    opencode|agent-reach|gh|python3|pipx)
+        # Allow `docker compose run --rm wukong <tool> ...` for runtime setup.
         exec gosu wukong "$@"
         ;;
     *)
