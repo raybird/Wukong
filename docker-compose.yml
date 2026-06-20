@@ -24,6 +24,10 @@ services:
       - opencode-config:/home/wukong/.config/opencode
       # Persistent opencode sessions/state (paired with Wukong agent_sessions)
       - opencode-state:/home/wukong/.local/share/opencode
+      # Persistent Agent Reach channel config/cookies
+      - agent-reach-state:/home/wukong/.agent-reach
+      # Persistent GitHub CLI auth/config
+      - gh-config:/home/wukong/.config/gh
       # Persistent memory database
       - wukong-data:/data
     # Default to interactive shell / REPL
@@ -52,6 +56,8 @@ services:
       - ${WUKONG_HOST_WORKSPACE:-./workspace}:/workspace
       - opencode-config:/home/wukong/.config/opencode
       - opencode-state:/home/wukong/.local/share/opencode
+      - agent-reach-state:/home/wukong/.agent-reach
+      - gh-config:/home/wukong/.config/gh
       - wukong-data:/data
     command: ["wukong-telegram"]
     restart: unless-stopped
@@ -80,6 +86,8 @@ services:
       - ${WUKONG_HOST_WORKSPACE:-./workspace}:/workspace
       - opencode-config:/home/wukong/.config/opencode
       - opencode-state:/home/wukong/.local/share/opencode
+      - agent-reach-state:/home/wukong/.agent-reach
+      - gh-config:/home/wukong/.config/gh
       - wukong-data:/data
     command: ["wukong-web"]
     restart: unless-stopped
@@ -103,6 +111,8 @@ services:
       - ${WUKONG_HOST_WORKSPACE:-./workspace}:/workspace
       - opencode-config:/home/wukong/.config/opencode
       - opencode-state:/home/wukong/.local/share/opencode
+      - agent-reach-state:/home/wukong/.agent-reach
+      - gh-config:/home/wukong/.config/gh
       - wukong-data:/data
     command: ["wukong-schedulerd"]
     restart: unless-stopped
@@ -113,6 +123,12 @@ volumes:
     driver: local
   # Persistent opencode sessions/state (not mounted from host)
   opencode-state:
+    driver: local
+  # Persistent Agent Reach channel config/cookies
+  agent-reach-state:
+    driver: local
+  # Persistent GitHub CLI auth/config
+  gh-config:
     driver: local
   # Persistent wukong memory database
   wukong-data:
