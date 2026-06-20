@@ -28,6 +28,14 @@ require_in_file 'mkdir -p "$OPENCODE_STATE" "$OPENCODE_RUNTIME"' "$entrypoint" \
     "entrypoint must create opencode runtime directories before gosu"
 require_in_file "chown -R wukong:wukong /home/wukong/.local" "$entrypoint" \
     "entrypoint must chown Docker-created .local directories"
+require_in_file "agent-reach-state:/home/wukong/.agent-reach" "$compose_file" \
+    "docker compose must persist Agent Reach state"
+require_in_file "AGENT_REACH_STATE=\"/home/wukong/.agent-reach\"" "$entrypoint" \
+    "entrypoint must name Agent Reach state directory"
+require_in_file 'mkdir -p "$AGENT_REACH_STATE"' "$entrypoint" \
+    "entrypoint must create Agent Reach state directory before gosu"
+require_in_file 'chown -R wukong:wukong "$AGENT_REACH_STATE"' "$entrypoint" \
+    "entrypoint must chown Docker-created Agent Reach state volume"
 
 if awk '
     /^  wukong-schedulerd:/ { in_scheduler = 1; next }

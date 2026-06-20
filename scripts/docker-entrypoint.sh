@@ -87,6 +87,11 @@ fi
 
 chown -R wukong:wukong /home/wukong/.config 2>/dev/null || true
 
+# Ensure Agent Reach state volume is writable by the runtime user.
+AGENT_REACH_STATE="/home/wukong/.agent-reach"
+mkdir -p "$AGENT_REACH_STATE"
+chown -R wukong:wukong "$AGENT_REACH_STATE" 2>/dev/null || true
+
 # Ensure opencode session/runtime dirs exist and are writable before gosu.
 OPENCODE_STATE="/home/wukong/.local/share/opencode"
 OPENCODE_RUNTIME="/home/wukong/.local/state"
