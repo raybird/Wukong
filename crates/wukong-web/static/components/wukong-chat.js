@@ -14,13 +14,35 @@ export class WukongChat extends HTMLElement {
       </div>
       <div class="log" id="log"></div>
       <form id="form" class="composer">
-        <input id="q" type="text" autocomplete="off" placeholder="問悟空…" />
-        <button type="submit">送出</button>
+        <div class="textarea-wrapper">
+          <textarea id="q" rows="1" autocomplete="off" placeholder="問悟空… (Enter 送出, Shift+Enter 換行)"></textarea>
+        </div>
+        <button type="submit" class="send-btn" title="送出">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+          </svg>
+        </button>
       </form>
     `.toString();
     this.log = this.querySelector('#log');
-    this.input = this.querySelector('#q');
+    const textarea = this.querySelector('#q');
+    this.input = textarea;
     this.scopeSelect = this.querySelector('#chat-scope');
+    
+    // Auto-resizing logic
+    textarea.addEventListener('input', function () {
+      this.style.height = 'auto';
+      this.style.height = Math.min(this.scrollHeight, 200) + 'px';
+    });
+    
+    // Keyboard handlers
+    textarea.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        this.send();
+        textarea.style.height = 'auto';
+      }
+    });
     this.loadingOlder = false;
     this.hasMore = false;
     this.oldestId = null;
