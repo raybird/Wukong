@@ -179,6 +179,16 @@ export class WukongChat extends HTMLElement {
   async loadOlder() {
     if (this.loadingOlder || !this.hasMore || !this.oldestId) return;
     this.loadingOlder = true;
+
+    const skeleton = document.createElement('div');
+    skeleton.className = 'skeleton-loader';
+    skeleton.innerHTML = `
+      <div class="skeleton-bar w-full"></div>
+      <div class="skeleton-bar w-75"></div>
+      <div class="skeleton-bar w-50"></div>
+    `;
+    this.log.prepend(skeleton);
+
     try {
       const data = await this.fetchMessages('before=' + encodeURIComponent(this.oldestId) + '&limit=10');
       this.hasMore = data.has_more;
@@ -189,6 +199,7 @@ export class WukongChat extends HTMLElement {
       note.textContent = '載入較舊訊息失敗，請重試。';
       this.log.prepend(note);
     } finally {
+      skeleton.remove();
       this.loadingOlder = false;
     }
   }
