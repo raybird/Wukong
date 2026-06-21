@@ -119,9 +119,57 @@ wukong-chat { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .bubble pre { overflow-x: auto; background: #0001; padding: 0.5rem; border-radius: 0.5rem; }
 .bubble table { border-collapse: collapse; }
 .bubble td, .bubble th { border: 1px solid #8886; padding: 0.2rem 0.5rem; }
-.thinking { align-self: flex-start; max-width: 80%; font-size: 0.85rem; opacity: 0.75; }
-.thinking summary { cursor: pointer; }
-.thinking .reasoning { white-space: pre-wrap; margin: 0.3rem 0 0; max-height: 12rem; overflow-y: auto; }
+.thinking {
+  align-self: flex-start;
+  max-width: 80%;
+  width: 100%;
+  margin: 0.5rem 0;
+  border: 1px solid rgba(234, 179, 8, 0.15);
+  border-radius: 8px;
+  background: rgba(234, 179, 8, 0.03);
+  overflow: hidden;
+  transition: var(--transition-smooth);
+}
+.thinking summary {
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--accent-gold);
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  user-select: none;
+  background: rgba(234, 179, 8, 0.05);
+  transition: var(--transition-smooth);
+}
+.thinking summary::-webkit-details-marker {
+  display: none;
+}
+.thinking summary::before {
+  content: '▶';
+  font-size: 0.7rem;
+  display: inline-block;
+  transition: transform 0.2s ease;
+}
+.thinking[open] summary::before {
+  transform: rotate(90deg);
+}
+.thinking[open] summary {
+  border-bottom: 1px solid rgba(234, 179, 8, 0.12);
+}
+.thinking .reasoning {
+  padding: 0.75rem;
+  font-family: monospace;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  margin: 0;
+  max-height: 15rem;
+  overflow-y: auto;
+}
 .composer {
   display: flex;
   align-items: flex-end;
