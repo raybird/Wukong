@@ -17,8 +17,7 @@ enum Progress {
     Reasoning(String),
 }
 
-/// Compose the status-bubble text from the current role and accumulated
-/// reasoning (showing only the tail to keep the bubble small).
+/// Compose the status-bubble text from the current role and accumulated reasoning.
 fn bubble_text(role: Option<&str>, reasoning: &str) -> String {
     // Full-width space (U+3000) after each emoji so the glyph doesn't visually
     // crowd / obscure the first CJK character on some Telegram clients.
@@ -30,13 +29,7 @@ fn bubble_text(role: Option<&str>, reasoning: &str) -> String {
     if r.is_empty() {
         return base;
     }
-    let chars: Vec<char> = r.chars().collect();
-    let start = chars.len().saturating_sub(200);
-    let tail: String = chars[start..].iter().collect();
-    // Lead with an ellipsis when the head was dropped, so the truncated tail
-    // doesn't read as "the first few characters went missing".
-    let ellipsis = if start > 0 { "…" } else { "" };
-    format!("{base}\n💭　{ellipsis}{tail}")
+    format!("{base}\n💭　{r}")
 }
 
 fn now_unix() -> i64 {
@@ -485,6 +478,19 @@ mod tests {
                 .iter()
                 .any(|(_, _, t)| t.contains("💭") && t.contains("想一下")),
             "no reasoning edit: {edits:?}"
+        );
+    }
+
+    #[test]
+    fn bubble_text_keeps_full_reasoning() {
+        let reasoning = format!("{}{}", "前段".repeat(80), "後段".repeat(80));
+        let text = bubble_text(Some("explorer"), &reasoning);
+
+        assert!(text.contains("💭　前段"), "reasoning head missing: {text}");
+        assert!(text.contains("後段"), "reasoning tail missing: {text}");
+        assert!(
+            !text.contains("💭　…"),
+            "reasoning should not be presented as a truncated tail: {text}"
         );
     }
 
