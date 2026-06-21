@@ -142,7 +142,8 @@ wukong-chat { display: flex; flex-direction: column; flex: 1; min-height: 0; }
   opacity: 0;
   transition: var(--transition-smooth);
 }
-.bubble pre:hover .copy-code-btn {
+.bubble pre:hover .copy-code-btn,
+.copy-code-btn:focus-visible {
   opacity: 1;
 }
 .copy-code-btn:hover {

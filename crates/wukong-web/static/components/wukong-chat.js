@@ -257,6 +257,7 @@ export class WukongChat extends HTMLElement {
     const text = this.input.value.trim();
     if (!text) return;
     this.input.value = '';
+    this.input.style.height = 'auto';
     if (this.log.querySelector('.empty-state')) this.log.innerHTML = '';
     // User bubble: input is escaped via the html`` template.
     this.bubble('user', html`${text}`.toString());
