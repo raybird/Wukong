@@ -144,7 +144,11 @@ export class WukongChat extends HTMLElement {
         nodes.push(sep);
         lastDate = date;
       }
-      nodes.push(this.messageNode(message));
+      const bubbleNode = this.messageNode(message);
+      if (message.role === 'assistant') {
+        this.enhanceCodeBlocks(bubbleNode);
+      }
+      nodes.push(bubbleNode);
     }
     if (mode === 'prepend') {
       const previousHeight = this.log.scrollHeight;
@@ -205,6 +209,30 @@ export class WukongChat extends HTMLElement {
     }
   }
 
+  enhanceCodeBlocks(container) {
+    const pres = container.querySelectorAll('pre');
+    pres.forEach((pre) => {
+      if (pre.querySelector('.copy-code-btn')) return;
+      pre.style.position = 'relative';
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'copy-code-btn';
+      button.textContent = '複製';
+      
+      button.addEventListener('click', async () => {
+        const codeText = pre.querySelector('code')?.textContent || pre.textContent;
+        try {
+          await navigator.clipboard.writeText(codeText);
+          button.textContent = '已複製！';
+          setTimeout(() => { button.textContent = '複製'; }, 2000);
+        } catch (_err) {
+          button.textContent = '複製失敗';
+        }
+      });
+      pre.appendChild(button);
+    });
+  }
+
   bubble(cls, innerHTML) {
     const div = document.createElement('div');
     div.className = 'bubble ' + cls;
@@ -243,7 +271,8 @@ export class WukongChat extends HTMLElement {
     es.addEventListener('answer', (ev) => {
       progress.remove();
       // Server already produced safe HTML; mark it trusted.
-      this.bubble('assistant', unsafe(ev.data).toString());
+      const div = this.bubble('assistant', unsafe(ev.data).toString());
+      this.enhanceCodeBlocks(div);
     });
     es.addEventListener('error', (ev) => {
       // EventSource also fires a data-less 'error' on connection close; ignore

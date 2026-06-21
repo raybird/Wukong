@@ -116,7 +116,39 @@ wukong-chat { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .bubble.error { border: 1px solid #d33; }
 .date-separator { align-self: center; font-size: 0.8rem; opacity: 0.7; padding: 0.2rem 0.6rem; border-radius: 999px; background: #8882; }
 .empty-state, .load-error { align-self: center; opacity: 0.75; margin: 1rem; }
-.bubble pre { overflow-x: auto; background: #0001; padding: 0.5rem; border-radius: 0.5rem; }
+.bubble pre {
+  position: relative;
+  background: #0002;
+  padding: 0.75rem;
+  border-radius: var(--border-radius);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  overflow-x: auto;
+}
+.bubble pre code {
+  font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.875rem;
+}
+.copy-code-btn {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+  opacity: 0;
+  transition: var(--transition-smooth);
+}
+.bubble pre:hover .copy-code-btn {
+  opacity: 1;
+}
+.copy-code-btn:hover {
+  background: var(--accent-sun);
+  color: #fff;
+}
 .bubble table { border-collapse: collapse; }
 .bubble td, .bubble th { border: 1px solid #8886; padding: 0.2rem 0.5rem; }
 .thinking {
