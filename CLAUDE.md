@@ -86,6 +86,7 @@ wukong-orchestrator → wukong-gateway → wukong-memory
 - **Web 執行緒隔離**：`run_turn` 含非 `Send` callback，Web 後端以 `std::thread::spawn` + `current_thread` 隔離，進度透過 mpsc channel → SSE 回傳。
 - **Superpowers 來源**：`crates/wukong-skills/assets/superpowers/SOURCE.md` 記錄上游版本；以 `scripts/sync-superpowers.sh` 更新。
 - **排程能力注入**：`run_turn` 最後一棒的 prompt 會常駐注入「排程能力」區塊（`persona::scheduling_capability_hint`，帶當前 scope），讓 agent 透過 opencode shell 自行執行 `wukong schedule add-turn`。`wukong` 指令路徑可用 `WUKONG_BIN` 覆寫。
+- **末棒輸出保證**：`run_turn` 最後一棒常駐注入 `[輸出要求]`（`persona::final_answer_directive`），要求即使全程用工具操作也要文字總結；收尾後若末棒輸出為空，回退取最近一棒非空輸出（全空才回 `(本回合未產生文字輸出)`），確保 `TurnOutput`、記憶與對話歷史皆非空。詳見 `docs/superpowers/specs/2026-06-22-final-output-fallback-design.md`。
 - **排程結果回送**：`wukong-schedulerd` 觸發 Turn job 後，若 scope 可由 `chat_id_from_scope` 還原成 `user:tg-<id>`，透過 `wukong-tg-client` 把結果回送 Telegram（成功 HTML、失敗一行）；best-effort 不影響 job 狀態。`WUKONG_SCHED_NOTIFY=0` 關閉，需 `WUKONG_TG_TOKEN`。
 - **容器內 opencode 權限**：`AgentCliBackend` 兩條路徑（`run`／`run_streaming`）都以 `stdin(Stdio::null())` 啟動 opencode，所以**任何進入點都無法回應互動式權限詢問**。容器內 `docker-compose.yml` 的 `WUKONG_AGENT_CMD` 預設帶 `--dangerously-skip-permissions`（自動核准未被明確 `deny` 的權限）；`docker-entrypoint.sh` 在缺檔時 seed `~/.config/opencode/opencode.json`，內含一組 `bash` deny 黑名單擋住對絕對路徑的毀滅性遞迴刪除、同時放行 `/workspace` 內刪除（靠 opencode「最後符合規則勝出」+ 開頭 `*` 涵蓋指令串接）。屬防呆護欄非資安牆；放自訂 `opencode.json` 進 `opencode-config` volume 可覆蓋（缺檔才 seed）。
 

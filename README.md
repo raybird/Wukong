@@ -89,6 +89,8 @@ sequenceDiagram
 
 - **輸入接力與前序協作**：當 planner 規劃出多角色協作鏈（例如 `explorer, fixer`）時，前一個步驟角色的輸出會被以 `[前序協作]` 格式標記，並拼接到下一步的 Task 輸入中，實現接力分析。
 - **會話狀態隔離 (Session Isolation)**：為避免中間角色步驟的暫存輸出污染對話歷史，**只有最後一棒的執行才會帶入並更新該 Scope 的 `session_id`**，前面的所有輔助步驟皆為無狀態（Stateless）執行，確保最終對話的連貫與乾淨。
+- **空輸出回退 (Final Output Fallback)**：末棒若為 executor、只用工具收尾而未吐文字時，`run_turn` 會回退取「最近一棒非空輸出」作為最終答覆（全空才回 `(本回合未產生文字輸出)`），保證使用者不收到空白，也不以空字串污染記憶與對話歷史。
+- **末棒輸出要求**：最後一棒的 prompt 常駐注入 `[輸出要求]`（`persona::final_answer_directive`），要求即使工作都用工具完成也必須以文字總結，降低 executor 靜默收尾的機率。
 
 ### 技能路由 (Skill Routing)
 
