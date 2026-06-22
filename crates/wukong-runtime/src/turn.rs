@@ -60,6 +60,8 @@ pub async fn run_turn(
         // so stateless helper steps never take a side-effecting schedule action.
         if is_final {
             prompt.push_str("\n\n");
+            prompt.push_str(persona::final_answer_directive());
+            prompt.push_str("\n\n");
             prompt.push_str(&persona::scheduling_capability_hint(
                 &cfg.scope,
                 &persona::scheduling_bin(),
@@ -91,6 +93,23 @@ pub async fn run_turn(
         .last()
         .cloned()
         .unwrap_or(wukong_orchestrator::Outcome { role: Role::Oracle, output: String::new() });
+    // The final step may be an executor that finished via tool calls without a
+    // closing message, leaving its output empty. Fall back to the most recent
+    // non-empty step so the user never receives a blank reply and memory/history
+    // are not polluted with an empty Assistant entry.
+    let answer = if last.output.trim().is_empty() {
+        prior
+            .iter()
+            .rev()
+            .find(|o| !o.output.trim().is_empty())
+            .cloned()
+            .unwrap_or(wukong_orchestrator::Outcome {
+                role: last.role,
+                output: "(本回合未產生文字輸出)".to_string(),
+            })
+    } else {
+        last
+    };
 
     memory
         .remember(RememberInput {
@@ -104,14 +123,14 @@ pub async fn run_turn(
                 },
                 MemoryItem {
                     kind: MemoryKind::Event,
-                    text: format!("Assistant: {}", last.output),
+                    text: format!("Assistant: {}", answer.output),
                     importance: None,
                 },
             ],
         })
         .await?;
 
-    Ok(TurnOutput { role: last.role, text: last.output })
+    Ok(TurnOutput { role: answer.role, text: answer.output })
 }
 
 /// Send a raw `/compact` message to a specific opencode session (no planner,
@@ -371,5 +390,52 @@ mod tests {
             .unwrap();
         assert!(r.data.iter().any(|h| h.text.contains("Assistant: f2")));
         assert!(!r.data.iter().any(|h| h.text.contains("Assistant: f1")));
+    }
+
+    #[tokio::test]
+    async fn run_turn_falls_back_when_final_output_empty() {
+        let mem = open_memory().await;
+        // planner -> explorer,fixer; explorer reports findings; fixer (final) returns empty.
+        let backend = MockBackend::new(&["explorer, fixer", "找到了根因", ""]);
+        let out = run_turn(&mem, &backend, &test_cfg("project:T"), "find and fix the bug", &mut |_| {}, &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(out.role, Role::Explorer);
+        assert_eq!(out.text, "找到了根因");
+
+        let r = mem
+            .recall(RecallQuery {
+                query: "find and fix the bug".to_string(),
+                top_k: 10,
+                scope: Some("project:T".to_string()),
+                mode: RecallMode::Hybrid,
+            })
+            .await
+            .unwrap();
+        assert!(r.data.iter().any(|h| h.text.contains("Assistant: 找到了根因")));
+    }
+
+    #[tokio::test]
+    async fn run_turn_all_empty_returns_sentinel() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["fixer", ""]);
+        let out = run_turn(&mem, &backend, &test_cfg("project:T"), "go", &mut |_| {}, &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(out.text, "(本回合未產生文字輸出)");
+    }
+
+    #[tokio::test]
+    async fn run_turn_injects_final_answer_directive_into_final_step_only() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["explorer, fixer", "e1", "f2"]);
+        run_turn(&mem, &backend, &test_cfg("project:T"), "go", &mut |_| {}, &mut |_| {})
+            .await
+            .unwrap();
+        let prompts = backend.prompts.lock().unwrap();
+        // prompts[0]=planner, [1]=explorer (helper), [2]=fixer (final).
+        assert_eq!(prompts.len(), 3);
+        assert!(!prompts[1].contains("[輸出要求]"));
+        assert!(prompts[2].contains("[輸出要求]"));
     }
 }

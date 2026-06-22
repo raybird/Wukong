@@ -34,6 +34,17 @@ pub fn build_prompt_with_skill(
     prompt
 }
 
+/// A directive appended to the final step instructing the agent to always
+/// produce a textual summary — even when its work was done entirely via tool
+/// calls — so an executor role never finishes silently and leaves the user
+/// with a blank reply. Paired with the empty-output fallback in `run_turn`.
+pub fn final_answer_directive() -> &'static str {
+    "[輸出要求]\n\
+     無論你在過程中執行了多少工具操作（讀寫檔案、執行指令等），\
+     最後務必用一段繁體中文文字向使用者清楚總結：你做了什麼、結果如何、有無注意事項。\
+     不要只執行動作而不回覆文字。"
+}
+
 /// Resolve the `wukong` binary name used inside the scheduling capability hint.
 /// Defaults to `wukong` (assumes it is on PATH in the agent runtime); override
 /// with `WUKONG_BIN` (e.g. an absolute path) when it is not.
@@ -111,6 +122,13 @@ mod tests {
         assert!(!p.contains("[技能規範指引]"));
         assert!(p.contains("你是 Oracle"));
         assert!(p.contains("think about it"));
+    }
+
+    #[test]
+    fn final_answer_directive_requires_text_summary() {
+        let d = final_answer_directive();
+        assert!(d.contains("[輸出要求]"));
+        assert!(d.contains("總結"));
     }
 
     #[test]
