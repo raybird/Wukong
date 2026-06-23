@@ -260,6 +260,49 @@ wukong-chat { display: flex; flex-direction: column; flex: 1; min-height: 0; }
   overflow: auto;
 }
 
+/* History reload: collapsible group wrapping a message's helper-baton steps,
+   fetched lazily on first expand. */
+.baton-group {
+  align-self: flex-start;
+  max-width: 80%;
+  width: 100%;
+  margin: 0.35rem 0;
+}
+.baton-group > summary {
+  padding: 0.3rem 0.5rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  user-select: none;
+  opacity: 0.85;
+}
+.baton-group > summary::-webkit-details-marker {
+  display: none;
+}
+.baton-group > summary::before {
+  content: '▶';
+  font-size: 0.65rem;
+  display: inline-block;
+  transition: transform 0.2s ease;
+}
+.baton-group[open] > summary::before {
+  transform: rotate(90deg);
+}
+.baton-group-body {
+  margin-top: 0.25rem;
+}
+.baton-loading {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  padding: 0.4rem 0.5rem;
+  margin: 0;
+}
+
 .composer {
   display: flex;
   align-items: flex-end;

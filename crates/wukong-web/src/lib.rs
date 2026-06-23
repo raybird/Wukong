@@ -332,6 +332,9 @@ where
                 let role_tx = tx.clone();
                 let ev_tx = tx.clone();
                 let step_tx = tx.clone();
+                // Buffer helper-baton steps to persist them after the turn, linked
+                // to the final assistant message. (role, raw content, rendered html)
+                let mut steps_buf: Vec<(String, String, String)> = Vec::new();
                 let result = run_turn_observed(
                     mem.as_ref(),
                     backend.as_ref(),
@@ -351,8 +354,9 @@ where
                         let html = wukong_render::to_web_html(output);
                         let _ = step_tx.send(SseMsg::Step {
                             role: role.name().to_string(),
-                            html,
+                            html: html.clone(),
                         });
+                        steps_buf.push((role.name().to_string(), output.to_string(), html));
                     },
                 )
                 .await;
@@ -360,16 +364,34 @@ where
                     Ok(out) => {
                         let html = wukong_render::to_web_html(&out.text);
                         if let Ok(store) = ChatHistoryStore::open(&db_url).await {
-                            let _ = store
+                            let now = now_unix();
+                            if let Ok(message_id) = store
                                 .insert_message(
                                     &thread,
                                     "assistant",
                                     &out.text,
                                     Some(&html),
                                     "complete",
-                                    now_unix(),
+                                    now,
                                 )
-                                .await;
+                                .await
+                            {
+                                // best-effort: surface failures don't block the answer.
+                                for (seq, (role, content, step_html)) in
+                                    steps_buf.iter().enumerate()
+                                {
+                                    let _ = store
+                                        .insert_step(
+                                            message_id,
+                                            seq as i64,
+                                            role,
+                                            content,
+                                            Some(step_html),
+                                            now,
+                                        )
+                                        .await;
+                                }
+                            }
                         }
                         let _ = tx.send(SseMsg::Answer(html));
                     }
@@ -446,6 +468,31 @@ where
             }
             Json(ChatMessagesResponse { messages, has_more }).into_response()
         }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// `GET /api/chat/messages/:id/steps` — the helper-baton steps for one assistant
+/// message, lazily fetched when the user expands the collapsible card.
+async fn get_chat_steps<B>(
+    State(state): State<AppState<B>>,
+    Path(message_id): Path<i64>,
+    Query(params): Query<SettingsQuery>,
+) -> axum::response::Response
+where
+    B: AiBackend + Send + Sync + 'static,
+{
+    use axum::response::IntoResponse;
+
+    if !authorized(&state.token, params.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let store = match ChatHistoryStore::open(&state.db_url).await {
+        Ok(store) => store,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    match store.list_steps(message_id).await {
+        Ok(steps) => Json(steps).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -662,6 +709,10 @@ where
         .route(
             "/api/chat/messages",
             axum::routing::get(get_chat_messages::<B>),
+        )
+        .route(
+            "/api/chat/messages/:id/steps",
+            axum::routing::get(get_chat_steps::<B>),
         )
         .route(
             "/api/settings",
@@ -890,6 +941,68 @@ mod tests {
         // output goes through the answer event, not a step.
         assert!(body.contains(r#""role":"explorer""#), "step role:\n{body}");
         assert!(!body.contains(r#""role":"fixer""#), "final must not be a step:\n{body}");
+    }
+
+    #[tokio::test]
+    async fn turn_persists_helper_steps_and_serves_them() {
+        let app_state = state(None, &["explorer, fixer", "e1", "f2"]).await;
+
+        // Reading the full SSE body waits for the turn thread (and its DB writes).
+        let body = body_string(
+            build_router(app_state.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri("/chat?q=build%20and%20fix")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(body.contains("event: answer"), "turn did not finish:\n{body}");
+
+        // The messages payload carries step_count; the assistant message has one.
+        let msgs = body_string(
+            build_router(app_state.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/chat/messages?limit=10")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        let parsed: serde_json::Value = serde_json::from_str(&msgs).unwrap();
+        let assistant = parsed["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("no assistant message");
+        assert_eq!(assistant["step_count"].as_i64().unwrap(), 1);
+        let mid = assistant["id"].as_i64().unwrap();
+
+        // The lazy steps endpoint returns the helper (explorer) baton, not the final.
+        let steps_body = body_string(
+            build_router(app_state.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/chat/messages/{mid}/steps"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        let steps: serde_json::Value = serde_json::from_str(&steps_body).unwrap();
+        let steps = steps.as_array().unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0]["role"].as_str().unwrap(), "explorer");
+        assert_eq!(steps[0]["content"].as_str().unwrap(), "e1");
     }
 
     #[tokio::test]

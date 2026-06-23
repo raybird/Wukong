@@ -10,6 +10,10 @@ pub struct ChatMessage {
     pub content_html: Option<String>,
     pub status: String,
     pub created_at: i64,
+    /// Number of helper-baton steps linked to this message (0 for most turns).
+    /// Lets the UI show a "reasoning" collapsible only when there's something in it.
+    #[serde(default)]
+    pub step_count: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -18,6 +22,20 @@ pub struct ChatScope {
     pub label: String,
     pub message_count: i64,
     pub updated_at: i64,
+}
+
+/// A non-final (helper) baton's output captured for one turn, linked to the
+/// final assistant message. Kept out of the main `chat_messages` timeline so it
+/// neither pollutes pagination nor memory recall.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TurnStep {
+    pub id: i64,
+    pub message_id: i64,
+    pub seq: i64,
+    pub role: String,
+    pub content: String,
+    pub content_html: Option<String>,
+    pub created_at: i64,
 }
 
 pub struct ChatHistoryStore {
@@ -61,6 +79,26 @@ impl ChatHistoryStore {
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS chat_messages_thread_id_created_at_idx
              ON chat_messages(thread_id, created_at)",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS turn_steps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id INTEGER NOT NULL,
+                seq INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                content_html TEXT,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY(message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
+            )",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS turn_steps_message_id_idx
+             ON turn_steps(message_id)",
         )
         .execute(&pool)
         .await?;
@@ -114,10 +152,51 @@ impl ChatHistoryStore {
         Ok(row.get("id"))
     }
 
+    /// Persist one helper-baton step linked to the final assistant message.
+    pub async fn insert_step(
+        &self,
+        message_id: i64,
+        seq: i64,
+        role: &str,
+        content: &str,
+        content_html: Option<&str>,
+        created_at: i64,
+    ) -> Result<i64, sqlx::Error> {
+        let row = sqlx::query(
+            "INSERT INTO turn_steps (message_id, seq, role, content, content_html, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             RETURNING id",
+        )
+        .bind(message_id)
+        .bind(seq)
+        .bind(role)
+        .bind(content)
+        .bind(content_html)
+        .bind(created_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get("id"))
+    }
+
+    /// All helper-baton steps for a final assistant message, in chain order.
+    pub async fn list_steps(&self, message_id: i64) -> Result<Vec<TurnStep>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id, message_id, seq, role, content, content_html, created_at
+             FROM turn_steps
+             WHERE message_id = ?1
+             ORDER BY seq ASC, id ASC",
+        )
+        .bind(message_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(row_to_step).collect())
+    }
+
     pub async fn latest_messages(&self, thread_id: &str, limit: i64) -> Result<Vec<ChatMessage>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT * FROM (
-                 SELECT id, thread_id, role, content, content_html, status, created_at
+                 SELECT id, thread_id, role, content, content_html, status, created_at,
+                        (SELECT COUNT(*) FROM turn_steps ts WHERE ts.message_id = chat_messages.id) AS step_count
                  FROM chat_messages
                  WHERE thread_id = ?1
                  ORDER BY id DESC
@@ -139,7 +218,8 @@ impl ChatHistoryStore {
     ) -> Result<Vec<ChatMessage>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT * FROM (
-                 SELECT id, thread_id, role, content, content_html, status, created_at
+                 SELECT id, thread_id, role, content, content_html, status, created_at,
+                        (SELECT COUNT(*) FROM turn_steps ts WHERE ts.message_id = chat_messages.id) AS step_count
                  FROM chat_messages
                  WHERE thread_id = ?1 AND id < ?2
                  ORDER BY id DESC
@@ -162,7 +242,8 @@ impl ChatHistoryStore {
         limit: i64,
     ) -> Result<Vec<ChatMessage>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, thread_id, role, content, content_html, status, created_at
+            "SELECT id, thread_id, role, content, content_html, status, created_at,
+                    (SELECT COUNT(*) FROM turn_steps ts WHERE ts.message_id = chat_messages.id) AS step_count
              FROM chat_messages
              WHERE thread_id = ?1 AND created_at >= ?2 AND created_at < ?3
              ORDER BY created_at ASC, id ASC
@@ -237,6 +318,20 @@ fn row_to_message(row: sqlx::sqlite::SqliteRow) -> ChatMessage {
         content_html: row.get("content_html"),
         status: row.get("status"),
         created_at: row.get("created_at"),
+        // Tolerant: SELECTs that don't compute the count still map cleanly to 0.
+        step_count: row.try_get("step_count").unwrap_or(0),
+    }
+}
+
+fn row_to_step(row: sqlx::sqlite::SqliteRow) -> TurnStep {
+    TurnStep {
+        id: row.get("id"),
+        message_id: row.get("message_id"),
+        seq: row.get("seq"),
+        role: row.get("role"),
+        content: row.get("content"),
+        content_html: row.get("content_html"),
+        created_at: row.get("created_at"),
     }
 }
 
@@ -266,6 +361,35 @@ mod tests {
         let b = store.default_thread("global").await.unwrap();
         assert_eq!(a, b);
         assert_eq!(a, "scope:global");
+    }
+
+    #[tokio::test]
+    async fn turn_steps_round_trip_in_chain_order() {
+        let store = store().await;
+        let thread = store.default_thread("global").await.unwrap();
+        let mid = store
+            .insert_message(&thread, "assistant", "final", Some("<p>final</p>"), "complete", 100)
+            .await
+            .unwrap();
+        // Insert out of seq order to prove ORDER BY seq.
+        store.insert_step(mid, 1, "oracle", "o1", Some("<p>o1</p>"), 100).await.unwrap();
+        store.insert_step(mid, 0, "explorer", "e1", None, 100).await.unwrap();
+
+        let steps = store.list_steps(mid).await.unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].role, "explorer");
+        assert_eq!(steps[0].seq, 0);
+        assert_eq!(steps[0].content, "e1");
+        assert_eq!(steps[0].content_html, None);
+        assert_eq!(steps[1].role, "oracle");
+        assert_eq!(steps[1].content_html.as_deref(), Some("<p>o1</p>"));
+
+        // Steps are scoped per message_id.
+        let other = store
+            .insert_message(&thread, "assistant", "other", None, "complete", 200)
+            .await
+            .unwrap();
+        assert!(store.list_steps(other).await.unwrap().is_empty());
     }
 
     #[tokio::test]

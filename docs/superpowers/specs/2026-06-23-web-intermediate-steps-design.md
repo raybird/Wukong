@@ -1,7 +1,7 @@
 # Web Console 可折疊中間棒(Collapsible Intermediate Steps）設計
 
 **日期:** 2026-06-23
-**狀態:** 草案,待核可後轉實作
+**狀態:** 已實作(Phase 1 即時顯示 + Phase 2 落盤與歷史重載)
 **前置:** 協作鏈(`2026-06-06-collaboration-chain-design.md`)、末棒空輸出回退(`2026-06-22-final-output-fallback-design.md`)、Web Console(`2026-06-07-web-console-design.md`)、共用對話歷史(`2026-06-18-shared-chat-history-design.md`)、思考顯示(`2026-06-07-thinking-display-design.md`)。
 
 ## 背景與問題

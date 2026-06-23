@@ -130,6 +130,49 @@ export class WukongChat extends HTMLElement {
     return div;
   }
 
+  // Collapsible group for an assistant message's helper-baton steps; the steps
+  // are fetched lazily the first time the user expands it (most turns have none,
+  // so we only attach this when step_count > 0).
+  lazyStepsNode(message) {
+    const details = document.createElement('details');
+    details.className = 'baton-group';
+    const label =
+      message.step_count > 1 ? '🔍 推理過程（' + message.step_count + ' 棒）' : '🔍 推理過程';
+    details.innerHTML =
+      '<summary>' + escapeHTML(label) + '</summary><div class="baton-group-body"></div>';
+    let loaded = false;
+    details.addEventListener('toggle', async () => {
+      if (!details.open || loaded) return;
+      loaded = true;
+      const body = details.querySelector('.baton-group-body');
+      body.innerHTML = '<p class="baton-loading">載入中…</p>';
+      try {
+        const resp = await fetch(
+          this.chatUrl('/api/chat/messages/' + encodeURIComponent(message.id) + '/steps')
+        );
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const steps = await resp.json();
+        body.innerHTML = '';
+        for (const step of steps) {
+          const card = document.createElement('details');
+          card.className = 'baton';
+          card.open = true;
+          // content_html is server-produced safe HTML; fall back to escaped text.
+          const inner = step.content_html || escapeHTML(step.content);
+          card.innerHTML =
+            '<summary>🔍 悟空·' + escapeHTML(step.role) + ' 的產出</summary>' +
+            '<div class="baton-body">' + inner + '</div>';
+          body.appendChild(card);
+          this.enhanceCodeBlocks(card);
+        }
+      } catch (err) {
+        body.innerHTML = '<p class="baton-loading">載入失敗：' + escapeHTML(err.message) + '</p>';
+        loaded = false; // allow a retry on next expand
+      }
+    });
+    return details;
+  }
+
   renderMessages(messages, mode) {
     const nodes = [];
     let lastDate = null;
@@ -146,6 +189,8 @@ export class WukongChat extends HTMLElement {
       }
       const bubbleNode = this.messageNode(message);
       if (message.role === 'assistant') {
+        // Steps card sits above the answer, matching live-turn ordering.
+        if (message.step_count > 0) nodes.push(this.lazyStepsNode(message));
         this.enhanceCodeBlocks(bubbleNode);
       }
       nodes.push(bubbleNode);
