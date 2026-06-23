@@ -36,7 +36,16 @@ pub async fn run_turn(
 ) -> Result<TurnOutput, WukongError> {
     // Delegate with a no-op step observer so existing callers (CLI, Telegram,
     // Scheduler) and their tests keep an unchanged signature.
-    run_turn_observed(memory, backend, cfg, input, on_event, on_role, &mut |_, _| {}).await
+    run_turn_observed(
+        memory,
+        backend,
+        cfg,
+        input,
+        on_event,
+        on_role,
+        &mut |_, _| {},
+    )
+    .await
 }
 
 /// Same as [`run_turn`], but additionally reports each *non-final* chain step's
@@ -68,6 +77,7 @@ pub async fn run_turn_observed(
     let n_steps = steps.len();
     let mut prior: Vec<wukong_orchestrator::Outcome> = Vec::new();
     let mut captured_session: Option<String> = None;
+    let mut final_repair: Option<(Role, Option<String>, String)> = None;
     for (i, step) in steps.into_iter().enumerate() {
         let role = step.role;
         on_role(role);
@@ -87,13 +97,20 @@ pub async fn run_turn_observed(
             ));
         }
         let session_id = if is_final { stored.clone() } else { None };
+        if is_final {
+            final_repair = Some((role, session_id.clone(), prompt.clone()));
+        }
         let resp = backend
             .run_streaming(
                 AgentRequest {
                     prompt,
                     session_id,
                     thinking: cfg.thinking,
-                    model: if is_final { cfg.default_model.clone() } else { None },
+                    model: if is_final {
+                        cfg.default_model.clone()
+                    } else {
+                        None
+                    },
                 },
                 on_event,
             )
@@ -110,28 +127,58 @@ pub async fn run_turn_observed(
         prior.push(wukong_orchestrator::Outcome { role, output: text });
     }
 
-    if let Some(id) = captured_session {
-        memory.set_agent_session(&cfg.scope, &id).await?;
+    if let Some(id) = captured_session.as_deref() {
+        memory.set_agent_session(&cfg.scope, id).await?;
     }
 
     let last = prior
         .last()
         .cloned()
-        .unwrap_or(wukong_orchestrator::Outcome { role: Role::Oracle, output: String::new() });
+        .unwrap_or(wukong_orchestrator::Outcome {
+            role: Role::Oracle,
+            output: String::new(),
+        });
     // The final step may be an executor that finished via tool calls without a
     // closing message, leaving its output empty. Fall back to the most recent
     // non-empty step so the user never receives a blank reply and memory/history
     // are not polluted with an empty Assistant entry.
     let answer = if last.output.trim().is_empty() {
-        prior
+        if let Some(existing) = prior
             .iter()
             .rev()
             .find(|o| !o.output.trim().is_empty())
             .cloned()
-            .unwrap_or(wukong_orchestrator::Outcome {
+        {
+            existing
+        } else if let Some((role, session_id, prompt)) = final_repair {
+            let repair = backend
+                .run_streaming(
+                    AgentRequest {
+                        prompt: append_empty_output_repair_directive(prompt),
+                        session_id: captured_session.clone().or(session_id),
+                        thinking: cfg.thinking,
+                        model: cfg.default_model.clone(),
+                    },
+                    on_event,
+                )
+                .await?;
+            if !repair.text.trim().is_empty() {
+                wukong_orchestrator::Outcome {
+                    role,
+                    output: repair.text,
+                }
+            } else {
+                wukong_orchestrator::Outcome {
+                    role,
+                    output: "(本回合未產生文字輸出)".to_string(),
+                }
+            }
+        } else {
+            wukong_orchestrator::Outcome {
                 role: last.role,
                 output: "(本回合未產生文字輸出)".to_string(),
-            })
+            }
+        }
     } else {
         last
     };
@@ -155,7 +202,21 @@ pub async fn run_turn_observed(
         })
         .await?;
 
-    Ok(TurnOutput { role: answer.role, text: answer.output })
+    Ok(TurnOutput {
+        role: answer.role,
+        text: answer.output,
+    })
+}
+
+fn append_empty_output_repair_directive(mut prompt: String) -> String {
+    prompt.push_str("\n\n[修復回覆]\n");
+    prompt.push_str(
+        "上一輪沒有產生任何可回覆文字，可能是工具不可用、權限被拒，或只完成了工具呼叫。\n",
+    );
+    prompt.push_str(
+        "這次不要呼叫工具，也不要嘗試讀取環境；請直接根據使用者原問題與已知上下文，用繁體中文給出可交付的文字回覆。",
+    );
+    prompt
 }
 
 /// Send a raw `/compact` message to a specific opencode session (no planner,
@@ -185,7 +246,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
     use tempfile::NamedTempFile;
-    use wukong_gateway::backend::{AgentResponse, AgentRequest};
+    use wukong_gateway::backend::{AgentRequest, AgentResponse};
     use wukong_gateway::GatewayError;
 
     struct MockBackend {
@@ -212,7 +273,10 @@ mod tests {
             self.session_ids.lock().unwrap().push(req.session_id);
             self.models.lock().unwrap().push(req.model);
             let text = self.replies.lock().unwrap().pop_front().unwrap_or_default();
-            Ok(AgentResponse { text, session_id: Some("ses_new".to_string()) })
+            Ok(AgentResponse {
+                text,
+                session_id: Some("ses_new".to_string()),
+            })
         }
     }
 
@@ -227,11 +291,16 @@ mod tests {
     async fn passthrough_sends_requested_command_to_session() {
         let backend = MockBackend::new(&["ok"]);
 
-        let text = run_turn_session_passthrough(&backend, "ses_42", "/compact").await.unwrap();
+        let text = run_turn_session_passthrough(&backend, "ses_42", "/compact")
+            .await
+            .unwrap();
 
         assert_eq!(text, "ok");
         assert_eq!(backend.prompts.lock().unwrap()[0], "/compact");
-        assert_eq!(backend.session_ids.lock().unwrap()[0], Some("ses_42".to_string()));
+        assert_eq!(
+            backend.session_ids.lock().unwrap()[0],
+            Some("ses_42".to_string())
+        );
     }
 
     #[tokio::test]
@@ -246,7 +315,10 @@ mod tests {
             .unwrap();
 
         let models = backend.models.lock().unwrap();
-        assert_eq!(models.last().and_then(Clone::clone).as_deref(), Some("opencode/deepseek-v4-flash-free"));
+        assert_eq!(
+            models.last().and_then(Clone::clone).as_deref(),
+            Some("opencode/deepseek-v4-flash-free")
+        );
     }
 
     fn test_cfg(scope: &str) -> GatewayConfig {
@@ -282,7 +354,8 @@ mod tests {
         assert!(prompts[0].contains("test-driven-development"));
         assert!(prompts[1].contains("[技能規範指引]"));
         assert!(prompts[1].contains("test-driven-development"));
-        assert!(prompts[1].contains("crates/wukong-skills/assets/superpowers/test-driven-development/SKILL.md"));
+        assert!(prompts[1]
+            .contains("crates/wukong-skills/assets/superpowers/test-driven-development/SKILL.md"));
         assert!(prompts[1].contains("你是 Fixer"));
     }
 
@@ -290,9 +363,16 @@ mod tests {
     async fn run_turn_injects_scheduling_capability_into_final_step_only() {
         let mem = open_memory().await;
         let backend = MockBackend::new(&["explorer, fixer", "e1", "f2"]);
-        run_turn(&mem, &backend, &test_cfg("project:T"), "schedule it", &mut |_| {}, &mut |_| {})
-            .await
-            .unwrap();
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "schedule it",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
         let prompts = backend.prompts.lock().unwrap();
         // prompts[0] = planner, [1] = explorer (helper), [2] = fixer (final).
         assert_eq!(prompts.len(), 3);
@@ -306,9 +386,16 @@ mod tests {
     async fn run_turn_ignores_unknown_planned_skill() {
         let mem = open_memory().await;
         let backend = MockBackend::new(&["oracle|unknown-skill", "answer"]);
-        run_turn(&mem, &backend, &test_cfg("project:T"), "think", &mut |_| {}, &mut |_| {})
-            .await
-            .unwrap();
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "think",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
         let prompts = backend.prompts.lock().unwrap();
         assert_eq!(prompts.len(), 2);
         assert!(!prompts[1].contains("[技能規範指引]"));
@@ -319,9 +406,16 @@ mod tests {
     async fn run_turn_routes_executes_and_persists() {
         let mem = open_memory().await;
         let backend = MockBackend::new(&["fixer", "done"]);
-        let out = run_turn(&mem, &backend, &test_cfg("project:T"), "fix the bug", &mut |_| {}, &mut |_| {})
-            .await
-            .unwrap();
+        let out = run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "fix the bug",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
         assert_eq!(out.role, Role::Fixer);
         assert_eq!(out.text, "done");
 
@@ -341,9 +435,16 @@ mod tests {
     async fn execution_prompt_carries_role_and_not_persona() {
         let mem = open_memory().await;
         let backend = MockBackend::new(&["fixer", "done"]);
-        run_turn(&mem, &backend, &test_cfg("project:T"), "fix the bug", &mut |_| {}, &mut |_| {})
-            .await
-            .unwrap();
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "fix the bug",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
         let prompts = backend.prompts.lock().unwrap();
         assert_eq!(prompts.len(), 2);
         assert!(!prompts[1].contains("孫悟空"));
@@ -355,15 +456,25 @@ mod tests {
         let mem = open_memory().await;
         mem.set_agent_session("project:T", "ses_old").await.unwrap();
         let backend = MockBackend::new(&["oracle", "answer"]);
-        run_turn(&mem, &backend, &test_cfg("project:T"), "hi", &mut |_| {}, &mut |_| {})
-            .await
-            .unwrap();
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "hi",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
         {
             let ids = backend.session_ids.lock().unwrap();
             assert_eq!(ids[0], None);
             assert_eq!(ids[1], Some("ses_old".to_string()));
         }
-        assert_eq!(mem.agent_session("project:T").await.unwrap(), Some("ses_new".to_string()));
+        assert_eq!(
+            mem.agent_session("project:T").await.unwrap(),
+            Some("ses_new".to_string())
+        );
     }
 
     #[tokio::test]
@@ -371,9 +482,16 @@ mod tests {
         let mem = open_memory().await;
         mem.set_agent_session("project:T", "ses_old").await.unwrap();
         let backend = MockBackend::new(&["explorer, fixer", "e1", "f2"]);
-        run_turn(&mem, &backend, &test_cfg("project:T"), "go", &mut |_| {}, &mut |_| {})
-            .await
-            .unwrap();
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "go",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
         let ids = backend.session_ids.lock().unwrap();
         assert_eq!(ids.clone(), vec![None, None, Some("ses_old".to_string())]);
     }
@@ -468,9 +586,16 @@ mod tests {
         let mem = open_memory().await;
         // planner -> explorer,fixer; explorer reports findings; fixer (final) returns empty.
         let backend = MockBackend::new(&["explorer, fixer", "找到了根因", ""]);
-        let out = run_turn(&mem, &backend, &test_cfg("project:T"), "find and fix the bug", &mut |_| {}, &mut |_| {})
-            .await
-            .unwrap();
+        let out = run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "find and fix the bug",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
         assert_eq!(out.role, Role::Explorer);
         assert_eq!(out.text, "找到了根因");
 
@@ -483,26 +608,82 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(r.data.iter().any(|h| h.text.contains("Assistant: 找到了根因")));
+        assert!(r
+            .data
+            .iter()
+            .any(|h| h.text.contains("Assistant: 找到了根因")));
     }
 
     #[tokio::test]
-    async fn run_turn_all_empty_returns_sentinel() {
+    async fn run_turn_all_empty_repairs_with_text() {
         let mem = open_memory().await;
-        let backend = MockBackend::new(&["fixer", ""]);
-        let out = run_turn(&mem, &backend, &test_cfg("project:T"), "go", &mut |_| {}, &mut |_| {})
+        let backend = MockBackend::new(&["fixer", "", "直接回答原問題"]);
+        let out = run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "你目前是什麼模型",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.text, "直接回答原問題");
+        assert_eq!(backend.prompts.lock().unwrap().len(), 3);
+        let repair_prompt = backend.prompts.lock().unwrap()[2].clone();
+        assert!(repair_prompt.contains("[修復回覆]"));
+        assert!(repair_prompt.contains("不要呼叫工具"));
+        assert!(repair_prompt.contains("你目前是什麼模型"));
+
+        let r = mem
+            .recall(RecallQuery {
+                query: "直接回答原問題".to_string(),
+                top_k: 10,
+                scope: Some("project:T".to_string()),
+                mode: RecallMode::Hybrid,
+            })
             .await
             .unwrap();
+        assert!(r
+            .data
+            .iter()
+            .any(|h| h.text.contains("Assistant: 直接回答原問題")));
+    }
+
+    #[tokio::test]
+    async fn run_turn_all_empty_repair_empty_returns_sentinel() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["fixer", "", ""]);
+        let out = run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "go",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
         assert_eq!(out.text, "(本回合未產生文字輸出)");
+        assert_eq!(backend.prompts.lock().unwrap().len(), 3);
     }
 
     #[tokio::test]
     async fn run_turn_injects_final_answer_directive_into_final_step_only() {
         let mem = open_memory().await;
         let backend = MockBackend::new(&["explorer, fixer", "e1", "f2"]);
-        run_turn(&mem, &backend, &test_cfg("project:T"), "go", &mut |_| {}, &mut |_| {})
-            .await
-            .unwrap();
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "go",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
         let prompts = backend.prompts.lock().unwrap();
         // prompts[0]=planner, [1]=explorer (helper), [2]=fixer (final).
         assert_eq!(prompts.len(), 3);
