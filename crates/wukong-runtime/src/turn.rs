@@ -34,6 +34,25 @@ pub async fn run_turn(
     on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
     on_role: &mut dyn FnMut(Role),
 ) -> Result<TurnOutput, WukongError> {
+    // Delegate with a no-op step observer so existing callers (CLI, Telegram,
+    // Scheduler) and their tests keep an unchanged signature.
+    run_turn_observed(memory, backend, cfg, input, on_event, on_role, &mut |_, _| {}).await
+}
+
+/// Same as [`run_turn`], but additionally reports each *non-final* chain step's
+/// output via `on_step(role, output)` the moment it completes (empty outputs are
+/// skipped). The final step is delivered through the returned [`TurnOutput`], not
+/// `on_step`, so a front-end can surface intermediate (helper) baton results
+/// while the final answer stays the primary reply.
+pub async fn run_turn_observed(
+    memory: &Memory,
+    backend: &impl AiBackend,
+    cfg: &GatewayConfig,
+    input: &str,
+    on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
+    on_role: &mut dyn FnMut(Role),
+    on_step: &mut dyn FnMut(Role, &str),
+) -> Result<TurnOutput, WukongError> {
     let recall = memory
         .recall(RecallQuery {
             query: input.to_string(),
@@ -82,7 +101,13 @@ pub async fn run_turn(
         if is_final {
             captured_session = resp.session_id.clone();
         }
-        prior.push(wukong_orchestrator::Outcome { role, output: resp.text });
+        let text = resp.text;
+        // Surface helper-baton output to observers as soon as it lands; the final
+        // step is delivered via the returned TurnOutput, not on_step.
+        if !is_final && !text.trim().is_empty() {
+            on_step(role, &text);
+        }
+        prior.push(wukong_orchestrator::Outcome { role, output: text });
     }
 
     if let Some(id) = captured_session {
@@ -390,6 +415,52 @@ mod tests {
             .unwrap();
         assert!(r.data.iter().any(|h| h.text.contains("Assistant: f2")));
         assert!(!r.data.iter().any(|h| h.text.contains("Assistant: f1")));
+    }
+
+    #[tokio::test]
+    async fn run_turn_observed_reports_only_non_final_steps() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["explorer, fixer", "e1", "f2"]);
+        let mut steps: Vec<(Role, String)> = Vec::new();
+        let out = run_turn_observed(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "build and fix",
+            &mut |_| {},
+            &mut |_| {},
+            &mut |role, output| steps.push((role, output.to_string())),
+        )
+        .await
+        .unwrap();
+
+        // Only the helper (Explorer) step is observed; the final (Fixer) output
+        // is delivered via TurnOutput, not on_step.
+        assert_eq!(steps, vec![(Role::Explorer, "e1".to_string())]);
+        assert_eq!(out.role, Role::Fixer);
+        assert_eq!(out.text, "f2");
+    }
+
+    #[tokio::test]
+    async fn run_turn_observed_skips_empty_non_final_step() {
+        let mem = open_memory().await;
+        // Explorer (helper) returns empty; nothing should be observed for it.
+        let backend = MockBackend::new(&["explorer, fixer", "", "f2"]);
+        let mut steps: Vec<(Role, String)> = Vec::new();
+        let out = run_turn_observed(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "go",
+            &mut |_| {},
+            &mut |_| {},
+            &mut |role, output| steps.push((role, output.to_string())),
+        )
+        .await
+        .unwrap();
+
+        assert!(steps.is_empty());
+        assert_eq!(out.text, "f2");
     }
 
     #[tokio::test]

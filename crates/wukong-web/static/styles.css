@@ -203,6 +203,63 @@ wukong-chat { display: flex; flex-direction: column; flex: 1; min-height: 0; }
   max-height: 15rem;
   overflow-y: auto;
 }
+
+/* Helper-baton output: visually secondary to the final answer (neutral, muted,
+   collapsed by default) so it informs without competing for attention. */
+.baton {
+  align-self: flex-start;
+  max-width: 80%;
+  width: 100%;
+  margin: 0.35rem 0;
+  border: 1px solid var(--border-color);
+  border-left: 3px solid rgba(120, 120, 120, 0.4);
+  border-radius: 8px;
+  background: rgba(120, 120, 120, 0.04);
+  overflow: hidden;
+  transition: var(--transition-smooth);
+}
+.baton summary {
+  padding: 0.4rem 0.7rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  user-select: none;
+}
+.baton summary::-webkit-details-marker {
+  display: none;
+}
+.baton summary::before {
+  content: '▶';
+  font-size: 0.7rem;
+  display: inline-block;
+  transition: transform 0.2s ease;
+}
+.baton[open] summary::before {
+  transform: rotate(90deg);
+}
+.baton[open] summary {
+  border-bottom: 1px solid var(--border-color);
+}
+.baton-body {
+  padding: 0.6rem 0.75rem;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  max-height: 22rem;
+  overflow-y: auto;
+}
+.baton-body :first-child { margin-top: 0; }
+.baton-body :last-child { margin-bottom: 0; }
+.baton-body pre {
+  max-height: 16rem;
+  overflow: auto;
+}
+
 .composer {
   display: flex;
   align-items: flex-end;

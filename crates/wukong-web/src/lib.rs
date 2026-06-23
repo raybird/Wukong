@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt;
 use wukong_chat_history::{ChatHistoryStore, ChatMessage};
-use wukong_cli::run_turn;
+use wukong_cli::run_turn_observed;
 use wukong_gateway::backend::AiBackend;
 use wukong_gateway::config::GatewayConfig;
 use wukong_memory::Memory;
@@ -112,6 +112,8 @@ async fn styles_css() -> axum::response::Response {
 enum SseMsg {
     Role(String),
     Reasoning(String),
+    /// A non-final (helper) baton's rendered output, surfaced as a collapsible card.
+    Step { role: String, html: String },
     Answer(String),
     Error(String),
     Done,
@@ -122,6 +124,9 @@ impl SseMsg {
         match self {
             SseMsg::Role(r) => Event::default().event("role").data(r),
             SseMsg::Reasoning(t) => Event::default().event("reasoning").data(t),
+            SseMsg::Step { role, html } => Event::default()
+                .event("step")
+                .data(serde_json::json!({ "role": role, "html": html }).to_string()),
             SseMsg::Answer(h) => Event::default().event("answer").data(h),
             SseMsg::Error(e) => Event::default().event("error").data(e),
             SseMsg::Done => Event::default().event("done").data("ok"),
@@ -326,7 +331,8 @@ where
 
                 let role_tx = tx.clone();
                 let ev_tx = tx.clone();
-                let result = run_turn(
+                let step_tx = tx.clone();
+                let result = run_turn_observed(
                     mem.as_ref(),
                     backend.as_ref(),
                     &cfg,
@@ -340,6 +346,13 @@ where
                     },
                     &mut |role| {
                         let _ = role_tx.send(SseMsg::Role(role.name().to_string()));
+                    },
+                    &mut |role, output| {
+                        let html = wukong_render::to_web_html(output);
+                        let _ = step_tx.send(SseMsg::Step {
+                            role: role.name().to_string(),
+                            html,
+                        });
                     },
                 )
                 .await;
@@ -851,6 +864,32 @@ mod tests {
             app_state.memory.agent_session("global").await.unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn chat_streams_helper_step_before_answer() {
+        // planner -> [explorer, fixer]; explorer (helper) emits e1, fixer (final) f2.
+        let app = build_router(state(None, &["explorer, fixer", "e1", "f2"]).await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/chat?q=build%20and%20fix")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        let step_at = body.find("event: step").expect("missing step event");
+        let answer_at = body.find("event: answer").expect("missing answer event");
+        // Helper baton card streams before the final answer.
+        assert!(step_at < answer_at, "step must precede answer:\n{body}");
+        // The helper step carries its role and rendered output; the final (fixer)
+        // output goes through the answer event, not a step.
+        assert!(body.contains(r#""role":"explorer""#), "step role:\n{body}");
+        assert!(!body.contains(r#""role":"fixer""#), "final must not be a step:\n{body}");
     }
 
     #[tokio::test]

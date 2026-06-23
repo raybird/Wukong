@@ -280,6 +280,26 @@ export class WukongChat extends HTMLElement {
       thinking.querySelector('.reasoning').textContent += ev.data;
       this.log.scrollTop = this.log.scrollHeight;
     });
+    es.addEventListener('step', (ev) => {
+      // Helper-baton output: a collapsed, visually-secondary card above the answer.
+      let role = '', stepHtml = '';
+      try {
+        const parsed = JSON.parse(ev.data);
+        role = parsed.role || '';
+        stepHtml = parsed.html || '';
+      } catch (_err) {
+        return;
+      }
+      const details = document.createElement('details');
+      details.className = 'baton';
+      // role is escaped; stepHtml is server-produced safe HTML, trusted as-is.
+      details.innerHTML =
+        '<summary>🔍 悟空·' + escapeHTML(role) + ' 的產出</summary>' +
+        '<div class="baton-body">' + stepHtml + '</div>';
+      this.log.appendChild(details);
+      this.enhanceCodeBlocks(details);
+      this.log.scrollTop = this.log.scrollHeight;
+    });
     es.addEventListener('answer', (ev) => {
       progress.remove();
       // Server already produced safe HTML; mark it trusted.
