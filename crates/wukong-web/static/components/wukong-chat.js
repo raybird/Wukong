@@ -11,6 +11,8 @@ export class WukongChat extends HTMLElement {
         <label class="chat-source">來源 <select id="chat-scope"></select></label>
         <label>跳到日期 <input id="jump-date" type="date" /></label>
         <button id="jump-button" type="button">前往</button>
+        <span id="chat-model-status" class="tag">模型：載入中</span>
+        <span id="chat-skill-status" class="tag">技能偏好：Phase 2</span>
       </div>
       <div class="log" id="log"></div>
       <form id="form" class="composer">
@@ -28,6 +30,7 @@ export class WukongChat extends HTMLElement {
     const textarea = this.querySelector('#q');
     this.input = textarea;
     this.scopeSelect = this.querySelector('#chat-scope');
+    this.modelStatus = this.querySelector('#chat-model-status');
     
     // Auto-resizing logic
     textarea.addEventListener('input', function () {
@@ -82,8 +85,21 @@ export class WukongChat extends HTMLElement {
   }
 
   async initialize() {
+    await this.loadModelStatus();
     await this.loadScopes();
     await this.loadLatest();
+  }
+
+  async loadModelStatus() {
+    if (!this.modelStatus) return;
+    const token = window.WUKONG_TOKEN ? '?token=' + encodeURIComponent(window.WUKONG_TOKEN) : '';
+    const resp = await fetch('/api/settings/model' + token);
+    if (!resp.ok) {
+      this.modelStatus.textContent = '模型：未知';
+      return;
+    }
+    const data = await resp.json();
+    this.modelStatus.textContent = data.model ? '模型：' + data.model : '模型：agent 預設';
   }
 
   resetMessages() {
