@@ -88,6 +88,7 @@ async fn main() {
         db_url,
         agent_command: vec![],
         default_model: None,
+        planner_preferences: None,
         thinking: true,
         recall_top_k: 5,
         stream: false,

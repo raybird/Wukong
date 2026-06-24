@@ -327,6 +327,7 @@ mod tests {
             db_url: String::new(),
             agent_command: vec![],
             default_model: None,
+            planner_preferences: None,
             thinking: true,
             recall_top_k: 5,
             stream: true,

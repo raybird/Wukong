@@ -1,12 +1,19 @@
 use crate::cli::Cli;
 
 /// Fully resolved runtime configuration (CLI > env > defaults).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannerPreferenceConfig {
+    pub preferred_roles: Vec<String>,
+    pub preferred_skills: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
     pub scope: String,
     pub db_url: String,
     pub agent_command: Vec<String>,
     pub default_model: Option<String>,
+    pub planner_preferences: Option<PlannerPreferenceConfig>,
     /// Pass `--thinking` to opencode for conversational turns. Default true;
     /// off via `--no-thinking` or `WUKONG_THINKING=0`.
     pub thinking: bool,
@@ -43,6 +50,7 @@ impl GatewayConfig {
             db_url,
             agent_command,
             default_model: None,
+            planner_preferences: None,
             thinking,
             recall_top_k: 5,
             stream,
@@ -55,6 +63,40 @@ impl GatewayConfig {
             .filter(|m| !m.is_empty())
             .map(|m| m.to_string());
     }
+
+    pub fn apply_planner_preferences(
+        &mut self,
+        enabled: bool,
+        roles: Vec<String>,
+        skills: Vec<String>,
+    ) {
+        if !enabled {
+            self.planner_preferences = None;
+            return;
+        }
+        let preferred_roles = normalize_preference_ids(roles);
+        let preferred_skills = normalize_preference_ids(skills);
+        if preferred_roles.is_empty() && preferred_skills.is_empty() {
+            self.planner_preferences = None;
+            return;
+        }
+        self.planner_preferences = Some(PlannerPreferenceConfig {
+            preferred_roles,
+            preferred_skills,
+        });
+    }
+}
+
+fn normalize_preference_ids(values: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for value in values {
+        let value = value.trim();
+        if value.is_empty() || normalized.iter().any(|existing| existing == value) {
+            continue;
+        }
+        normalized.push(value.to_string());
+    }
+    normalized
 }
 
 fn split_ws(s: &str) -> Vec<String> {
@@ -120,6 +162,7 @@ mod tests {
             db_url: "sqlite://x.db".to_string(),
             agent_command: vec!["opencode".to_string(), "run".to_string()],
             default_model: None,
+            planner_preferences: None,
             thinking: true,
             recall_top_k: 5,
             stream: false,
@@ -128,6 +171,54 @@ mod tests {
         cfg.apply_default_model(Some("opencode/deepseek-v4-flash-free"));
 
         assert_eq!(cfg.default_model.as_deref(), Some("opencode/deepseek-v4-flash-free"));
+    }
+
+    #[test]
+    fn apply_planner_preferences_sets_none_when_disabled_or_empty() {
+        let mut cfg = GatewayConfig {
+            scope: "global".to_string(),
+            db_url: "sqlite://x.db".to_string(),
+            agent_command: vec!["opencode".to_string(), "run".to_string()],
+            default_model: None,
+            planner_preferences: None,
+            thinking: true,
+            recall_top_k: 5,
+            stream: false,
+        };
+
+        cfg.apply_planner_preferences(
+            false,
+            vec!["fixer".to_string()],
+            vec!["systematic-debugging".to_string()],
+        );
+        assert!(cfg.planner_preferences.is_none());
+
+        cfg.apply_planner_preferences(true, vec![" ".to_string()], vec![]);
+        assert!(cfg.planner_preferences.is_none());
+    }
+
+    #[test]
+    fn apply_planner_preferences_sets_normalized_values() {
+        let mut cfg = GatewayConfig {
+            scope: "global".to_string(),
+            db_url: "sqlite://x.db".to_string(),
+            agent_command: vec!["opencode".to_string(), "run".to_string()],
+            default_model: None,
+            planner_preferences: None,
+            thinking: true,
+            recall_top_k: 5,
+            stream: false,
+        };
+
+        cfg.apply_planner_preferences(
+            true,
+            vec![" fixer ".to_string(), "fixer".to_string(), "oracle".to_string()],
+            vec![" systematic-debugging ".to_string()],
+        );
+
+        let prefs = cfg.planner_preferences.unwrap();
+        assert_eq!(prefs.preferred_roles, vec!["fixer", "oracle"]);
+        assert_eq!(prefs.preferred_skills, vec!["systematic-debugging"]);
     }
 
     #[test]
