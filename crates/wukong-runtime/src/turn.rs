@@ -3,7 +3,7 @@ use thiserror::Error;
 use wukong_gateway::backend::{AgentRequest, AiBackend};
 use wukong_gateway::config::GatewayConfig;
 use wukong_memory::{Memory, MemoryItem, MemoryKind, RecallMode, RecallQuery, RememberInput};
-use wukong_orchestrator::Role;
+use wukong_orchestrator::{PlannerPreferenceHint, Role};
 use wukong_skills::{find as find_skill, route_options};
 
 /// All errors produced by the unified turn.
@@ -22,6 +22,12 @@ pub enum WukongError {
 pub struct TurnOutput {
     pub role: Role,
     pub text: String,
+}
+
+pub struct ObservedStep<'a> {
+    pub role: Role,
+    pub skill_name: Option<&'a str>,
+    pub output: &'a str,
 }
 
 /// One unified Wukong turn: recall → route → execute (persona + role + memory)
@@ -62,6 +68,27 @@ pub async fn run_turn_observed(
     on_role: &mut dyn FnMut(Role),
     on_step: &mut dyn FnMut(Role, &str),
 ) -> Result<TurnOutput, WukongError> {
+    run_turn_traced(
+        memory,
+        backend,
+        cfg,
+        input,
+        on_event,
+        on_role,
+        &mut |step| on_step(step.role, step.output),
+    )
+    .await
+}
+
+pub async fn run_turn_traced(
+    memory: &Memory,
+    backend: &impl AiBackend,
+    cfg: &GatewayConfig,
+    input: &str,
+    on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
+    on_role: &mut dyn FnMut(Role),
+    on_step: &mut dyn FnMut(ObservedStep<'_>),
+) -> Result<TurnOutput, WukongError> {
     let recall = memory
         .recall(RecallQuery {
             query: input.to_string(),
@@ -71,7 +98,14 @@ pub async fn run_turn_observed(
         })
         .await?;
 
-    let steps = wukong_orchestrator::plan_skill_chain(backend, input, &route_options()).await?;
+    let preference_hint = planner_preference_hint(cfg);
+    let steps = wukong_orchestrator::plan_skill_chain_with_preferences(
+        backend,
+        input,
+        &route_options(),
+        preference_hint.as_ref(),
+    )
+    .await?;
 
     let stored = memory.agent_session(&cfg.scope).await?;
     let n_steps = steps.len();
@@ -122,7 +156,11 @@ pub async fn run_turn_observed(
         // Surface helper-baton output to observers as soon as it lands; the final
         // step is delivered via the returned TurnOutput, not on_step.
         if !is_final && !text.trim().is_empty() {
-            on_step(role, &text);
+            on_step(ObservedStep {
+                role,
+                skill_name: step.skill_name.as_deref(),
+                output: &text,
+            });
         }
         prior.push(wukong_orchestrator::Outcome { role, output: text });
     }
@@ -217,6 +255,36 @@ fn append_empty_output_repair_directive(mut prompt: String) -> String {
         "這次不要呼叫工具，也不要嘗試讀取環境；請直接根據使用者原問題與已知上下文，用繁體中文給出可交付的文字回覆。",
     );
     prompt
+}
+
+fn parse_preferred_role(name: &str) -> Option<Role> {
+    let normalized = name.trim().to_ascii_lowercase();
+    Role::all()
+        .into_iter()
+        .find(|role| role.name() == normalized)
+}
+
+fn planner_preference_hint(cfg: &GatewayConfig) -> Option<PlannerPreferenceHint> {
+    let prefs = cfg.planner_preferences.as_ref()?;
+    let preferred_roles = prefs
+        .preferred_roles
+        .iter()
+        .filter_map(|role| parse_preferred_role(role))
+        .collect::<Vec<_>>();
+    let preferred_skills = prefs
+        .preferred_skills
+        .iter()
+        .filter(|skill| find_skill(skill).is_some())
+        .cloned()
+        .collect::<Vec<_>>();
+    if preferred_roles.is_empty() && preferred_skills.is_empty() {
+        None
+    } else {
+        Some(PlannerPreferenceHint {
+            preferred_roles,
+            preferred_skills,
+        })
+    }
 }
 
 /// Send a raw `/compact` message to a specific opencode session (no planner,
@@ -319,6 +387,47 @@ mod tests {
             models.last().and_then(Clone::clone).as_deref(),
             Some("opencode/deepseek-v4-flash-free")
         );
+    }
+
+    #[tokio::test]
+    async fn run_turn_sends_planner_preferences_to_skill_planner() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["fixer|systematic-debugging", "done"]);
+        let mut cfg = test_cfg("project:T");
+        cfg.apply_planner_preferences(
+            true,
+            vec!["fixer".to_string(), "oracle".to_string()],
+            vec!["systematic-debugging".to_string()],
+        );
+
+        run_turn(&mem, &backend, &cfg, "fix the bug", &mut |_| {}, &mut |_| {})
+            .await
+            .unwrap();
+
+        let planner_prompt = backend.prompts.lock().unwrap()[0].clone();
+        assert!(planner_prompt.contains("[User Preferences]"));
+        assert!(planner_prompt.contains("Preferred roles: fixer, oracle"));
+        assert!(planner_prompt.contains("Preferred skills: systematic-debugging"));
+        assert!(planner_prompt.contains("not hard constraints"));
+    }
+
+    #[tokio::test]
+    async fn run_turn_drops_invalid_preference_ids_before_planning() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["oracle|none", "answer"]);
+        let mut cfg = test_cfg("project:T");
+        cfg.apply_planner_preferences(
+            true,
+            vec!["unknown-role".to_string()],
+            vec!["unknown-skill".to_string()],
+        );
+
+        run_turn(&mem, &backend, &cfg, "think", &mut |_| {}, &mut |_| {})
+            .await
+            .unwrap();
+
+        let planner_prompt = backend.prompts.lock().unwrap()[0].clone();
+        assert!(!planner_prompt.contains("[User Preferences]"));
     }
 
     fn test_cfg(scope: &str) -> GatewayConfig {
@@ -580,6 +689,63 @@ mod tests {
 
         assert!(steps.is_empty());
         assert_eq!(out.text, "f2");
+    }
+
+    #[tokio::test]
+    async fn run_turn_traced_reports_role_skill_and_output_for_helper_steps() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["explorer|systematic-debugging\nfixer|none", "e1", "f2"]);
+        let mut steps: Vec<(Role, Option<String>, String)> = Vec::new();
+
+        let out = run_turn_traced(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "build and fix",
+            &mut |_| {},
+            &mut |_| {},
+            &mut |step| {
+                steps.push((
+                    step.role,
+                    step.skill_name.map(str::to_string),
+                    step.output.to_string(),
+                ));
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            steps,
+            vec![(
+                Role::Explorer,
+                Some("systematic-debugging".to_string()),
+                "e1".to_string()
+            )]
+        );
+        assert_eq!(out.role, Role::Fixer);
+        assert_eq!(out.text, "f2");
+    }
+
+    #[tokio::test]
+    async fn run_turn_observed_remains_role_output_compatible() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["explorer|systematic-debugging\nfixer|none", "e1", "f2"]);
+        let mut steps: Vec<(Role, String)> = Vec::new();
+
+        run_turn_observed(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "build and fix",
+            &mut |_| {},
+            &mut |_| {},
+            &mut |role, output| steps.push((role, output.to_string())),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(steps, vec![(Role::Explorer, "e1".to_string())]);
     }
 
     #[tokio::test]
