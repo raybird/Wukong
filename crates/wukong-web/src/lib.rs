@@ -180,6 +180,18 @@ struct SaveSettingsRequest {
     telegram: TelegramSettings,
 }
 
+#[derive(serde::Serialize)]
+struct ModelSettingsResponse {
+    model: Option<String>,
+    source: String,
+    editable: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct SaveModelSettingsRequest {
+    model: String,
+}
+
 fn authorized(expected: &Option<String>, provided: Option<&str>) -> bool {
     match expected {
         Some(t) => provided == Some(t.as_str()),
@@ -573,6 +585,77 @@ where
     }
 }
 
+fn env_model_override() -> Option<String> {
+    std::env::var("WUKONG_MODEL")
+        .ok()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+}
+
+async fn get_model_settings<B>(
+    State(state): State<AppState<B>>,
+    Query(params): Query<SettingsQuery>,
+) -> axum::response::Response
+where
+    B: AiBackend + Send + Sync + 'static,
+{
+    use axum::response::IntoResponse;
+
+    if !authorized(&state.token, params.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if let Some(model) = env_model_override() {
+        return Json(ModelSettingsResponse {
+            model: Some(model),
+            source: "env".to_string(),
+            editable: false,
+        })
+        .into_response();
+    }
+    match wukong_settings::load_settings(&state.settings_path) {
+        Ok(settings) => Json(ModelSettingsResponse {
+            model: settings.agent.default_model,
+            source: "persisted".to_string(),
+            editable: true,
+        })
+        .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn put_model_settings<B>(
+    State(state): State<AppState<B>>,
+    Query(params): Query<SettingsQuery>,
+    Json(req): Json<SaveModelSettingsRequest>,
+) -> axum::response::Response
+where
+    B: AiBackend + Send + Sync + 'static,
+{
+    use axum::response::IntoResponse;
+
+    if !authorized(&state.token, params.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if env_model_override().is_some() {
+        return (StatusCode::CONFLICT, "model is controlled by environment").into_response();
+    }
+    let model = req.model.trim();
+    if model.is_empty() {
+        return (StatusCode::BAD_REQUEST, "model must not be empty").into_response();
+    }
+    let mut settings = wukong_settings::load_settings(&state.settings_path).unwrap_or_default();
+    settings.agent.default_model = Some(model.to_string());
+    match wukong_settings::save_settings(&state.settings_path, &settings) {
+        Ok(()) => Json(ModelSettingsResponse {
+            model: Some(model.to_string()),
+            source: "persisted".to_string(),
+            editable: true,
+        })
+        .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 async fn list_schedules<B>(
     State(state): State<AppState<B>>,
     Query(params): Query<SettingsQuery>,
@@ -782,6 +865,10 @@ where
         .route(
             "/api/settings",
             axum::routing::get(get_settings::<B>).post(post_settings::<B>),
+        )
+        .route(
+            "/api/settings/model",
+            axum::routing::get(get_model_settings::<B>).put(put_model_settings::<B>),
         )
         .route(
             "/api/memory/summary",
@@ -1252,6 +1339,58 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn model_settings_round_trip() {
+        let app = build_router(state(None, &[]).await);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/settings/model")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"opencode/deepseek-v4-flash-free"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings/model")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains("opencode/deepseek-v4-flash-free"));
+        assert!(body.contains("persisted"));
+    }
+
+    #[tokio::test]
+    async fn model_settings_reject_empty_model() {
+        let app = build_router(state(None, &[]).await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/settings/model")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"   "}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
