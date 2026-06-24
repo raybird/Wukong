@@ -1,7 +1,9 @@
 //! wukong-web: a zero-build browser console for Wukong. Reuses run_turn and
 //! streams role progress + the rendered answer over SSE.
 
+pub mod memory_api;
 pub mod schedule_api;
+pub mod skills_api;
 pub mod system_api;
 
 use axum::extract::{Path, Query, State};
@@ -680,6 +682,69 @@ where
     }
 }
 
+async fn get_memory_summary<B>(
+    State(state): State<AppState<B>>,
+    Query(params): Query<memory_api::MemorySummaryQuery>,
+) -> axum::response::Response
+where
+    B: AiBackend + Send + Sync + 'static,
+{
+    use axum::response::IntoResponse;
+
+    if !authorized(&state.token, params.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match state.memory.snapshot(params.scope.as_deref()).await {
+        Ok(snapshot) => Json(snapshot).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn get_memory_records<B>(
+    State(state): State<AppState<B>>,
+    Query(params): Query<memory_api::MemoryRecordsQuery>,
+) -> axum::response::Response
+where
+    B: AiBackend + Send + Sync + 'static,
+{
+    use axum::response::IntoResponse;
+
+    if !authorized(&state.token, params.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let kind = match memory_api::parse_kind(params.kind.as_deref()) {
+        Ok(kind) => kind,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    match state
+        .memory
+        .records(
+            params.scope.as_deref(),
+            kind,
+            memory_api::capped_records_limit(params.limit),
+        )
+        .await
+    {
+        Ok(page) => Json(page).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn get_skills_catalog<B>(
+    State(state): State<AppState<B>>,
+    Query(params): Query<SettingsQuery>,
+) -> axum::response::Response
+where
+    B: AiBackend + Send + Sync + 'static,
+{
+    use axum::response::IntoResponse;
+
+    if !authorized(&state.token, params.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    Json(skills_api::catalog_response()).into_response()
+}
+
 /// Build the application router from shared state.
 pub fn build_router<B>(state: AppState<B>) -> axum::Router
 where
@@ -717,6 +782,18 @@ where
         .route(
             "/api/settings",
             axum::routing::get(get_settings::<B>).post(post_settings::<B>),
+        )
+        .route(
+            "/api/memory/summary",
+            axum::routing::get(get_memory_summary::<B>),
+        )
+        .route(
+            "/api/memory/records",
+            axum::routing::get(get_memory_records::<B>),
+        )
+        .route(
+            "/api/skills/catalog",
+            axum::routing::get(get_skills_catalog::<B>),
         )
         .route("/api/schedules", axum::routing::get(list_schedules::<B>))
         .route(
@@ -1175,6 +1252,94 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn memory_summary_returns_snapshot() {
+        let app_state = state(None, &[]).await;
+        app_state
+            .memory
+            .remember(wukong_memory::RememberInput {
+                scope: "project:Wukong".to_string(),
+                session_id: None,
+                items: vec![wukong_memory::MemoryItem {
+                    kind: wukong_memory::MemoryKind::Decision,
+                    text: "Use Web Console as control center".to_string(),
+                    importance: Some(1.0),
+                }],
+            })
+            .await
+            .unwrap();
+        let app = build_router(app_state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/memory/summary?scope=project:Wukong")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains("project:Wukong"));
+        assert!(body.contains("consolidation_candidates"));
+    }
+
+    #[tokio::test]
+    async fn memory_records_returns_recent_rows() {
+        let app_state = state(None, &[]).await;
+        app_state
+            .memory
+            .remember(wukong_memory::RememberInput {
+                scope: "project:Wukong".to_string(),
+                session_id: None,
+                items: vec![wukong_memory::MemoryItem {
+                    kind: wukong_memory::MemoryKind::Note,
+                    text: "Memory panel can read records".to_string(),
+                    importance: Some(0.8),
+                }],
+            })
+            .await
+            .unwrap();
+        let app = build_router(app_state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/memory/records?scope=project:Wukong&limit=5")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains("Memory panel can read records"));
+        assert!(body.contains("has_more"));
+    }
+
+    #[tokio::test]
+    async fn skills_catalog_returns_roles_and_skills() {
+        let app = build_router(state(None, &[]).await);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/skills/catalog")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains("Explorer"));
+        assert!(body.contains("systematic-debugging"));
     }
 
     #[tokio::test]
