@@ -837,6 +837,55 @@ where
     Json(skills_api::catalog_response()).into_response()
 }
 
+async fn get_skills_preferences<B>(
+    State(state): State<AppState<B>>,
+    Query(params): Query<SettingsQuery>,
+) -> axum::response::Response
+where
+    B: AiBackend + Send + Sync + 'static,
+{
+    use axum::response::IntoResponse;
+
+    if !authorized(&state.token, params.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match wukong_settings::load_settings(&state.settings_path) {
+        Ok(settings) => {
+            let prefs = wukong_settings::effective_planner_preferences(&settings);
+            Json(skills_api::preferences_response(&prefs)).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn put_skills_preferences<B>(
+    State(state): State<AppState<B>>,
+    Query(params): Query<SettingsQuery>,
+    Json(req): Json<skills_api::SaveSkillPreferencesRequest>,
+) -> axum::response::Response
+where
+    B: AiBackend + Send + Sync + 'static,
+{
+    use axum::response::IntoResponse;
+
+    if !authorized(&state.token, params.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let prefs = match skills_api::validate_preferences(req) {
+        Ok(prefs) => prefs,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let mut settings = wukong_settings::load_settings(&state.settings_path).unwrap_or_default();
+    settings.planner_preferences = prefs;
+    match wukong_settings::save_settings(&state.settings_path, &settings) {
+        Ok(()) => {
+            let effective = wukong_settings::effective_planner_preferences(&settings);
+            Json(skills_api::preferences_response(&effective)).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 /// Build the application router from shared state.
 pub fn build_router<B>(state: AppState<B>) -> axum::Router
 where
@@ -898,6 +947,10 @@ where
         .route(
             "/api/skills/catalog",
             axum::routing::get(get_skills_catalog::<B>),
+        )
+        .route(
+            "/api/skills/preferences",
+            axum::routing::get(get_skills_preferences::<B>).put(put_skills_preferences::<B>),
         )
         .route("/api/schedules", axum::routing::get(list_schedules::<B>))
         .route(
@@ -1326,6 +1379,7 @@ mod tests {
                 agent: wukong_settings::AgentSettings {
                     default_model: Some("opencode/deepseek-v4-flash-free".to_string()),
                 },
+                planner_preferences: wukong_settings::PlannerPreferences::default(),
             },
         )
         .unwrap();
@@ -1508,6 +1562,115 @@ mod tests {
         let body = body_string(resp).await;
         assert!(body.contains("Explorer"));
         assert!(body.contains("systematic-debugging"));
+    }
+
+    #[tokio::test]
+    async fn skills_preferences_requires_token_when_set() {
+        let app = build_router(state(Some("sekret"), &[]).await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/skills/preferences")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_skills_preferences_returns_defaults() {
+        let app = build_router(state(None, &[]).await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/skills/preferences")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains(r#""enabled":false"#));
+        assert!(body.contains(r#""roles":[]"#));
+        assert!(body.contains(r#""skills":[]"#));
+        assert!(body.contains(r#""warnings":[]"#));
+    }
+
+    #[tokio::test]
+    async fn put_skills_preferences_persists_normalized_values() {
+        let state = state(None, &[]).await;
+        let settings_path = state.settings_path.clone();
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/skills/preferences")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"enabled":true,"roles":["fixer","fixer","oracle"],"skills":["systematic-debugging"]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains(r#""enabled":true"#));
+        assert!(body.contains(r#""roles":["fixer","oracle"]"#));
+        assert!(body.contains(r#""skills":["systematic-debugging"]"#));
+        let saved = wukong_settings::load_settings(&settings_path).unwrap();
+        assert!(saved.planner_preferences.enabled);
+        assert_eq!(saved.planner_preferences.roles, vec!["fixer", "oracle"]);
+        assert_eq!(saved.planner_preferences.skills, vec!["systematic-debugging"]);
+    }
+
+    #[tokio::test]
+    async fn put_skills_preferences_rejects_unknown_role() {
+        let app = build_router(state(None, &[]).await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/skills/preferences")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"enabled":true,"roles":["not-a-role"],"skills":[]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(body_string(resp).await.contains("unknown role"));
+    }
+
+    #[tokio::test]
+    async fn put_skills_preferences_rejects_unknown_skill() {
+        let app = build_router(state(None, &[]).await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/skills/preferences")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"enabled":true,"roles":[],"skills":["not-a-skill"]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(body_string(resp).await.contains("unknown skill"));
     }
 
     #[tokio::test]
