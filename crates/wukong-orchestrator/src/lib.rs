@@ -7,8 +7,10 @@ pub mod router;
 pub use error::OrchestratorError;
 pub use role::Role;
 pub use router::{
-    parse_chain, parse_role, parse_skill_chain, plan_chain, plan_skill_chain, planning_prompt,
-    route, routing_prompt, skill_planning_prompt, PlannedStep, SkillRouteOption,
+    parse_chain, parse_role, parse_skill_chain, plan_chain, plan_skill_chain,
+    plan_skill_chain_with_preferences, planning_prompt, route, routing_prompt,
+    skill_planning_prompt, skill_planning_prompt_with_preferences, PlannedStep, PlannerPreferenceHint,
+    SkillRouteOption,
 };
 
 use wukong_gateway::backend::{AgentRequest, AiBackend};

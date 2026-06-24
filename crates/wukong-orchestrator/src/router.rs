@@ -83,6 +83,12 @@ pub struct PlannedStep {
     pub skill_name: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannerPreferenceHint {
+    pub preferred_roles: Vec<Role>,
+    pub preferred_skills: Vec<String>,
+}
+
 const KNOWN_SKILLS: &[&str] = &[
     "brainstorming",
     "writing-plans",
@@ -145,6 +151,14 @@ pub fn parse_skill_chain(response: &str) -> Vec<PlannedStep> {
 }
 
 pub fn skill_planning_prompt(task: &str, skills: &[SkillRouteOption]) -> String {
+    skill_planning_prompt_with_preferences(task, skills, None)
+}
+
+pub fn skill_planning_prompt_with_preferences(
+    task: &str,
+    skills: &[SkillRouteOption],
+    preferences: Option<&PlannerPreferenceHint>,
+) -> String {
     let mut s = String::from(
         "You are a planner. Decide which roles should collaborate on the task, \
          and which Superpowers skill each role should follow.\nRoles:\n",
@@ -166,6 +180,29 @@ pub fn skill_planning_prompt(task: &str, skills: &[SkillRouteOption]) -> String 
             collaborator
         ));
     }
+    if let Some(preferences) = preferences {
+        if !preferences.preferred_roles.is_empty() || !preferences.preferred_skills.is_empty() {
+            s.push_str("\n[User Preferences]\n");
+            if !preferences.preferred_roles.is_empty() {
+                let roles = preferences
+                    .preferred_roles
+                    .iter()
+                    .map(Role::name)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                s.push_str(&format!("Preferred roles: {roles}\n"));
+            }
+            if !preferences.preferred_skills.is_empty() {
+                s.push_str(&format!(
+                    "Preferred skills: {}\n",
+                    preferences.preferred_skills.join(", ")
+                ));
+            }
+            s.push_str(
+                "These are preferences, not hard constraints. Choose other roles or skills when the task requires it.\n",
+            );
+        }
+    }
     s.push_str(
         "\nReply with ONLY one step per line in this exact format:\n\
          <role>|<skill-or-none>\n\
@@ -181,9 +218,18 @@ pub async fn plan_skill_chain(
     task: &str,
     skills: &[SkillRouteOption],
 ) -> Result<Vec<PlannedStep>, OrchestratorError> {
+    plan_skill_chain_with_preferences(backend, task, skills, None).await
+}
+
+pub async fn plan_skill_chain_with_preferences(
+    backend: &impl AiBackend,
+    task: &str,
+    skills: &[SkillRouteOption],
+    preferences: Option<&PlannerPreferenceHint>,
+) -> Result<Vec<PlannedStep>, OrchestratorError> {
     let resp = backend
         .run(AgentRequest {
-            prompt: skill_planning_prompt(task, skills),
+            prompt: skill_planning_prompt_with_preferences(task, skills, preferences),
             session_id: None,
             thinking: false,
             model: None,
@@ -341,5 +387,61 @@ mod tests {
         assert!(p.contains("新功能或 bugfix"));
         assert!(p.contains("fix the bug"));
         assert!(p.contains("<role>|<skill-or-none>"));
+    }
+
+    #[test]
+    fn skill_planning_prompt_without_preferences_stays_unchanged() {
+        let skills = vec![SkillRouteOption {
+            skill_name: "systematic-debugging",
+            description: "錯誤追因、根因定位",
+            primary_role: Role::Fixer,
+            collaborator_role: Some(Role::Explorer),
+        }];
+
+        assert_eq!(
+            skill_planning_prompt("fix it", &skills),
+            skill_planning_prompt_with_preferences("fix it", &skills, None)
+        );
+    }
+
+    #[test]
+    fn skill_planning_prompt_with_preferences_includes_guidance_not_constraints() {
+        let skills = vec![SkillRouteOption {
+            skill_name: "systematic-debugging",
+            description: "錯誤追因、根因定位",
+            primary_role: Role::Fixer,
+            collaborator_role: Some(Role::Explorer),
+        }];
+        let hint = PlannerPreferenceHint {
+            preferred_roles: vec![Role::Fixer, Role::Oracle],
+            preferred_skills: vec!["systematic-debugging".to_string()],
+        };
+
+        let prompt = skill_planning_prompt_with_preferences("fix it", &skills, Some(&hint));
+
+        assert!(prompt.contains("[User Preferences]"));
+        assert!(prompt.contains("Preferred roles: fixer, oracle"));
+        assert!(prompt.contains("Preferred skills: systematic-debugging"));
+        assert!(prompt.contains("These are preferences, not hard constraints"));
+        assert!(prompt.contains("Choose other roles or skills when the task requires it"));
+        assert!(prompt.contains("fix it"));
+    }
+
+    #[test]
+    fn skill_planning_prompt_skips_empty_preference_hint() {
+        let skills = vec![SkillRouteOption {
+            skill_name: "systematic-debugging",
+            description: "錯誤追因、根因定位",
+            primary_role: Role::Fixer,
+            collaborator_role: Some(Role::Explorer),
+        }];
+        let hint = PlannerPreferenceHint {
+            preferred_roles: vec![],
+            preferred_skills: vec![],
+        };
+
+        let prompt = skill_planning_prompt_with_preferences("fix it", &skills, Some(&hint));
+
+        assert!(!prompt.contains("[User Preferences]"));
     }
 }
