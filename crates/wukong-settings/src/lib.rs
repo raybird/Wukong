@@ -6,6 +6,18 @@ pub struct Settings {
     pub telegram: TelegramSettings,
     #[serde(default)]
     pub agent: AgentSettings,
+    #[serde(default)]
+    pub planner_preferences: PlannerPreferences,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub struct PlannerPreferences {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub roles: Vec<String>,
+    #[serde(default)]
+    pub skills: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
@@ -70,6 +82,26 @@ pub fn effective_agent_settings(file: &Settings) -> AgentSettings {
     }
 }
 
+pub fn effective_planner_preferences(file: &Settings) -> PlannerPreferences {
+    PlannerPreferences {
+        enabled: file.planner_preferences.enabled,
+        roles: normalize_preference_ids(&file.planner_preferences.roles),
+        skills: normalize_preference_ids(&file.planner_preferences.skills),
+    }
+}
+
+fn normalize_preference_ids(values: &[String]) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for value in values {
+        let value = value.trim();
+        if value.is_empty() || normalized.iter().any(|existing| existing == value) {
+            continue;
+        }
+        normalized.push(value.to_string());
+    }
+    normalized
+}
+
 pub fn redact_token(token: &str) -> String {
     if token.is_empty() {
         String::new()
@@ -104,6 +136,7 @@ mod tests {
                 allowed: "42 99".to_string(),
             },
             agent: AgentSettings::default(),
+            planner_preferences: PlannerPreferences::default(),
         };
 
         save_settings(&path, &settings).unwrap();
@@ -121,12 +154,76 @@ mod tests {
             agent: AgentSettings {
                 default_model: Some("opencode/deepseek-v4-flash-free".to_string()),
             },
+            planner_preferences: PlannerPreferences::default(),
         };
 
         save_settings(&path, &settings).unwrap();
         let loaded = load_settings(&path).unwrap();
 
         assert_eq!(loaded.agent.default_model.as_deref(), Some("opencode/deepseek-v4-flash-free"));
+    }
+
+    #[test]
+    fn missing_planner_preferences_defaults_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"telegram":{"token":"123:abc","allowed":"42"}}"#).unwrap();
+
+        let loaded = load_settings(&path).unwrap();
+
+        assert_eq!(loaded.planner_preferences, PlannerPreferences::default());
+    }
+
+    #[test]
+    fn saves_and_loads_planner_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let settings = Settings {
+            telegram: TelegramSettings::default(),
+            agent: AgentSettings::default(),
+            planner_preferences: PlannerPreferences {
+                enabled: true,
+                roles: vec!["fixer".to_string(), "oracle".to_string()],
+                skills: vec!["systematic-debugging".to_string()],
+            },
+        };
+
+        save_settings(&path, &settings).unwrap();
+        let loaded = load_settings(&path).unwrap();
+
+        assert_eq!(loaded.planner_preferences, settings.planner_preferences);
+    }
+
+    #[test]
+    fn effective_planner_preferences_trims_dedupes_and_drops_empty_values() {
+        let settings = Settings {
+            telegram: TelegramSettings::default(),
+            agent: AgentSettings::default(),
+            planner_preferences: PlannerPreferences {
+                enabled: true,
+                roles: vec![
+                    " fixer ".to_string(),
+                    "".to_string(),
+                    "oracle".to_string(),
+                    "fixer".to_string(),
+                ],
+                skills: vec![
+                    " systematic-debugging ".to_string(),
+                    "systematic-debugging".to_string(),
+                    " ".to_string(),
+                    "verification-before-completion".to_string(),
+                ],
+            },
+        };
+
+        let effective = effective_planner_preferences(&settings);
+
+        assert!(effective.enabled);
+        assert_eq!(effective.roles, vec!["fixer", "oracle"]);
+        assert_eq!(
+            effective.skills,
+            vec!["systematic-debugging", "verification-before-completion"]
+        );
     }
 
     #[test]
@@ -148,6 +245,7 @@ mod tests {
             agent: AgentSettings {
                 default_model: Some("opencode/deepseek-v4-flash-free".to_string()),
             },
+            planner_preferences: PlannerPreferences::default(),
         };
 
         let effective = effective_agent_settings(&settings);
@@ -165,6 +263,7 @@ mod tests {
                 allowed: "42".to_string(),
             },
             agent: AgentSettings::default(),
+            planner_preferences: PlannerPreferences::default(),
         };
 
         let effective = effective_telegram_settings(&file);
