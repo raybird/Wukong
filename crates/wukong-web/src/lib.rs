@@ -313,6 +313,12 @@ where
                 let settings = wukong_settings::load_settings(&settings_path).unwrap_or_default();
                 let agent_settings = wukong_settings::effective_agent_settings(&settings);
                 cfg.apply_default_model(agent_settings.default_model.as_deref());
+                let planner_preferences = wukong_settings::effective_planner_preferences(&settings);
+                cfg.apply_planner_preferences(
+                    planner_preferences.enabled,
+                    planner_preferences.roles,
+                    planner_preferences.skills,
+                );
                 // Leading-slash inputs are session commands, not turns.
                 let trimmed = q.trim();
                 if let Some(rest) = trimmed.strip_prefix('/') {
@@ -979,16 +985,19 @@ mod tests {
 
     struct MockBackend {
         replies: Mutex<VecDeque<String>>,
+        prompts: Mutex<Vec<String>>,
     }
     impl MockBackend {
         fn new(r: &[&str]) -> Self {
             Self {
                 replies: Mutex::new(r.iter().map(|s| s.to_string()).collect()),
+                prompts: Mutex::new(Vec::new()),
             }
         }
     }
     impl AiBackend for MockBackend {
-        async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+        async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+            self.prompts.lock().unwrap().push(req.prompt);
             Ok(AgentResponse {
                 text: self.replies.lock().unwrap().pop_front().unwrap_or_default(),
                 session_id: None,
@@ -1671,6 +1680,40 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert!(body_string(resp).await.contains("unknown skill"));
+    }
+
+    #[tokio::test]
+    async fn chat_applies_saved_planner_preferences_to_turn_config() {
+        let state = state(None, &["fixer|systematic-debugging", "answer"]).await;
+        let backend = state.backend.clone();
+        let settings = wukong_settings::Settings {
+            telegram: wukong_settings::TelegramSettings::default(),
+            agent: wukong_settings::AgentSettings::default(),
+            planner_preferences: wukong_settings::PlannerPreferences {
+                enabled: true,
+                roles: vec!["fixer".to_string()],
+                skills: vec!["systematic-debugging".to_string()],
+            },
+        };
+        wukong_settings::save_settings(&state.settings_path, &settings).unwrap();
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/chat?q=fix%20it")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let _ = body_string(resp).await;
+
+        let prompts = backend.prompts.lock().unwrap();
+        assert!(prompts[0].contains("[User Preferences]"));
+        assert!(prompts[0].contains("Preferred roles: fixer"));
+        assert!(prompts[0].contains("Preferred skills: systematic-debugging"));
     }
 
     #[tokio::test]

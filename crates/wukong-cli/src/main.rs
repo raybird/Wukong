@@ -19,8 +19,7 @@ async fn main() {
     let mut cfg = GatewayConfig::resolve(&cli);
     let settings_path = wukong_settings::default_settings_path();
     let settings = wukong_settings::load_settings(&settings_path).unwrap_or_default();
-    let agent_settings = wukong_settings::effective_agent_settings(&settings);
-    cfg.apply_default_model(agent_settings.default_model.as_deref());
+    apply_settings_to_config(&mut cfg, &settings);
 
     let memory = match Memory::open(&cfg.db_url).await {
         Ok(m) => m,
@@ -387,6 +386,17 @@ async fn run_one(
         println!("{}", res.text);
         Ok(())
     }
+}
+
+fn apply_settings_to_config(cfg: &mut GatewayConfig, settings: &wukong_settings::Settings) {
+    let agent_settings = wukong_settings::effective_agent_settings(settings);
+    cfg.apply_default_model(agent_settings.default_model.as_deref());
+    let planner_preferences = wukong_settings::effective_planner_preferences(settings);
+    cfg.apply_planner_preferences(
+        planner_preferences.enabled,
+        planner_preferences.roles,
+        planner_preferences.skills,
+    );
 }
 
 /// Dispatch a `wukong memory <op>` maintenance command.

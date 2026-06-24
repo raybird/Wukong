@@ -90,6 +90,12 @@ pub async fn handle_message<C, B>(
             let settings = wukong_settings::load_settings(&settings_path).unwrap_or_default();
             let agent_settings = wukong_settings::effective_agent_settings(&settings);
             cfg.apply_default_model(agent_settings.default_model.as_deref());
+            let planner_preferences = wukong_settings::effective_planner_preferences(&settings);
+            cfg.apply_planner_preferences(
+                planner_preferences.enabled,
+                planner_preferences.roles,
+                planner_preferences.skills,
+            );
             record_chat(history, &cfg.scope, "user", &msg.text, None, "complete").await;
             match wukong_cli::parse_session_command(&name, &args) {
                 Some(cmd) => {
@@ -122,6 +128,12 @@ pub async fn handle_message<C, B>(
             let settings = wukong_settings::load_settings(&settings_path).unwrap_or_default();
             let agent_settings = wukong_settings::effective_agent_settings(&settings);
             cfg.apply_default_model(agent_settings.default_model.as_deref());
+            let planner_preferences = wukong_settings::effective_planner_preferences(&settings);
+            cfg.apply_planner_preferences(
+                planner_preferences.enabled,
+                planner_preferences.roles,
+                planner_preferences.skills,
+            );
             record_chat(history, &cfg.scope, "user", &input, None, "complete").await;
 
             // Single status bubble, edited in place as the turn progresses.
