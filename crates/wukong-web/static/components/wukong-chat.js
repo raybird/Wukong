@@ -31,6 +31,7 @@ export class WukongChat extends HTMLElement {
     this.input = textarea;
     this.scopeSelect = this.querySelector('#chat-scope');
     this.modelStatus = this.querySelector('#chat-model-status');
+    this.skillStatus = this.querySelector('#chat-skill-status');
     
     // Auto-resizing logic
     textarea.addEventListener('input', function () {
@@ -85,7 +86,7 @@ export class WukongChat extends HTMLElement {
   }
 
   async initialize() {
-    await this.loadModelStatus();
+    await Promise.all([this.loadModelStatus(), this.loadSkillStatus()]);
     await this.loadScopes();
     await this.loadLatest();
   }
@@ -100,6 +101,25 @@ export class WukongChat extends HTMLElement {
     }
     const data = await resp.json();
     this.modelStatus.textContent = data.model ? '模型：' + data.model : '模型：agent 預設';
+  }
+
+  async loadSkillStatus() {
+    if (!this.skillStatus) return;
+    const token = window.WUKONG_TOKEN ? '?token=' + encodeURIComponent(window.WUKONG_TOKEN) : '';
+    const resp = await fetch('/api/skills/preferences' + token);
+    if (!resp.ok) {
+      this.skillStatus.textContent = '技能偏好：未知';
+      return;
+    }
+    const data = await resp.json();
+    if (!data.enabled) {
+      this.skillStatus.textContent = '技能偏好：未啟用';
+      return;
+    }
+    const picks = [...(data.roles || []), ...(data.skills || [])];
+    this.skillStatus.textContent = picks.length
+      ? '技能偏好：' + picks.join(' + ')
+      : '技能偏好：已啟用';
   }
 
   resetMessages() {
@@ -343,10 +363,11 @@ export class WukongChat extends HTMLElement {
     });
     es.addEventListener('step', (ev) => {
       // Helper-baton output: a collapsed, visually-secondary card above the answer.
-      let role = '', stepHtml = '';
+      let role = '', skill = '', stepHtml = '';
       try {
         const parsed = JSON.parse(ev.data);
         role = parsed.role || '';
+        skill = parsed.skill || '';
         stepHtml = parsed.html || '';
       } catch (_err) {
         return;
@@ -354,8 +375,9 @@ export class WukongChat extends HTMLElement {
       const details = document.createElement('details');
       details.className = 'baton';
       // role is escaped; stepHtml is server-produced safe HTML, trusted as-is.
+      const label = skill ? role + ' + ' + skill : role;
       details.innerHTML =
-        '<summary>🔍 悟空·' + escapeHTML(role) + ' 的產出</summary>' +
+        '<summary>🔍 悟空·' + escapeHTML(label) + ' 的產出</summary>' +
         '<div class="baton-body">' + stepHtml + '</div>';
       this.log.appendChild(details);
       this.enhanceCodeBlocks(details);
