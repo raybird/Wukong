@@ -402,8 +402,52 @@ wukong-chat { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .skeleton-bar.w-75 { width: 75%; }
 .skeleton-bar.w-50 { width: 50%; }
 
+.panel {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 1rem;
+}
+.panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+.panel-header h2 { margin: 0; }
+.panel-help { color: var(--text-secondary); margin: 0.25rem 0 0; }
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+.stat-card, .control-card, .record-card, .skill-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  padding: 0.85rem;
+}
+.stat-card strong { display: block; font-size: 1.35rem; color: var(--accent-gold); }
+.control-row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
+.control-row input, .control-row select, .control-row button { font: inherit; }
+.record-list, .skill-grid { display: grid; gap: 0.75rem; }
+.skill-grid { grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); }
+.tag {
+  display: inline-block;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  padding: 0.15rem 0.45rem;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+
 @media (max-width: 760px) {
   body { height: auto; min-height: 100vh; }
   main { flex-direction: column; }
   #settings { max-width: none; border-left: 0; border-top: 1px solid #8884; }
+  header { align-items: flex-start; flex-direction: column; }
+  header nav { width: 100%; overflow-x: auto; padding-bottom: 0.2rem; }
+  .panel-header { flex-direction: column; }
 }

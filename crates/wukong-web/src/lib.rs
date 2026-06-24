@@ -52,6 +52,8 @@ const INDEX_HTML: &str = include_str!("../static/index.html");
 const APP_JS: &str = include_str!("../static/app.js");
 const HTML_JS: &str = include_str!("../static/lib/html.js");
 const CHAT_JS: &str = include_str!("../static/components/wukong-chat.js");
+const MEMORY_JS: &str = include_str!("../static/components/wukong-memory.js");
+const SKILLS_JS: &str = include_str!("../static/components/wukong-skills.js");
 const SETTINGS_JS: &str = include_str!("../static/components/wukong-settings.js");
 const SCHEDULES_JS: &str = include_str!("../static/components/wukong-schedules.js");
 const SYSTEM_JS: &str = include_str!("../static/components/wukong-system.js");
@@ -96,6 +98,12 @@ async fn html_js() -> axum::response::Response {
 }
 async fn chat_js() -> axum::response::Response {
     asset(JS, CHAT_JS)
+}
+async fn memory_js() -> axum::response::Response {
+    asset(JS, MEMORY_JS)
+}
+async fn skills_js() -> axum::response::Response {
+    asset(JS, SKILLS_JS)
 }
 async fn settings_js() -> axum::response::Response {
     asset(JS, SETTINGS_JS)
@@ -839,6 +847,14 @@ where
         .route("/lib/html.js", axum::routing::get(html_js))
         .route("/components/wukong-chat.js", axum::routing::get(chat_js))
         .route(
+            "/components/wukong-memory.js",
+            axum::routing::get(memory_js),
+        )
+        .route(
+            "/components/wukong-skills.js",
+            axum::routing::get(skills_js),
+        )
+        .route(
             "/components/wukong-settings.js",
             axum::routing::get(settings_js),
         )
@@ -994,6 +1010,18 @@ mod tests {
         assert!(content_type(
             build_router(state(None, &[]).await),
             "/components/wukong-system.js"
+        )
+        .await
+        .contains("javascript"));
+        assert!(content_type(
+            build_router(state(None, &[]).await),
+            "/components/wukong-memory.js"
+        )
+        .await
+        .contains("javascript"));
+        assert!(content_type(
+            build_router(state(None, &[]).await),
+            "/components/wukong-skills.js"
         )
         .await
         .contains("javascript"));
