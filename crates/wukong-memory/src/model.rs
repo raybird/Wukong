@@ -156,6 +156,28 @@ pub struct Snapshot {
     pub prune_candidates: i64,
 }
 
+/// A single memory row for Web observability views.
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryRecord {
+    pub id: i64,
+    pub scope: String,
+    pub kind: MemoryKind,
+    pub text: String,
+    pub importance: f64,
+    pub created_at: i64,
+    pub last_recalled_at: Option<i64>,
+    pub recall_count: i64,
+    pub has_embedding: bool,
+    pub consolidated_into: Option<i64>,
+}
+
+/// A bounded page of memory records.
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryRecordsPage {
+    pub records: Vec<MemoryRecord>,
+    pub has_more: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -13,8 +13,9 @@ pub mod store;
 
 pub use error::{MemoryError, Result};
 pub use model::{
-    AgeBuckets, EmbeddingCoverage, Evidence, KindCount, MemoryItem, MemoryKind, RecallHit,
-    RecallMode, RecallQuery, RememberInput, ScopeCount, Snapshot, Stats, WukongResult,
+    AgeBuckets, EmbeddingCoverage, Evidence, KindCount, MemoryItem, MemoryKind, MemoryRecord,
+    MemoryRecordsPage, RecallHit, RecallMode, RecallQuery, RememberInput, ScopeCount, Snapshot,
+    Stats, WukongResult,
 };
 pub use consolidate::{
     plan_batches, ConcatSummarizer, ConsolidatePlan, ConsolidatePolicy, MockSummarizer, Summarizer,
@@ -362,6 +363,22 @@ impl Memory {
         self.store
             .snapshot(scope, now_unix(), p.max_age_secs, p.importance_floor)
             .await
+    }
+
+    /// Recent memory rows for Web observability.
+    pub async fn records(
+        &self,
+        scope: Option<&str>,
+        kind: Option<MemoryKind>,
+        limit: i64,
+    ) -> Result<MemoryRecordsPage> {
+        let requested = limit.clamp(1, 100);
+        let mut records = self.store.list_records(scope, kind, requested + 1).await?;
+        let has_more = records.len() as i64 > requested;
+        if has_more {
+            records.pop();
+        }
+        Ok(MemoryRecordsPage { records, has_more })
     }
 
     /// Aggregate statistics.

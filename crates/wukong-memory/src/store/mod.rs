@@ -1,7 +1,8 @@
 use crate::embed::blob_to_embedding;
 use crate::error::Result;
 use crate::model::{
-    AgeBuckets, EmbeddingCoverage, KindCount, MemoryKind, ScopeCount, Snapshot, Stats,
+    AgeBuckets, EmbeddingCoverage, KindCount, MemoryKind, MemoryRecord, ScopeCount, Snapshot,
+    Stats,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -447,6 +448,75 @@ impl Store {
         })
     }
 
+    /// Recent memory rows for observability. Ordered newest-first.
+    pub async fn list_records(
+        &self,
+        scope: Option<&str>,
+        kind: Option<MemoryKind>,
+        limit: i64,
+    ) -> Result<Vec<MemoryRecord>> {
+        let limit = limit.clamp(1, 101);
+        let rows = match (scope, kind) {
+            (Some(scope), Some(kind)) => {
+                sqlx::query(
+                    "SELECT id, scope, kind, text, importance, created_at, last_recalled_at,
+                            recall_count, embedding, consolidated_into
+                     FROM memories
+                     WHERE scope = ?1 AND kind = ?2
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT ?3",
+                )
+                .bind(scope)
+                .bind(kind.as_str())
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (Some(scope), None) => {
+                sqlx::query(
+                    "SELECT id, scope, kind, text, importance, created_at, last_recalled_at,
+                            recall_count, embedding, consolidated_into
+                     FROM memories
+                     WHERE scope = ?1
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT ?2",
+                )
+                .bind(scope)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (None, Some(kind)) => {
+                sqlx::query(
+                    "SELECT id, scope, kind, text, importance, created_at, last_recalled_at,
+                            recall_count, embedding, consolidated_into
+                     FROM memories
+                     WHERE kind = ?1
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT ?2",
+                )
+                .bind(kind.as_str())
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (None, None) => {
+                sqlx::query(
+                    "SELECT id, scope, kind, text, importance, created_at, last_recalled_at,
+                            recall_count, embedding, consolidated_into
+                     FROM memories
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT ?1",
+                )
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
+
+        Ok(rows.into_iter().map(row_to_memory_record).collect())
+    }
+
     /// All memories ordered oldest-first, for full markdown export.
     /// Returns (scope, created_at, kind, text).
     pub async fn all_for_export(&self) -> Result<Vec<(String, i64, MemoryKind, String)>> {
@@ -529,6 +599,21 @@ fn row_to_candidate(r: sqlx::sqlite::SqliteRow) -> Candidate {
     }
 }
 
+fn row_to_memory_record(r: sqlx::sqlite::SqliteRow) -> MemoryRecord {
+    MemoryRecord {
+        id: r.get::<i64, _>("id"),
+        scope: r.get::<String, _>("scope"),
+        kind: MemoryKind::from_db_str(&r.get::<String, _>("kind")),
+        text: r.get::<String, _>("text"),
+        importance: r.get::<f64, _>("importance"),
+        created_at: r.get::<i64, _>("created_at"),
+        last_recalled_at: r.get::<Option<i64>, _>("last_recalled_at"),
+        recall_count: r.get::<i64, _>("recall_count"),
+        has_embedding: r.get::<Option<Vec<u8>>, _>("embedding").is_some(),
+        consolidated_into: r.get::<Option<i64>, _>("consolidated_into"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -586,6 +671,49 @@ mod tests {
         let stats = store.stats().await.unwrap();
         assert_eq!(stats.total, 2);
         assert_eq!(stats.by_scope.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_records_filters_scope_kind_and_limit() {
+        let store = test_store().await;
+        let now = 1_700_000_000;
+
+        store
+            .insert_memory(None, "global", MemoryKind::Note, "global note", 0.7, now)
+            .await
+            .unwrap();
+        store
+            .insert_memory(
+                None,
+                "project:Wukong",
+                MemoryKind::Decision,
+                "keep this",
+                1.0,
+                now + 1,
+            )
+            .await
+            .unwrap();
+        store
+            .insert_memory(
+                None,
+                "project:Wukong",
+                MemoryKind::Note,
+                "skip kind",
+                0.4,
+                now + 2,
+            )
+            .await
+            .unwrap();
+
+        let rows = store
+            .list_records(Some("project:Wukong"), Some(MemoryKind::Decision), 10)
+            .await
+            .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].scope, "project:Wukong");
+        assert_eq!(rows[0].kind, MemoryKind::Decision);
+        assert_eq!(rows[0].text, "keep this");
     }
 
     #[tokio::test]
