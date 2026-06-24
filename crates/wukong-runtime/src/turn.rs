@@ -400,9 +400,16 @@ mod tests {
             vec!["systematic-debugging".to_string()],
         );
 
-        run_turn(&mem, &backend, &cfg, "fix the bug", &mut |_| {}, &mut |_| {})
-            .await
-            .unwrap();
+        run_turn(
+            &mem,
+            &backend,
+            &cfg,
+            "fix the bug",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
 
         let planner_prompt = backend.prompts.lock().unwrap()[0].clone();
         assert!(planner_prompt.contains("[User Preferences]"));

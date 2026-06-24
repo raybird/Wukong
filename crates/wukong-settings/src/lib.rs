@@ -66,7 +66,8 @@ pub fn save_settings(path: &Path, settings: &Settings) -> Result<()> {
 
 pub fn effective_telegram_settings(file: &Settings) -> TelegramSettings {
     let token = std::env::var("WUKONG_TG_TOKEN").unwrap_or_else(|_| file.telegram.token.clone());
-    let allowed = std::env::var("WUKONG_TG_ALLOWED").unwrap_or_else(|_| file.telegram.allowed.clone());
+    let allowed =
+        std::env::var("WUKONG_TG_ALLOWED").unwrap_or_else(|_| file.telegram.allowed.clone());
     TelegramSettings { token, allowed }
 }
 
@@ -160,7 +161,10 @@ mod tests {
         save_settings(&path, &settings).unwrap();
         let loaded = load_settings(&path).unwrap();
 
-        assert_eq!(loaded.agent.default_model.as_deref(), Some("opencode/deepseek-v4-flash-free"));
+        assert_eq!(
+            loaded.agent.default_model.as_deref(),
+            Some("opencode/deepseek-v4-flash-free")
+        );
     }
 
     #[test]
@@ -250,7 +254,10 @@ mod tests {
 
         let effective = effective_agent_settings(&settings);
 
-        assert_eq!(effective.default_model.as_deref(), Some("opencode/deepseek-v4-flash-free"));
+        assert_eq!(
+            effective.default_model.as_deref(),
+            Some("opencode/deepseek-v4-flash-free")
+        );
     }
 
     #[test]

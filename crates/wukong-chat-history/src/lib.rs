@@ -192,7 +192,11 @@ impl ChatHistoryStore {
         Ok(rows.into_iter().map(row_to_step).collect())
     }
 
-    pub async fn latest_messages(&self, thread_id: &str, limit: i64) -> Result<Vec<ChatMessage>, sqlx::Error> {
+    pub async fn latest_messages(
+        &self,
+        thread_id: &str,
+        limit: i64,
+    ) -> Result<Vec<ChatMessage>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT * FROM (
                  SELECT id, thread_id, role, content, content_html, status, created_at,
@@ -368,12 +372,25 @@ mod tests {
         let store = store().await;
         let thread = store.default_thread("global").await.unwrap();
         let mid = store
-            .insert_message(&thread, "assistant", "final", Some("<p>final</p>"), "complete", 100)
+            .insert_message(
+                &thread,
+                "assistant",
+                "final",
+                Some("<p>final</p>"),
+                "complete",
+                100,
+            )
             .await
             .unwrap();
         // Insert out of seq order to prove ORDER BY seq.
-        store.insert_step(mid, 1, "oracle", "o1", Some("<p>o1</p>"), 100).await.unwrap();
-        store.insert_step(mid, 0, "explorer", "e1", None, 100).await.unwrap();
+        store
+            .insert_step(mid, 1, "oracle", "o1", Some("<p>o1</p>"), 100)
+            .await
+            .unwrap();
+        store
+            .insert_step(mid, 0, "explorer", "e1", None, 100)
+            .await
+            .unwrap();
 
         let steps = store.list_steps(mid).await.unwrap();
         assert_eq!(steps.len(), 2);
@@ -397,7 +414,10 @@ mod tests {
         let store = store().await;
         let thread = store.default_thread("global").await.unwrap();
         for i in 0..12 {
-            store.insert_message(&thread, "user", &format!("m{i}"), None, "complete", 100 + i).await.unwrap();
+            store
+                .insert_message(&thread, "user", &format!("m{i}"), None, "complete", 100 + i)
+                .await
+                .unwrap();
         }
 
         let messages = store.latest_messages(&thread, 10).await.unwrap();
@@ -412,7 +432,10 @@ mod tests {
         let thread = store.default_thread("global").await.unwrap();
         let mut ids = Vec::new();
         for i in 0..12 {
-            let id = store.insert_message(&thread, "user", &format!("m{i}"), None, "complete", 100 + i).await.unwrap();
+            let id = store
+                .insert_message(&thread, "user", &format!("m{i}"), None, "complete", 100 + i)
+                .await
+                .unwrap();
             ids.push(id);
         }
 
@@ -426,16 +449,38 @@ mod tests {
     async fn messages_for_date_filters_by_time_range() {
         let store = store().await;
         let thread = store.default_thread("global").await.unwrap();
-        store.insert_message(&thread, "user", "old", None, "complete", 9).await.unwrap();
-        store.insert_message(&thread, "user", "in", None, "complete", 10).await.unwrap();
         store
-            .insert_message(&thread, "assistant", "also in", Some("<p>also in</p>"), "complete", 19)
+            .insert_message(&thread, "user", "old", None, "complete", 9)
             .await
             .unwrap();
-        store.insert_message(&thread, "user", "new", None, "complete", 20).await.unwrap();
+        store
+            .insert_message(&thread, "user", "in", None, "complete", 10)
+            .await
+            .unwrap();
+        store
+            .insert_message(
+                &thread,
+                "assistant",
+                "also in",
+                Some("<p>also in</p>"),
+                "complete",
+                19,
+            )
+            .await
+            .unwrap();
+        store
+            .insert_message(&thread, "user", "new", None, "complete", 20)
+            .await
+            .unwrap();
 
         let messages = store.messages_for_date(&thread, 10, 20, 10).await.unwrap();
-        assert_eq!(messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), vec!["in", "also in"]);
+        assert_eq!(
+            messages
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["in", "also in"]
+        );
         assert_eq!(messages[1].content_html.as_deref(), Some("<p>also in</p>"));
     }
 
@@ -443,14 +488,22 @@ mod tests {
     async fn list_scopes_includes_existing_and_empty_default() {
         let store = store().await;
         let tg = store.default_thread("user:tg-915354960").await.unwrap();
-        store.insert_message(&tg, "user", "hi", None, "complete", 10).await.unwrap();
+        store
+            .insert_message(&tg, "user", "hi", None, "complete", 10)
+            .await
+            .unwrap();
 
         let scopes = store.list_scopes("global").await.unwrap();
 
         assert!(scopes.iter().any(|s| {
-            s.scope == "user:tg-915354960" && s.label == "Telegram 915354960" && s.message_count == 1 && s.updated_at == 10
+            s.scope == "user:tg-915354960"
+                && s.label == "Telegram 915354960"
+                && s.message_count == 1
+                && s.updated_at == 10
         }));
-        assert!(scopes.iter().any(|s| s.scope == "global" && s.label == "Global" && s.message_count == 0));
+        assert!(scopes
+            .iter()
+            .any(|s| s.scope == "global" && s.label == "Global" && s.message_count == 0));
     }
 
     #[test]

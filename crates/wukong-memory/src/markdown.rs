@@ -12,14 +12,25 @@ use std::path::PathBuf;
 pub fn scope_to_filename(scope: &str) -> String {
     let safe: String = scope
         .chars()
-        .map(|c| if c == ':' || c == '/' || c == '\\' { '_' } else { c })
+        .map(|c| {
+            if c == ':' || c == '/' || c == '\\' {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     format!("{safe}.md")
 }
 
 /// Render one memory as a markdown block. `created_at` is unix seconds.
 pub fn render_markdown_entry(created_at: i64, kind: MemoryKind, text: &str) -> String {
-    format!("## {} · {}\n{}\n\n", iso8601(created_at), kind.as_str(), text)
+    format!(
+        "## {} · {}\n{}\n\n",
+        iso8601(created_at),
+        kind.as_str(),
+        text
+    )
 }
 
 /// Minimal UTC ISO-8601 formatter (no external date dep).
@@ -90,8 +101,10 @@ mod tests {
     fn sink_appends_to_scope_file() {
         let dir = tempdir().unwrap();
         let sink = MarkdownSink::new(dir.path());
-        sink.append("project:X", 100, MemoryKind::Note, "first").unwrap();
-        sink.append("project:X", 200, MemoryKind::Note, "second").unwrap();
+        sink.append("project:X", 100, MemoryKind::Note, "first")
+            .unwrap();
+        sink.append("project:X", 200, MemoryKind::Note, "second")
+            .unwrap();
         let body = std::fs::read_to_string(dir.path().join("project_X.md")).unwrap();
         assert!(body.contains("first"));
         assert!(body.contains("second"));

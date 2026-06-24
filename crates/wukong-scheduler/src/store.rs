@@ -141,7 +141,9 @@ impl SchedulerStore {
     pub async fn set_enabled(&self, id: &str, enabled: bool) -> Result<bool, SchedulerError> {
         let now = now_unix();
         let next = if enabled {
-            let Some(job) = self.get_job(id).await? else { return Ok(false); };
+            let Some(job) = self.get_job(id).await? else {
+                return Ok(false);
+            };
             next_after(&job.cron, now)?
         } else {
             None
@@ -268,7 +270,11 @@ impl SchedulerStore {
     }
 
     pub async fn complete_job(&self, job: &Job, finished_at: i64) -> Result<(), SchedulerError> {
-        let next = if job.enabled { next_after(&job.cron, finished_at)? } else { None };
+        let next = if job.enabled {
+            next_after(&job.cron, finished_at)?
+        } else {
+            None
+        };
         sqlx::query(
             "UPDATE scheduler_jobs
              SET last_run_at = ?2, next_run_at = ?3, locked_by = NULL, locked_until = NULL, updated_at = ?2
@@ -288,7 +294,11 @@ impl SchedulerStore {
         worker_id: &str,
         finished_at: i64,
     ) -> Result<bool, SchedulerError> {
-        let next = if job.enabled { next_after(&job.cron, finished_at)? } else { None };
+        let next = if job.enabled {
+            next_after(&job.cron, finished_at)?
+        } else {
+            None
+        };
         let result = sqlx::query(
             "UPDATE scheduler_jobs
              SET last_run_at = ?2, next_run_at = ?3, locked_by = NULL, locked_until = NULL, updated_at = ?2
@@ -303,7 +313,11 @@ impl SchedulerStore {
         Ok(result.rows_affected() > 0)
     }
 
-    pub async fn recent_runs(&self, job_id: Option<&str>, limit: i64) -> Result<Vec<JobRun>, SchedulerError> {
+    pub async fn recent_runs(
+        &self,
+        job_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<JobRun>, SchedulerError> {
         let rows = if let Some(job_id) = job_id {
             sqlx::query(
                 "SELECT id, job_id, started_at, finished_at, status, message
@@ -383,7 +397,10 @@ mod tests {
     fn new_turn(cron: &str) -> NewJob {
         NewJob {
             name: "turn".to_string(),
-            kind: JobKind::Turn { scope: "project:T".to_string(), prompt: "do it".to_string() },
+            kind: JobKind::Turn {
+                scope: "project:T".to_string(),
+                prompt: "do it".to_string(),
+            },
             cron: cron.to_string(),
         }
     }
@@ -408,7 +425,11 @@ mod tests {
         let disabled = store.get_job(&job.id).await.unwrap().unwrap();
         assert!(!disabled.enabled);
         assert_eq!(disabled.next_run_at, None);
-        assert!(store.claim_due_jobs(i64::MAX / 2, "w1", 60, 10).await.unwrap().is_empty());
+        assert!(store
+            .claim_due_jobs(i64::MAX / 2, "w1", 60, 10)
+            .await
+            .unwrap()
+            .is_empty());
 
         assert!(store.set_enabled(&job.id, true).await.unwrap());
         let enabled = store.get_job(&job.id).await.unwrap().unwrap();
@@ -435,8 +456,18 @@ mod tests {
         let job = store.add_job(new_turn("* * * * *")).await.unwrap();
         let now = job.next_run_at.unwrap();
 
-        assert_eq!(store.claim_due_jobs(now, "w1", 10, 10).await.unwrap().len(), 1);
-        assert_eq!(store.claim_due_jobs(now + 11, "w2", 10, 10).await.unwrap().len(), 1);
+        assert_eq!(
+            store.claim_due_jobs(now, "w1", 10, 10).await.unwrap().len(),
+            1
+        );
+        assert_eq!(
+            store
+                .claim_due_jobs(now + 11, "w2", 10, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -444,7 +475,11 @@ mod tests {
         let store = open_store().await;
         let job = store.add_job(new_turn("* * * * *")).await.unwrap();
         let due = job.next_run_at.unwrap();
-        let claimed = store.claim_due_jobs(due, "w1", 60, 10).await.unwrap().remove(0);
+        let claimed = store
+            .claim_due_jobs(due, "w1", 60, 10)
+            .await
+            .unwrap()
+            .remove(0);
 
         store.complete_job(&claimed, due).await.unwrap();
         let completed = store.get_job(&job.id).await.unwrap().unwrap();
@@ -459,16 +494,25 @@ mod tests {
         let job = store
             .add_job(NewJob {
                 name: "maintenance".to_string(),
-                kind: JobKind::Maintenance { scope: None, task: MaintenanceTask::Snapshot },
+                kind: JobKind::Maintenance {
+                    scope: None,
+                    task: MaintenanceTask::Snapshot,
+                },
                 cron: "* * * * *".to_string(),
             })
             .await
             .unwrap();
 
         let run1 = store.start_run(&job.id, 10).await.unwrap();
-        store.finish_run(run1, RunStatus::Success, "ok", 11).await.unwrap();
+        store
+            .finish_run(run1, RunStatus::Success, "ok", 11)
+            .await
+            .unwrap();
         let run2 = store.start_run(&job.id, 12).await.unwrap();
-        store.finish_run(run2, RunStatus::Failure, "bad", 13).await.unwrap();
+        store
+            .finish_run(run2, RunStatus::Failure, "bad", 13)
+            .await
+            .unwrap();
 
         let runs = store.recent_runs(Some(&job.id), 10).await.unwrap();
         assert_eq!(runs.len(), 2);
@@ -483,8 +527,14 @@ mod tests {
         let job = store.add_job(new_turn("* * * * *")).await.unwrap();
         let now = job.next_run_at.unwrap();
 
-        let claimed = store.claim_job(&job.id, now, "manual-1", 300).await.unwrap();
-        let duplicate = store.claim_job(&job.id, now + 1, "manual-2", 300).await.unwrap();
+        let claimed = store
+            .claim_job(&job.id, now, "manual-1", 300)
+            .await
+            .unwrap();
+        let duplicate = store
+            .claim_job(&job.id, now + 1, "manual-2", 300)
+            .await
+            .unwrap();
 
         assert!(claimed.is_some());
         assert!(duplicate.is_none());
@@ -496,11 +546,25 @@ mod tests {
         let job = store.add_job(new_turn("* * * * *")).await.unwrap();
         let now = job.next_run_at.unwrap();
 
-        let first = store.claim_due_jobs(now, "w1", 10, 10).await.unwrap().remove(0);
-        let second = store.claim_due_jobs(now + 11, "w2", 10, 10).await.unwrap().remove(0);
+        let first = store
+            .claim_due_jobs(now, "w1", 10, 10)
+            .await
+            .unwrap()
+            .remove(0);
+        let second = store
+            .claim_due_jobs(now + 11, "w2", 10, 10)
+            .await
+            .unwrap()
+            .remove(0);
 
-        assert!(!store.complete_claimed_job(&first, "w1", now + 12).await.unwrap());
-        assert!(store.complete_claimed_job(&second, "w2", now + 13).await.unwrap());
+        assert!(!store
+            .complete_claimed_job(&first, "w1", now + 12)
+            .await
+            .unwrap());
+        assert!(store
+            .complete_claimed_job(&second, "w2", now + 13)
+            .await
+            .unwrap());
         let completed = store.get_job(&job.id).await.unwrap().unwrap();
         assert_eq!(completed.last_run_at, Some(now + 13));
     }

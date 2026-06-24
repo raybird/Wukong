@@ -94,13 +94,21 @@ mod tests {
     #[test]
     fn mock_summarizer_reports_count() {
         let s = MockSummarizer;
-        assert_eq!(s.summarize(&["x".to_string(), "y".to_string()]).unwrap(), "SUMMARY(2)");
+        assert_eq!(
+            s.summarize(&["x".to_string(), "y".to_string()]).unwrap(),
+            "SUMMARY(2)"
+        );
     }
 
     use crate::store::ConsolidationRow;
 
     fn row(id: i64, session: Option<&str>) -> ConsolidationRow {
-        ConsolidationRow { id, session_id: session.map(|s| s.to_string()), text: format!("t{id}"), importance: 1.0 }
+        ConsolidationRow {
+            id,
+            session_id: session.map(|s| s.to_string()),
+            text: format!("t{id}"),
+            importance: 1.0,
+        }
     }
 
     #[test]

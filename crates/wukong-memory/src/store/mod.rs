@@ -1,8 +1,7 @@
 use crate::embed::blob_to_embedding;
 use crate::error::Result;
 use crate::model::{
-    AgeBuckets, EmbeddingCoverage, KindCount, MemoryKind, MemoryRecord, ScopeCount, Snapshot,
-    Stats,
+    AgeBuckets, EmbeddingCoverage, KindCount, MemoryKind, MemoryRecord, ScopeCount, Snapshot, Stats,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -132,11 +131,7 @@ impl Store {
     }
 
     /// Keyword candidates ranked by FTS5 bm25 (best first).
-    pub async fn keyword_candidates(
-        &self,
-        match_expr: &str,
-        limit: i64,
-    ) -> Result<Vec<Candidate>> {
+    pub async fn keyword_candidates(&self, match_expr: &str, limit: i64) -> Result<Vec<Candidate>> {
         let rows = sqlx::query(
             "SELECT m.id, m.scope, m.kind, m.text, m.created_at, m.recall_count, m.importance,
                     bm25(memories_fts) AS bm25
@@ -434,8 +429,10 @@ impl Store {
         }
         let consolidation_candidates = consq.fetch_one(&self.pool).await?.get::<i64, _>("c");
 
-        let prune_candidates =
-            self.prune_candidates(scope, max_age_secs, importance_floor, now).await?.len() as i64;
+        let prune_candidates = self
+            .prune_candidates(scope, max_age_secs, importance_floor, now)
+            .await?
+            .len() as i64;
 
         Ok(Snapshot {
             total: base.total,
@@ -544,11 +541,10 @@ impl Store {
             .fetch_one(&self.pool)
             .await?
             .get::<i64, _>("c");
-        let rows = sqlx::query(
-            "SELECT scope, COUNT(*) AS c FROM memories GROUP BY scope ORDER BY c DESC",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows =
+            sqlx::query("SELECT scope, COUNT(*) AS c FROM memories GROUP BY scope ORDER BY c DESC")
+                .fetch_all(&self.pool)
+                .await?;
         let by_scope = rows
             .into_iter()
             .map(|r| ScopeCount {
@@ -793,12 +789,24 @@ mod tests {
     #[tokio::test]
     async fn consolidation_candidates_excludes_consolidated_and_nonfoldable() {
         let store = test_store().await;
-        let e1 = store.insert_memory(Some("s1"), "project:X", MemoryKind::Event, "e1", 1.0, 100).await.unwrap();
-        let _e2 = store.insert_memory(None, "project:X", MemoryKind::Note, "n1", 2.0, 110).await.unwrap();
+        let e1 = store
+            .insert_memory(Some("s1"), "project:X", MemoryKind::Event, "e1", 1.0, 100)
+            .await
+            .unwrap();
+        let _e2 = store
+            .insert_memory(None, "project:X", MemoryKind::Note, "n1", 2.0, 110)
+            .await
+            .unwrap();
         // Decision is never foldable.
-        let _d = store.insert_memory(None, "project:X", MemoryKind::Decision, "d1", 1.0, 120).await.unwrap();
+        let _d = store
+            .insert_memory(None, "project:X", MemoryKind::Decision, "d1", 1.0, 120)
+            .await
+            .unwrap();
         // Different scope must not appear.
-        let _o = store.insert_memory(None, "global", MemoryKind::Event, "other", 1.0, 130).await.unwrap();
+        let _o = store
+            .insert_memory(None, "global", MemoryKind::Event, "other", 1.0, 130)
+            .await
+            .unwrap();
         // Mark e1 as already consolidated.
         store.mark_consolidated(&[e1], 999).await.unwrap();
 
@@ -815,10 +823,22 @@ mod tests {
         let store = test_store().await;
         let now = 1_000_000_000i64;
         let old = now - 40 * 86_400;
-        let e1 = store.insert_memory(None, "project:X", MemoryKind::Event, "e1", 1.0, now).await.unwrap();
-        let _n1 = store.insert_memory(None, "project:X", MemoryKind::Note, "n1", 0.2, old).await.unwrap();
-        let _d1 = store.insert_memory(None, "project:X", MemoryKind::Decision, "d1", 1.0, now).await.unwrap();
-        store.update_embedding(e1, &embedding_to_blob(&[0.1f32]), "mock").await.unwrap();
+        let e1 = store
+            .insert_memory(None, "project:X", MemoryKind::Event, "e1", 1.0, now)
+            .await
+            .unwrap();
+        let _n1 = store
+            .insert_memory(None, "project:X", MemoryKind::Note, "n1", 0.2, old)
+            .await
+            .unwrap();
+        let _d1 = store
+            .insert_memory(None, "project:X", MemoryKind::Decision, "d1", 1.0, now)
+            .await
+            .unwrap();
+        store
+            .update_embedding(e1, &embedding_to_blob(&[0.1f32]), "mock")
+            .await
+            .unwrap();
 
         let snap = store.snapshot(None, now, 30 * 86_400, 0.5).await.unwrap();
         assert_eq!(snap.total, 3);
@@ -841,19 +861,37 @@ mod tests {
         let store = test_store().await;
         let now = 1_000_000_000i64;
         let old = now - 40 * 86_400; // 40 days old
-        // (a) consolidated event => prunable via main path.
-        let a = store.insert_memory(None, "project:X", MemoryKind::Event, "a", 1.0, old).await.unwrap();
+                                     // (a) consolidated event => prunable via main path.
+        let a = store
+            .insert_memory(None, "project:X", MemoryKind::Event, "a", 1.0, old)
+            .await
+            .unwrap();
         store.mark_consolidated(&[a], 999).await.unwrap();
         // (b) old, never recalled, low importance note => prunable via fallback.
-        let b = store.insert_memory(None, "project:X", MemoryKind::Note, "b", 0.2, old).await.unwrap();
+        let b = store
+            .insert_memory(None, "project:X", MemoryKind::Note, "b", 0.2, old)
+            .await
+            .unwrap();
         // (c) old but high importance => NOT prunable.
-        let _c = store.insert_memory(None, "project:X", MemoryKind::Note, "c", 0.9, old).await.unwrap();
+        let _c = store
+            .insert_memory(None, "project:X", MemoryKind::Note, "c", 0.9, old)
+            .await
+            .unwrap();
         // (d) decision is never prunable, even if old/low.
-        let _d = store.insert_memory(None, "project:X", MemoryKind::Decision, "d", 0.1, old).await.unwrap();
+        let _d = store
+            .insert_memory(None, "project:X", MemoryKind::Decision, "d", 0.1, old)
+            .await
+            .unwrap();
         // (e) recent low-importance note => NOT prunable (too new).
-        let _e = store.insert_memory(None, "project:X", MemoryKind::Note, "e", 0.1, now).await.unwrap();
+        let _e = store
+            .insert_memory(None, "project:X", MemoryKind::Note, "e", 0.1, now)
+            .await
+            .unwrap();
 
-        let ids = store.prune_candidates(Some("project:X"), 30 * 86_400, 0.5, now).await.unwrap();
+        let ids = store
+            .prune_candidates(Some("project:X"), 30 * 86_400, 0.5, now)
+            .await
+            .unwrap();
         let mut ids = ids;
         ids.sort();
         assert_eq!(ids, vec![a, b]);
@@ -862,11 +900,21 @@ mod tests {
     #[tokio::test]
     async fn delete_memories_removes_rows_and_fts() {
         let store = test_store().await;
-        let id = store.insert_memory(None, "global", MemoryKind::Note, "gizmo", 1.0, 100).await.unwrap();
+        let id = store
+            .insert_memory(None, "global", MemoryKind::Note, "gizmo", 1.0, 100)
+            .await
+            .unwrap();
         let n = store.delete_memories(&[id]).await.unwrap();
         assert_eq!(n, 1);
         assert_eq!(store.recent_candidates(10).await.unwrap().len(), 0);
-        assert_eq!(store.keyword_candidates("\"gizmo\"", 10).await.unwrap().len(), 0);
+        assert_eq!(
+            store
+                .keyword_candidates("\"gizmo\"", 10)
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -884,16 +932,37 @@ mod tests {
     async fn delete_keeps_fts_in_sync() {
         let store = test_store().await;
         let id = store
-            .insert_memory(None, "global", MemoryKind::Note, "deletable widget", 1.0, 100)
+            .insert_memory(
+                None,
+                "global",
+                MemoryKind::Note,
+                "deletable widget",
+                1.0,
+                100,
+            )
             .await
             .unwrap();
-        assert_eq!(store.keyword_candidates("\"widget\"", 10).await.unwrap().len(), 1);
+        assert_eq!(
+            store
+                .keyword_candidates("\"widget\"", 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         sqlx::query("DELETE FROM memories WHERE id = ?1")
             .bind(id)
             .execute(&store.pool)
             .await
             .unwrap();
         // FTS index must no longer match the deleted row.
-        assert_eq!(store.keyword_candidates("\"widget\"", 10).await.unwrap().len(), 0);
+        assert_eq!(
+            store
+                .keyword_candidates("\"widget\"", 10)
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
     }
 }

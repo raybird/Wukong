@@ -1,8 +1,8 @@
 use std::sync::Arc;
+use wukong_chat_history::ChatHistoryStore;
 use wukong_gateway::backend::AgentCliBackend;
 use wukong_gateway::config::GatewayConfig;
 use wukong_gateway::workspace_dir;
-use wukong_chat_history::ChatHistoryStore;
 use wukong_memory::Memory;
 use wukong_telegram::client::{ReqwestTgClient, TgClient};
 use wukong_telegram::dispatch::handle_message;
@@ -29,7 +29,9 @@ async fn main() {
     let mut token = tg_settings.token.clone();
     let mut allow = parse_allowlist(&tg_settings.allowed);
     if allow.is_empty() {
-        eprintln!("warning: WUKONG_TG_ALLOWED/shared allowed is empty — all messages will be ignored");
+        eprintln!(
+            "warning: WUKONG_TG_ALLOWED/shared allowed is empty — all messages will be ignored"
+        );
     }
 
     let db_url = std::env::var("WUKONG_MEMORY_DB").unwrap_or_else(|_| {
@@ -75,7 +77,11 @@ async fn main() {
 
     let agent_command = std::env::var("WUKONG_AGENT_CMD")
         .ok()
-        .map(|s| s.split_whitespace().map(|t| t.to_string()).collect::<Vec<_>>())
+        .map(|s| {
+            s.split_whitespace()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+        })
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| vec!["opencode".to_string(), "run".to_string()]);
     let backend = AgentCliBackend {
@@ -95,7 +101,10 @@ async fn main() {
     };
 
     let mut client = ReqwestTgClient::new(&token);
-    eprintln!("🐵 wukong-telegram 上線（long-poll）。允許 {} 個 chat。", allow.len());
+    eprintln!(
+        "🐵 wukong-telegram 上線（long-poll）。允許 {} 個 chat。",
+        allow.len()
+    );
 
     let mut offset: i64 = 0;
     loop {
@@ -114,7 +123,16 @@ async fn main() {
                     offset = max + 1;
                 }
                 for msg in parse_updates(&json) {
-                    handle_message(&client, &memory, &base_cfg, &backend, history.as_ref(), &allow, &msg).await;
+                    handle_message(
+                        &client,
+                        &memory,
+                        &base_cfg,
+                        &backend,
+                        history.as_ref(),
+                        &allow,
+                        &msg,
+                    )
+                    .await;
                 }
             }
             Err(e) => {

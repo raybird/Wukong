@@ -162,10 +162,7 @@ mod tests {
 
     #[test]
     fn parses_prompt_and_flags() {
-        let cli = Cli::try_parse_from([
-            "wukong", "--scope", "global", "hello", "world",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["wukong", "--scope", "global", "hello", "world"]).unwrap();
         assert_eq!(cli.prompt_text(), "hello world");
         assert_eq!(cli.scope.as_deref(), Some("global"));
     }
@@ -195,7 +192,9 @@ mod tests {
     fn parses_memory_snapshot_subcommand() {
         let cli = Cli::try_parse_from(["wukong", "memory", "snapshot"]).unwrap();
         match cli.command {
-            Some(Command::Memory { op: MemoryOp::Snapshot { scope } }) => assert!(scope.is_none()),
+            Some(Command::Memory {
+                op: MemoryOp::Snapshot { scope },
+            }) => assert!(scope.is_none()),
             _ => panic!("expected memory snapshot"),
         }
     }
@@ -204,7 +203,9 @@ mod tests {
     fn parses_memory_prune_dry_run() {
         let cli = Cli::try_parse_from(["wukong", "memory", "prune", "--dry-run"]).unwrap();
         match cli.command {
-            Some(Command::Memory { op: MemoryOp::Prune { dry_run, .. } }) => assert!(dry_run),
+            Some(Command::Memory {
+                op: MemoryOp::Prune { dry_run, .. },
+            }) => assert!(dry_run),
             _ => panic!("expected memory prune"),
         }
     }
@@ -240,7 +241,15 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Some(Command::Schedule { op: ScheduleOp::AddTurn { name, cron, scope, prompt } }) => {
+            Some(Command::Schedule {
+                op:
+                    ScheduleOp::AddTurn {
+                        name,
+                        cron,
+                        scope,
+                        prompt,
+                    },
+            }) => {
                 assert_eq!(name, "daily");
                 assert_eq!(cron, "0 9 * * *");
                 assert_eq!(scope, "project:X");
@@ -265,7 +274,9 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Some(Command::Schedule { op: ScheduleOp::AddMaintenance { task, scope, .. } }) => {
+            Some(Command::Schedule {
+                op: ScheduleOp::AddMaintenance { task, scope, .. },
+            }) => {
                 assert_eq!(task, ScheduleMaintenanceTaskArg::Consolidate);
                 assert_eq!(scope, None);
             }
@@ -292,7 +303,12 @@ mod tests {
     #[test]
     fn schedule_command_does_not_conflict_with_prompt_args() {
         let cli = Cli::try_parse_from(["wukong", "schedule", "list"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::Schedule { op: ScheduleOp::List })));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Schedule {
+                op: ScheduleOp::List
+            })
+        ));
         assert!(cli.prompt_text().is_empty());
     }
 }

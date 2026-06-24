@@ -142,7 +142,10 @@ mod tests {
         let cfg = GatewayConfig::resolve(&cli);
         assert_eq!(cfg.scope, "project:Explicit");
         assert_eq!(cfg.db_url, "sqlite://x.db");
-        assert_eq!(cfg.agent_command, vec!["my-agent".to_string(), "go".to_string()]);
+        assert_eq!(
+            cfg.agent_command,
+            vec!["my-agent".to_string(), "go".to_string()]
+        );
         assert_eq!(cfg.recall_top_k, 5);
         assert!(cfg.thinking); // default on when --no-thinking absent
         assert!(cfg.stream); // default on when --no-stream absent
@@ -170,7 +173,10 @@ mod tests {
 
         cfg.apply_default_model(Some("opencode/deepseek-v4-flash-free"));
 
-        assert_eq!(cfg.default_model.as_deref(), Some("opencode/deepseek-v4-flash-free"));
+        assert_eq!(
+            cfg.default_model.as_deref(),
+            Some("opencode/deepseek-v4-flash-free")
+        );
     }
 
     #[test]
@@ -212,7 +218,11 @@ mod tests {
 
         cfg.apply_planner_preferences(
             true,
-            vec![" fixer ".to_string(), "fixer".to_string(), "oracle".to_string()],
+            vec![
+                " fixer ".to_string(),
+                "fixer".to_string(),
+                "oracle".to_string(),
+            ],
             vec![" systematic-debugging ".to_string()],
         );
 
@@ -229,7 +239,10 @@ mod tests {
 
     #[test]
     fn split_ws_splits_on_whitespace() {
-        assert_eq!(split_ws("opencode  run"), vec!["opencode".to_string(), "run".to_string()]);
+        assert_eq!(
+            split_ws("opencode  run"),
+            vec!["opencode".to_string(), "run".to_string()]
+        );
         assert!(split_ws("   ").is_empty());
     }
 }

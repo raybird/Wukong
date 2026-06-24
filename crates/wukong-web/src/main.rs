@@ -9,7 +9,9 @@ async fn main() {
     let host = std::env::var("WUKONG_WEB_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = std::env::var("WUKONG_WEB_PORT").unwrap_or_else(|_| "8787".to_string());
     let scope = std::env::var("WUKONG_WEB_SCOPE").unwrap_or_else(|_| "global".to_string());
-    let token = std::env::var("WUKONG_WEB_TOKEN").ok().filter(|t| !t.is_empty());
+    let token = std::env::var("WUKONG_WEB_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty());
 
     let db_url = std::env::var("WUKONG_MEMORY_DB").unwrap_or_else(|_| {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
@@ -45,7 +47,11 @@ async fn main() {
 
     let agent_command = std::env::var("WUKONG_AGENT_CMD")
         .ok()
-        .map(|s| s.split_whitespace().map(|t| t.to_string()).collect::<Vec<_>>())
+        .map(|s| {
+            s.split_whitespace()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+        })
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| vec!["opencode".to_string(), "run".to_string()]);
     let backend = AgentCliBackend {

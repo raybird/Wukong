@@ -49,9 +49,7 @@ impl From<MemoryError> for AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = match &self.0 {
-            MemoryError::InvalidScope(_) | MemoryError::InvalidQuery(_) => {
-                StatusCode::BAD_REQUEST
-            }
+            MemoryError::InvalidScope(_) | MemoryError::InvalidQuery(_) => StatusCode::BAD_REQUEST,
             MemoryError::NotFound => StatusCode::NOT_FOUND,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };

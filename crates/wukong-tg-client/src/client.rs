@@ -56,11 +56,18 @@ impl ReqwestTgClient {
             .timeout(std::time::Duration::from_secs(60))
             .build()
             .expect("reqwest client");
-        Self { http, base: format!("https://api.telegram.org/bot{token}") }
+        Self {
+            http,
+            base: format!("https://api.telegram.org/bot{token}"),
+        }
     }
 
     /// POST a JSON body and return the parsed response value.
-    async fn post(&self, method: &str, body: serde_json::Value) -> Result<serde_json::Value, TgError> {
+    async fn post(
+        &self,
+        method: &str,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, TgError> {
         let url = format!("{}/{method}", self.base);
         let resp = self.http.post(&url).json(&body).send().await?;
         Ok(resp.json::<serde_json::Value>().await?)
@@ -89,7 +96,10 @@ impl TgClient for ReqwestTgClient {
 
     async fn send_message(&self, chat_id: i64, text: &str) -> Result<i64, TgError> {
         let v = self
-            .post("sendMessage", serde_json::json!({ "chat_id": chat_id, "text": text }))
+            .post(
+                "sendMessage",
+                serde_json::json!({ "chat_id": chat_id, "text": text }),
+            )
             .await?;
         message_id_of(&v)
     }
@@ -104,7 +114,12 @@ impl TgClient for ReqwestTgClient {
         message_id_of(&v)
     }
 
-    async fn edit_message_text(&self, chat_id: i64, message_id: i64, text: &str) -> Result<(), TgError> {
+    async fn edit_message_text(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        text: &str,
+    ) -> Result<(), TgError> {
         self.post(
             "editMessageText",
             serde_json::json!({ "chat_id": chat_id, "message_id": message_id, "text": text }),
@@ -123,8 +138,11 @@ impl TgClient for ReqwestTgClient {
     }
 
     async fn send_chat_action(&self, chat_id: i64, action: &str) -> Result<(), TgError> {
-        self.post("sendChatAction", serde_json::json!({ "chat_id": chat_id, "action": action }))
-            .await?;
+        self.post(
+            "sendChatAction",
+            serde_json::json!({ "chat_id": chat_id, "action": action }),
+        )
+        .await?;
         Ok(())
     }
 }
@@ -168,15 +186,31 @@ pub mod mock {
             Ok(serde_json::json!({ "result": [] }))
         }
         async fn send_message(&self, chat_id: i64, text: &str) -> Result<i64, TgError> {
-            self.sent.lock().unwrap().push(Sent { chat_id, text: text.to_string(), html: false });
+            self.sent.lock().unwrap().push(Sent {
+                chat_id,
+                text: text.to_string(),
+                html: false,
+            });
             Ok(self.alloc_id())
         }
         async fn send_message_html(&self, chat_id: i64, html: &str) -> Result<i64, TgError> {
-            self.sent.lock().unwrap().push(Sent { chat_id, text: html.to_string(), html: true });
+            self.sent.lock().unwrap().push(Sent {
+                chat_id,
+                text: html.to_string(),
+                html: true,
+            });
             Ok(self.alloc_id())
         }
-        async fn edit_message_text(&self, chat_id: i64, message_id: i64, text: &str) -> Result<(), TgError> {
-            self.edits.lock().unwrap().push((chat_id, message_id, text.to_string()));
+        async fn edit_message_text(
+            &self,
+            chat_id: i64,
+            message_id: i64,
+            text: &str,
+        ) -> Result<(), TgError> {
+            self.edits
+                .lock()
+                .unwrap()
+                .push((chat_id, message_id, text.to_string()));
             Ok(())
         }
         async fn delete_message(&self, chat_id: i64, message_id: i64) -> Result<(), TgError> {
@@ -184,7 +218,10 @@ pub mod mock {
             Ok(())
         }
         async fn send_chat_action(&self, chat_id: i64, action: &str) -> Result<(), TgError> {
-            self.actions.lock().unwrap().push((chat_id, action.to_string()));
+            self.actions
+                .lock()
+                .unwrap()
+                .push((chat_id, action.to_string()));
             Ok(())
         }
     }

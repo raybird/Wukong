@@ -9,8 +9,8 @@ pub use role::Role;
 pub use router::{
     parse_chain, parse_role, parse_skill_chain, plan_chain, plan_skill_chain,
     plan_skill_chain_with_preferences, planning_prompt, route, routing_prompt,
-    skill_planning_prompt, skill_planning_prompt_with_preferences, PlannedStep, PlannerPreferenceHint,
-    SkillRouteOption,
+    skill_planning_prompt, skill_planning_prompt_with_preferences, PlannedStep,
+    PlannerPreferenceHint, SkillRouteOption,
 };
 
 use wukong_gateway::backend::{AgentRequest, AiBackend};
@@ -84,11 +84,24 @@ pub async fn orchestrate_chain(
     let roles = plan_chain(backend, task).await?;
     let mut steps: Vec<Outcome> = Vec::new();
     for role in roles {
-        let prompt = format!("{}\n\n[任務]\n{}{}", role.card(), task, chain_context(&steps));
+        let prompt = format!(
+            "{}\n\n[任務]\n{}{}",
+            role.card(),
+            task,
+            chain_context(&steps)
+        );
         let resp = backend
-            .run(AgentRequest { prompt, session_id: None, thinking: false, model: None })
+            .run(AgentRequest {
+                prompt,
+                session_id: None,
+                thinking: false,
+                model: None,
+            })
             .await?;
-        steps.push(Outcome { role, output: resp.text });
+        steps.push(Outcome {
+            role,
+            output: resp.text,
+        });
     }
     Ok(ChainOutcome { steps })
 }
@@ -120,7 +133,10 @@ mod tests {
         async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
             self.prompts.lock().unwrap().push(req.prompt);
             let text = self.replies.lock().unwrap().pop_front().unwrap_or_default();
-            Ok(AgentResponse { text, session_id: None })
+            Ok(AgentResponse {
+                text,
+                session_id: None,
+            })
         }
     }
 
@@ -166,10 +182,15 @@ mod tests {
             primary_role: Role::Fixer,
             collaborator_role: Some(Role::Oracle),
         }];
-        let steps = plan_skill_chain(&backend, "fix the bug", &skills).await.unwrap();
+        let steps = plan_skill_chain(&backend, "fix the bug", &skills)
+            .await
+            .unwrap();
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].role, Role::Fixer);
-        assert_eq!(steps[0].skill_name.as_deref(), Some("test-driven-development"));
+        assert_eq!(
+            steps[0].skill_name.as_deref(),
+            Some("test-driven-development")
+        );
 
         let prompts = backend.prompts.lock().unwrap();
         assert!(prompts[0].contains("test-driven-development"));
@@ -199,8 +220,14 @@ mod tests {
     #[test]
     fn chain_context_includes_roles_and_outputs() {
         let prior = vec![
-            Outcome { role: Role::Explorer, output: "找到了問題".to_string() },
-            Outcome { role: Role::Fixer, output: "已修正".to_string() },
+            Outcome {
+                role: Role::Explorer,
+                output: "找到了問題".to_string(),
+            },
+            Outcome {
+                role: Role::Fixer,
+                output: "已修正".to_string(),
+            },
         ];
         let c = chain_context(&prior);
         assert!(c.contains("前序協作"));
@@ -214,8 +241,14 @@ mod tests {
     fn chain_outcome_final_is_last_step() {
         let co = ChainOutcome {
             steps: vec![
-                Outcome { role: Role::Explorer, output: "a".to_string() },
-                Outcome { role: Role::Fixer, output: "b".to_string() },
+                Outcome {
+                    role: Role::Explorer,
+                    output: "a".to_string(),
+                },
+                Outcome {
+                    role: Role::Fixer,
+                    output: "b".to_string(),
+                },
             ],
         };
         assert_eq!(co.final_output(), "b");

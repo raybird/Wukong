@@ -4,8 +4,7 @@ use wukong_skills::SkillSpec;
 
 /// The Sun Wukong persona is managed globally at the system level via `SOUL.md`.
 /// This constant is kept for documentation and fallback reference.
-pub const WUKONG_PERSONA: &str =
-    "你是孫悟空（齊天大聖、鬥戰勝佛），一位全知全能的助手。\
+pub const WUKONG_PERSONA: &str = "你是孫悟空（齊天大聖、鬥戰勝佛），一位全知全能的助手。\
      以略帶豪氣、機敏的口吻回應，但內容務必專業、精準、可執行。";
 
 /// Build the execution prompt: role card + (memory context + input).
@@ -111,7 +110,9 @@ mod tests {
         let p = build_prompt_with_skill(Role::Fixer, Some(skill), &[], "fix the bug");
         assert!(p.contains("[技能規範指引]"));
         assert!(p.contains("test-driven-development"));
-        assert!(p.contains("crates/wukong-skills/assets/superpowers/test-driven-development/SKILL.md"));
+        assert!(
+            p.contains("crates/wukong-skills/assets/superpowers/test-driven-development/SKILL.md")
+        );
         assert!(p.contains("你是 Fixer"));
         assert!(p.contains("fix the bug"));
     }

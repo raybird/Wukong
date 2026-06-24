@@ -33,14 +33,20 @@ mod tests {
 
     #[test]
     fn plain_text_is_a_turn() {
-        assert_eq!(classify_message("hello there"), MessageAction::Turn("hello there".to_string()));
+        assert_eq!(
+            classify_message("hello there"),
+            MessageAction::Turn("hello there".to_string())
+        );
     }
 
     #[test]
     fn slash_becomes_command_with_args() {
         assert_eq!(
             classify_message("/reset now please"),
-            MessageAction::Command { name: "reset".to_string(), args: "now please".to_string() }
+            MessageAction::Command {
+                name: "reset".to_string(),
+                args: "now please".to_string()
+            }
         );
     }
 
@@ -48,7 +54,10 @@ mod tests {
     fn slash_without_args() {
         assert_eq!(
             classify_message("  /compact  "),
-            MessageAction::Command { name: "compact".to_string(), args: String::new() }
+            MessageAction::Command {
+                name: "compact".to_string(),
+                args: String::new()
+            }
         );
     }
 }

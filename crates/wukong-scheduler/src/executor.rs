@@ -21,8 +21,14 @@ pub async fn execute_job<B: AiBackend + Sync>(
     job: &Job,
 ) -> ExecutionOutput {
     match execute_job_inner(ctx, job).await {
-        Ok(message) => ExecutionOutput { success: true, message },
-        Err(err) => ExecutionOutput { success: false, message: err.to_string() },
+        Ok(message) => ExecutionOutput {
+            success: true,
+            message,
+        },
+        Err(err) => ExecutionOutput {
+            success: false,
+            message: err.to_string(),
+        },
     }
 }
 
@@ -59,7 +65,7 @@ async fn execute_job_inner<B: AiBackend + Sync>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::job::{MaintenanceTask, JobKind};
+    use crate::job::{JobKind, MaintenanceTask};
     use std::collections::VecDeque;
     use std::sync::Mutex;
     use tempfile::NamedTempFile;
@@ -83,8 +89,16 @@ mod tests {
     impl AiBackend for MockBackend {
         async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
             self.prompts.lock().unwrap().push(req.prompt);
-            let reply = self.replies.lock().unwrap().pop_front().unwrap_or_else(|| Ok(String::new()))?;
-            Ok(AgentResponse { text: reply, session_id: Some("ses_new".to_string()) })
+            let reply = self
+                .replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Ok(String::new()))?;
+            Ok(AgentResponse {
+                text: reply,
+                session_id: Some("ses_new".to_string()),
+            })
         }
     }
 
@@ -125,24 +139,45 @@ mod tests {
         let memory = open_memory().await;
         let backend = MockBackend::new(vec![Ok("oracle"), Ok("done")]);
         let cfg = cfg("project:Base");
-        let ctx = ExecutionContext { memory: &memory, backend: &backend, base_config: &cfg };
-        let job = job(JobKind::Turn { scope: "project:Scheduled".to_string(), prompt: "do it".to_string() });
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &backend,
+            base_config: &cfg,
+        };
+        let job = job(JobKind::Turn {
+            scope: "project:Scheduled".to_string(),
+            prompt: "do it".to_string(),
+        });
 
         let out = execute_job(&ctx, &job).await;
 
         assert!(out.success);
         assert_eq!(out.message, "done");
-        assert!(memory.agent_session("project:Scheduled").await.unwrap().is_some());
+        assert!(memory
+            .agent_session("project:Scheduled")
+            .await
+            .unwrap()
+            .is_some());
         assert_eq!(memory.agent_session("project:Base").await.unwrap(), None);
     }
 
     #[tokio::test]
     async fn turn_job_returns_failure_message_when_backend_fails() {
         let memory = open_memory().await;
-        let backend = MockBackend::new(vec![Err(GatewayError::AgentFailed { code: Some(1), stderr: "boom".to_string() })]);
+        let backend = MockBackend::new(vec![Err(GatewayError::AgentFailed {
+            code: Some(1),
+            stderr: "boom".to_string(),
+        })]);
         let cfg = cfg("project:Base");
-        let ctx = ExecutionContext { memory: &memory, backend: &backend, base_config: &cfg };
-        let job = job(JobKind::Turn { scope: "project:Scheduled".to_string(), prompt: "do it".to_string() });
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &backend,
+            base_config: &cfg,
+        };
+        let job = job(JobKind::Turn {
+            scope: "project:Scheduled".to_string(),
+            prompt: "do it".to_string(),
+        });
 
         let out = execute_job(&ctx, &job).await;
 
@@ -155,8 +190,15 @@ mod tests {
         let memory = open_memory().await;
         let backend = MockBackend::new(vec![]);
         let cfg = cfg("project:Base");
-        let ctx = ExecutionContext { memory: &memory, backend: &backend, base_config: &cfg };
-        let job = job(JobKind::Maintenance { scope: None, task: MaintenanceTask::Snapshot });
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &backend,
+            base_config: &cfg,
+        };
+        let job = job(JobKind::Maintenance {
+            scope: None,
+            task: MaintenanceTask::Snapshot,
+        });
 
         let out = execute_job(&ctx, &job).await;
 
@@ -169,8 +211,15 @@ mod tests {
         let memory = open_memory().await;
         let backend = MockBackend::new(vec![]);
         let cfg = cfg("project:Base");
-        let ctx = ExecutionContext { memory: &memory, backend: &backend, base_config: &cfg };
-        let job = job(JobKind::Maintenance { scope: Some("project:Scheduled".to_string()), task: MaintenanceTask::Prune });
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &backend,
+            base_config: &cfg,
+        };
+        let job = job(JobKind::Maintenance {
+            scope: Some("project:Scheduled".to_string()),
+            task: MaintenanceTask::Prune,
+        });
 
         let out = execute_job(&ctx, &job).await;
 

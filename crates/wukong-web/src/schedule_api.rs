@@ -18,9 +18,12 @@ pub struct ScheduleJobResponse {
 pub fn job_response(job: Job) -> ScheduleJobResponse {
     let (kind, scope, prompt, task) = match job.kind {
         JobKind::Turn { scope, prompt } => ("turn".to_string(), Some(scope), Some(prompt), None),
-        JobKind::Maintenance { scope, task } => {
-            ("maintenance".to_string(), scope, None, Some(task_label(task).to_string()))
-        }
+        JobKind::Maintenance { scope, task } => (
+            "maintenance".to_string(),
+            scope,
+            None,
+            Some(task_label(task).to_string()),
+        ),
     };
     ScheduleJobResponse {
         id: job.id,

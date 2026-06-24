@@ -19,8 +19,14 @@ pub async fn memory_snapshot(memory: &Memory, scope: Option<&str>) -> Result<Str
         "年齡: <1d={} <7d={} <30d={} older={}\n",
         snap.age.last_day, snap.age.last_week, snap.age.last_month, snap.age.older
     ));
-    out.push_str(&format!("embedding 覆蓋: {}/{}\n", snap.embedding.embedded, snap.embedding.total));
-    out.push_str(&format!("consolidation 候選: {}\n", snap.consolidation_candidates));
+    out.push_str(&format!(
+        "embedding 覆蓋: {}/{}\n",
+        snap.embedding.embedded, snap.embedding.total
+    ));
+    out.push_str(&format!(
+        "consolidation 候選: {}\n",
+        snap.consolidation_candidates
+    ));
     out.push_str(&format!("prune 候選: {}", snap.prune_candidates));
     Ok(out)
 }
@@ -80,7 +86,11 @@ mod tests {
         mem.remember(RememberInput {
             scope: "project:T".to_string(),
             session_id: None,
-            items: vec![MemoryItem { kind: MemoryKind::Note, text: "note".to_string(), importance: None }],
+            items: vec![MemoryItem {
+                kind: MemoryKind::Note,
+                text: "note".to_string(),
+                importance: None,
+            }],
         })
         .await
         .unwrap();

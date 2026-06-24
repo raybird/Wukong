@@ -20,7 +20,11 @@ pub fn parse_updates(json: &serde_json::Value) -> Vec<TgMessage> {
             let msg = u.get("message")?;
             let chat_id = msg.get("chat")?.get("id")?.as_i64()?;
             let text = msg.get("text")?.as_str()?.to_string();
-            Some(TgMessage { update_id, chat_id, text })
+            Some(TgMessage {
+                update_id,
+                chat_id,
+                text,
+            })
         })
         .collect()
 }
@@ -59,7 +63,9 @@ pub fn scope_for_chat(chat_id: i64) -> String {
 /// Returns None for scopes that are not Telegram-originated (e.g. `project:X`),
 /// so non-Telegram scheduled jobs are never mistakenly delivered to a chat.
 pub fn chat_id_from_scope(scope: &str) -> Option<i64> {
-    scope.strip_prefix("user:tg-").and_then(|s| s.parse::<i64>().ok())
+    scope
+        .strip_prefix("user:tg-")
+        .and_then(|s| s.parse::<i64>().ok())
 }
 
 #[cfg(test)]

@@ -11,7 +11,10 @@ pub enum SchedulerError {
     #[error("cron expression must have 5 fields: {0}")]
     InvalidCronFieldCount(String),
     #[error("invalid cron expression '{expr}': {source}")]
-    InvalidCron { expr: String, source: cron::error::Error },
+    InvalidCron {
+        expr: String,
+        source: cron::error::Error,
+    },
     #[error("invalid timestamp: {0}")]
     InvalidTimestamp(i64),
     #[error("unknown scheduler job kind: {0}")]
@@ -22,8 +25,14 @@ pub enum SchedulerError {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum JobKind {
-    Turn { scope: String, prompt: String },
-    Maintenance { scope: Option<String>, task: MaintenanceTask },
+    Turn {
+        scope: String,
+        prompt: String,
+    },
+    Maintenance {
+        scope: Option<String>,
+        task: MaintenanceTask,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -71,8 +80,10 @@ fn parse_schedule(expr: &str) -> Result<Schedule, SchedulerError> {
         return Err(SchedulerError::InvalidCronFieldCount(expr.to_string()));
     }
     let with_seconds = format!("0 {trimmed}");
-    Schedule::from_str(&with_seconds)
-        .map_err(|source| SchedulerError::InvalidCron { expr: expr.to_string(), source })
+    Schedule::from_str(&with_seconds).map_err(|source| SchedulerError::InvalidCron {
+        expr: expr.to_string(),
+        source,
+    })
 }
 
 #[cfg(test)]
@@ -87,20 +98,37 @@ mod tests {
 
     #[test]
     fn rejects_invalid_cron() {
-        assert!(matches!(validate_cron("* * * *"), Err(SchedulerError::InvalidCronFieldCount(_))));
-        assert!(matches!(validate_cron("nope * * * *"), Err(SchedulerError::InvalidCron { .. })));
+        assert!(matches!(
+            validate_cron("* * * *"),
+            Err(SchedulerError::InvalidCronFieldCount(_))
+        ));
+        assert!(matches!(
+            validate_cron("nope * * * *"),
+            Err(SchedulerError::InvalidCron { .. })
+        ));
     }
 
     #[test]
     fn computes_next_timestamp_after_known_time() {
-        let after = Utc.with_ymd_and_hms(2026, 6, 13, 8, 59, 30).unwrap().timestamp();
+        let after = Utc
+            .with_ymd_and_hms(2026, 6, 13, 8, 59, 30)
+            .unwrap()
+            .timestamp();
         let next = next_after("0 9 * * *", after).unwrap().unwrap();
-        assert_eq!(next, Utc.with_ymd_and_hms(2026, 6, 13, 9, 0, 0).unwrap().timestamp());
+        assert_eq!(
+            next,
+            Utc.with_ymd_and_hms(2026, 6, 13, 9, 0, 0)
+                .unwrap()
+                .timestamp()
+        );
     }
 
     #[test]
     fn serializes_and_deserializes_job_kind() {
-        let kind = JobKind::Maintenance { scope: Some("project:Wukong".to_string()), task: MaintenanceTask::Prune };
+        let kind = JobKind::Maintenance {
+            scope: Some("project:Wukong".to_string()),
+            task: MaintenanceTask::Prune,
+        };
         let raw = serde_json::to_string(&kind).unwrap();
         let decoded: JobKind = serde_json::from_str(&raw).unwrap();
         assert_eq!(decoded, kind);

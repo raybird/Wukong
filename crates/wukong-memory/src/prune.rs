@@ -12,6 +12,9 @@ pub struct PrunePolicy {
 
 impl Default for PrunePolicy {
     fn default() -> Self {
-        Self { max_age_secs: 30 * 86_400, importance_floor: 0.5 }
+        Self {
+            max_age_secs: 30 * 86_400,
+            importance_floor: 0.5,
+        }
     }
 }

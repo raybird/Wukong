@@ -138,9 +138,9 @@ impl SseMsg {
         match self {
             SseMsg::Role(r) => Event::default().event("role").data(r),
             SseMsg::Reasoning(t) => Event::default().event("reasoning").data(t),
-            SseMsg::Step { role, skill, html } => Event::default()
-                .event("step")
-                .data(serde_json::json!({ "role": role, "skill": skill, "html": html }).to_string()),
+            SseMsg::Step { role, skill, html } => Event::default().event("step").data(
+                serde_json::json!({ "role": role, "skill": skill, "html": html }).to_string(),
+            ),
             SseMsg::Answer(h) => Event::default().event("answer").data(h),
             SseMsg::Error(e) => Event::default().event("error").data(e),
             SseMsg::Done => Event::default().event("done").data("ok"),
@@ -1184,9 +1184,8 @@ mod tests {
     #[tokio::test]
     async fn chat_streams_helper_step_before_answer() {
         // planner -> [explorer, fixer]; explorer (helper) emits e1, fixer (final) f2.
-        let app = build_router(
-            state(None, &["explorer|systematic-debugging\nfixer", "e1", "f2"]).await,
-        );
+        let app =
+            build_router(state(None, &["explorer|systematic-debugging\nfixer", "e1", "f2"]).await);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -1210,7 +1209,10 @@ mod tests {
             body.contains(r#""skill":"systematic-debugging""#),
             "step skill:\n{body}"
         );
-        assert!(!body.contains(r#""role":"fixer""#), "final must not be a step:\n{body}");
+        assert!(
+            !body.contains(r#""role":"fixer""#),
+            "final must not be a step:\n{body}"
+        );
     }
 
     #[tokio::test]
@@ -1230,7 +1232,10 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert!(body.contains("event: answer"), "turn did not finish:\n{body}");
+        assert!(
+            body.contains("event: answer"),
+            "turn did not finish:\n{body}"
+        );
 
         // The messages payload carries step_count; the assistant message has one.
         let msgs = body_string(
@@ -1459,9 +1464,7 @@ mod tests {
                     .method("PUT")
                     .uri("/api/settings/model")
                     .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"model":"opencode/deepseek-v4-flash-free"}"#,
-                    ))
+                    .body(Body::from(r#"{"model":"opencode/deepseek-v4-flash-free"}"#))
                     .unwrap(),
             )
             .await
@@ -1652,7 +1655,10 @@ mod tests {
         let saved = wukong_settings::load_settings(&settings_path).unwrap();
         assert!(saved.planner_preferences.enabled);
         assert_eq!(saved.planner_preferences.roles, vec!["fixer", "oracle"]);
-        assert_eq!(saved.planner_preferences.skills, vec!["systematic-debugging"]);
+        assert_eq!(
+            saved.planner_preferences.skills,
+            vec!["systematic-debugging"]
+        );
     }
 
     #[tokio::test]

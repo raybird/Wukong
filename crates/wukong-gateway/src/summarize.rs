@@ -15,7 +15,10 @@ pub struct OpencodeSummarizer<'a, B: AiBackend> {
 
 impl<'a, B: AiBackend> OpencodeSummarizer<'a, B> {
     pub fn new(backend: &'a B) -> Self {
-        Self { backend, handle: tokio::runtime::Handle::current() }
+        Self {
+            backend,
+            handle: tokio::runtime::Handle::current(),
+        }
     }
 }
 
@@ -25,7 +28,12 @@ impl<B: AiBackend + Sync> Summarizer for OpencodeSummarizer<'_, B> {
             "請把以下記憶濃縮成一段精簡摘要,保留關鍵決策與事實,只輸出摘要本身:\n\n{}",
             texts.join("\n")
         );
-        let fut = self.backend.run(AgentRequest { prompt, session_id: None, thinking: false, model: None });
+        let fut = self.backend.run(AgentRequest {
+            prompt,
+            session_id: None,
+            thinking: false,
+            model: None,
+        });
         let resp = tokio::task::block_in_place(|| self.handle.block_on(fut))
             .map_err(|e| MemoryError::Other(format!("summarizer backend failed: {e}")))?;
         Ok(resp.text)
@@ -41,7 +49,10 @@ mod tests {
     struct Echo;
     impl AiBackend for Echo {
         async fn run(&self, req: AgentRequest) -> std::result::Result<AgentResponse, GatewayError> {
-            Ok(AgentResponse { text: format!("SUM[{}]", req.prompt.len()), session_id: None })
+            Ok(AgentResponse {
+                text: format!("SUM[{}]", req.prompt.len()),
+                session_id: None,
+            })
         }
     }
 

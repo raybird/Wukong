@@ -4,10 +4,10 @@ use clap::Parser;
 use std::io::Write;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::interval;
+use wukong_chat_history::ChatHistoryStore;
 use wukong_gateway::backend::AgentCliBackend;
 use wukong_gateway::config::{default_scope, GatewayConfig};
 use wukong_gateway::workspace_dir;
-use wukong_chat_history::ChatHistoryStore;
 use wukong_memory::Memory;
 use wukong_scheduler::{execute_job, ExecutionContext, RunStatus, SchedulerStore};
 use wukong_tg_client::client::ReqwestTgClient;
@@ -54,8 +54,13 @@ async fn run(cli: Cli) -> Result<(), String> {
     let agent_settings = wukong_settings::effective_agent_settings(&settings);
     cfg.apply_default_model(agent_settings.default_model.as_deref());
     let memory = open_memory(&cfg).await?;
-    let backend = AgentCliBackend { command: cfg.agent_command.clone(), workspace: workspace_dir() };
-    let store = SchedulerStore::open(&cfg.db_url).await.map_err(|e| e.to_string())?;
+    let backend = AgentCliBackend {
+        command: cfg.agent_command.clone(),
+        workspace: workspace_dir(),
+    };
+    let store = SchedulerStore::open(&cfg.db_url)
+        .await
+        .map_err(|e| e.to_string())?;
     let history = match ChatHistoryStore::open(&cfg.db_url).await {
         Ok(store) => Some(store),
         Err(e) => {
@@ -67,7 +72,18 @@ async fn run(cli: Cli) -> Result<(), String> {
     let notifier = build_notifier();
 
     if cli.once {
-        run_scan(&store, &memory, &backend, &cfg, &worker_id, cli.lease_secs, cli.limit, notifier.as_ref(), history.as_ref()).await?;
+        run_scan(
+            &store,
+            &memory,
+            &backend,
+            &cfg,
+            &worker_id,
+            cli.lease_secs,
+            cli.limit,
+            notifier.as_ref(),
+            history.as_ref(),
+        )
+        .await?;
         return Ok(());
     }
 
@@ -101,20 +117,41 @@ async fn run_scan(
     history: Option<&ChatHistoryStore>,
 ) -> Result<(), String> {
     let now = now_unix();
-    let jobs = store.claim_due_jobs(now, worker_id, lease_secs, limit).await.map_err(|e| e.to_string())?;
+    let jobs = store
+        .claim_due_jobs(now, worker_id, lease_secs, limit)
+        .await
+        .map_err(|e| e.to_string())?;
     for job in jobs {
         let started_at = now_unix();
-        let run_id = store.start_run(&job.id, started_at).await.map_err(|e| e.to_string())?;
-        let ctx = ExecutionContext { memory, backend, base_config: cfg };
+        let run_id = store
+            .start_run(&job.id, started_at)
+            .await
+            .map_err(|e| e.to_string())?;
+        let ctx = ExecutionContext {
+            memory,
+            backend,
+            base_config: cfg,
+        };
         let output = execute_job(&ctx, &job).await;
         let finished_at = now_unix();
-        let status = if output.success { RunStatus::Success } else { RunStatus::Failure };
+        let status = if output.success {
+            RunStatus::Success
+        } else {
+            RunStatus::Failure
+        };
         store
             .finish_run(run_id, status, &output.message, finished_at)
             .await
             .map_err(|e| e.to_string())?;
-        if !store.complete_claimed_job(&job, worker_id, finished_at).await.map_err(|e| e.to_string())? {
-            eprintln!("warning: job {} lease was taken by another worker before completion", job.id);
+        if !store
+            .complete_claimed_job(&job, worker_id, finished_at)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            eprintln!(
+                "warning: job {} lease was taken by another worker before completion",
+                job.id
+            );
             continue;
         }
         if output.success {
@@ -145,7 +182,10 @@ fn build_notifier() -> Option<ReqwestTgClient> {
     }
     let path = wukong_settings::default_settings_path();
     let file = wukong_settings::load_settings(&path).unwrap_or_default();
-    let token = wukong_settings::effective_telegram_settings(&file).token.trim().to_string();
+    let token = wukong_settings::effective_telegram_settings(&file)
+        .token
+        .trim()
+        .to_string();
     if token.is_empty() {
         eprintln!("🐵 scheduler 通知停用：未設定 Telegram token（WUKONG_TG_TOKEN 或 settings）");
         None
@@ -269,7 +309,10 @@ mod tests {
         .unwrap();
         let cfg = resolve_config(&cli);
         assert_eq!(cfg.db_url, "sqlite://x.db");
-        assert_eq!(cfg.agent_command, vec!["agent".to_string(), "go".to_string()]);
+        assert_eq!(
+            cfg.agent_command,
+            vec!["agent".to_string(), "go".to_string()]
+        );
         assert_eq!(cfg.scope, "project:X");
     }
 }

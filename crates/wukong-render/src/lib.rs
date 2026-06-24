@@ -5,7 +5,9 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 /// Escape the three characters Telegram's HTML parse_mode is sensitive to.
 fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Render GFM markdown into Telegram-supported HTML, split into chunks of at
@@ -270,9 +272,16 @@ mod tests {
 
     #[test]
     fn long_output_splits_into_multiple_chunks() {
-        let md = (0..200).map(|i| format!("line number {i} with some words")).collect::<Vec<_>>().join("\n\n");
+        let md = (0..200)
+            .map(|i| format!("line number {i} with some words"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
         let chunks = to_telegram_html(&md);
-        assert!(chunks.len() > 1, "expected multiple chunks, got {}", chunks.len());
+        assert!(
+            chunks.len() > 1,
+            "expected multiple chunks, got {}",
+            chunks.len()
+        );
         assert!(chunks.iter().all(|c| c.len() <= 4096));
     }
 }

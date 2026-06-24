@@ -86,8 +86,14 @@ mod tests {
 
     #[test]
     fn parses_step_events() {
-        assert_eq!(parse_event(r#"{"type":"step_start"}"#), Some(StreamEvent::StepStart));
-        assert_eq!(parse_event(r#"{"type":"step_finish"}"#), Some(StreamEvent::StepFinish));
+        assert_eq!(
+            parse_event(r#"{"type":"step_start"}"#),
+            Some(StreamEvent::StepStart)
+        );
+        assert_eq!(
+            parse_event(r#"{"type":"step_finish"}"#),
+            Some(StreamEvent::StepFinish)
+        );
     }
 
     #[test]

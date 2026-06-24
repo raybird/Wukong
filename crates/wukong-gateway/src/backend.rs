@@ -232,7 +232,13 @@ mod tests {
 
     #[test]
     fn assemble_argv_plain() {
-        let argv = assemble_argv(&["opencode".to_string(), "run".to_string()], None, false, None, "hi");
+        let argv = assemble_argv(
+            &["opencode".to_string(), "run".to_string()],
+            None,
+            false,
+            None,
+            "hi",
+        );
         assert_eq!(argv, vec!["opencode", "run", "hi"]);
     }
 
@@ -245,7 +251,10 @@ mod tests {
             None,
             "hi",
         );
-        assert_eq!(argv, vec!["opencode", "run", "-s", "ses_x", "--thinking", "hi"]);
+        assert_eq!(
+            argv,
+            vec!["opencode", "run", "-s", "ses_x", "--thinking", "hi"]
+        );
     }
 
     #[test]
@@ -257,7 +266,16 @@ mod tests {
             Some("opencode/deepseek-v4-flash-free"),
             "hi",
         );
-        assert_eq!(argv, vec!["opencode", "run", "--model", "opencode/deepseek-v4-flash-free", "hi"]);
+        assert_eq!(
+            argv,
+            vec![
+                "opencode",
+                "run",
+                "--model",
+                "opencode/deepseek-v4-flash-free",
+                "hi"
+            ]
+        );
     }
 
     #[test]
@@ -274,13 +292,31 @@ mod tests {
             Some("new/model"),
             "hi",
         );
-        assert_eq!(argv, vec!["opencode", "run", "-s", "ses_x", "--thinking", "--model", "new/model", "hi"]);
+        assert_eq!(
+            argv,
+            vec![
+                "opencode",
+                "run",
+                "-s",
+                "ses_x",
+                "--thinking",
+                "--model",
+                "new/model",
+                "hi"
+            ]
+        );
     }
 
     #[test]
     fn opencode_binary_uses_first_base_command_arg() {
-        assert_eq!(opencode_binary(&["opencode".to_string(), "run".to_string()]), "opencode");
-        assert_eq!(opencode_binary(&["/usr/local/bin/opencode".to_string(), "run".to_string()]), "/usr/local/bin/opencode");
+        assert_eq!(
+            opencode_binary(&["opencode".to_string(), "run".to_string()]),
+            "opencode"
+        );
+        assert_eq!(
+            opencode_binary(&["/usr/local/bin/opencode".to_string(), "run".to_string()]),
+            "/usr/local/bin/opencode"
+        );
     }
 
     #[tokio::test]
@@ -327,13 +363,21 @@ mod tests {
         struct Plain;
         impl AiBackend for Plain {
             async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
-                Ok(AgentResponse { text: "whole answer".to_string(), session_id: None })
+                Ok(AgentResponse {
+                    text: "whole answer".to_string(),
+                    session_id: None,
+                })
             }
         }
         let mut events = Vec::new();
         let resp = Plain
             .run_streaming(
-                AgentRequest { prompt: "x".into(), session_id: None, thinking: false, model: None },
+                AgentRequest {
+                    prompt: "x".into(),
+                    session_id: None,
+                    thinking: false,
+                    model: None,
+                },
                 &mut |e| events.push(e),
             )
             .await
@@ -361,7 +405,12 @@ mod tests {
         let mut events = Vec::new();
         let resp = backend
             .run_streaming(
-                AgentRequest { prompt: "ignored".into(), session_id: None, thinking: false, model: None },
+                AgentRequest {
+                    prompt: "ignored".into(),
+                    session_id: None,
+                    thinking: false,
+                    model: None,
+                },
                 &mut |e| events.push(e),
             )
             .await

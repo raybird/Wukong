@@ -59,8 +59,7 @@ pub fn filter_by_scope(candidates: Vec<Candidate>, filter: &Option<Scope>) -> Ve
     match filter {
         None => candidates,
         Some(scope) => {
-            let allowed: Vec<String> =
-                scope.ancestry().iter().map(|s| s.to_string()).collect();
+            let allowed: Vec<String> = scope.ancestry().iter().map(|s| s.to_string()).collect();
             candidates
                 .into_iter()
                 .filter(|c| allowed.contains(&c.scope))
@@ -82,12 +81,7 @@ pub struct Scored {
 /// Normalize bm25 and vector_sim across candidates, compute combined scores,
 /// sort descending, and take top_k. bm25: lower = better. vector_sim: higher =
 /// better. Either signal absent on a candidate contributes 0 for that term.
-pub fn rank(
-    candidates: Vec<Candidate>,
-    now: i64,
-    top_k: usize,
-    weights: &Weights,
-) -> Vec<Scored> {
+pub fn rank(candidates: Vec<Candidate>, now: i64, top_k: usize, weights: &Weights) -> Vec<Scored> {
     // bm25: more negative = better match.
     let bm25_vals: Vec<f64> = candidates.iter().filter_map(|c| c.bm25).collect();
     let (bmin, bmax) = match (
@@ -142,7 +136,11 @@ pub fn rank(
         })
         .collect();
 
-    scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     scored.truncate(top_k);
     scored
 }
@@ -246,8 +244,7 @@ mod tests {
             cand(2, "global", 100, None),
             cand(3, "project:X", 100, None),
         ];
-        let filtered =
-            filter_by_scope(cands, &Some(Scope::Agent("main".to_string())));
+        let filtered = filter_by_scope(cands, &Some(Scope::Agent("main".to_string())));
         let ids: Vec<i64> = filtered.iter().map(|c| c.id).collect();
         assert_eq!(ids, vec![1, 2]); // agent:main + global, not project:X
     }
@@ -255,8 +252,8 @@ mod tests {
     #[test]
     fn rank_orders_by_score_and_truncates() {
         let cands = vec![
-            cand(1, "global", 0, Some(-1.0)),   // weaker match (less negative bm25)
-            cand(2, "global", 0, Some(-5.0)),   // stronger match (more negative bm25)
+            cand(1, "global", 0, Some(-1.0)), // weaker match (less negative bm25)
+            cand(2, "global", 0, Some(-5.0)), // stronger match (more negative bm25)
         ];
         let ranked = rank(cands, 0, 1, &Weights::default());
         assert_eq!(ranked.len(), 1);

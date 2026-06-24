@@ -11,19 +11,19 @@ pub mod scope;
 pub mod scoring;
 pub mod store;
 
+pub use consolidate::{
+    plan_batches, ConcatSummarizer, ConsolidatePlan, ConsolidatePolicy, MockSummarizer, Summarizer,
+};
+#[cfg(feature = "embed")]
+pub use embed::FastembedBackend;
+pub use embed::{cosine_similarity, Embedder, MockEmbedder};
 pub use error::{MemoryError, Result};
+pub use markdown::MarkdownSink;
 pub use model::{
     AgeBuckets, EmbeddingCoverage, Evidence, KindCount, MemoryItem, MemoryKind, MemoryRecord,
     MemoryRecordsPage, RecallHit, RecallMode, RecallQuery, RememberInput, ScopeCount, Snapshot,
     Stats, WukongResult,
 };
-pub use consolidate::{
-    plan_batches, ConcatSummarizer, ConsolidatePlan, ConsolidatePolicy, MockSummarizer, Summarizer,
-};
-pub use embed::{cosine_similarity, Embedder, MockEmbedder};
-#[cfg(feature = "embed")]
-pub use embed::FastembedBackend;
-pub use markdown::MarkdownSink;
 pub use prune::PrunePolicy;
 pub use scope::Scope;
 pub use scoring::Weights;
@@ -33,9 +33,9 @@ use recall::{
     apply_vector_sims, build_vector_candidates, filter_by_scope, fts_match_string, is_trivial,
     merge_candidates, rank, sources_for_mode,
 };
-use store::{Candidate, Store};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use store::{Candidate, Store};
 
 /// Internal fetch fan-out before ranking.
 fn fetch_limit(top_k: usize) -> i64 {
@@ -105,7 +105,9 @@ impl Memory {
 
     /// Set/overwrite the opencode session id for a scope.
     pub async fn set_agent_session(&self, scope: &str, session_id: &str) -> Result<()> {
-        self.store.set_agent_session(scope, session_id, now_unix()).await
+        self.store
+            .set_agent_session(scope, session_id, now_unix())
+            .await
     }
 
     /// Clear the stored opencode session id for a scope.
@@ -121,7 +123,9 @@ impl Memory {
         let now = now_unix();
 
         if let Some(session_id) = &input.session_id {
-            self.store.upsert_session(session_id, &scope_str, now).await?;
+            self.store
+                .upsert_session(session_id, &scope_str, now)
+                .await?;
         }
 
         let mut ids = Vec::with_capacity(input.items.len());
@@ -239,7 +243,10 @@ impl Memory {
                 score: s.score,
             })
             .collect();
-        let confidence = scored.first().map(|s| s.score.clamp(0.0, 1.0)).unwrap_or(0.0);
+        let confidence = scored
+            .first()
+            .map(|s| s.score.clamp(0.0, 1.0))
+            .unwrap_or(0.0);
         let hits: Vec<RecallHit> = scored
             .into_iter()
             .map(|s| RecallHit {
@@ -296,7 +303,14 @@ impl Memory {
             let summary_text = summarizer.summarize(&texts)?;
             let summary_id = self
                 .store
-                .insert_memory(None, scope, MemoryKind::Summary, &summary_text, importance, now)
+                .insert_memory(
+                    None,
+                    scope,
+                    MemoryKind::Summary,
+                    &summary_text,
+                    importance,
+                    now,
+                )
                 .await?;
             let src_ids: Vec<i64> = batch.iter().map(|r| r.id).collect();
             self.store.mark_consolidated(&src_ids, summary_id).await?;
@@ -325,7 +339,12 @@ impl Memory {
         policy: &prune::PrunePolicy,
     ) -> Result<Vec<i64>> {
         self.store
-            .prune_candidates(scope, policy.max_age_secs, policy.importance_floor, now_unix())
+            .prune_candidates(
+                scope,
+                policy.max_age_secs,
+                policy.importance_floor,
+                now_unix(),
+            )
             .await
     }
 
@@ -425,10 +444,16 @@ mod tests {
         let mem = open_mem().await;
         assert_eq!(mem.agent_session("global").await.unwrap(), None);
         mem.set_agent_session("global", "ses_1").await.unwrap();
-        assert_eq!(mem.agent_session("global").await.unwrap(), Some("ses_1".to_string()));
+        assert_eq!(
+            mem.agent_session("global").await.unwrap(),
+            Some("ses_1".to_string())
+        );
         // UPSERT overwrites.
         mem.set_agent_session("global", "ses_2").await.unwrap();
-        assert_eq!(mem.agent_session("global").await.unwrap(), Some("ses_2".to_string()));
+        assert_eq!(
+            mem.agent_session("global").await.unwrap(),
+            Some("ses_2".to_string())
+        );
         // Clear, including a no-op clear of an unknown scope.
         mem.clear_agent_session("global").await.unwrap();
         assert_eq!(mem.agent_session("global").await.unwrap(), None);
@@ -439,7 +464,11 @@ mod tests {
         mem.remember(RememberInput {
             scope: scope.to_string(),
             session_id: None,
-            items: vec![MemoryItem { kind: MemoryKind::Event, text: text.to_string(), importance: None }],
+            items: vec![MemoryItem {
+                kind: MemoryKind::Event,
+                text: text.to_string(),
+                importance: None,
+            }],
         })
         .await
         .unwrap();
@@ -459,7 +488,11 @@ mod tests {
         assert_eq!(plan.batches[0].len(), 2);
 
         let summary_ids = mem
-            .consolidate("project:X", &ConsolidatePolicy { batch_size: 20 }, &MockSummarizer)
+            .consolidate(
+                "project:X",
+                &ConsolidatePolicy { batch_size: 20 },
+                &MockSummarizer,
+            )
             .await
             .unwrap();
         assert_eq!(summary_ids.len(), 1);
@@ -473,7 +506,9 @@ mod tests {
 
         // The summary text came from the summarizer.
         let recent = mem.store.recent_candidates(10).await.unwrap();
-        assert!(recent.iter().any(|c| c.kind == MemoryKind::Summary && c.text == "SUMMARY(2)"));
+        assert!(recent
+            .iter()
+            .any(|c| c.kind == MemoryKind::Summary && c.text == "SUMMARY(2)"));
     }
 
     #[tokio::test]
@@ -487,10 +522,16 @@ mod tests {
             .unwrap();
 
         // dry-run plan lists the two consolidated source events.
-        let plan = mem.plan_prune(Some("project:X"), &PrunePolicy::default()).await.unwrap();
+        let plan = mem
+            .plan_prune(Some("project:X"), &PrunePolicy::default())
+            .await
+            .unwrap();
         assert_eq!(plan.len(), 2);
 
-        let deleted = mem.prune(Some("project:X"), &PrunePolicy::default()).await.unwrap();
+        let deleted = mem
+            .prune(Some("project:X"), &PrunePolicy::default())
+            .await
+            .unwrap();
         assert_eq!(deleted, 2);
 
         // The summary survives (never prunable).
@@ -521,7 +562,11 @@ mod tests {
 
         mem.export(dir.path()).await.unwrap();
 
-        assert!(std::fs::read_to_string(dir.path().join("project_X.md")).unwrap().contains("x-note"));
-        assert!(std::fs::read_to_string(dir.path().join("global.md")).unwrap().contains("g-note"));
+        assert!(std::fs::read_to_string(dir.path().join("project_X.md"))
+            .unwrap()
+            .contains("x-note"));
+        assert!(std::fs::read_to_string(dir.path().join("global.md"))
+            .unwrap()
+            .contains("g-note"));
     }
 }

@@ -4,9 +4,8 @@ use wukong_gateway::backend::{AgentRequest, AiBackend};
 
 /// Build the routing prompt: list the roles and ask for exactly one name.
 pub fn routing_prompt(task: &str) -> String {
-    let mut s = String::from(
-        "You are a router. Pick the single best role to handle the task.\nRoles:\n",
-    );
+    let mut s =
+        String::from("You are a router. Pick the single best role to handle the task.\nRoles:\n");
     for role in Role::all() {
         s.push_str(&format!("- {}: {}\n", role.name(), role.description()));
     }
@@ -143,7 +142,10 @@ pub fn parse_skill_chain(response: &str) -> Vec<PlannedStep> {
         return roles
             .into_iter()
             .take(3)
-            .map(|role| PlannedStep { role, skill_name: None })
+            .map(|role| PlannedStep {
+                role,
+                skill_name: None,
+            })
             .collect();
     }
 
@@ -252,7 +254,10 @@ pub async fn route(backend: &impl AiBackend, task: &str) -> Result<Role, Orchest
 }
 
 /// Phase 1 (chain): ask the backend for an ordered role chain.
-pub async fn plan_chain(backend: &impl AiBackend, task: &str) -> Result<Vec<Role>, OrchestratorError> {
+pub async fn plan_chain(
+    backend: &impl AiBackend,
+    task: &str,
+) -> Result<Vec<Role>, OrchestratorError> {
     let resp = backend
         .run(AgentRequest {
             prompt: planning_prompt(task),
@@ -317,7 +322,10 @@ mod tests {
     #[test]
     fn parse_chain_orders_by_appearance() {
         // Order follows position in the text, not Role::all() order.
-        assert_eq!(parse_chain("先 fixer 再 explorer"), vec![Role::Fixer, Role::Explorer]);
+        assert_eq!(
+            parse_chain("先 fixer 再 explorer"),
+            vec![Role::Fixer, Role::Explorer]
+        );
     }
 
     #[test]
@@ -342,7 +350,10 @@ mod tests {
         let steps = parse_skill_chain("fixer|test-driven-development");
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].role, Role::Fixer);
-        assert_eq!(steps[0].skill_name.as_deref(), Some("test-driven-development"));
+        assert_eq!(
+            steps[0].skill_name.as_deref(),
+            Some("test-driven-development")
+        );
     }
 
     #[test]
