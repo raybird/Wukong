@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt;
 use wukong_chat_history::{ChatHistoryStore, ChatMessage};
-use wukong_cli::run_turn_observed;
+use wukong_cli::run_turn_traced;
 use wukong_gateway::backend::AiBackend;
 use wukong_gateway::config::GatewayConfig;
 use wukong_memory::Memory;
@@ -123,7 +123,11 @@ enum SseMsg {
     Role(String),
     Reasoning(String),
     /// A non-final (helper) baton's rendered output, surfaced as a collapsible card.
-    Step { role: String, html: String },
+    Step {
+        role: String,
+        skill: Option<String>,
+        html: String,
+    },
     Answer(String),
     Error(String),
     Done,
@@ -134,9 +138,9 @@ impl SseMsg {
         match self {
             SseMsg::Role(r) => Event::default().event("role").data(r),
             SseMsg::Reasoning(t) => Event::default().event("reasoning").data(t),
-            SseMsg::Step { role, html } => Event::default()
+            SseMsg::Step { role, skill, html } => Event::default()
                 .event("step")
-                .data(serde_json::json!({ "role": role, "html": html }).to_string()),
+                .data(serde_json::json!({ "role": role, "skill": skill, "html": html }).to_string()),
             SseMsg::Answer(h) => Event::default().event("answer").data(h),
             SseMsg::Error(e) => Event::default().event("error").data(e),
             SseMsg::Done => Event::default().event("done").data("ok"),
@@ -364,7 +368,7 @@ where
                 // Buffer helper-baton steps to persist them after the turn, linked
                 // to the final assistant message. (role, raw content, rendered html)
                 let mut steps_buf: Vec<(String, String, String)> = Vec::new();
-                let result = run_turn_observed(
+                let result = run_turn_traced(
                     mem.as_ref(),
                     backend.as_ref(),
                     &cfg,
@@ -379,13 +383,18 @@ where
                     &mut |role| {
                         let _ = role_tx.send(SseMsg::Role(role.name().to_string()));
                     },
-                    &mut |role, output| {
-                        let html = wukong_render::to_web_html(output);
+                    &mut |step| {
+                        let html = wukong_render::to_web_html(step.output);
                         let _ = step_tx.send(SseMsg::Step {
-                            role: role.name().to_string(),
+                            role: step.role.name().to_string(),
+                            skill: step.skill_name.map(str::to_string),
                             html: html.clone(),
                         });
-                        steps_buf.push((role.name().to_string(), output.to_string(), html));
+                        steps_buf.push((
+                            step.role.name().to_string(),
+                            step.output.to_string(),
+                            html,
+                        ));
                     },
                 )
                 .await;
@@ -1175,7 +1184,9 @@ mod tests {
     #[tokio::test]
     async fn chat_streams_helper_step_before_answer() {
         // planner -> [explorer, fixer]; explorer (helper) emits e1, fixer (final) f2.
-        let app = build_router(state(None, &["explorer, fixer", "e1", "f2"]).await);
+        let app = build_router(
+            state(None, &["explorer|systematic-debugging\nfixer", "e1", "f2"]).await,
+        );
         let resp = app
             .oneshot(
                 Request::builder()
@@ -1195,6 +1206,10 @@ mod tests {
         // The helper step carries its role and rendered output; the final (fixer)
         // output goes through the answer event, not a step.
         assert!(body.contains(r#""role":"explorer""#), "step role:\n{body}");
+        assert!(
+            body.contains(r#""skill":"systematic-debugging""#),
+            "step skill:\n{body}"
+        );
         assert!(!body.contains(r#""role":"fixer""#), "final must not be a step:\n{body}");
     }
 
