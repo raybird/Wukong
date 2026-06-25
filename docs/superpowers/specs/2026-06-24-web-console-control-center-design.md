@@ -59,7 +59,7 @@ The Chat panel should not become the only place to manage memory or skills. It s
 
 ## Memory Panel
 
-Memory is implemented in three phases.
+Memory is currently scoped to read-only visibility and recall diagnostics. The implemented target is: observe stored records, run recall previews, and explain why hits were returned. Maintenance operations remain a later backlog item because they introduce destructive or high-risk workflows.
 
 ### Phase 1: Observability
 
@@ -76,9 +76,9 @@ Capabilities:
 
 Initial implementation should prefer existing `Memory::snapshot`-style data and add narrow read APIs only where needed.
 
-### Phase 2: Maintenance
+### Phase 2: Maintenance (Deferred)
 
-Purpose: make memory upkeep manageable from Web while preserving safety.
+Purpose: make memory upkeep manageable from Web while preserving safety. This phase is intentionally deferred; the current Web Console goal is to stop at read-only Memory views and recall explainability.
 
 Capabilities:
 
@@ -94,9 +94,15 @@ Rules:
 - Web maintenance failures should show structured errors and should not corrupt chat history or active turns.
 - Long-running operations should stream or poll progress rather than freezing the page.
 
+Deferred boundary:
+
+- No consolidate, prune, export, delete, edit, or destructive preview flow is part of the current implementation scope.
+- No memory mutation controls should be added until a later explicit maintenance spec is approved.
+- Existing maintenance descriptions are retained here only as future backlog context.
+
 ### Phase 3: Recall Tuning
 
-Purpose: explain and improve why Wukong recalls certain memories.
+Purpose: explain why Wukong recalls certain memories. Improvement/tuning controls are out of scope for the current implementation.
 
 Capabilities:
 
@@ -267,7 +273,7 @@ Regression tests:
 
 ## Phased Delivery
 
-### Phase 1: Control Center Shell And Read-Only Panels
+### Phase 1: Control Center Shell And Read-Only Panels (Completed)
 
 - Add top-level tab shell.
 - Keep Chat unchanged except for current model and preference indicators.
@@ -276,24 +282,32 @@ Regression tests:
 - Add Settings global model read/write.
 - Expand System diagnostics if needed.
 
-### Phase 2: Skill Preferences Into Planner
+Status: completed. System diagnostics were expanded as read-only runtime status cards.
+
+### Phase 2: Skill Preferences Into Planner (Completed)
 
 - Persist preferred roles and skills.
 - Inject preference hint into planner prompt.
 - Display selected skill per baton when available.
 - Add tests proving preferences guide but do not force planner output.
 
-### Phase 3: Memory Maintenance
+Status: completed. Preferences are persisted, injected as planner guidance, and surfaced in Web chat baton metadata.
+
+### Phase 3: Memory Maintenance (Deferred)
 
 - Add dry-run previews for consolidate and prune.
 - Add confirmed maintenance operations.
 - Add export trigger and status.
 
-### Phase 4: Recall Sandbox
+Status: deferred. Memory scope currently stops at read-only observability, recall preview, and recall explainability.
+
+### Phase 4: Recall Sandbox (Completed)
 
 - Add recall preview API and UI.
 - Show hit explanations and score components.
 - Keep scoring controls read-only unless a later spec explicitly designs tuning writes.
+
+Status: completed. Recall preview and score explanations are available; tuning controls remain out of scope.
 
 ## Implementation Decisions For The First Plan
 
