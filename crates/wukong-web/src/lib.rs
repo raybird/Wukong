@@ -761,6 +761,85 @@ where
     }
 }
 
+const SYSTEM_DIAGNOSTIC_TIMEOUT_SECS: u64 = 5;
+
+async fn run_opencode_diagnostic(args: &[&str]) -> Result<String, String> {
+    let util = wukong_gateway::backend::OpencodeUtility::from_agent_command(
+        &[],
+        wukong_gateway::workspace_dir(),
+    );
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(SYSTEM_DIAGNOSTIC_TIMEOUT_SECS),
+        util.run_fixed(args),
+    )
+    .await
+    {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("command timed out".to_string()),
+    }
+}
+
+async fn run_github_auth_status() -> Result<String, String> {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(SYSTEM_DIAGNOSTIC_TIMEOUT_SECS),
+        tokio::process::Command::new("gh")
+            .args(["auth", "status"])
+            .output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) if output.status.success() => {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        }
+        Ok(Ok(output)) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            Err(if stderr.is_empty() {
+                "gh auth status failed".to_string()
+            } else {
+                stderr
+            })
+        }
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("command timed out".to_string()),
+    }
+}
+
+async fn system_extra_groups() -> Vec<system_api::DiagnosticGroup> {
+    let (providers_result, models_result, github_result) = tokio::join!(
+        run_opencode_diagnostic(&["providers", "list"]),
+        run_opencode_diagnostic(&["models"]),
+        run_github_auth_status(),
+    );
+
+    let providers = system_api::command_diagnostic_item(
+        "providers",
+        "Providers",
+        providers_result,
+    );
+    let models = system_api::command_diagnostic_item("models", "Models", models_result);
+    let github =
+        system_api::command_diagnostic_item("github_cli", "GitHub CLI", github_result);
+
+    vec![
+        system_api::DiagnosticGroup {
+            id: "providers".to_string(),
+            title: "Providers".to_string(),
+            items: vec![providers],
+        },
+        system_api::DiagnosticGroup {
+            id: "models".to_string(),
+            title: "Models".to_string(),
+            items: vec![models],
+        },
+        system_api::DiagnosticGroup {
+            id: "tools".to_string(),
+            title: "Tools".to_string(),
+            items: vec![github],
+        },
+    ]
+}
+
 async fn get_system<B>(
     State(state): State<AppState<B>>,
     Query(params): Query<SettingsQuery>,
@@ -778,14 +857,17 @@ where
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
     match store.list_jobs().await {
-        Ok(jobs) => Json(system_api::system_response(
-            &state.scope,
-            state.token.is_some(),
-            &state.db_url,
-            &jobs,
-            Vec::new(),
-        ))
-        .into_response(),
+        Ok(jobs) => {
+            let groups = system_extra_groups().await;
+            Json(system_api::system_response(
+                &state.scope,
+                state.token.is_some(),
+                &state.db_url,
+                &jobs,
+                groups,
+            ))
+            .into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -2201,6 +2283,22 @@ mod tests {
         assert!(body.contains(r#""scope":"global""#), "body: {body}");
         assert!(body.contains(r#""token_enabled":true"#), "body: {body}");
         assert!(body.contains(r#""schedule_total":1"#), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn system_returns_diagnostic_groups() {
+        let app = build_router(state(None, &[]).await);
+        let resp = app
+            .oneshot(Request::builder().uri("/api/system").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains(r#""groups""#), "body: {body}");
+        assert!(body.contains(r#""id":"runtime""#), "body: {body}");
+        assert!(body.contains(r#""id":"environment""#), "body: {body}");
+        assert!(body.contains(r#""id":"schedules""#), "body: {body}");
     }
 
     #[tokio::test]

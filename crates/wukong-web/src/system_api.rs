@@ -193,6 +193,37 @@ fn schedules_group(
     }
 }
 
+pub fn command_diagnostic_item(
+    id: &str,
+    label: &str,
+    result: Result<String, String>,
+) -> DiagnosticItem {
+    match result {
+        Ok(output) => {
+            let summary = summarize_output(&output);
+            DiagnosticItem::ok(id, label, &summary, Some(output))
+        }
+        Err(error) => DiagnosticItem::warn(
+            id,
+            label,
+            &error,
+            None,
+            Some("Retry from System or check the backend command in the terminal".to_string()),
+        ),
+    }
+}
+
+fn summarize_output(output: &str) -> String {
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("no output")
+        .chars()
+        .take(120)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +286,31 @@ mod tests {
         );
         let json = serde_json::to_string(&item).unwrap();
         assert!(json.contains(r#""status":"warn""#), "json: {json}");
+    }
+
+    #[test]
+    fn command_success_becomes_ok_item_with_summary() {
+        let item = command_diagnostic_item(
+            "providers",
+            "Providers",
+            Ok("opencode\nanthropic".to_string()),
+        );
+
+        assert_eq!(item.status, DiagnosticStatus::Ok);
+        assert_eq!(item.summary, "opencode");
+        assert_eq!(item.detail.as_deref(), Some("opencode\nanthropic"));
+    }
+
+    #[test]
+    fn command_failure_becomes_warn_item() {
+        let item = command_diagnostic_item(
+            "models",
+            "Models",
+            Err("backend unavailable".to_string()),
+        );
+
+        assert_eq!(item.status, DiagnosticStatus::Warn);
+        assert_eq!(item.summary, "backend unavailable");
+        assert!(item.suggestion.as_deref().unwrap().contains("Retry"));
     }
 }
