@@ -783,6 +783,7 @@ where
             state.token.is_some(),
             &state.db_url,
             &jobs,
+            Vec::new(),
         ))
         .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
