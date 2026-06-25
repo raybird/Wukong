@@ -1685,9 +1685,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        assert!(body_string(resp)
-            .await
-            .contains("unsupported recall mode"));
+        assert!(body_string(resp).await.contains("unsupported recall mode"));
     }
 
     #[tokio::test]
