@@ -155,7 +155,10 @@ fn environment_group(db_url: &str) -> DiagnosticGroup {
                     "Memory DB",
                     "unavailable",
                     None,
-                    Some("Set a memory database URL before relying on memory diagnostics".to_string()),
+                    Some(
+                        "Set a memory database URL before relying on memory diagnostics"
+                            .to_string(),
+                    ),
                 )
             } else {
                 DiagnosticItem::ok("memory_db", "Memory DB", "configured", None)
@@ -174,7 +177,12 @@ fn schedules_group(
         id: "schedules".to_string(),
         title: "Schedules".to_string(),
         items: vec![
-            DiagnosticItem::ok("total", "Total schedules", &schedule_total.to_string(), None),
+            DiagnosticItem::ok(
+                "total",
+                "Total schedules",
+                &schedule_total.to_string(),
+                None,
+            ),
             DiagnosticItem::ok(
                 "enabled",
                 "Enabled schedules",
@@ -270,7 +278,10 @@ mod tests {
         assert_eq!(response.schedule_enabled, 1);
         assert_eq!(response.next_run_at, Some(200));
         assert!(response.groups.iter().any(|group| group.id == "runtime"));
-        assert!(response.groups.iter().any(|group| group.id == "environment"));
+        assert!(response
+            .groups
+            .iter()
+            .any(|group| group.id == "environment"));
         assert!(response.groups.iter().any(|group| group.id == "schedules"));
         assert!(response.groups.iter().any(|group| group.id == "providers"));
     }
@@ -303,11 +314,8 @@ mod tests {
 
     #[test]
     fn command_failure_becomes_warn_item() {
-        let item = command_diagnostic_item(
-            "models",
-            "Models",
-            Err("backend unavailable".to_string()),
-        );
+        let item =
+            command_diagnostic_item("models", "Models", Err("backend unavailable".to_string()));
 
         assert_eq!(item.status, DiagnosticStatus::Warn);
         assert_eq!(item.summary, "backend unavailable");

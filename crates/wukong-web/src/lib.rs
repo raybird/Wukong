@@ -812,14 +812,9 @@ async fn system_extra_groups() -> Vec<system_api::DiagnosticGroup> {
         run_github_auth_status(),
     );
 
-    let providers = system_api::command_diagnostic_item(
-        "providers",
-        "Providers",
-        providers_result,
-    );
+    let providers = system_api::command_diagnostic_item("providers", "Providers", providers_result);
     let models = system_api::command_diagnostic_item("models", "Models", models_result);
-    let github =
-        system_api::command_diagnostic_item("github_cli", "GitHub CLI", github_result);
+    let github = system_api::command_diagnostic_item("github_cli", "GitHub CLI", github_result);
 
     vec![
         system_api::DiagnosticGroup {
@@ -2289,7 +2284,12 @@ mod tests {
     async fn system_returns_diagnostic_groups() {
         let app = build_router(state(None, &[]).await);
         let resp = app
-            .oneshot(Request::builder().uri("/api/system").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/system")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
