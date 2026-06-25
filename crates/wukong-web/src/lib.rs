@@ -1646,6 +1646,9 @@ mod tests {
         let body = body_string(resp).await;
         assert!(body.contains("scheduler memory query note"), "body: {body}");
         assert!(body.contains(r#""mode":"hybrid""#), "body: {body}");
+        assert!(body.contains(r#""explanation""#), "body: {body}");
+        assert!(body.contains(r#""lexical""#), "body: {body}");
+        assert!(body.contains(r#""source_signals""#), "body: {body}");
     }
 
     #[tokio::test]

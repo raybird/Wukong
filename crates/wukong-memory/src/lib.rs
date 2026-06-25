@@ -21,8 +21,8 @@ pub use error::{MemoryError, Result};
 pub use markdown::MarkdownSink;
 pub use model::{
     AgeBuckets, EmbeddingCoverage, Evidence, KindCount, MemoryItem, MemoryKind, MemoryRecord,
-    MemoryRecordsPage, RecallHit, RecallMode, RecallQuery, RememberInput, ScopeCount, Snapshot,
-    Stats, WukongResult,
+    MemoryRecordsPage, RecallExplanation, RecallHit, RecallMode, RecallQuery, RememberInput,
+    ScopeCount, Snapshot, Stats, WukongResult,
 };
 pub use prune::PrunePolicy;
 pub use scope::Scope;
@@ -255,6 +255,7 @@ impl Memory {
                 kind: s.kind,
                 text: s.text,
                 score: s.score,
+                explanation: s.explanation,
             })
             .collect();
 

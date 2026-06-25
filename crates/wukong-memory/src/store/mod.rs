@@ -60,6 +60,8 @@ pub struct Candidate {
     pub bm25: Option<f64>,
     /// Cosine similarity to the query (higher = better); None for non-vector sources.
     pub vector_sim: Option<f64>,
+    /// Candidate source names observed before ranking.
+    pub source_signals: Vec<String>,
 }
 
 /// A row eligible for consolidation (event/note, not yet consolidated).
@@ -145,7 +147,14 @@ impl Store {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(row_to_candidate).collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let mut c = row_to_candidate(r);
+                c.source_signals.push("keyword".to_string());
+                c
+            })
+            .collect())
     }
 
     /// Most recent memories (tree/recency source). bm25 is None.
@@ -160,7 +169,14 @@ impl Store {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(row_to_candidate).collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let mut c = row_to_candidate(r);
+                c.source_signals.push("recent".to_string());
+                c
+            })
+            .collect())
     }
 
     /// Bump recall_count and last_recalled_at for the given ids.
@@ -592,6 +608,7 @@ fn row_to_candidate(r: sqlx::sqlite::SqliteRow) -> Candidate {
         importance: r.get::<f64, _>("importance"),
         bm25: r.get::<Option<f64>, _>("bm25"),
         vector_sim: None,
+        source_signals: Vec::new(),
     }
 }
 

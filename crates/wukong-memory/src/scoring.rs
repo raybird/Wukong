@@ -19,7 +19,7 @@ impl Default for Weights {
     }
 }
 
-const HALF_LIFE_DAYS: f64 = 90.0;
+pub const HALF_LIFE_DAYS: f64 = 90.0;
 
 /// Exponential time decay with a 90-day half-life. Returns 1.0 at age 0,
 /// 0.5 at 90 days. Negative ages are clamped to 0.

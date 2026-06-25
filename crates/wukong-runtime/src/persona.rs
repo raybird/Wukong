@@ -75,7 +75,7 @@ pub fn scheduling_capability_hint(scope: &str, bin: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wukong_memory::MemoryKind;
+    use wukong_memory::{MemoryKind, RecallExplanation};
 
     fn hit(scope: &str, text: &str) -> RecallHit {
         RecallHit {
@@ -84,6 +84,16 @@ mod tests {
             kind: MemoryKind::Note,
             text: text.to_string(),
             score: 1.0,
+            explanation: RecallExplanation {
+                lexical: 1.0,
+                semantic: 0.0,
+                decay: 1.0,
+                importance: 1.0,
+                recall_bonus: 0.0,
+                age_seconds: 0,
+                recall_count: 0,
+                source_signals: vec!["keyword".to_string()],
+            },
         }
     }
 

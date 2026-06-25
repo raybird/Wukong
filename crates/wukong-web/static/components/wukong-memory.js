@@ -1,4 +1,4 @@
-import { html } from '/lib/html.js';
+import { html, unsafe } from '/lib/html.js';
 
 export class WukongMemory extends HTMLElement {
   connectedCallback() {
@@ -152,9 +152,25 @@ export class WukongMemory extends HTMLElement {
     this.recallStatus.textContent = '命中 ' + hits.length + ' 筆 · confidence ' + data.confidence + ' · ' + data.latency_ms + 'ms';
     this.recallResults.innerHTML = hits.map((hit) => html`
       <article class="record-card">
-        <div><span class="tag">${hit.scope}</span> <span class="tag">${hit.kind}</span> <span class="tag">score ${Number(hit.score).toFixed(3)}</span></div>
+        <div><span class="tag">${hit.scope}</span> <span class="tag">${hit.kind}</span> <span class="tag">score ${this.formatScore(hit.score)}</span></div>
         <p>${hit.text}</p>
+        ${unsafe(this.recallExplanationHtml(hit.explanation))}
       </article>
     `.toString()).join('') || '<p class="empty-state">沒有符合的記憶。</p>';
+  }
+
+  formatScore(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number.toFixed(3) : '0.000';
+  }
+
+  recallExplanationHtml(explanation) {
+    if (!explanation) return '';
+    const signals = (explanation.source_signals || []).join(', ') || 'none';
+    return html`
+      <small>
+        signals ${signals} · lexical ${this.formatScore(explanation.lexical)} · semantic ${this.formatScore(explanation.semantic)} · decay ${this.formatScore(explanation.decay)} · importance ${this.formatScore(explanation.importance)} · bonus ${this.formatScore(explanation.recall_bonus)} · age ${explanation.age_seconds}s · recalled ${explanation.recall_count}
+      </small>
+    `.toString();
   }
 }

@@ -1,7 +1,7 @@
 use crate::embed::cosine_similarity;
-use crate::model::RecallMode;
+use crate::model::{RecallExplanation, RecallMode};
 use crate::scope::Scope;
-use crate::scoring::{combined_score, Weights};
+use crate::scoring::{combined_score, time_decay, Weights, HALF_LIFE_DAYS};
 use crate::store::Candidate;
 
 const STOPWORDS: &[&str] = &[
@@ -47,11 +47,21 @@ pub fn fts_match_string(query: &str) -> Option<String> {
 pub fn merge_candidates(keyword: Vec<Candidate>, recent: Vec<Candidate>) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = keyword;
     for c in recent {
-        if !out.iter().any(|k| k.id == c.id) {
+        if let Some(existing) = out.iter_mut().find(|k| k.id == c.id) {
+            merge_source_signals(&mut existing.source_signals, c.source_signals);
+        } else {
             out.push(c);
         }
     }
     out
+}
+
+fn merge_source_signals(existing: &mut Vec<String>, incoming: Vec<String>) {
+    for signal in incoming {
+        if !existing.contains(&signal) {
+            existing.push(signal);
+        }
+    }
 }
 
 /// Keep only candidates whose scope is within the filter's ancestry.
@@ -76,6 +86,7 @@ pub struct Scored {
     pub kind: crate::model::MemoryKind,
     pub text: String,
     pub score: f64,
+    pub explanation: RecallExplanation,
 }
 
 /// Normalize bm25 and vector_sim across candidates, compute combined scores,
@@ -118,6 +129,8 @@ pub fn rank(candidates: Vec<Candidate>, now: i64, top_k: usize, weights: &Weight
                 Some(s) => (s - vmin) / (vmax - vmin),
             };
             let age = (now - c.created_at).max(0);
+            let decay = time_decay(age, HALF_LIFE_DAYS);
+            let recall_bonus = 0.02 * (1.0 + c.recall_count.max(0) as f64).ln();
             let score = combined_score(
                 lexical_norm,
                 semantic_norm,
@@ -132,6 +145,16 @@ pub fn rank(candidates: Vec<Candidate>, now: i64, top_k: usize, weights: &Weight
                 kind: c.kind,
                 text: c.text,
                 score,
+                explanation: RecallExplanation {
+                    lexical: lexical_norm,
+                    semantic: semantic_norm,
+                    decay,
+                    importance: c.importance,
+                    recall_bonus,
+                    age_seconds: age,
+                    recall_count: c.recall_count,
+                    source_signals: c.source_signals,
+                },
             }
         })
         .collect();
@@ -166,6 +189,7 @@ pub fn build_vector_candidates(
         .into_iter()
         .map(|(mut c, v)| {
             c.vector_sim = Some(cosine_similarity(query_vec, &v));
+            c.source_signals.push("vector".to_string());
             c
         })
         .collect();
@@ -184,6 +208,7 @@ pub fn apply_vector_sims(mut base: Vec<Candidate>, vector: Vec<Candidate>) -> Ve
     for v in vector {
         if let Some(existing) = base.iter_mut().find(|c| c.id == v.id) {
             existing.vector_sim = v.vector_sim;
+            merge_source_signals(&mut existing.source_signals, v.source_signals);
         } else {
             base.push(v);
         }
@@ -207,6 +232,7 @@ mod tests {
             importance: 1.0,
             bm25,
             vector_sim: None,
+            source_signals: Vec::new(),
         }
     }
 
@@ -258,6 +284,56 @@ mod tests {
         let ranked = rank(cands, 0, 1, &Weights::default());
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].id, 2); // more-negative bm25 = better match => higher lexical_norm
+    }
+
+    #[test]
+    fn rank_explains_score_components_and_signals() {
+        let now = 200;
+        let mut c = cand(1, "global", 100, Some(-5.0));
+        c.vector_sim = Some(0.9);
+        c.importance = 0.8;
+        c.recall_count = 3;
+        c.source_signals = vec![
+            "keyword".to_string(),
+            "recent".to_string(),
+            "vector".to_string(),
+        ];
+
+        let ranked = rank(vec![c], now, 1, &Weights::default());
+
+        assert_eq!(ranked.len(), 1);
+        let explanation = &ranked[0].explanation;
+        assert_eq!(explanation.lexical, 1.0);
+        assert_eq!(explanation.semantic, 1.0);
+        assert!(explanation.decay > 0.99);
+        assert_eq!(explanation.importance, 0.8);
+        assert!(explanation.recall_bonus > 0.0);
+        assert_eq!(explanation.age_seconds, 100);
+        assert_eq!(explanation.recall_count, 3);
+        assert_eq!(
+            explanation.source_signals,
+            vec![
+                "keyword".to_string(),
+                "recent".to_string(),
+                "vector".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_candidates_preserves_recent_signal_on_duplicate() {
+        let mut keyword = cand(1, "global", 100, Some(-2.0));
+        keyword.source_signals = vec!["keyword".to_string()];
+        let mut recent = cand(1, "global", 100, None);
+        recent.source_signals = vec!["recent".to_string()];
+
+        let merged = merge_candidates(vec![keyword], vec![recent]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0].source_signals,
+            vec!["keyword".to_string(), "recent".to_string()]
+        );
     }
 
     #[test]

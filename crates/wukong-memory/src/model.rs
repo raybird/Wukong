@@ -88,6 +88,20 @@ pub struct RecallHit {
     pub kind: MemoryKind,
     pub text: String,
     pub score: f64,
+    pub explanation: RecallExplanation,
+}
+
+/// Explainable score breakdown for a recall result.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecallExplanation {
+    pub lexical: f64,
+    pub semantic: f64,
+    pub decay: f64,
+    pub importance: f64,
+    pub recall_bonus: f64,
+    pub age_seconds: i64,
+    pub recall_count: i64,
+    pub source_signals: Vec<String>,
 }
 
 /// Provenance entry attached to every result envelope.
