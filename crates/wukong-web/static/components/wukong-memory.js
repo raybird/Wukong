@@ -28,6 +28,20 @@ export class WukongMemory extends HTMLElement {
             </label>
           </div>
         </section>
+        <section class="control-card">
+          <h3>Recall 查詢</h3>
+          <p class="panel-help">只讀查詢：顯示 Wukong 會從目前 scope 想起哪些記憶，不會修改記憶資料。</p>
+          <div class="control-row">
+            <label>Top K <input id="recall-top-k" type="number" min="1" max="20" value="8"></label>
+            <span class="tag">mode hybrid</span>
+          </div>
+          <textarea id="recall-query" rows="3" placeholder="輸入要查詢的記憶線索…"></textarea>
+          <div class="control-row">
+            <button id="run-recall" type="button">查詢記憶</button>
+          </div>
+          <div id="recall-status" class="settings-status"></div>
+          <div id="recall-results" class="record-list"></div>
+        </section>
         <div id="memory-records" class="record-list"></div>
       </section>
     `.toString();
@@ -36,7 +50,12 @@ export class WukongMemory extends HTMLElement {
     this.records = this.querySelector('#memory-records');
     this.scopeSelect = this.querySelector('#memory-scope');
     this.kindSelect = this.querySelector('#memory-kind');
+    this.recallQuery = this.querySelector('#recall-query');
+    this.recallTopK = this.querySelector('#recall-top-k');
+    this.recallStatus = this.querySelector('#recall-status');
+    this.recallResults = this.querySelector('#recall-results');
     this.querySelector('#refresh-memory').addEventListener('click', () => this.load());
+    this.querySelector('#run-recall').addEventListener('click', () => this.runRecall());
     this.scopeSelect.addEventListener('change', () => this.loadRecords());
     this.kindSelect.addEventListener('change', () => this.loadRecords());
     this.load();
@@ -96,5 +115,46 @@ export class WukongMemory extends HTMLElement {
         <small>importance ${record.importance} · recalled ${record.recall_count} · ${new Date(record.created_at * 1000).toLocaleString('zh-TW')}</small>
       </article>
     `.toString()).join('') || '<p class="empty-state">沒有記憶。</p>';
+  }
+
+  async runRecall() {
+    const query = this.recallQuery.value.trim();
+    if (!query) {
+      this.recallStatus.textContent = '請先輸入查詢內容。';
+      this.recallResults.innerHTML = '';
+      return;
+    }
+    const topK = Number.parseInt(this.recallTopK.value || '8', 10);
+    this.recallStatus.textContent = '查詢中…';
+    this.recallResults.innerHTML = '';
+    const params = new URLSearchParams();
+    if (window.WUKONG_TOKEN) params.set('token', window.WUKONG_TOKEN);
+    const resp = await fetch('/api/memory/recall-preview' + (params.toString() ? '?' + params.toString() : ''), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        query,
+        scope: this.scopeSelect.value ? decodeURIComponent(this.scopeSelect.value) : undefined,
+        top_k: Number.isFinite(topK) ? topK : 8,
+        mode: 'hybrid',
+      }),
+    });
+    if (!resp.ok) {
+      this.recallStatus.textContent = '查詢失敗：HTTP ' + resp.status + ' ' + await resp.text();
+      return;
+    }
+    const data = await resp.json();
+    this.renderRecallResults(data);
+  }
+
+  renderRecallResults(data) {
+    const hits = data.hits || [];
+    this.recallStatus.textContent = '命中 ' + hits.length + ' 筆 · confidence ' + data.confidence + ' · ' + data.latency_ms + 'ms';
+    this.recallResults.innerHTML = hits.map((hit) => html`
+      <article class="record-card">
+        <div><span class="tag">${hit.scope}</span> <span class="tag">${hit.kind}</span> <span class="tag">score ${Number(hit.score).toFixed(3)}</span></div>
+        <p>${hit.text}</p>
+      </article>
+    `.toString()).join('') || '<p class="empty-state">沒有符合的記憶。</p>';
   }
 }
