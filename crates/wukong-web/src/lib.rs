@@ -19,7 +19,7 @@ use wukong_chat_history::{ChatHistoryStore, ChatMessage};
 use wukong_cli::run_turn_traced;
 use wukong_gateway::backend::AiBackend;
 use wukong_gateway::config::GatewayConfig;
-use wukong_memory::Memory;
+use wukong_memory::{Memory, RecallMode, RecallQuery};
 use wukong_scheduler::SchedulerStore;
 use wukong_settings::TelegramSettings;
 
@@ -837,6 +837,41 @@ where
     }
 }
 
+async fn post_memory_recall_preview<B>(
+    State(state): State<AppState<B>>,
+    Query(query): Query<SettingsQuery>,
+    Json(req): Json<memory_api::RecallPreviewRequest>,
+) -> Result<Json<memory_api::RecallPreviewResponse>, (StatusCode, String)>
+where
+    B: AiBackend + Send + Sync + 'static,
+{
+    if !authorized(&state.token, query.token.as_deref()) {
+        return Err((StatusCode::UNAUTHORIZED, "unauthorized".to_string()));
+    }
+    let normalized = memory_api::normalize_recall_request(req, &state.scope)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err))?;
+    let result = state
+        .memory
+        .recall(RecallQuery {
+            query: normalized.query.clone(),
+            top_k: normalized.top_k,
+            scope: Some(normalized.scope.clone()),
+            mode: RecallMode::Hybrid,
+        })
+        .await
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+
+    Ok(Json(memory_api::RecallPreviewResponse {
+        query: normalized.query,
+        scope: normalized.scope,
+        mode: normalized.mode,
+        hits: result.data,
+        evidence: result.evidence,
+        confidence: result.confidence,
+        latency_ms: result.latency_ms,
+    }))
+}
+
 async fn get_skills_catalog<B>(
     State(state): State<AppState<B>>,
     Query(params): Query<SettingsQuery>,
@@ -958,6 +993,10 @@ where
         .route(
             "/api/memory/records",
             axum::routing::get(get_memory_records::<B>),
+        )
+        .route(
+            "/api/memory/recall-preview",
+            axum::routing::post(post_memory_recall_preview::<B>),
         )
         .route(
             "/api/skills/catalog",
@@ -1569,6 +1608,105 @@ mod tests {
         let body = body_string(resp).await;
         assert!(body.contains("Memory panel can read records"));
         assert!(body.contains("has_more"));
+    }
+
+    #[tokio::test]
+    async fn memory_recall_preview_returns_hits() {
+        let app_state = state(None, &[]).await;
+        app_state
+            .memory
+            .remember(wukong_memory::RememberInput {
+                scope: "project:Wukong".to_string(),
+                session_id: None,
+                items: vec![wukong_memory::MemoryItem {
+                    kind: wukong_memory::MemoryKind::Note,
+                    text: "scheduler memory query note".to_string(),
+                    importance: Some(0.8),
+                }],
+            })
+            .await
+            .unwrap();
+        let app = build_router(app_state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/memory/recall-preview")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"query":"scheduler memory","scope":"project:Wukong","top_k":5,"mode":"hybrid"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains("scheduler memory query note"), "body: {body}");
+        assert!(body.contains(r#""mode":"hybrid""#), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn memory_recall_preview_rejects_blank_query() {
+        let app = build_router(state(None, &[]).await);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/memory/recall-preview")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"query":"   "}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(body_string(resp).await.contains("query is required"));
+    }
+
+    #[tokio::test]
+    async fn memory_recall_preview_rejects_unknown_mode() {
+        let app = build_router(state(None, &[]).await);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/memory/recall-preview")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"query":"memory","mode":"keyword"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(body_string(resp)
+            .await
+            .contains("unsupported recall mode"));
+    }
+
+    #[tokio::test]
+    async fn memory_recall_preview_requires_token_when_set() {
+        let app = build_router(state(Some("sekret"), &[]).await);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/memory/recall-preview")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"query":"memory"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
