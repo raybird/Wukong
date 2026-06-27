@@ -121,8 +121,9 @@ mod tests {
         assert!(p.contains("[技能規範指引]"));
         assert!(p.contains("test-driven-development"));
         assert!(
-            p.contains("crates/wukong-skills/assets/superpowers/test-driven-development/SKILL.md")
+            p.contains("/workspace/.wukong/skills/superpowers/test-driven-development/SKILL.md")
         );
+        assert!(!p.contains("crates/wukong-skills/assets/superpowers"));
         assert!(p.contains("你是 Fixer"));
         assert!(p.contains("fix the bug"));
     }
