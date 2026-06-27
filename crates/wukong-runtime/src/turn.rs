@@ -472,7 +472,8 @@ mod tests {
         assert!(prompts[1].contains("[技能規範指引]"));
         assert!(prompts[1].contains("test-driven-development"));
         assert!(prompts[1]
-            .contains("crates/wukong-skills/assets/superpowers/test-driven-development/SKILL.md"));
+            .contains("/workspace/.wukong/skills/superpowers/test-driven-development/SKILL.md"));
+        assert!(!prompts[1].contains("crates/wukong-skills/assets/superpowers"));
         assert!(prompts[1].contains("你是 Fixer"));
     }
 

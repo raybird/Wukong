@@ -24,7 +24,7 @@ pub fn build_prompt_with_skill(
     let mut prompt = role.card().to_string();
     if let Some(skill) = skill {
         prompt.push_str(&format!(
-            "\n\n[技能規範指引]\n你必須遵循 `{}` 的流程。請先閱讀並遵循專案中的技能規範文件：\n路徑：crates/wukong-skills/assets/superpowers/{}/SKILL.md",
+            "\n\n[技能規範指引]\n你必須遵循 `{}` 的流程。請先閱讀並遵循 Docker runtime 內的技能規範文件：\n路徑：/workspace/.wukong/skills/superpowers/{}/SKILL.md",
             skill.name, skill.name
         ));
     }
