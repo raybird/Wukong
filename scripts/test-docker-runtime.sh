@@ -41,6 +41,18 @@ require_in_file "COPY crates/wukong-skills/assets/superpowers /usr/local/share/w
     "Docker image must package Superpowers skill assets"
 require_in_file "/usr/local/share/wukong/skills/superpowers" "$dockerfile" \
     "Dockerfile must use the canonical image skill asset path"
+require_in_file 'IMAGE_SKILLS="/usr/local/share/wukong/skills/superpowers"' "$entrypoint" \
+    "entrypoint must define image skill asset source"
+require_in_file 'WORKSPACE_SKILLS="$WUKONG_WORKSPACE/.wukong/skills/superpowers"' "$entrypoint" \
+    "entrypoint must define workspace skill asset destination"
+require_in_file 'sync_wukong_skills()' "$entrypoint" \
+    "entrypoint must provide a skill asset sync function"
+require_in_file 'cmp -s "$IMAGE_SKILLS/SOURCE.md" "$WORKSPACE_SKILLS/SOURCE.md"' "$entrypoint" \
+    "entrypoint must skip skill sync when SOURCE.md matches"
+require_in_file 'cp -a "$IMAGE_SKILLS/." "$tmp_dir/"' "$entrypoint" \
+    "entrypoint must copy image skill assets into a temporary directory"
+require_in_file 'mv "$tmp_dir" "$WORKSPACE_SKILLS"' "$entrypoint" \
+    "entrypoint must atomically install workspace skill assets"
 
 if awk '
     /^  wukong-schedulerd:/ { in_scheduler = 1; next }
