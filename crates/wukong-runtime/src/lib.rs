@@ -3,6 +3,7 @@
 
 pub mod maintenance;
 pub mod persona;
+pub mod skill_assets;
 pub mod turn;
 
 pub use turn::{
