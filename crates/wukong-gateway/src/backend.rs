@@ -5,6 +5,9 @@ use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
+const DSML_TOOL_CALLS_START: &str = "<｜｜DSML｜｜tool_calls>";
+const DSML_TOOL_CALLS_END: &str = "</｜｜DSML｜｜tool_calls>";
+
 /// A request to the AI backend.
 #[derive(Debug, Clone)]
 pub struct AgentRequest {
@@ -196,19 +199,35 @@ impl AiBackend for AgentCliBackend {
         let mut lines = BufReader::new(stdout).lines();
         let mut full = String::new();
         let mut session_id: Option<String> = None;
+        let mut text_filter = DsmlToolCallFilter::default();
         while let Some(line) = lines.next_line().await? {
             if let Some(id) = parse_session_id(&line) {
                 session_id = Some(id);
             }
             if let Some(ev) = parse_event(&line) {
-                if let StreamEvent::Text(t) = &ev {
-                    if !full.is_empty() {
-                        full.push('\n');
+                match ev {
+                    StreamEvent::Text(t) => {
+                        let clean = text_filter.feed(&t);
+                        if !clean.is_empty() {
+                            if !full.is_empty() {
+                                full.push('\n');
+                            }
+                            full.push_str(&clean);
+                            on_event(StreamEvent::Text(clean));
+                        }
                     }
-                    full.push_str(t);
+                    other => on_event(other),
                 }
-                on_event(ev);
             }
+        }
+
+        let clean = text_filter.finish();
+        if !clean.is_empty() {
+            if !full.is_empty() {
+                full.push('\n');
+            }
+            full.push_str(&clean);
+            on_event(StreamEvent::Text(clean));
         }
 
         let status = child.wait().await?;
@@ -224,6 +243,72 @@ impl AiBackend for AgentCliBackend {
             session_id,
         })
     }
+}
+
+#[derive(Default)]
+struct DsmlToolCallFilter {
+    pending: String,
+    in_tool_calls: bool,
+}
+
+impl DsmlToolCallFilter {
+    fn feed(&mut self, text: &str) -> String {
+        self.pending.push_str(text);
+        let mut out = String::new();
+
+        loop {
+            if self.in_tool_calls {
+                if let Some(end) = self.pending.find(DSML_TOOL_CALLS_END) {
+                    let drain_to = end + DSML_TOOL_CALLS_END.len();
+                    self.pending.drain(..drain_to);
+                    if self.pending.starts_with('\n') {
+                        self.pending.drain(..1);
+                    }
+                    self.in_tool_calls = false;
+                    continue;
+                }
+                self.pending.clear();
+                break;
+            }
+
+            if let Some(start) = self.pending.find(DSML_TOOL_CALLS_START) {
+                out.push_str(&self.pending[..start]);
+                let drain_to = start + DSML_TOOL_CALLS_START.len();
+                self.pending.drain(..drain_to);
+                self.in_tool_calls = true;
+                continue;
+            }
+
+            let keep = suffix_prefix_len(&self.pending, DSML_TOOL_CALLS_START);
+            let emit_len = self.pending.len().saturating_sub(keep);
+            out.push_str(&self.pending[..emit_len]);
+            self.pending.drain(..emit_len);
+            break;
+        }
+
+        out
+    }
+
+    fn finish(mut self) -> String {
+        if self.in_tool_calls {
+            String::new()
+        } else {
+            std::mem::take(&mut self.pending)
+        }
+    }
+}
+
+fn suffix_prefix_len(text: &str, prefix: &str) -> usize {
+    let max = text.len().min(prefix.len().saturating_sub(1));
+    for len in (1..=max).rev() {
+        if text.is_char_boundary(text.len() - len)
+            && prefix.is_char_boundary(len)
+            && text[text.len() - len..] == prefix[..len]
+        {
+            return len;
+        }
+    }
+    0
 }
 
 #[cfg(test)]
@@ -426,5 +511,34 @@ mod tests {
                 StreamEvent::StepFinish,
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn agent_cli_run_streaming_removes_dsml_tool_call_blocks_from_text() {
+        let backend = AgentCliBackend {
+            command: vec![
+                "printf".to_string(),
+                "%s\n".to_string(),
+                r#"{"type":"text","part":{"type":"text","text":"before\n<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"bash\">\n<｜｜DSML｜｜parameter name=\"command\" string=\"true\">pwd</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>\nafter"}}"#.to_string(),
+            ],
+            workspace: None,
+        };
+        let mut events = Vec::new();
+
+        let resp = backend
+            .run_streaming(
+                AgentRequest {
+                    prompt: "ignored".into(),
+                    session_id: None,
+                    thinking: false,
+                    model: None,
+                },
+                &mut |e| events.push(e),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.text, "before\nafter");
+        assert_eq!(events, vec![StreamEvent::Text("before\nafter".to_string())]);
     }
 }
