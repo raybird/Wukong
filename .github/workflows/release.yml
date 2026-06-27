@@ -48,12 +48,13 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
           VERSION="${GITHUB_REF_NAME}"
-          mkdir -p dist/wukong-docker/scripts dist/wukong-docker/workspace
+          mkdir -p dist/wukong-docker/scripts dist/wukong-docker/workspace dist/wukong-docker/crates/wukong-skills/assets
           cp .env.example dist/wukong-docker/.env.example
           cp Dockerfile dist/wukong-docker/Dockerfile
           sed -i "s/^ARG VERSION=.*/ARG VERSION=${VERSION}/" dist/wukong-docker/Dockerfile
           cp scripts/docker-entrypoint.sh dist/wukong-docker/scripts/docker-entrypoint.sh
           cp docker-compose.yml dist/wukong-docker/docker-compose.yml
+          cp -R crates/wukong-skills/assets/superpowers dist/wukong-docker/crates/wukong-skills/assets/superpowers
           cp workspace/SOUL.md dist/wukong-docker/workspace/SOUL.md
           cp workspace/AGENTS.md dist/wukong-docker/workspace/AGENTS.md
           cd dist

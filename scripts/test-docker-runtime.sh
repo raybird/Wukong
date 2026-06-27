@@ -4,6 +4,7 @@ set -euo pipefail
 compose_file="docker-compose.yml"
 entrypoint="scripts/docker-entrypoint.sh"
 dockerfile="Dockerfile"
+release_workflow=".github/workflows/release.yml"
 
 require_in_file() {
     local pattern="$1"
@@ -41,6 +42,10 @@ require_in_file "COPY crates/wukong-skills/assets/superpowers /usr/local/share/w
     "Docker image must package Superpowers skill assets"
 require_in_file "/usr/local/share/wukong/skills/superpowers" "$dockerfile" \
     "Dockerfile must use the canonical image skill asset path"
+require_in_file "dist/wukong-docker/crates/wukong-skills/assets" "$release_workflow" \
+    "Docker release bundle must include the skill asset parent directory"
+require_in_file "cp -R crates/wukong-skills/assets/superpowers dist/wukong-docker/crates/wukong-skills/assets/superpowers" "$release_workflow" \
+    "Docker release bundle must include Superpowers skill assets in the Docker build context"
 require_in_file 'IMAGE_SKILLS="/usr/local/share/wukong/skills/superpowers"' "$entrypoint" \
     "entrypoint must define image skill asset source"
 require_in_file 'WORKSPACE_SKILLS="$WUKONG_WORKSPACE/.wukong/skills/superpowers"' "$entrypoint" \
