@@ -2,11 +2,13 @@ use crate::error::GatewayError;
 use crate::stream::{parse_event, parse_session_id, StreamEvent};
 use std::path::PathBuf;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 
 const DSML_TOOL_CALLS_START: &str = "<｜｜DSML｜｜tool_calls>";
 const DSML_TOOL_CALLS_END: &str = "</｜｜DSML｜｜tool_calls>";
+const DEFAULT_AGENT_TIMEOUT_SECS: u64 = 20 * 60;
 
 /// A request to the AI backend.
 #[derive(Debug, Clone)]
@@ -139,19 +141,39 @@ impl AiBackend for AgentCliBackend {
             &req.prompt,
         );
         let mut cmd = Command::new(&argv[0]);
-        cmd.args(&argv[1..]).stdin(Stdio::null());
+        cmd.args(&argv[1..])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         if let Some(ws) = &self.workspace {
             cmd.current_dir(ws);
         }
-        let output = cmd.output().await?;
-        if !output.status.success() {
+        let mut child = cmd.spawn()?;
+        let stdout = child.stdout.take().expect("stdout piped");
+        let stderr = child.stderr.take().expect("stderr piped");
+        let stdout_task = tokio::spawn(read_pipe(stdout));
+        let stderr_task = tokio::spawn(read_pipe(stderr));
+
+        let status = match tokio::time::timeout(agent_timeout(), child.wait()).await {
+            Ok(status) => status?,
+            Err(_) => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                stdout_task.abort();
+                stderr_task.abort();
+                return Err(agent_timeout_error(""));
+            }
+        };
+        let stdout_buf = stdout_task.await.unwrap_or_default();
+        let stderr_buf = stderr_task.await.unwrap_or_default();
+        if !status.success() {
             return Err(GatewayError::AgentFailed {
-                code: output.status.code(),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                code: status.code(),
+                stderr: stderr_buf.trim().to_string(),
             });
         }
         Ok(AgentResponse {
-            text: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+            text: stdout_buf.trim().to_string(),
             session_id: None,
         })
     }
@@ -187,20 +209,28 @@ impl AiBackend for AgentCliBackend {
         // Drain stderr concurrently so a large stderr can't deadlock us while
         // we read stdout line-by-line.
         let stderr = child.stderr.take().expect("stderr piped");
-        let stderr_task = tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
-            let mut buf = String::new();
-            let mut rdr = stderr;
-            let _ = rdr.read_to_string(&mut buf).await;
-            buf
-        });
+        let stderr_task = tokio::spawn(read_pipe(stderr));
 
         let stdout = child.stdout.take().expect("stdout piped");
         let mut lines = BufReader::new(stdout).lines();
         let mut full = String::new();
         let mut session_id: Option<String> = None;
         let mut text_filter = DsmlToolCallFilter::default();
-        while let Some(line) = lines.next_line().await? {
+        let deadline = tokio::time::sleep(agent_timeout());
+        tokio::pin!(deadline);
+        loop {
+            let line = tokio::select! {
+                line = lines.next_line() => line?,
+                _ = &mut deadline => {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    stderr_task.abort();
+                    return Err(agent_timeout_error(""));
+                }
+            };
+            let Some(line) = line else {
+                break;
+            };
             if let Some(id) = parse_session_id(&line) {
                 session_id = Some(id);
             }
@@ -242,6 +272,35 @@ impl AiBackend for AgentCliBackend {
             text: full.trim().to_string(),
             session_id,
         })
+    }
+}
+
+async fn read_pipe(mut pipe: impl tokio::io::AsyncRead + Unpin) -> String {
+    let mut buf = String::new();
+    let _ = pipe.read_to_string(&mut buf).await;
+    buf
+}
+
+fn agent_timeout() -> Duration {
+    std::env::var("WUKONG_AGENT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(DEFAULT_AGENT_TIMEOUT_SECS))
+}
+
+fn agent_timeout_error(stderr: &str) -> GatewayError {
+    let mut message =
+        "處理逾時，可能是模型 rate limit 或 opencode 無回應；已中斷 agent process。".to_string();
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        message.push_str(" stderr: ");
+        message.push_str(stderr);
+    }
+    GatewayError::AgentFailed {
+        code: None,
+        stderr: message,
     }
 }
 
@@ -443,6 +502,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_cli_backend_times_out_and_reports_stuck_agent() {
+        std::env::set_var("WUKONG_AGENT_TIMEOUT_SECS", "1");
+        let backend = AgentCliBackend {
+            command: vec!["sh".to_string(), "-c".to_string(), "sleep 30".to_string()],
+            workspace: None,
+        };
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            backend.run(AgentRequest {
+                prompt: "ignored".to_string(),
+                session_id: None,
+                thinking: false,
+                model: None,
+            }),
+        )
+        .await;
+        std::env::remove_var("WUKONG_AGENT_TIMEOUT_SECS");
+
+        let err = result
+            .expect("backend should return before the outer test timeout")
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("處理逾時"));
+        assert!(msg.contains("rate limit"));
+        assert!(msg.contains("opencode 無回應"));
+    }
+
+    #[test]
+    fn agent_timeout_defaults_to_twenty_minutes() {
+        std::env::remove_var("WUKONG_AGENT_TIMEOUT_SECS");
+
+        assert_eq!(agent_timeout(), std::time::Duration::from_secs(20 * 60));
+    }
+
+    #[tokio::test]
     async fn run_streaming_default_emits_single_text() {
         // Test the DEFAULT run_streaming impl via a minimal mock backend.
         struct Plain;
@@ -540,5 +635,39 @@ mod tests {
 
         assert_eq!(resp.text, "before\nafter");
         assert_eq!(events, vec![StreamEvent::Text("before\nafter".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn agent_cli_run_streaming_times_out_and_reports_stuck_agent() {
+        std::env::set_var("WUKONG_AGENT_TIMEOUT_SECS", "1");
+        let backend = AgentCliBackend {
+            command: vec!["sh".to_string(), "-c".to_string(), "sleep 30".to_string()],
+            workspace: None,
+        };
+        let mut events = Vec::new();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            backend.run_streaming(
+                AgentRequest {
+                    prompt: "ignored".into(),
+                    session_id: None,
+                    thinking: false,
+                    model: None,
+                },
+                &mut |e| events.push(e),
+            ),
+        )
+        .await;
+        std::env::remove_var("WUKONG_AGENT_TIMEOUT_SECS");
+
+        let err = result
+            .expect("backend should return before the outer test timeout")
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("處理逾時"));
+        assert!(msg.contains("rate limit"));
+        assert!(msg.contains("opencode 無回應"));
+        assert!(events.is_empty());
     }
 }
