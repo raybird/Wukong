@@ -3,6 +3,7 @@ set -euo pipefail
 
 compose_file="docker-compose.yml"
 entrypoint="scripts/docker-entrypoint.sh"
+dockerfile="Dockerfile"
 
 require_in_file() {
     local pattern="$1"
@@ -36,6 +37,10 @@ require_in_file 'mkdir -p "$AGENT_REACH_STATE"' "$entrypoint" \
     "entrypoint must create Agent Reach state directory before gosu"
 require_in_file 'chown -R wukong:wukong "$AGENT_REACH_STATE"' "$entrypoint" \
     "entrypoint must chown Docker-created Agent Reach state volume"
+require_in_file "COPY crates/wukong-skills/assets/superpowers /usr/local/share/wukong/skills/superpowers" "$dockerfile" \
+    "Docker image must package Superpowers skill assets"
+require_in_file "/usr/local/share/wukong/skills/superpowers" "$dockerfile" \
+    "Dockerfile must use the canonical image skill asset path"
 
 if awk '
     /^  wukong-schedulerd:/ { in_scheduler = 1; next }
