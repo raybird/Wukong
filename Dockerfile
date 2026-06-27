@@ -59,6 +59,9 @@ RUN mkdir -p "$PIPX_HOME" "$PIPX_BIN_DIR" && \
 RUN mkdir -p /usr/local/share/wukong
 COPY workspace/SOUL.md workspace/AGENTS.md /usr/local/share/wukong/
 
+# Copy runtime-readable Superpowers skill assets from the canonical source tree.
+COPY crates/wukong-skills/assets/superpowers /usr/local/share/wukong/skills/superpowers
+
 # Prepare directories and entrypoint
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
