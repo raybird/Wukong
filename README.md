@@ -149,6 +149,26 @@ curl -fsSL ... | bash -s -- --mode binary --flavor gnu   # glibc (動態)
 curl -fsSL ... | bash -s -- --mode binary --flavor musl  # musl  (靜態，預設，跨 distro)
 ```
 
+### 安裝 prerelease / RC 版本
+
+預設 installer 會查詢 GitHub Releases 的 latest stable 版本；不指定 `--version` 時，不會自動安裝 prerelease 或 RC 版本。若你要協助測試尚未正式發布的版本，請明確指定 tag。
+
+```bash
+# Docker prerelease 安裝
+curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh \
+  | bash -s -- --mode docker --version v0.16.15-rc.1
+
+# 既有 Docker 部署升級到 prerelease
+curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh \
+  | bash -s -- --mode docker --upgrade --version v0.16.15-rc.1
+
+# Binary prerelease 安裝
+curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh \
+  | bash -s -- --mode binary --version v0.16.15-rc.1
+```
+
+Prerelease 適合驗證新功能或修補，例如 runtime skill assets、Docker entrypoint、binary 安裝行為等。正式部署仍建議使用 latest stable。指定 prerelease tag 時，該 GitHub Release 必須已包含完整 assets：各平台 binary tarball、對應 `checksums-<target>.txt`，以及 Docker mode 所需的 `wukong-docker-<version>.tar.gz`。
+
 ### Docker 容器化執行
 
 提供完整的 Docker / Docker Compose 配置，隔離 host 環境，同時滿足 opencode 工作空間掛載與設定隔離需求。
