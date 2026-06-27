@@ -2,4 +2,4 @@
 
 pub mod catalog;
 
-pub use catalog::{all, find, route_options, SkillId, SkillSpec};
+pub use catalog::{all, find, route_options, source_content, SkillId, SkillSpec};

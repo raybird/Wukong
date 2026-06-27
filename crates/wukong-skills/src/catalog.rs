@@ -128,6 +128,10 @@ pub fn find(name: &str) -> Option<&'static SkillSpec> {
     all().iter().find(|spec| spec.id == id)
 }
 
+pub fn source_content() -> &'static str {
+    include_str!("../assets/superpowers/SOURCE.md")
+}
+
 pub fn route_options() -> Vec<SkillRouteOption> {
     all()
         .iter()
@@ -184,6 +188,13 @@ mod tests {
             );
             assert!(skill.content.contains("#") || skill.content.contains("Skill"));
         }
+    }
+
+    #[test]
+    fn source_content_is_embedded() {
+        let source = source_content();
+        assert!(source.contains("Source Attribution"));
+        assert!(source.contains("superpowers"));
     }
 
     #[test]
