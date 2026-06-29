@@ -93,7 +93,7 @@ wukong-orchestrator → wukong-gateway → wukong-memory
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **Wukong** (3194 symbols, 6673 relationships, 273 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **Wukong** (3396 symbols, 7129 relationships, 290 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
