@@ -761,7 +761,10 @@ mod tests {
             .await
             .unwrap();
 
-        let events = store.live_events_after("user:tg-12", first, 10).await.unwrap();
+        let events = store
+            .live_events_after("user:tg-12", first, 10)
+            .await
+            .unwrap();
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].id, second);

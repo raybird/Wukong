@@ -195,8 +195,15 @@ pub async fn handle_message<C, B>(
             );
             let user_message_id =
                 record_chat(history, &cfg.scope, "user", &msg.text, None, "complete").await;
-            record_live_event(history, &cfg.scope, "user", None, &msg.text, user_message_id)
-                .await;
+            record_live_event(
+                history,
+                &cfg.scope,
+                "user",
+                None,
+                &msg.text,
+                user_message_id,
+            )
+            .await;
             match wukong_cli::parse_session_command(&name, &args) {
                 Some(cmd) => {
                     let reply = match wukong_cli::run_session_command(
@@ -211,15 +218,9 @@ pub async fn handle_message<C, B>(
                         Ok(t) => t,
                         Err(e) => format!("⚠️ 失敗：{e}"),
                     };
-                    let reply_message_id = record_chat(
-                        history,
-                        &cfg.scope,
-                        "assistant",
-                        &reply,
-                        None,
-                        "complete",
-                    )
-                    .await;
+                    let reply_message_id =
+                        record_chat(history, &cfg.scope, "assistant", &reply, None, "complete")
+                            .await;
                     let reply_html = wukong_render::to_web_html(&reply);
                     record_live_event(
                         history,
@@ -234,15 +235,9 @@ pub async fn handle_message<C, B>(
                 }
                 None => {
                     let reply = format!("指令 /{name} 尚未支援");
-                    let reply_message_id = record_chat(
-                        history,
-                        &cfg.scope,
-                        "assistant",
-                        &reply,
-                        None,
-                        "complete",
-                    )
-                    .await;
+                    let reply_message_id =
+                        record_chat(history, &cfg.scope, "assistant", &reply, None, "complete")
+                            .await;
                     let reply_html = wukong_render::to_web_html(&reply);
                     record_live_event(
                         history,
@@ -847,16 +842,12 @@ mod tests {
             .unwrap();
         assert!(events.iter().any(|e| e.kind == "user" && e.content == "hi"));
         assert!(events.iter().any(|e| e.kind == "role"));
-        assert!(
-            events
-                .iter()
-                .any(|e| e.kind == "tool" && e.label.as_deref() == Some("read"))
-        );
-        assert!(
-            events
-                .iter()
-                .any(|e| e.kind == "answer" && e.content == "<p>done</p>")
-        );
+        assert!(events
+            .iter()
+            .any(|e| e.kind == "tool" && e.label.as_deref() == Some("read")));
+        assert!(events
+            .iter()
+            .any(|e| e.kind == "answer" && e.content == "<p>done</p>"));
     }
 
     #[test]
