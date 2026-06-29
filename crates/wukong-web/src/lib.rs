@@ -150,6 +150,22 @@ impl SseMsg {
     }
 }
 
+fn live_event_to_sse(event: wukong_chat_history::ChatLiveEvent) -> Event {
+    let mut payload = serde_json::json!({
+        "id": event.id,
+        "scope": event.scope,
+        "kind": event.kind,
+        "content": event.content,
+        "message_id": event.message_id,
+        "created_at": event.created_at,
+    });
+    if let Some(label) = event.label {
+        payload["label"] = serde_json::Value::String(label);
+    }
+    let name = payload["kind"].as_str().unwrap_or("message").to_string();
+    Event::default().event(name).data(payload.to_string())
+}
+
 #[derive(serde::Deserialize)]
 struct ChatQuery {
     q: Option<String>,
@@ -164,6 +180,13 @@ struct ChatMessagesQuery {
     date: Option<String>,
     limit: Option<i64>,
     scope: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ChatStreamQuery {
+    token: Option<String>,
+    scope: Option<String>,
+    after: Option<i64>,
 }
 
 #[derive(serde::Serialize)]
@@ -657,6 +680,72 @@ where
     }
 }
 
+async fn stream_chat_events<B>(
+    State(state): State<AppState<B>>,
+    Query(params): Query<ChatStreamQuery>,
+) -> axum::response::Response
+where
+    B: AiBackend + Send + Sync + 'static,
+{
+    use axum::response::IntoResponse;
+
+    if !authorized(&state.token, params.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let scope = match params
+        .scope
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        Some(scope) => scope,
+        None => return (StatusCode::BAD_REQUEST, "missing scope").into_response(),
+    };
+    let db_url = state.db_url.clone();
+    let mut cursor = params.after.unwrap_or(0).max(0);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+
+    tokio::spawn(async move {
+        let store = match ChatHistoryStore::open(&db_url).await {
+            Ok(store) => store,
+            Err(e) => {
+                let _ = tx.send(Event::default().event("error").data(e.to_string()));
+                return;
+            }
+        };
+        let mut idle_ticks = 0;
+        loop {
+            match store.live_events_after(&scope, cursor, 50).await {
+                Ok(events) => {
+                    if events.is_empty() {
+                        idle_ticks += 1;
+                    } else {
+                        idle_ticks = 0;
+                    }
+                    for event in events {
+                        cursor = event.id;
+                        if tx.send(live_event_to_sse(event)).is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(Event::default().event("error").data(e.to_string()));
+                    return;
+                }
+            }
+
+            if idle_ticks >= 2 && cfg!(test) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    });
+
+    let stream = UnboundedReceiverStream::new(rx).map(Ok::<Event, Infallible>);
+    Sse::new(stream).into_response()
+}
+
 async fn get_settings<B>(
     State(state): State<AppState<B>>,
     Query(params): Query<SettingsQuery>,
@@ -1147,6 +1236,10 @@ where
         .route("/settings", axum::routing::get(index::<B>))
         .route("/chat", axum::routing::get(chat::<B>))
         .route("/api/chat/scopes", axum::routing::get(get_chat_scopes::<B>))
+        .route(
+            "/api/chat/stream",
+            axum::routing::get(stream_chat_events::<B>),
+        )
         .route(
             "/api/chat/messages",
             axum::routing::get(get_chat_messages::<B>),
@@ -2160,6 +2253,58 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn chat_stream_requires_token_when_set() {
+        let app = build_router(state(Some("sekret"), &[]).await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/chat/stream?scope=user%3Atg-12")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn chat_stream_replays_events_after_cursor_for_scope() {
+        let app_state = state(None, &[]).await;
+        let store = ChatHistoryStore::open(&app_state.db_url).await.unwrap();
+        let first = store
+            .insert_live_event("user:tg-12", "user", None, "old", Some(1), 100)
+            .await
+            .unwrap();
+        store
+            .insert_live_event("user:tg-99", "user", None, "wrong", Some(2), 101)
+            .await
+            .unwrap();
+        store
+            .insert_live_event("user:tg-12", "tool", Some("read"), "read", None, 102)
+            .await
+            .unwrap();
+
+        let app = build_router(app_state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/chat/stream?scope=user%3Atg-12&after={first}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains("event: tool"), "body: {body}");
+        assert!(body.contains("read"), "body: {body}");
+        assert!(!body.contains("old"), "body should respect cursor: {body}");
+        assert!(!body.contains("wrong"), "body should filter scope: {body}");
     }
 
     #[tokio::test]
