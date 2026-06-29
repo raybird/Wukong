@@ -47,20 +47,25 @@ async fn record_chat(
     content: &str,
     content_html: Option<&str>,
     status: &str,
-) {
+) -> Option<i64> {
     let Some(history) = history else {
-        return;
+        return None;
     };
     match history.default_thread(scope).await {
-        Ok(thread) => {
-            if let Err(e) = history
-                .insert_message(&thread, role, content, content_html, status, now_unix())
-                .await
-            {
+        Ok(thread) => match history
+            .insert_message(&thread, role, content, content_html, status, now_unix())
+            .await
+        {
+            Ok(id) => Some(id),
+            Err(e) => {
                 eprintln!("warning: telegram chat history insert failed: {e}");
+                None
             }
+        },
+        Err(e) => {
+            eprintln!("warning: telegram chat history thread failed: {e}");
+            None
         }
-        Err(e) => eprintln!("warning: telegram chat history thread failed: {e}"),
     }
 }
 
@@ -72,34 +77,86 @@ async fn record_chat_with_events(
     content_html: Option<&str>,
     status: &str,
     events: &[(i64, String, Option<String>, String, i64)],
+) -> Option<i64> {
+    let Some(history) = history else {
+        return None;
+    };
+    match history.default_thread(scope).await {
+        Ok(thread) => match history
+            .insert_message(&thread, role, content, content_html, status, now_unix())
+            .await
+        {
+            Ok(message_id) => {
+                for (seq, kind, label, content, created_at) in events {
+                    let _ = history
+                        .insert_event(
+                            message_id,
+                            *seq,
+                            kind,
+                            label.as_deref(),
+                            content,
+                            *created_at,
+                        )
+                        .await;
+                }
+                Some(message_id)
+            }
+            Err(e) => {
+                eprintln!("warning: telegram chat history insert failed: {e}");
+                None
+            }
+        },
+        Err(e) => {
+            eprintln!("warning: telegram chat history thread failed: {e}");
+            None
+        }
+    }
+}
+
+#[derive(Debug)]
+struct LiveEventWrite {
+    kind: String,
+    label: Option<String>,
+    content: String,
+    message_id: Option<i64>,
+    created_at: i64,
+}
+
+fn queue_live_event(
+    tx: &Option<tokio::sync::mpsc::UnboundedSender<LiveEventWrite>>,
+    kind: &str,
+    label: Option<&str>,
+    content: &str,
+    message_id: Option<i64>,
+) {
+    let Some(tx) = tx else {
+        return;
+    };
+    let _ = tx.send(LiveEventWrite {
+        kind: kind.to_string(),
+        label: label.map(str::to_string),
+        content: content.to_string(),
+        message_id,
+        created_at: now_unix(),
+    });
+}
+
+async fn record_live_event(
+    history: Option<&ChatHistoryStore>,
+    scope: &str,
+    kind: &str,
+    label: Option<&str>,
+    content: &str,
+    message_id: Option<i64>,
 ) {
     let Some(history) = history else {
         return;
     };
-    match history.default_thread(scope).await {
-        Ok(thread) => {
-            match history
-                .insert_message(&thread, role, content, content_html, status, now_unix())
-                .await
-            {
-                Ok(message_id) => {
-                    for (seq, kind, label, content, created_at) in events {
-                        let _ = history
-                            .insert_event(
-                                message_id,
-                                *seq,
-                                kind,
-                                label.as_deref(),
-                                content,
-                                *created_at,
-                            )
-                            .await;
-                    }
-                }
-                Err(e) => eprintln!("warning: telegram chat history insert failed: {e}"),
-            }
-        }
-        Err(e) => eprintln!("warning: telegram chat history thread failed: {e}"),
+    if let Err(e) = history
+        .insert_live_event(scope, kind, label, content, message_id, now_unix())
+        .await
+    {
+        eprintln!("warning: telegram live event insert failed: {e}");
     }
 }
 
@@ -136,7 +193,10 @@ pub async fn handle_message<C, B>(
                 planner_preferences.roles,
                 planner_preferences.skills,
             );
-            record_chat(history, &cfg.scope, "user", &msg.text, None, "complete").await;
+            let user_message_id =
+                record_chat(history, &cfg.scope, "user", &msg.text, None, "complete").await;
+            record_live_event(history, &cfg.scope, "user", None, &msg.text, user_message_id)
+                .await;
             match wukong_cli::parse_session_command(&name, &args) {
                 Some(cmd) => {
                     let reply = match wukong_cli::run_session_command(
@@ -151,12 +211,48 @@ pub async fn handle_message<C, B>(
                         Ok(t) => t,
                         Err(e) => format!("⚠️ 失敗：{e}"),
                     };
-                    record_chat(history, &cfg.scope, "assistant", &reply, None, "complete").await;
+                    let reply_message_id = record_chat(
+                        history,
+                        &cfg.scope,
+                        "assistant",
+                        &reply,
+                        None,
+                        "complete",
+                    )
+                    .await;
+                    let reply_html = wukong_render::to_web_html(&reply);
+                    record_live_event(
+                        history,
+                        &cfg.scope,
+                        "answer",
+                        None,
+                        &reply_html,
+                        reply_message_id,
+                    )
+                    .await;
                     let _ = client.send_message(chat_id, &reply).await;
                 }
                 None => {
                     let reply = format!("指令 /{name} 尚未支援");
-                    record_chat(history, &cfg.scope, "assistant", &reply, None, "complete").await;
+                    let reply_message_id = record_chat(
+                        history,
+                        &cfg.scope,
+                        "assistant",
+                        &reply,
+                        None,
+                        "complete",
+                    )
+                    .await;
+                    let reply_html = wukong_render::to_web_html(&reply);
+                    record_live_event(
+                        history,
+                        &cfg.scope,
+                        "answer",
+                        None,
+                        &reply_html,
+                        reply_message_id,
+                    )
+                    .await;
                     let _ = client.send_message(chat_id, &reply).await;
                 }
             }
@@ -174,7 +270,31 @@ pub async fn handle_message<C, B>(
                 planner_preferences.roles,
                 planner_preferences.skills,
             );
-            record_chat(history, &cfg.scope, "user", &input, None, "complete").await;
+            let (live_tx, live_writer) = if let Some(history) = history {
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LiveEventWrite>();
+                let history = history.clone();
+                let scope = cfg.scope.clone();
+                let writer = tokio::spawn(async move {
+                    while let Some(event) = rx.recv().await {
+                        let _ = history
+                            .insert_live_event(
+                                &scope,
+                                &event.kind,
+                                event.label.as_deref(),
+                                &event.content,
+                                event.message_id,
+                                event.created_at,
+                            )
+                            .await;
+                    }
+                });
+                (Some(tx), Some(writer))
+            } else {
+                (None, None)
+            };
+            let user_message_id =
+                record_chat(history, &cfg.scope, "user", &input, None, "complete").await;
+            queue_live_event(&live_tx, "user", None, &input, user_message_id);
 
             // Single status bubble, edited in place as the turn progresses.
             let mid = match client.send_message(chat_id, "🐵 收到，思考中…").await {
@@ -270,6 +390,13 @@ pub async fn handle_message<C, B>(
                             ));
                             event_seq += 1;
                             let _ = tx_ev.send(Progress::Reasoning(t));
+                            queue_live_event(
+                                &live_tx,
+                                "reasoning",
+                                None,
+                                events_buf.last().map(|e| e.3.as_str()).unwrap_or(""),
+                                None,
+                            );
                         }
                     }
                     StreamEvent::ToolUse(name) => {
@@ -283,6 +410,13 @@ pub async fn handle_message<C, B>(
                         ));
                         event_seq += 1;
                         let _ = tx_ev.send(Progress::ToolUse(name));
+                        queue_live_event(
+                            &live_tx,
+                            "tool",
+                            events_buf.last().and_then(|e| e.2.as_deref()),
+                            events_buf.last().map(|e| e.3.as_str()).unwrap_or(""),
+                            None,
+                        );
                     }
                     StreamEvent::StepStart => {
                         let now = now_unix();
@@ -309,6 +443,8 @@ pub async fn handle_message<C, B>(
                     StreamEvent::Text(_) => {}
                 },
                 &mut |r| {
+                    let role_name = r.name().to_string();
+                    queue_live_event(&live_tx, "role", None, &role_name, None);
                     let _ = tx.send(Progress::Role(r));
                 },
             )
@@ -321,7 +457,7 @@ pub async fn handle_message<C, B>(
             match result {
                 Ok(out) => {
                     let html = wukong_render::to_web_html(&out.text);
-                    record_chat_with_events(
+                    let assistant_message_id = record_chat_with_events(
                         history,
                         &cfg.scope,
                         "assistant",
@@ -331,6 +467,7 @@ pub async fn handle_message<C, B>(
                         &events_buf,
                     )
                     .await;
+                    queue_live_event(&live_tx, "answer", None, &html, assistant_message_id);
                     let chunks = wukong_render::to_telegram_html(&out.text);
                     let _ = client.delete_message(chat_id, mid).await;
                     if chunks.is_empty() {
@@ -343,7 +480,7 @@ pub async fn handle_message<C, B>(
                 }
                 Err(e) => {
                     let err = format!("⚠️ 處理失敗：{e}");
-                    record_chat_with_events(
+                    let assistant_message_id = record_chat_with_events(
                         history,
                         &cfg.scope,
                         "assistant",
@@ -353,8 +490,13 @@ pub async fn handle_message<C, B>(
                         &events_buf,
                     )
                     .await;
+                    queue_live_event(&live_tx, "error", None, &err, assistant_message_id);
                     let _ = client.edit_message_text(chat_id, mid, &err).await;
                 }
+            }
+            drop(live_tx);
+            if let Some(writer) = live_writer {
+                let _ = writer.await;
             }
         }
     }
@@ -672,6 +814,49 @@ mod tests {
         assert!(assistant.event_count > 0);
         let events = history.list_events(assistant.id).await.unwrap();
         assert!(events.iter().any(|event| event.kind == "reasoning"));
+    }
+
+    #[tokio::test]
+    async fn telegram_live_events_include_turn_progress_for_web_stream() {
+        let client = MockTgClient::default();
+        let (mem, db_url) = open_memory_with_url().await;
+        let history = wukong_chat_history::ChatHistoryStore::open(&db_url)
+            .await
+            .unwrap();
+        let backend = ToolBackend;
+        let msg = TgMessage {
+            update_id: 1,
+            chat_id: 12,
+            text: "hi".to_string(),
+        };
+
+        handle_message(
+            &client,
+            &mem,
+            &base_cfg(),
+            &backend,
+            Some(&history),
+            &[12],
+            &msg,
+        )
+        .await;
+
+        let events = history
+            .live_events_after(&scope_for_chat(12), 0, 20)
+            .await
+            .unwrap();
+        assert!(events.iter().any(|e| e.kind == "user" && e.content == "hi"));
+        assert!(events.iter().any(|e| e.kind == "role"));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.kind == "tool" && e.label.as_deref() == Some("read"))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.kind == "answer" && e.content == "<p>done</p>")
+        );
     }
 
     #[test]
