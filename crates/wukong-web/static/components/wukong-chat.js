@@ -6,6 +6,11 @@ export class WukongChat extends HTMLElement {
   connectedCallback() {
     this.scopes = [];
     this.selectedScope = '';
+    this.liveStream = null;
+    this.liveCursor = 0;
+    this.renderedMessageIds = new Set();
+    this.liveProgress = null;
+    this.liveThinking = null;
     this.innerHTML = html`
       <div class="chat-toolbar">
         <label class="chat-source">來源 <select id="chat-scope"></select></label>
@@ -51,9 +56,11 @@ export class WukongChat extends HTMLElement {
     this.hasMore = false;
     this.oldestId = null;
     this.scopeSelect.addEventListener('change', () => {
+      this.closeLiveStream();
       this.selectedScope = this.scopeSelect.value;
+      this.liveCursor = 0;
       this.resetMessages();
-      this.loadLatest();
+      this.loadLatest().then(() => this.startLiveStream());
     });
     this.querySelector('#form').addEventListener('submit', (e) => {
       e.preventDefault();
@@ -64,6 +71,10 @@ export class WukongChat extends HTMLElement {
       if (this.log.scrollTop < 80) this.loadOlder();
     });
     this.initialize();
+  }
+
+  disconnectedCallback() {
+    this.closeLiveStream();
   }
 
   tokenParam(prefix = '?') {
@@ -89,6 +100,36 @@ export class WukongChat extends HTMLElement {
     await Promise.all([this.loadModelStatus(), this.loadSkillStatus()]);
     await this.loadScopes();
     await this.loadLatest();
+    this.startLiveStream();
+  }
+
+  isTelegramScope() {
+    return this.selectedScope && this.selectedScope.startsWith('user:tg-');
+  }
+
+  closeLiveStream() {
+    if (this.liveStream) {
+      this.liveStream.close();
+      this.liveStream = null;
+    }
+    this.liveProgress = null;
+    this.liveThinking = null;
+  }
+
+  startLiveStream() {
+    this.closeLiveStream();
+    if (!this.isTelegramScope()) return;
+    const stream = new EventSource(this.chatUrl('/api/chat/stream', { after: this.liveCursor }));
+    this.liveStream = stream;
+    stream.addEventListener('user', (ev) => this.handleLiveEvent(ev));
+    stream.addEventListener('role', (ev) => this.handleLiveEvent(ev));
+    stream.addEventListener('reasoning', (ev) => this.handleLiveEvent(ev));
+    stream.addEventListener('tool', (ev) => this.handleLiveEvent(ev));
+    stream.addEventListener('step', (ev) => this.handleLiveEvent(ev));
+    stream.addEventListener('answer', (ev) => this.handleLiveEvent(ev));
+    stream.addEventListener('error', (ev) => {
+      if (ev.data) this.handleLiveEvent(ev);
+    });
   }
 
   async loadModelStatus() {
@@ -125,6 +166,9 @@ export class WukongChat extends HTMLElement {
   resetMessages() {
     this.hasMore = false;
     this.oldestId = null;
+    this.renderedMessageIds.clear();
+    this.liveProgress = null;
+    this.liveThinking = null;
     this.log.innerHTML = '';
   }
 
@@ -134,8 +178,9 @@ export class WukongChat extends HTMLElement {
       if (!resp.ok) return;
       this.scopes = await resp.json();
       if (!this.selectedScope && this.scopes.length > 0) {
+        const telegram = this.scopes.find((s) => s.scope.startsWith('user:tg-'));
         const global = this.scopes.find((s) => s.scope === 'global');
-        this.selectedScope = (global || this.scopes[0]).scope;
+        this.selectedScope = (telegram || global || this.scopes[0]).scope;
       }
       this.scopeSelect.innerHTML = this.scopes
         .map((s) => `<option value="${escapeHTML(s.scope)}">${escapeHTML(s.label)}</option>`)
@@ -266,7 +311,20 @@ export class WukongChat extends HTMLElement {
     return details;
   }
 
+  isNearBottom() {
+    return this.log.scrollHeight - this.log.scrollTop - this.log.clientHeight < 120;
+  }
+
+  scrollToBottom() {
+    this.log.scrollTop = this.log.scrollHeight;
+  }
+
+  maybeScrollToBottom(wasNearBottom) {
+    if (wasNearBottom) this.scrollToBottom();
+  }
+
   renderMessages(messages, mode) {
+    if (mode !== 'prepend') this.renderedMessageIds.clear();
     const nodes = [];
     let lastDate = null;
     for (const message of messages) {
@@ -281,6 +339,7 @@ export class WukongChat extends HTMLElement {
         lastDate = date;
       }
       const bubbleNode = this.messageNode(message);
+      this.renderedMessageIds.add(String(message.id));
       if (message.role === 'assistant') {
         // Event and steps cards sit above the answer, matching live-turn ordering.
         if (message.event_count > 0) nodes.push(this.lazyEventsNode(message));
@@ -296,7 +355,7 @@ export class WukongChat extends HTMLElement {
     } else {
       this.log.innerHTML = '';
       for (const node of nodes) this.log.appendChild(node);
-      this.log.scrollTop = this.log.scrollHeight;
+      this.scrollToBottom();
     }
     this.oldestId = this.log.querySelector('[data-message-id]')?.dataset.messageId || null;
   }
@@ -390,6 +449,100 @@ export class WukongChat extends HTMLElement {
     this.log.appendChild(div);
     this.log.scrollTop = this.log.scrollHeight;
     return div;
+  }
+
+  appendBubble(cls, innerHTML) {
+    const div = document.createElement('div');
+    div.className = 'bubble ' + cls;
+    div.innerHTML = innerHTML;
+    this.log.appendChild(div);
+    return div;
+  }
+
+  parseLiveEvent(ev) {
+    try {
+      const data = JSON.parse(ev.data);
+      if (data.id) this.liveCursor = Math.max(this.liveCursor, Number(data.id));
+      return data;
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  ensureLiveProgress() {
+    if (!this.liveProgress) {
+      this.liveProgress = this.appendBubble('status', '🐵 收到，思考中…');
+    }
+    return this.liveProgress;
+  }
+
+  ensureLiveThinking() {
+    if (!this.liveThinking) {
+      this.liveThinking = document.createElement('details');
+      this.liveThinking.className = 'thinking';
+      this.liveThinking.innerHTML = '<summary>💭 思考過程</summary><pre class="reasoning"></pre>';
+      this.log.appendChild(this.liveThinking);
+    }
+    return this.liveThinking;
+  }
+
+  handleLiveEvent(ev) {
+    const data = this.parseLiveEvent(ev);
+    if (!data || data.scope !== this.selectedScope) return;
+    const isDuplicate = data.message_id && this.renderedMessageIds.has(String(data.message_id));
+    if (isDuplicate && !['answer', 'error'].includes(data.kind)) return;
+    const wasNearBottom = this.isNearBottom();
+
+    if (data.kind === 'user') {
+      const node = this.appendBubble('user', html`${data.content || ''}`.toString());
+      if (data.message_id) {
+        node.dataset.messageId = data.message_id;
+        this.renderedMessageIds.add(String(data.message_id));
+      }
+    } else if (data.kind === 'role') {
+      this.ensureLiveProgress().innerHTML = '🐵 悟空·' + escapeHTML(data.content || '') + ' 思考中…';
+    } else if (data.kind === 'reasoning') {
+      const thinking = this.ensureLiveThinking();
+      thinking.querySelector('.reasoning').textContent += data.content || '';
+    } else if (data.kind === 'tool') {
+      const progress = this.ensureLiveProgress();
+      progress.innerHTML = '🐵 使用工具 ' + escapeHTML(data.label || data.content || 'tool') + '…';
+      const thinking = this.ensureLiveThinking();
+      thinking.querySelector('.reasoning').textContent += '\n▸ 使用工具 ' + (data.label || data.content || 'tool') + '\n';
+    } else if (data.kind === 'step') {
+      const details = document.createElement('details');
+      details.className = 'baton';
+      details.innerHTML =
+        '<summary>🔍 悟空·' + escapeHTML(data.label || 'step') + ' 的產出</summary>' +
+        '<div class="baton-body">' + (data.content || '') + '</div>';
+      this.log.appendChild(details);
+      this.enhanceCodeBlocks(details);
+    } else if (data.kind === 'answer') {
+      if (this.liveProgress) this.liveProgress.remove();
+      this.liveProgress = null;
+      if (!isDuplicate) {
+        const div = this.appendBubble('assistant', unsafe(data.content_html || data.content || '').toString());
+        if (data.message_id) {
+          div.dataset.messageId = data.message_id;
+          this.renderedMessageIds.add(String(data.message_id));
+        }
+        this.enhanceCodeBlocks(div);
+      }
+      this.liveThinking = null;
+    } else if (data.kind === 'error') {
+      if (this.liveProgress) this.liveProgress.remove();
+      this.liveProgress = null;
+      if (!isDuplicate) {
+        const div = this.appendBubble('assistant', '⚠️ ' + escapeHTML(data.content || '處理失敗'));
+        if (data.message_id) {
+          div.dataset.messageId = data.message_id;
+          this.renderedMessageIds.add(String(data.message_id));
+        }
+      }
+      this.liveThinking = null;
+    }
+
+    this.maybeScrollToBottom(wasNearBottom);
   }
 
   send() {
