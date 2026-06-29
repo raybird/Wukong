@@ -374,6 +374,8 @@ fn suffix_prefix_len(text: &str, prefix: &str) -> usize {
 mod tests {
     use super::*;
 
+    static AGENT_TIMEOUT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[test]
     fn assemble_argv_plain() {
         let argv = assemble_argv(
@@ -503,6 +505,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_cli_backend_times_out_and_reports_stuck_agent() {
+        let _guard = AGENT_TIMEOUT_ENV_LOCK.lock().await;
         std::env::set_var("WUKONG_AGENT_TIMEOUT_SECS", "1");
         let backend = AgentCliBackend {
             command: vec!["sh".to_string(), "-c".to_string(), "sleep 30".to_string()],
@@ -530,8 +533,9 @@ mod tests {
         assert!(msg.contains("opencode 無回應"));
     }
 
-    #[test]
-    fn agent_timeout_defaults_to_twenty_minutes() {
+    #[tokio::test]
+    async fn agent_timeout_defaults_to_twenty_minutes() {
+        let _guard = AGENT_TIMEOUT_ENV_LOCK.lock().await;
         std::env::remove_var("WUKONG_AGENT_TIMEOUT_SECS");
 
         assert_eq!(agent_timeout(), std::time::Duration::from_secs(20 * 60));
@@ -639,6 +643,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_cli_run_streaming_times_out_and_reports_stuck_agent() {
+        let _guard = AGENT_TIMEOUT_ENV_LOCK.lock().await;
         std::env::set_var("WUKONG_AGENT_TIMEOUT_SECS", "1");
         let backend = AgentCliBackend {
             command: vec!["sh".to_string(), "-c".to_string(), "sleep 30".to_string()],
