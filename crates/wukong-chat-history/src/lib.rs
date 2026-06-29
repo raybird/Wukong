@@ -52,6 +52,18 @@ pub struct TurnEvent {
     pub created_at: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChatLiveEvent {
+    pub id: i64,
+    pub scope: String,
+    pub kind: String,
+    pub label: Option<String>,
+    pub content: String,
+    pub message_id: Option<i64>,
+    pub created_at: i64,
+}
+
+#[derive(Clone)]
 pub struct ChatHistoryStore {
     pool: SqlitePool,
 }
@@ -133,6 +145,25 @@ impl ChatHistoryStore {
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS turn_events_message_id_idx
              ON turn_events(message_id)",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS chat_live_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                label TEXT,
+                content TEXT NOT NULL,
+                message_id INTEGER,
+                created_at INTEGER NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS chat_live_events_scope_id_idx
+             ON chat_live_events(scope, id)",
         )
         .execute(&pool)
         .await?;
@@ -262,6 +293,60 @@ impl ChatHistoryStore {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(row_to_event).collect())
+    }
+
+    pub async fn insert_live_event(
+        &self,
+        scope: &str,
+        kind: &str,
+        label: Option<&str>,
+        content: &str,
+        message_id: Option<i64>,
+        created_at: i64,
+    ) -> Result<i64, sqlx::Error> {
+        let row = sqlx::query(
+            "INSERT INTO chat_live_events (scope, kind, label, content, message_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             RETURNING id",
+        )
+        .bind(scope)
+        .bind(kind)
+        .bind(label)
+        .bind(content)
+        .bind(message_id)
+        .bind(created_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get("id"))
+    }
+
+    pub async fn live_events_after(
+        &self,
+        scope: &str,
+        after: i64,
+        limit: i64,
+    ) -> Result<Vec<ChatLiveEvent>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id, scope, kind, label, content, message_id, created_at
+             FROM chat_live_events
+             WHERE scope = ?1 AND id > ?2
+             ORDER BY id ASC
+             LIMIT ?3",
+        )
+        .bind(scope)
+        .bind(after)
+        .bind(limit.clamp(1, 100))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(row_to_live_event).collect())
+    }
+
+    pub async fn prune_live_events_before(&self, created_before: i64) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM chat_live_events WHERE created_at < ?1")
+            .bind(created_before)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
     }
 
     pub async fn latest_messages(
@@ -423,6 +508,18 @@ fn row_to_event(row: sqlx::sqlite::SqliteRow) -> TurnEvent {
         kind: row.get("kind"),
         label: row.get("label"),
         content: row.get("content"),
+        created_at: row.get("created_at"),
+    }
+}
+
+fn row_to_live_event(row: sqlx::sqlite::SqliteRow) -> ChatLiveEvent {
+    ChatLiveEvent {
+        id: row.get("id"),
+        scope: row.get("scope"),
+        kind: row.get("kind"),
+        label: row.get("label"),
+        content: row.get("content"),
+        message_id: row.get("message_id"),
         created_at: row.get("created_at"),
     }
 }
@@ -646,6 +743,53 @@ mod tests {
         assert!(scopes
             .iter()
             .any(|s| s.scope == "global" && s.label == "Global" && s.message_count == 0));
+    }
+
+    #[tokio::test]
+    async fn live_events_round_trip_by_scope_after_cursor() {
+        let store = store().await;
+        let first = store
+            .insert_live_event("user:tg-12", "user", None, "hello", Some(10), 100)
+            .await
+            .unwrap();
+        let second = store
+            .insert_live_event("user:tg-12", "reasoning", None, "想一下", None, 101)
+            .await
+            .unwrap();
+        store
+            .insert_live_event("user:tg-99", "user", None, "other", Some(99), 102)
+            .await
+            .unwrap();
+
+        let events = store.live_events_after("user:tg-12", first, 10).await.unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, second);
+        assert_eq!(events[0].scope, "user:tg-12");
+        assert_eq!(events[0].kind, "reasoning");
+        assert_eq!(events[0].content, "想一下");
+        assert_eq!(events[0].message_id, None);
+    }
+
+    #[tokio::test]
+    async fn live_events_prune_by_created_at() {
+        let store = store().await;
+        store
+            .insert_live_event("user:tg-12", "user", None, "old", None, 100)
+            .await
+            .unwrap();
+        let kept = store
+            .insert_live_event("user:tg-12", "answer", None, "new", Some(2), 200)
+            .await
+            .unwrap();
+
+        let deleted = store.prune_live_events_before(150).await.unwrap();
+        let events = store.live_events_after("user:tg-12", 0, 10).await.unwrap();
+
+        assert_eq!(deleted, 1);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, kept);
+        assert_eq!(events[0].message_id, Some(2));
     }
 
     #[test]
