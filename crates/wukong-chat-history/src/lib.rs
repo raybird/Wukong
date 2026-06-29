@@ -14,6 +14,9 @@ pub struct ChatMessage {
     /// Lets the UI show a "reasoning" collapsible only when there's something in it.
     #[serde(default)]
     pub step_count: i64,
+    /// Number of stream events linked to this message (reasoning/tool/status).
+    #[serde(default)]
+    pub event_count: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -35,6 +38,17 @@ pub struct TurnStep {
     pub role: String,
     pub content: String,
     pub content_html: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TurnEvent {
+    pub id: i64,
+    pub message_id: i64,
+    pub seq: i64,
+    pub kind: String,
+    pub label: Option<String>,
+    pub content: String,
     pub created_at: i64,
 }
 
@@ -99,6 +113,26 @@ impl ChatHistoryStore {
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS turn_steps_message_id_idx
              ON turn_steps(message_id)",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS turn_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id INTEGER NOT NULL,
+                seq INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                label TEXT,
+                content TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY(message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
+            )",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS turn_events_message_id_idx
+             ON turn_events(message_id)",
         )
         .execute(&pool)
         .await?;
@@ -192,6 +226,44 @@ impl ChatHistoryStore {
         Ok(rows.into_iter().map(row_to_step).collect())
     }
 
+    pub async fn insert_event(
+        &self,
+        message_id: i64,
+        seq: i64,
+        kind: &str,
+        label: Option<&str>,
+        content: &str,
+        created_at: i64,
+    ) -> Result<i64, sqlx::Error> {
+        let row = sqlx::query(
+            "INSERT INTO turn_events (message_id, seq, kind, label, content, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             RETURNING id",
+        )
+        .bind(message_id)
+        .bind(seq)
+        .bind(kind)
+        .bind(label)
+        .bind(content)
+        .bind(created_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get("id"))
+    }
+
+    pub async fn list_events(&self, message_id: i64) -> Result<Vec<TurnEvent>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id, message_id, seq, kind, label, content, created_at
+             FROM turn_events
+             WHERE message_id = ?1
+             ORDER BY seq ASC, id ASC",
+        )
+        .bind(message_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(row_to_event).collect())
+    }
+
     pub async fn latest_messages(
         &self,
         thread_id: &str,
@@ -200,7 +272,8 @@ impl ChatHistoryStore {
         let rows = sqlx::query(
             "SELECT * FROM (
                  SELECT id, thread_id, role, content, content_html, status, created_at,
-                        (SELECT COUNT(*) FROM turn_steps ts WHERE ts.message_id = chat_messages.id) AS step_count
+                         (SELECT COUNT(*) FROM turn_steps ts WHERE ts.message_id = chat_messages.id) AS step_count,
+                         (SELECT COUNT(*) FROM turn_events te WHERE te.message_id = chat_messages.id) AS event_count
                  FROM chat_messages
                  WHERE thread_id = ?1
                  ORDER BY id DESC
@@ -223,7 +296,8 @@ impl ChatHistoryStore {
         let rows = sqlx::query(
             "SELECT * FROM (
                  SELECT id, thread_id, role, content, content_html, status, created_at,
-                        (SELECT COUNT(*) FROM turn_steps ts WHERE ts.message_id = chat_messages.id) AS step_count
+                         (SELECT COUNT(*) FROM turn_steps ts WHERE ts.message_id = chat_messages.id) AS step_count,
+                         (SELECT COUNT(*) FROM turn_events te WHERE te.message_id = chat_messages.id) AS event_count
                  FROM chat_messages
                  WHERE thread_id = ?1 AND id < ?2
                  ORDER BY id DESC
@@ -247,7 +321,8 @@ impl ChatHistoryStore {
     ) -> Result<Vec<ChatMessage>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT id, thread_id, role, content, content_html, status, created_at,
-                    (SELECT COUNT(*) FROM turn_steps ts WHERE ts.message_id = chat_messages.id) AS step_count
+                    (SELECT COUNT(*) FROM turn_steps ts WHERE ts.message_id = chat_messages.id) AS step_count,
+                    (SELECT COUNT(*) FROM turn_events te WHERE te.message_id = chat_messages.id) AS event_count
              FROM chat_messages
              WHERE thread_id = ?1 AND created_at >= ?2 AND created_at < ?3
              ORDER BY created_at ASC, id ASC
@@ -324,6 +399,7 @@ fn row_to_message(row: sqlx::sqlite::SqliteRow) -> ChatMessage {
         created_at: row.get("created_at"),
         // Tolerant: SELECTs that don't compute the count still map cleanly to 0.
         step_count: row.try_get("step_count").unwrap_or(0),
+        event_count: row.try_get("event_count").unwrap_or(0),
     }
 }
 
@@ -335,6 +411,18 @@ fn row_to_step(row: sqlx::sqlite::SqliteRow) -> TurnStep {
         role: row.get("role"),
         content: row.get("content"),
         content_html: row.get("content_html"),
+        created_at: row.get("created_at"),
+    }
+}
+
+fn row_to_event(row: sqlx::sqlite::SqliteRow) -> TurnEvent {
+    TurnEvent {
+        id: row.get("id"),
+        message_id: row.get("message_id"),
+        seq: row.get("seq"),
+        kind: row.get("kind"),
+        label: row.get("label"),
+        content: row.get("content"),
         created_at: row.get("created_at"),
     }
 }
@@ -407,6 +495,60 @@ mod tests {
             .await
             .unwrap();
         assert!(store.list_steps(other).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn turn_events_round_trip_in_stream_order() {
+        let store = store().await;
+        let thread = store.default_thread("global").await.unwrap();
+        let mid = store
+            .insert_message(
+                &thread,
+                "assistant",
+                "final",
+                Some("<p>final</p>"),
+                "complete",
+                100,
+            )
+            .await
+            .unwrap();
+
+        store
+            .insert_event(mid, 1, "tool_use", Some("read"), "使用工具 read", 101)
+            .await
+            .unwrap();
+        store
+            .insert_event(mid, 0, "reasoning", None, "先想一下", 100)
+            .await
+            .unwrap();
+
+        let events = store.list_events(mid).await.unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].seq, 0);
+        assert_eq!(events[0].kind, "reasoning");
+        assert_eq!(events[0].label, None);
+        assert_eq!(events[0].content, "先想一下");
+        assert_eq!(events[1].seq, 1);
+        assert_eq!(events[1].kind, "tool_use");
+        assert_eq!(events[1].label.as_deref(), Some("read"));
+    }
+
+    #[tokio::test]
+    async fn latest_messages_include_event_count() {
+        let store = store().await;
+        let thread = store.default_thread("global").await.unwrap();
+        let mid = store
+            .insert_message(&thread, "assistant", "final", None, "complete", 100)
+            .await
+            .unwrap();
+        store
+            .insert_event(mid, 0, "reasoning", None, "想", 100)
+            .await
+            .unwrap();
+
+        let messages = store.latest_messages(&thread, 10).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].event_count, 1);
     }
 
     #[tokio::test]

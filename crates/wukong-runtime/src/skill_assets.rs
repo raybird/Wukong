@@ -30,7 +30,10 @@ pub fn materialize_runtime_skills(workspace: &Path) -> io::Result<PathBuf> {
     }
 
     let parent = root.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "skill asset root has no parent")
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "skill asset root has no parent",
+        )
     })?;
     let tmp = parent.join(format!(".superpowers.tmp.{}", std::process::id()));
     let old = parent.join(format!(".superpowers.old.{}", std::process::id()));

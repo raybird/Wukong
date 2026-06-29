@@ -15,6 +15,7 @@ use wukong_orchestrator::Role;
 enum Progress {
     Role(Role),
     Reasoning(String),
+    ToolUse(String),
 }
 
 /// Compose the status-bubble text from the current role and accumulated reasoning.
@@ -57,6 +58,45 @@ async fn record_chat(
                 .await
             {
                 eprintln!("warning: telegram chat history insert failed: {e}");
+            }
+        }
+        Err(e) => eprintln!("warning: telegram chat history thread failed: {e}"),
+    }
+}
+
+async fn record_chat_with_events(
+    history: Option<&ChatHistoryStore>,
+    scope: &str,
+    role: &str,
+    content: &str,
+    content_html: Option<&str>,
+    status: &str,
+    events: &[(i64, String, Option<String>, String, i64)],
+) {
+    let Some(history) = history else {
+        return;
+    };
+    match history.default_thread(scope).await {
+        Ok(thread) => {
+            match history
+                .insert_message(&thread, role, content, content_html, status, now_unix())
+                .await
+            {
+                Ok(message_id) => {
+                    for (seq, kind, label, content, created_at) in events {
+                        let _ = history
+                            .insert_event(
+                                message_id,
+                                *seq,
+                                kind,
+                                label.as_deref(),
+                                content,
+                                *created_at,
+                            )
+                            .await;
+                    }
+                }
+                Err(e) => eprintln!("warning: telegram chat history insert failed: {e}"),
             }
         }
         Err(e) => eprintln!("warning: telegram chat history thread failed: {e}"),
@@ -192,23 +232,81 @@ pub async fn handle_message<C, B>(
                                     last_reasoning_edit = Some(std::time::Instant::now());
                                 }
                             }
+                            Progress::ToolUse(name) => {
+                                reasoning.push_str("\n▸ 使用工具 ");
+                                reasoning.push_str(&name);
+                                reasoning.push('\n');
+                                let _ = c
+                                    .edit_message_text(
+                                        chat_id,
+                                        mid,
+                                        &bubble_text(role.as_deref(), &reasoning),
+                                    )
+                                    .await;
+                            }
                         }
                     }
                 })
             };
 
             let tx_ev = tx.clone();
+            let mut events_buf: Vec<(i64, String, Option<String>, String, i64)> = Vec::new();
+            let mut event_seq: i64 = 0;
             let result = run_turn(
                 mem,
                 backend,
                 &cfg,
                 &input,
-                &mut |ev| {
-                    if let StreamEvent::Reasoning(t) = ev {
+                &mut |ev| match ev {
+                    StreamEvent::Reasoning(t) => {
                         if !t.trim().is_empty() {
+                            let now = now_unix();
+                            events_buf.push((
+                                event_seq,
+                                "reasoning".to_string(),
+                                None,
+                                t.clone(),
+                                now,
+                            ));
+                            event_seq += 1;
                             let _ = tx_ev.send(Progress::Reasoning(t));
                         }
                     }
+                    StreamEvent::ToolUse(name) => {
+                        let now = now_unix();
+                        events_buf.push((
+                            event_seq,
+                            "tool_use".to_string(),
+                            Some(name.clone()),
+                            format!("使用工具 {name}"),
+                            now,
+                        ));
+                        event_seq += 1;
+                        let _ = tx_ev.send(Progress::ToolUse(name));
+                    }
+                    StreamEvent::StepStart => {
+                        let now = now_unix();
+                        events_buf.push((
+                            event_seq,
+                            "step_start".to_string(),
+                            None,
+                            "step_start".to_string(),
+                            now,
+                        ));
+                        event_seq += 1;
+                    }
+                    StreamEvent::StepFinish => {
+                        let now = now_unix();
+                        events_buf.push((
+                            event_seq,
+                            "step_finish".to_string(),
+                            None,
+                            "step_finish".to_string(),
+                            now,
+                        ));
+                        event_seq += 1;
+                    }
+                    StreamEvent::Text(_) => {}
                 },
                 &mut |r| {
                     let _ = tx.send(Progress::Role(r));
@@ -223,13 +321,14 @@ pub async fn handle_message<C, B>(
             match result {
                 Ok(out) => {
                     let html = wukong_render::to_web_html(&out.text);
-                    record_chat(
+                    record_chat_with_events(
                         history,
                         &cfg.scope,
                         "assistant",
                         &out.text,
                         Some(&html),
                         "complete",
+                        &events_buf,
                     )
                     .await;
                     let chunks = wukong_render::to_telegram_html(&out.text);
@@ -244,7 +343,16 @@ pub async fn handle_message<C, B>(
                 }
                 Err(e) => {
                     let err = format!("⚠️ 處理失敗：{e}");
-                    record_chat(history, &cfg.scope, "assistant", &err, None, "error").await;
+                    record_chat_with_events(
+                        history,
+                        &cfg.scope,
+                        "assistant",
+                        &err,
+                        None,
+                        "error",
+                        &events_buf,
+                    )
+                    .await;
                     let _ = client.edit_message_text(chat_id, mid, &err).await;
                 }
             }
@@ -492,6 +600,78 @@ mod tests {
                 .any(|(_, _, t)| t.contains("💭") && t.contains("想一下")),
             "no reasoning edit: {edits:?}"
         );
+    }
+
+    struct ToolBackend;
+    impl AiBackend for ToolBackend {
+        async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+            Ok(AgentResponse {
+                text: "done".to_string(),
+                session_id: None,
+            })
+        }
+
+        async fn run_streaming(
+            &self,
+            req: AgentRequest,
+            on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
+        ) -> Result<AgentResponse, GatewayError> {
+            on_event(wukong_gateway::StreamEvent::ToolUse("read".to_string()));
+            self.run(req).await
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_use_appears_in_status_bubble() {
+        let client = MockTgClient::default();
+        let mem = open_memory().await;
+        let backend = ToolBackend;
+        let msg = TgMessage {
+            update_id: 1,
+            chat_id: 12,
+            text: "hi".to_string(),
+        };
+        handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
+        let edits = client.edits.lock().unwrap();
+        assert!(
+            edits
+                .iter()
+                .any(|(_, _, text)| text.contains("使用工具 read")),
+            "tool edit missing: {edits:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_records_telegram_events_in_chat_history() {
+        let client = MockTgClient::default();
+        let (mem, db_url) = open_memory_with_url().await;
+        let history = wukong_chat_history::ChatHistoryStore::open(&db_url)
+            .await
+            .unwrap();
+        let backend = ReasoningBackend;
+        let msg = TgMessage {
+            update_id: 1,
+            chat_id: 12,
+            text: "hi".to_string(),
+        };
+
+        handle_message(
+            &client,
+            &mem,
+            &base_cfg(),
+            &backend,
+            Some(&history),
+            &[12],
+            &msg,
+        )
+        .await;
+
+        let thread = history.default_thread(&scope_for_chat(12)).await.unwrap();
+        let messages = history.latest_messages(&thread, 10).await.unwrap();
+        let assistant = messages.iter().find(|m| m.role == "assistant").unwrap();
+        assert!(assistant.event_count > 0);
+        let events = history.list_events(assistant.id).await.unwrap();
+        assert!(events.iter().any(|event| event.kind == "reasoning"));
     }
 
     #[test]

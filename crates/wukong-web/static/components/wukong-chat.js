@@ -209,6 +209,63 @@ export class WukongChat extends HTMLElement {
     return details;
   }
 
+  lazyEventsNode(message) {
+    const details = document.createElement('details');
+    details.className = 'turn-events-group';
+    details.innerHTML =
+      '<summary>💭 思考與工具紀錄</summary><div class="turn-events-body"></div>';
+    let loaded = false;
+    details.addEventListener('toggle', async () => {
+      if (!details.open || loaded) return;
+      loaded = true;
+      const body = details.querySelector('.turn-events-body');
+      body.innerHTML = '<p class="baton-loading">載入中…</p>';
+      try {
+        const resp = await fetch(
+          this.chatUrl('/api/chat/messages/' + encodeURIComponent(message.id) + '/events')
+        );
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const events = await resp.json();
+        const reasoning = events
+          .filter((event) => event.kind === 'reasoning')
+          .map((event) => event.content)
+          .join('');
+        const tools = events.filter((event) => event.kind !== 'reasoning');
+
+        body.innerHTML = '';
+        if (reasoning.trim()) {
+          const block = document.createElement('details');
+          block.className = 'thinking';
+          block.open = true;
+          block.innerHTML = '<summary>💭 思考過程</summary><pre class="reasoning"></pre>';
+          block.querySelector('.reasoning').textContent = reasoning;
+          body.appendChild(block);
+        }
+        if (tools.length) {
+          const list = document.createElement('ol');
+          list.className = 'turn-events-timeline';
+          for (const event of tools) {
+            const item = document.createElement('li');
+            if (event.kind === 'tool_use') {
+              item.textContent = '使用工具 ' + (event.label || event.content || 'tool');
+            } else {
+              item.textContent = event.content || event.kind;
+            }
+            list.appendChild(item);
+          }
+          body.appendChild(list);
+        }
+        if (!reasoning.trim() && !tools.length) {
+          body.innerHTML = '<p class="baton-loading">沒有紀錄。</p>';
+        }
+      } catch (err) {
+        body.innerHTML = '<p class="baton-loading">載入失敗：' + escapeHTML(err.message) + '</p>';
+        loaded = false;
+      }
+    });
+    return details;
+  }
+
   renderMessages(messages, mode) {
     const nodes = [];
     let lastDate = null;
@@ -225,7 +282,8 @@ export class WukongChat extends HTMLElement {
       }
       const bubbleNode = this.messageNode(message);
       if (message.role === 'assistant') {
-        // Steps card sits above the answer, matching live-turn ordering.
+        // Event and steps cards sit above the answer, matching live-turn ordering.
+        if (message.event_count > 0) nodes.push(this.lazyEventsNode(message));
         if (message.step_count > 0) nodes.push(this.lazyStepsNode(message));
         this.enhanceCodeBlocks(bubbleNode);
       }
@@ -359,6 +417,17 @@ export class WukongChat extends HTMLElement {
         this.log.appendChild(thinking);
       }
       thinking.querySelector('.reasoning').textContent += ev.data;
+      this.log.scrollTop = this.log.scrollHeight;
+    });
+    es.addEventListener('tool', (ev) => {
+      progress.innerHTML = '🐵 使用工具 ' + escapeHTML(ev.data) + '…';
+      if (!thinking) {
+        thinking = document.createElement('details');
+        thinking.className = 'thinking';
+        thinking.innerHTML = '<summary>💭 思考過程</summary><pre class="reasoning"></pre>';
+        this.log.appendChild(thinking);
+      }
+      thinking.querySelector('.reasoning').textContent += '\n▸ 使用工具 ' + ev.data + '\n';
       this.log.scrollTop = this.log.scrollHeight;
     });
     es.addEventListener('step', (ev) => {

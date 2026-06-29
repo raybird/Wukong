@@ -122,6 +122,7 @@ async fn styles_css() -> axum::response::Response {
 enum SseMsg {
     Role(String),
     Reasoning(String),
+    ToolUse(String),
     /// A non-final (helper) baton's rendered output, surfaced as a collapsible card.
     Step {
         role: String,
@@ -138,6 +139,7 @@ impl SseMsg {
         match self {
             SseMsg::Role(r) => Event::default().event("role").data(r),
             SseMsg::Reasoning(t) => Event::default().event("reasoning").data(t),
+            SseMsg::ToolUse(name) => Event::default().event("tool").data(name),
             SseMsg::Step { role, skill, html } => Event::default().event("step").data(
                 serde_json::json!({ "role": role, "skill": skill, "html": html }).to_string(),
             ),
@@ -368,17 +370,63 @@ where
                 // Buffer helper-baton steps to persist them after the turn, linked
                 // to the final assistant message. (role, raw content, rendered html)
                 let mut steps_buf: Vec<(String, String, String)> = Vec::new();
+                let mut events_buf: Vec<(i64, String, Option<String>, String, i64)> = Vec::new();
+                let mut event_seq: i64 = 0;
                 let result = run_turn_traced(
                     mem.as_ref(),
                     backend.as_ref(),
                     &cfg,
                     &q,
-                    &mut |ev| {
-                        if let wukong_gateway::StreamEvent::Reasoning(t) = ev {
+                    &mut |ev| match ev {
+                        wukong_gateway::StreamEvent::Reasoning(t) => {
                             if !t.trim().is_empty() {
+                                let now = now_unix();
+                                events_buf.push((
+                                    event_seq,
+                                    "reasoning".to_string(),
+                                    None,
+                                    t.clone(),
+                                    now,
+                                ));
+                                event_seq += 1;
                                 let _ = ev_tx.send(SseMsg::Reasoning(t));
                             }
                         }
+                        wukong_gateway::StreamEvent::ToolUse(name) => {
+                            let now = now_unix();
+                            events_buf.push((
+                                event_seq,
+                                "tool_use".to_string(),
+                                Some(name.clone()),
+                                format!("使用工具 {name}"),
+                                now,
+                            ));
+                            event_seq += 1;
+                            let _ = ev_tx.send(SseMsg::ToolUse(name));
+                        }
+                        wukong_gateway::StreamEvent::StepStart => {
+                            let now = now_unix();
+                            events_buf.push((
+                                event_seq,
+                                "step_start".to_string(),
+                                None,
+                                "step_start".to_string(),
+                                now,
+                            ));
+                            event_seq += 1;
+                        }
+                        wukong_gateway::StreamEvent::StepFinish => {
+                            let now = now_unix();
+                            events_buf.push((
+                                event_seq,
+                                "step_finish".to_string(),
+                                None,
+                                "step_finish".to_string(),
+                                now,
+                            ));
+                            event_seq += 1;
+                        }
+                        wukong_gateway::StreamEvent::Text(_) => {}
                     },
                     &mut |role| {
                         let _ = role_tx.send(SseMsg::Role(role.name().to_string()));
@@ -414,6 +462,18 @@ where
                                 )
                                 .await
                             {
+                                for (seq, kind, label, content, created_at) in &events_buf {
+                                    let _ = store
+                                        .insert_event(
+                                            message_id,
+                                            *seq,
+                                            kind,
+                                            label.as_deref(),
+                                            content,
+                                            *created_at,
+                                        )
+                                        .await;
+                                }
                                 // best-effort: surface failures don't block the answer.
                                 for (seq, (role, content, step_html)) in
                                     steps_buf.iter().enumerate()
@@ -436,7 +496,7 @@ where
                     Err(e) => {
                         let msg = e.to_string();
                         if let Ok(store) = ChatHistoryStore::open(&db_url).await {
-                            let _ = store
+                            if let Ok(message_id) = store
                                 .insert_message(
                                     &thread,
                                     "assistant",
@@ -445,7 +505,21 @@ where
                                     "error",
                                     now_unix(),
                                 )
-                                .await;
+                                .await
+                            {
+                                for (seq, kind, label, content, created_at) in &events_buf {
+                                    let _ = store
+                                        .insert_event(
+                                            message_id,
+                                            *seq,
+                                            kind,
+                                            label.as_deref(),
+                                            content,
+                                            *created_at,
+                                        )
+                                        .await;
+                                }
+                            }
                         }
                         let _ = tx.send(SseMsg::Error(msg));
                     }
@@ -531,6 +605,31 @@ where
     };
     match store.list_steps(message_id).await {
         Ok(steps) => Json(steps).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// `GET /api/chat/messages/:id/events` — raw turn stream events for one
+/// assistant message, lazily fetched for the reasoning/tool history expander.
+async fn get_chat_events<B>(
+    State(state): State<AppState<B>>,
+    Path(message_id): Path<i64>,
+    Query(params): Query<SettingsQuery>,
+) -> axum::response::Response
+where
+    B: AiBackend + Send + Sync + 'static,
+{
+    use axum::response::IntoResponse;
+
+    if !authorized(&state.token, params.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let store = match ChatHistoryStore::open(&state.db_url).await {
+        Ok(store) => store,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    match store.list_events(message_id).await {
+        Ok(events) => Json(events).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -1057,6 +1156,10 @@ where
             axum::routing::get(get_chat_steps::<B>),
         )
         .route(
+            "/api/chat/messages/:id/events",
+            axum::routing::get(get_chat_events::<B>),
+        )
+        .route(
             "/api/settings",
             axum::routing::get(get_settings::<B>).post(post_settings::<B>),
         )
@@ -1469,6 +1572,96 @@ mod tests {
             token: None,
             settings_path: tempfile::NamedTempFile::new().unwrap().path().to_path_buf(),
         }
+    }
+
+    struct ReasoningToolBackend;
+    impl AiBackend for ReasoningToolBackend {
+        async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+            Ok(AgentResponse {
+                text: "答案".to_string(),
+                session_id: None,
+            })
+        }
+
+        async fn run_streaming(
+            &self,
+            req: AgentRequest,
+            on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
+        ) -> Result<AgentResponse, GatewayError> {
+            on_event(wukong_gateway::StreamEvent::Reasoning("想一下".to_string()));
+            on_event(wukong_gateway::StreamEvent::ToolUse("read".to_string()));
+            self.run(req).await
+        }
+    }
+
+    async fn reasoning_tool_state() -> AppState<ReasoningToolBackend> {
+        let f = NamedTempFile::new().unwrap();
+        let url = format!("sqlite://{}", f.path().display());
+        std::mem::forget(f);
+        AppState {
+            memory: Arc::new(Memory::open(&url).await.unwrap()),
+            backend: Arc::new(ReasoningToolBackend),
+            scope: "global".to_string(),
+            db_url: url,
+            token: None,
+            settings_path: tempfile::NamedTempFile::new().unwrap().path().to_path_buf(),
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_streams_tool_event() {
+        let app = build_router(reasoning_tool_state().await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/chat?q=hi")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = body_string(resp).await;
+        assert!(body.contains("event: reasoning"), "body: {body}");
+        assert!(body.contains("event: tool"), "body: {body}");
+        assert!(body.contains("read"), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn chat_persists_turn_events_and_serves_them() {
+        let app_state = reasoning_tool_state().await;
+        let db_url = app_state.db_url.clone();
+        let app = build_router(app_state);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/chat?q=hi")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(body_string(resp).await.contains("event: answer"));
+
+        let store = ChatHistoryStore::open(&db_url).await.unwrap();
+        let thread = store.default_thread("global").await.unwrap();
+        let messages = store.latest_messages(&thread, 10).await.unwrap();
+        let assistant = messages.iter().find(|m| m.role == "assistant").unwrap();
+        assert!(assistant.event_count > 0);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/chat/messages/{}/events", assistant.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains("reasoning"), "body: {body}");
+        assert!(body.contains("tool_use"), "body: {body}");
     }
 
     #[tokio::test]
