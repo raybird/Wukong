@@ -433,7 +433,9 @@ fn map_server_event(
         Some(part) => part,
         None => return ServerEventAction::Ignore,
     };
-    if part.get("sessionID").and_then(Value::as_str) != Some(session_id) {
+    let matches_session = part.get("sessionID").and_then(Value::as_str) == Some(session_id)
+        || event_session_id(properties).as_deref() == Some(session_id);
+    if !matches_session {
         return ServerEventAction::Ignore;
     }
 
@@ -567,6 +569,50 @@ mod tests {
         assert_eq!(
             map_server_event(&value, "ses_1", &mut seen_tools),
             ServerEventAction::Emit(StreamEvent::Reasoning("thinking total".to_string()))
+        );
+    }
+
+    #[test]
+    fn maps_part_updates_when_session_id_is_on_properties() {
+        let reasoning = json!({
+            "payload": {
+                "type": "message.part.updated",
+                "properties": {
+                    "sessionID": "ses_1",
+                    "delta": "thinking",
+                    "part": {
+                        "id": "part_1",
+                        "messageID": "msg_1",
+                        "type": "reasoning",
+                        "text": "thinking total"
+                    }
+                }
+            }
+        });
+        let tool = json!({
+            "payload": {
+                "type": "message.part.updated",
+                "properties": {
+                    "sessionID": "ses_1",
+                    "part": {
+                        "id": "part_tool",
+                        "messageID": "msg_1",
+                        "type": "tool",
+                        "callID": "call_1",
+                        "tool": "bash"
+                    }
+                }
+            }
+        });
+        let mut seen_tools = std::collections::HashSet::new();
+
+        assert_eq!(
+            map_server_event(&reasoning, "ses_1", &mut seen_tools),
+            ServerEventAction::Emit(StreamEvent::Reasoning("thinking".to_string()))
+        );
+        assert_eq!(
+            map_server_event(&tool, "ses_1", &mut seen_tools),
+            ServerEventAction::Emit(StreamEvent::ToolUse("bash".to_string()))
         );
     }
 
