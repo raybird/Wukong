@@ -114,6 +114,24 @@ impl OpencodeServerBackend {
         self.send_json(self.client.get(url)).await
     }
 
+    async fn open_event_stream(&self) -> Result<reqwest::Response, GatewayError> {
+        let url = format!("{}/event", self.base_url);
+        let response = self
+            .authorize(self.client.get(url))
+            .send()
+            .await
+            .map_err(http_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.map_err(http_error)?;
+            return Err(GatewayError::AgentFailed {
+                code: Some(status.as_u16() as i32),
+                stderr: format!("opencode server returned {status}: {text}"),
+            });
+        }
+        Ok(response)
+    }
+
     async fn send_json(&self, request: reqwest::RequestBuilder) -> Result<Value, GatewayError> {
         let request = self.authorize(request);
         let response = request.send().await.map_err(http_error)?;
@@ -154,6 +172,55 @@ impl OpencodeServerBackend {
             None => request,
         }
     }
+
+    async fn consume_event_stream(
+        &self,
+        mut response: reqwest::Response,
+        session_id: &str,
+        on_event: &mut dyn FnMut(StreamEvent),
+    ) -> Result<(), GatewayError> {
+        let mut parser = SseParser::default();
+        let mut buffer = String::new();
+        let mut seen_tools = std::collections::HashSet::new();
+        let deadline = tokio::time::sleep(agent_timeout());
+        tokio::pin!(deadline);
+
+        loop {
+            let chunk = tokio::select! {
+                chunk = response.chunk() => chunk.map_err(http_error)?,
+                _ = &mut deadline => {
+                    return Err(GatewayError::AgentFailed {
+                        code: None,
+                        stderr: "opencode server stream timed out before session became idle".to_string(),
+                    });
+                }
+            };
+            let Some(chunk) = chunk else {
+                return Err(GatewayError::AgentFailed {
+                    code: None,
+                    stderr: "opencode server event stream ended before session became idle".to_string(),
+                });
+            };
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(newline) = buffer.find('\n') {
+                let mut line = buffer.drain(..=newline).collect::<String>();
+                if line.ends_with('\n') {
+                    line.pop();
+                }
+                if let Some(data) = parser.feed_line(&line) {
+                    let value: Value = match serde_json::from_str(&data) {
+                        Ok(value) => value,
+                        Err(_) => continue,
+                    };
+                    match map_server_event(&value, session_id, &mut seen_tools) {
+                        ServerEventAction::Emit(event) => on_event(event),
+                        ServerEventAction::Idle => return Ok(()),
+                        ServerEventAction::Ignore => {}
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl AiBackend for OpencodeServerBackend {
@@ -187,11 +254,32 @@ impl AiBackend for OpencodeServerBackend {
         req: AgentRequest,
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> Result<AgentResponse, GatewayError> {
-        let resp = self.run(req).await?;
-        if !resp.text.is_empty() {
-            on_event(StreamEvent::Text(resp.text.clone()));
+        self.health_check().await?;
+
+        let mut session_id = match req.session_id.clone() {
+            Some(id) => id,
+            None => self.create_session().await?,
+        };
+
+        let response = self.open_event_stream().await?;
+        match self.send_message_async(&session_id, &req).await {
+            Ok(()) => {}
+            Err(GatewayError::AgentFailed {
+                code: Some(code), ..
+            }) if code == StatusCode::NOT_FOUND.as_u16() as i32 => {
+                session_id = self.create_session().await?;
+                self.send_message_async(&session_id, &req).await?;
+            }
+            Err(err) => return Err(err),
         }
-        Ok(resp)
+
+        self.consume_event_stream(response, &session_id, on_event)
+            .await?;
+        let messages = self.list_messages(&session_id).await?;
+        Ok(AgentResponse {
+            text: extract_latest_assistant_text(&messages),
+            session_id: Some(session_id),
+        })
     }
 }
 
@@ -586,6 +674,58 @@ mod tests {
         assert_eq!(
             map_server_event(&text, "ses_1", &mut seen_tools),
             ServerEventAction::Ignore
+        );
+    }
+
+    #[test]
+    fn maps_sse_payload_sequence_to_stream_events_until_idle() {
+        let payloads = vec![
+            json!({
+                "payload": {
+                    "type": "message.part.updated",
+                    "properties": {
+                        "delta": "think",
+                        "part": { "id": "r1", "sessionID": "ses_1", "type": "reasoning" }
+                    }
+                }
+            }),
+            json!({
+                "payload": {
+                    "type": "message.part.updated",
+                    "properties": {
+                        "part": { "id": "t1", "sessionID": "ses_1", "type": "tool", "tool": "bash" }
+                    }
+                }
+            }),
+            json!({
+                "payload": {
+                    "type": "session.idle",
+                    "properties": { "sessionID": "ses_1" }
+                }
+            }),
+        ];
+        let mut seen_tools = std::collections::HashSet::new();
+        let mut events = Vec::new();
+        let mut idle = false;
+
+        for payload in payloads {
+            match map_server_event(&payload, "ses_1", &mut seen_tools) {
+                ServerEventAction::Emit(event) => events.push(event),
+                ServerEventAction::Idle => {
+                    idle = true;
+                    break;
+                }
+                ServerEventAction::Ignore => {}
+            }
+        }
+
+        assert!(idle);
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::Reasoning("think".to_string()),
+                StreamEvent::ToolUse("bash".to_string()),
+            ]
         );
     }
 
