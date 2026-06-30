@@ -93,14 +93,29 @@ impl OpencodeServerBackend {
         self.send_json(self.client.post(url).json(&body)).await
     }
 
-    async fn send_json(&self, request: reqwest::RequestBuilder) -> Result<Value, GatewayError> {
-        let request = match self.password.as_deref() {
-            Some(password) => request.basic_auth(
-                self.username.as_deref().unwrap_or("opencode"),
-                Some(password),
-            ),
-            None => request,
+    async fn send_message_async(
+        &self,
+        session_id: &str,
+        req: &AgentRequest,
+    ) -> Result<(), GatewayError> {
+        let url = format!("{}/session/{}/prompt_async", self.base_url, session_id);
+        let body = MessageBody {
+            model: req.model.as_deref().and_then(parse_model_override),
+            parts: vec![MessagePart {
+                kind: "text",
+                text: req.prompt.clone(),
+            }],
         };
+        self.send_empty(self.client.post(url).json(&body)).await
+    }
+
+    async fn list_messages(&self, session_id: &str) -> Result<Value, GatewayError> {
+        let url = format!("{}/session/{}/message", self.base_url, session_id);
+        self.send_json(self.client.get(url)).await
+    }
+
+    async fn send_json(&self, request: reqwest::RequestBuilder) -> Result<Value, GatewayError> {
+        let request = self.authorize(request);
         let response = request.send().await.map_err(http_error)?;
         let status = response.status();
         let text = response.text().await.map_err(http_error)?;
@@ -114,6 +129,30 @@ impl OpencodeServerBackend {
             code: None,
             stderr: format!("opencode server returned invalid JSON: {err}; body: {text}"),
         })
+    }
+
+    async fn send_empty(&self, request: reqwest::RequestBuilder) -> Result<(), GatewayError> {
+        let request = self.authorize(request);
+        let response = request.send().await.map_err(http_error)?;
+        let status = response.status();
+        let text = response.text().await.map_err(http_error)?;
+        if !status.is_success() {
+            return Err(GatewayError::AgentFailed {
+                code: Some(status.as_u16() as i32),
+                stderr: format!("opencode server returned {status}: {text}"),
+            });
+        }
+        Ok(())
+    }
+
+    fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self.password.as_deref() {
+            Some(password) => request.basic_auth(
+                self.username.as_deref().unwrap_or("opencode"),
+                Some(password),
+            ),
+            None => request,
+        }
     }
 }
 
@@ -164,6 +203,26 @@ fn extract_text(value: &Value) -> String {
     let mut out = Vec::new();
     collect_text(value, &mut out);
     out.join("\n")
+}
+
+fn extract_latest_assistant_text(value: &Value) -> String {
+    let Some(messages) = value.as_array() else {
+        return String::new();
+    };
+    messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message
+                .get("info")
+                .and_then(|info| info.get("role"))
+                .and_then(Value::as_str)
+                == Some("assistant")
+        })
+        .map(extract_text)
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 fn collect_text(value: &Value, out: &mut Vec<String>) {
@@ -528,6 +587,42 @@ mod tests {
             map_server_event(&text, "ses_1", &mut seen_tools),
             ServerEventAction::Ignore
         );
+    }
+
+    #[test]
+    fn extracts_latest_assistant_text_from_message_list() {
+        let value = json!([
+            {
+                "info": { "id": "msg_user", "role": "user", "sessionID": "ses_1" },
+                "parts": [{ "type": "text", "text": "question" }]
+            },
+            {
+                "info": { "id": "msg_old", "role": "assistant", "sessionID": "ses_1" },
+                "parts": [{ "type": "text", "text": "old" }]
+            },
+            {
+                "info": { "id": "msg_new", "role": "assistant", "sessionID": "ses_1" },
+                "parts": [
+                    { "type": "reasoning", "text": "hidden" },
+                    { "type": "text", "text": "hello" },
+                    { "type": "text", "text": "world" }
+                ]
+            }
+        ]);
+
+        assert_eq!(extract_latest_assistant_text(&value), "hello\nworld");
+    }
+
+    #[test]
+    fn latest_assistant_text_is_empty_when_absent() {
+        let value = json!([
+            {
+                "info": { "id": "msg_user", "role": "user", "sessionID": "ses_1" },
+                "parts": [{ "type": "text", "text": "question" }]
+            }
+        ]);
+
+        assert_eq!(extract_latest_assistant_text(&value), "");
     }
 
     #[test]
