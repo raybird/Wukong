@@ -101,6 +101,40 @@ pub struct AgentCliBackend {
     pub workspace: Option<PathBuf>,
 }
 
+pub enum AgentBackend {
+    Cli(AgentCliBackend),
+    Server(crate::opencode_server::OpencodeServerBackend),
+}
+
+pub fn build_backend_from_env(command: Vec<String>, workspace: Option<PathBuf>) -> AgentBackend {
+    match std::env::var("WUKONG_AGENT_SERVER_URL") {
+        Ok(url) if !url.trim().is_empty() => AgentBackend::Server(
+            crate::opencode_server::OpencodeServerBackend::from_env(url, workspace),
+        ),
+        _ => AgentBackend::Cli(AgentCliBackend { command, workspace }),
+    }
+}
+
+impl AiBackend for AgentBackend {
+    async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+        match self {
+            AgentBackend::Cli(backend) => backend.run(req).await,
+            AgentBackend::Server(backend) => backend.run(req).await,
+        }
+    }
+
+    async fn run_streaming(
+        &self,
+        req: AgentRequest,
+        on_event: &mut dyn FnMut(StreamEvent),
+    ) -> Result<AgentResponse, GatewayError> {
+        match self {
+            AgentBackend::Cli(backend) => backend.run_streaming(req, on_event).await,
+            AgentBackend::Server(backend) => backend.run_streaming(req, on_event).await,
+        }
+    }
+}
+
 pub struct OpencodeUtility {
     pub binary: String,
     pub workspace: Option<PathBuf>,
@@ -281,7 +315,7 @@ async fn read_pipe(mut pipe: impl tokio::io::AsyncRead + Unpin) -> String {
     buf
 }
 
-fn agent_timeout() -> Duration {
+pub(crate) fn agent_timeout() -> Duration {
     std::env::var("WUKONG_AGENT_TIMEOUT_SECS")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
@@ -375,6 +409,23 @@ mod tests {
     use super::*;
 
     static AGENT_TIMEOUT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[test]
+    fn backend_from_env_uses_cli_when_server_url_missing() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _lock = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var("WUKONG_AGENT_SERVER_URL").ok();
+        std::env::remove_var("WUKONG_AGENT_SERVER_URL");
+
+        let backend = build_backend_from_env(vec!["opencode".to_string(), "run".to_string()], None);
+
+        match previous {
+            Some(value) => std::env::set_var("WUKONG_AGENT_SERVER_URL", value),
+            None => std::env::remove_var("WUKONG_AGENT_SERVER_URL"),
+        }
+
+        assert!(matches!(backend, AgentBackend::Cli(_)));
+    }
 
     #[test]
     fn assemble_argv_plain() {

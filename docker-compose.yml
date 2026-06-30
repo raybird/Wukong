@@ -36,6 +36,26 @@ services:
     tty: true
     command: ["wukong"]
 
+  # ── Opencode Server Backend ──
+  opencode-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: wukong:latest
+    container_name: wukong-opencode-server
+    environment:
+      - USER_ID=${USER_ID:-1000}
+      - GROUP_ID=${GROUP_ID:-1000}
+      - WUKONG_WORKSPACE=/workspace
+    volumes:
+      - ${WUKONG_HOST_WORKSPACE:-./workspace}:/workspace
+      - opencode-config:/home/wukong/.config/opencode
+      - opencode-state:/home/wukong/.local/share/opencode
+      - agent-reach-state:/home/wukong/.agent-reach
+      - gh-config:/home/wukong/.config/gh
+    command: ["opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"]
+    restart: unless-stopped
+
   # ── Telegram Bot ──
   wukong-telegram:
     build:
@@ -47,6 +67,7 @@ services:
       - USER_ID=${USER_ID:-1000}
       - GROUP_ID=${GROUP_ID:-1000}
       - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run --dangerously-skip-permissions}
+      - WUKONG_AGENT_SERVER_URL=${WUKONG_AGENT_SERVER_URL:-http://opencode-server:4096}
       - WUKONG_AGENT_TIMEOUT_SECS=${WUKONG_AGENT_TIMEOUT_SECS:-1200}
       - WUKONG_WORKSPACE=/workspace
       - WUKONG_MEMORY_DB=sqlite:///data/memory.db
@@ -62,6 +83,8 @@ services:
       - gh-config:/home/wukong/.config/gh
       - wukong-data:/data
     command: ["wukong-telegram"]
+    depends_on:
+      - opencode-server
     restart: unless-stopped
 
   # ── Web Console ──
@@ -77,6 +100,7 @@ services:
       - USER_ID=${USER_ID:-1000}
       - GROUP_ID=${GROUP_ID:-1000}
       - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run --dangerously-skip-permissions}
+      - WUKONG_AGENT_SERVER_URL=${WUKONG_AGENT_SERVER_URL:-http://opencode-server:4096}
       - WUKONG_AGENT_TIMEOUT_SECS=${WUKONG_AGENT_TIMEOUT_SECS:-1200}
       - WUKONG_WORKSPACE=/workspace
       - WUKONG_MEMORY_DB=sqlite:///data/memory.db
@@ -93,6 +117,8 @@ services:
       - gh-config:/home/wukong/.config/gh
       - wukong-data:/data
     command: ["wukong-web"]
+    depends_on:
+      - opencode-server
     restart: unless-stopped
 
   # ── Scheduler Daemon ──
@@ -106,6 +132,7 @@ services:
       - USER_ID=${USER_ID:-1000}
       - GROUP_ID=${GROUP_ID:-1000}
       - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run --dangerously-skip-permissions}
+      - WUKONG_AGENT_SERVER_URL=${WUKONG_AGENT_SERVER_URL:-http://opencode-server:4096}
       - WUKONG_AGENT_TIMEOUT_SECS=${WUKONG_AGENT_TIMEOUT_SECS:-1200}
       - WUKONG_WORKSPACE=/workspace
       - WUKONG_MEMORY_DB=sqlite:///data/memory.db
@@ -119,6 +146,8 @@ services:
       - gh-config:/home/wukong/.config/gh
       - wukong-data:/data
     command: ["wukong-schedulerd"]
+    depends_on:
+      - opencode-server
     restart: unless-stopped
 
 volumes:

@@ -2,7 +2,7 @@ use clap::Parser;
 use std::io::{BufRead, Write};
 use wukong_cli::repl::{classify_line, LineAction};
 use wukong_cli::run_turn;
-use wukong_gateway::backend::AgentCliBackend;
+use wukong_gateway::backend::{build_backend_from_env, AgentBackend};
 use wukong_gateway::cli::{Cli, Command, MemoryOp, ScheduleMaintenanceTaskArg, ScheduleOp};
 use wukong_gateway::config::GatewayConfig;
 use wukong_gateway::workspace_dir;
@@ -47,10 +47,7 @@ async fn main() {
         _ => memory,
     };
 
-    let backend = AgentCliBackend {
-        command: cfg.agent_command.clone(),
-        workspace: workspace_dir(),
-    };
+    let backend = build_backend_from_env(cfg.agent_command.clone(), workspace_dir());
 
     if cli.new_session {
         if let Err(e) = memory.clear_agent_session(&cfg.scope).await {
@@ -129,7 +126,7 @@ async fn main() {
 
 async fn run_schedule_op(
     memory: &Memory,
-    backend: &AgentCliBackend,
+    backend: &AgentBackend,
     cfg: &GatewayConfig,
     op: &ScheduleOp,
 ) -> Result<(), wukong_cli::WukongError> {
@@ -268,7 +265,7 @@ async fn run_schedule_op(
 async fn trigger_job(
     store: &SchedulerStore,
     memory: &Memory,
-    backend: &AgentCliBackend,
+    backend: &AgentBackend,
     cfg: &GatewayConfig,
     job: &Job,
     worker_id: &str,
@@ -354,7 +351,7 @@ fn to_wukong_error_string(message: String) -> wukong_cli::WukongError {
 /// right after routing (before streamed text); answer text goes to stdout.
 async fn run_one(
     memory: &Memory,
-    backend: &AgentCliBackend,
+    backend: &AgentBackend,
     cfg: &GatewayConfig,
     input: &str,
 ) -> Result<(), wukong_cli::WukongError> {
@@ -402,7 +399,7 @@ fn apply_settings_to_config(cfg: &mut GatewayConfig, settings: &wukong_settings:
 /// Dispatch a `wukong memory <op>` maintenance command.
 async fn run_memory_op(
     memory: &Memory,
-    backend: &AgentCliBackend,
+    backend: &AgentBackend,
     cfg: &GatewayConfig,
     op: &MemoryOp,
 ) -> Result<(), wukong_cli::WukongError> {

@@ -5,7 +5,7 @@ use std::io::Write;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::interval;
 use wukong_chat_history::ChatHistoryStore;
-use wukong_gateway::backend::AgentCliBackend;
+use wukong_gateway::backend::{build_backend_from_env, AgentBackend};
 use wukong_gateway::config::{default_scope, GatewayConfig};
 use wukong_gateway::workspace_dir;
 use wukong_memory::Memory;
@@ -54,10 +54,7 @@ async fn run(cli: Cli) -> Result<(), String> {
     let agent_settings = wukong_settings::effective_agent_settings(&settings);
     cfg.apply_default_model(agent_settings.default_model.as_deref());
     let memory = open_memory(&cfg).await?;
-    let backend = AgentCliBackend {
-        command: cfg.agent_command.clone(),
-        workspace: workspace_dir(),
-    };
+    let backend = build_backend_from_env(cfg.agent_command.clone(), workspace_dir());
     let store = SchedulerStore::open(&cfg.db_url)
         .await
         .map_err(|e| e.to_string())?;
@@ -108,7 +105,7 @@ async fn run(cli: Cli) -> Result<(), String> {
 async fn run_scan(
     store: &SchedulerStore,
     memory: &Memory,
-    backend: &AgentCliBackend,
+    backend: &AgentBackend,
     cfg: &GatewayConfig,
     worker_id: &str,
     lease_secs: i64,

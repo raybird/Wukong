@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use wukong_chat_history::ChatHistoryStore;
-use wukong_gateway::backend::AgentCliBackend;
+use wukong_gateway::backend::build_backend_from_env;
 use wukong_gateway::config::GatewayConfig;
 use wukong_gateway::workspace_dir;
 use wukong_memory::Memory;
@@ -84,10 +84,7 @@ async fn main() {
         })
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| vec!["opencode".to_string(), "run".to_string()]);
-    let backend = AgentCliBackend {
-        command: agent_command,
-        workspace: workspace_dir(),
-    };
+    let backend = build_backend_from_env(agent_command, workspace_dir());
 
     let base_cfg = GatewayConfig {
         scope: String::new(),
