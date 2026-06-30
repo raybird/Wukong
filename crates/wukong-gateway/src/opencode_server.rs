@@ -198,7 +198,8 @@ impl OpencodeServerBackend {
             let Some(chunk) = chunk else {
                 return Err(GatewayError::AgentFailed {
                     code: None,
-                    stderr: "opencode server event stream ended before session became idle".to_string(),
+                    stderr: "opencode server event stream ended before session became idle"
+                        .to_string(),
                 });
             };
             buffer.push_str(&String::from_utf8_lossy(&chunk));
@@ -436,11 +437,7 @@ fn map_server_event(
         return ServerEventAction::Ignore;
     }
 
-    match part
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-    {
+    match part.get("type").and_then(Value::as_str).unwrap_or_default() {
         "reasoning" => {
             let text = properties
                 .get("delta")
@@ -501,10 +498,7 @@ mod tests {
         let mut parser = SseParser::default();
 
         assert_eq!(parser.feed_line("data: {\"hello\":true}"), None);
-        assert_eq!(
-            parser.feed_line(""),
-            Some("{\"hello\":true}".to_string())
-        );
+        assert_eq!(parser.feed_line(""), Some("{\"hello\":true}".to_string()));
     }
 
     #[test]
