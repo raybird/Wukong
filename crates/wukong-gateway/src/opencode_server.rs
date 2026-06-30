@@ -212,10 +212,323 @@ fn http_error(err: reqwest::Error) -> GatewayError {
     }
 }
 
+#[derive(Default)]
+struct SseParser {
+    data_lines: Vec<String>,
+}
+
+impl SseParser {
+    fn feed_line(&mut self, line: &str) -> Option<String> {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            if self.data_lines.is_empty() {
+                return None;
+            }
+            return Some(std::mem::take(&mut self.data_lines).join("\n"));
+        }
+        if line.starts_with(':') {
+            return None;
+        }
+        if let Some(data) = line.strip_prefix("data:") {
+            self.data_lines
+                .push(data.strip_prefix(' ').unwrap_or(data).to_string());
+        }
+        None
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum ServerEventAction {
+    Emit(StreamEvent),
+    Idle,
+    Ignore,
+}
+
+fn map_server_event(
+    value: &Value,
+    session_id: &str,
+    seen_tools: &mut std::collections::HashSet<String>,
+) -> ServerEventAction {
+    let payload = match value.get("payload") {
+        Some(payload) => payload,
+        None => value,
+    };
+    let event_type = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let properties = payload.get("properties").unwrap_or(payload);
+
+    if event_type == "session.idle" {
+        return match event_session_id(properties).as_deref() {
+            Some(id) if id == session_id => ServerEventAction::Idle,
+            _ => ServerEventAction::Ignore,
+        };
+    }
+    if event_type == "session.status" {
+        let is_idle = properties
+            .get("status")
+            .and_then(|status| status.get("type"))
+            .and_then(Value::as_str)
+            .map(|kind| kind == "idle")
+            .unwrap_or(false);
+        return match (event_session_id(properties).as_deref(), is_idle) {
+            (Some(id), true) if id == session_id => ServerEventAction::Idle,
+            _ => ServerEventAction::Ignore,
+        };
+    }
+    if event_type != "message.part.updated" {
+        return ServerEventAction::Ignore;
+    }
+
+    let part = match properties.get("part") {
+        Some(part) => part,
+        None => return ServerEventAction::Ignore,
+    };
+    if part.get("sessionID").and_then(Value::as_str) != Some(session_id) {
+        return ServerEventAction::Ignore;
+    }
+
+    match part
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "reasoning" => {
+            let text = properties
+                .get("delta")
+                .and_then(Value::as_str)
+                .or_else(|| part.get("text").and_then(Value::as_str))
+                .unwrap_or_default();
+            if text.trim().is_empty() {
+                ServerEventAction::Ignore
+            } else {
+                ServerEventAction::Emit(StreamEvent::Reasoning(text.to_string()))
+            }
+        }
+        "tool" => {
+            let dedupe_key = part
+                .get("callID")
+                .and_then(Value::as_str)
+                .or_else(|| part.get("id").and_then(Value::as_str))
+                .unwrap_or("tool")
+                .to_string();
+            if !seen_tools.insert(dedupe_key) {
+                return ServerEventAction::Ignore;
+            }
+            let name = part.get("tool").and_then(Value::as_str).unwrap_or("tool");
+            ServerEventAction::Emit(StreamEvent::ToolUse(name.to_string()))
+        }
+        "step-start" => ServerEventAction::Emit(StreamEvent::StepStart),
+        "step-finish" => ServerEventAction::Emit(StreamEvent::StepFinish),
+        _ => ServerEventAction::Ignore,
+    }
+}
+
+fn event_session_id(properties: &Value) -> Option<String> {
+    properties
+        .get("sessionID")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            properties
+                .get("session")
+                .and_then(|session| session.get("id"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            properties
+                .get("info")
+                .and_then(|info| info.get("id"))
+                .and_then(Value::as_str)
+        })
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn sse_parser_collects_single_data_event() {
+        let mut parser = SseParser::default();
+
+        assert_eq!(parser.feed_line("data: {\"hello\":true}"), None);
+        assert_eq!(
+            parser.feed_line(""),
+            Some("{\"hello\":true}".to_string())
+        );
+    }
+
+    #[test]
+    fn sse_parser_joins_multiline_data_and_ignores_comments() {
+        let mut parser = SseParser::default();
+
+        assert_eq!(parser.feed_line(": keep-alive"), None);
+        assert_eq!(parser.feed_line("event: message"), None);
+        assert_eq!(parser.feed_line("data: {\"a\":"), None);
+        assert_eq!(parser.feed_line("data: 1}"), None);
+
+        assert_eq!(parser.feed_line(""), Some("{\"a\":\n1}".to_string()));
+    }
+
+    #[test]
+    fn sse_parser_ignores_blank_events() {
+        let mut parser = SseParser::default();
+
+        assert_eq!(parser.feed_line("event: ping"), None);
+        assert_eq!(parser.feed_line(""), None);
+    }
+
+    #[test]
+    fn maps_reasoning_delta_for_matching_session() {
+        let value = json!({
+            "payload": {
+                "type": "message.part.updated",
+                "properties": {
+                    "delta": "thinking",
+                    "part": {
+                        "id": "part_1",
+                        "sessionID": "ses_1",
+                        "messageID": "msg_1",
+                        "type": "reasoning",
+                        "text": "thinking total"
+                    }
+                }
+            }
+        });
+        let mut seen_tools = std::collections::HashSet::new();
+
+        assert_eq!(
+            map_server_event(&value, "ses_1", &mut seen_tools),
+            ServerEventAction::Emit(StreamEvent::Reasoning("thinking".to_string()))
+        );
+    }
+
+    #[test]
+    fn maps_reasoning_text_when_delta_missing() {
+        let value = json!({
+            "payload": {
+                "type": "message.part.updated",
+                "properties": {
+                    "part": {
+                        "id": "part_1",
+                        "sessionID": "ses_1",
+                        "messageID": "msg_1",
+                        "type": "reasoning",
+                        "text": "thinking total"
+                    }
+                }
+            }
+        });
+        let mut seen_tools = std::collections::HashSet::new();
+
+        assert_eq!(
+            map_server_event(&value, "ses_1", &mut seen_tools),
+            ServerEventAction::Emit(StreamEvent::Reasoning("thinking total".to_string()))
+        );
+    }
+
+    #[test]
+    fn maps_tool_use_once_per_call_id() {
+        let value = json!({
+            "payload": {
+                "type": "message.part.updated",
+                "properties": {
+                    "part": {
+                        "id": "part_tool",
+                        "sessionID": "ses_1",
+                        "messageID": "msg_1",
+                        "type": "tool",
+                        "callID": "call_1",
+                        "tool": "bash"
+                    }
+                }
+            }
+        });
+        let mut seen_tools = std::collections::HashSet::new();
+
+        assert_eq!(
+            map_server_event(&value, "ses_1", &mut seen_tools),
+            ServerEventAction::Emit(StreamEvent::ToolUse("bash".to_string()))
+        );
+        assert_eq!(
+            map_server_event(&value, "ses_1", &mut seen_tools),
+            ServerEventAction::Ignore
+        );
+    }
+
+    #[test]
+    fn maps_step_boundaries_and_idle() {
+        let mut seen_tools = std::collections::HashSet::new();
+        let step_start = json!({
+            "payload": {
+                "type": "message.part.updated",
+                "properties": {
+                    "part": { "id": "s1", "sessionID": "ses_1", "type": "step-start" }
+                }
+            }
+        });
+        let step_finish = json!({
+            "payload": {
+                "type": "message.part.updated",
+                "properties": {
+                    "part": { "id": "s2", "sessionID": "ses_1", "type": "step-finish" }
+                }
+            }
+        });
+        let idle = json!({
+            "payload": {
+                "type": "session.idle",
+                "properties": { "sessionID": "ses_1" }
+            }
+        });
+
+        assert_eq!(
+            map_server_event(&step_start, "ses_1", &mut seen_tools),
+            ServerEventAction::Emit(StreamEvent::StepStart)
+        );
+        assert_eq!(
+            map_server_event(&step_finish, "ses_1", &mut seen_tools),
+            ServerEventAction::Emit(StreamEvent::StepFinish)
+        );
+        assert_eq!(
+            map_server_event(&idle, "ses_1", &mut seen_tools),
+            ServerEventAction::Idle
+        );
+    }
+
+    #[test]
+    fn ignores_events_for_other_sessions_and_text_parts() {
+        let mut seen_tools = std::collections::HashSet::new();
+        let other = json!({
+            "payload": {
+                "type": "message.part.updated",
+                "properties": {
+                    "delta": "hidden",
+                    "part": { "id": "p", "sessionID": "ses_2", "type": "reasoning" }
+                }
+            }
+        });
+        let text = json!({
+            "payload": {
+                "type": "message.part.updated",
+                "properties": {
+                    "delta": "answer",
+                    "part": { "id": "p", "sessionID": "ses_1", "type": "text", "text": "answer" }
+                }
+            }
+        });
+
+        assert_eq!(
+            map_server_event(&other, "ses_1", &mut seen_tools),
+            ServerEventAction::Ignore
+        );
+        assert_eq!(
+            map_server_event(&text, "ses_1", &mut seen_tools),
+            ServerEventAction::Ignore
+        );
+    }
 
     #[test]
     fn extracts_text_from_nested_message_parts() {
