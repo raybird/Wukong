@@ -215,6 +215,8 @@ pub mod mock {
         pub html: bool,
     }
 
+    type MockFiles = Arc<Mutex<HashMap<String, (TgFileInfo, Vec<u8>)>>>;
+
     /// In-memory client: scripts no updates, records all calls. Returns
     /// monotonically increasing message_ids starting at 1.
     #[derive(Clone, Default)]
@@ -223,7 +225,7 @@ pub mod mock {
         pub edits: Arc<Mutex<Vec<(i64, i64, String)>>>,
         pub deletes: Arc<Mutex<Vec<(i64, i64)>>>,
         pub actions: Arc<Mutex<Vec<(i64, String)>>>,
-        files: Arc<Mutex<HashMap<String, (TgFileInfo, Vec<u8>)>>>,
+        files: MockFiles,
         next_id: Arc<Mutex<i64>>,
     }
 

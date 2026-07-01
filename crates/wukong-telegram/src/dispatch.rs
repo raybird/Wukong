@@ -126,9 +126,7 @@ async fn record_chat(
     content_html: Option<&str>,
     status: &str,
 ) -> Option<i64> {
-    let Some(history) = history else {
-        return None;
-    };
+    let history = history?;
     match history.default_thread(scope).await {
         Ok(thread) => match history
             .insert_message(&thread, role, content, content_html, status, now_unix())
@@ -156,9 +154,7 @@ async fn record_chat_with_events(
     status: &str,
     events: &[(i64, String, Option<String>, String, i64)],
 ) -> Option<i64> {
-    let Some(history) = history else {
-        return None;
-    };
+    let history = history?;
     match history.default_thread(scope).await {
         Ok(thread) => match history
             .insert_message(&thread, role, content, content_html, status, now_unix())

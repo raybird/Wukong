@@ -103,6 +103,7 @@ pub async fn run_turn_observed(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_turn_observed_with_attachments(
     memory: &Memory,
     backend: &impl AiBackend,
@@ -148,6 +149,7 @@ pub async fn run_turn_traced(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_turn_traced_with_attachments(
     memory: &Memory,
     backend: &impl AiBackend,
