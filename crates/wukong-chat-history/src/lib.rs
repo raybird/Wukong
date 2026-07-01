@@ -1,3 +1,10 @@
+mod attachments;
+
+pub use attachments::{
+    relative_attachment_path, resolve_under_upload_root, sanitize_filename, sanitize_scope,
+    ChatAttachment, NewChatAttachment,
+};
+
 use serde::Serialize;
 use sqlx::{Row, SqlitePool};
 
@@ -109,6 +116,37 @@ impl ChatHistoryStore {
         .execute(&pool)
         .await?;
         sqlx::query(
+            "CREATE TABLE IF NOT EXISTS chat_attachments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id INTEGER NOT NULL,
+                scope TEXT NOT NULL,
+                source TEXT NOT NULL,
+                original_name TEXT NOT NULL,
+                stored_name TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                mime_type TEXT,
+                size_bytes INTEGER NOT NULL,
+                sha256 TEXT,
+                telegram_file_id TEXT,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY(message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
+            )",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS chat_attachments_message_id_idx
+             ON chat_attachments(message_id)",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS chat_attachments_scope_id_idx
+             ON chat_attachments(scope, id)",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
             "CREATE TABLE IF NOT EXISTS turn_steps (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 message_id INTEGER NOT NULL,
@@ -215,6 +253,62 @@ impl ChatHistoryStore {
             .execute(&self.pool)
             .await?;
         Ok(row.get("id"))
+    }
+
+    pub async fn insert_attachment(&self, a: &NewChatAttachment) -> Result<i64, sqlx::Error> {
+        let row = sqlx::query(
+            "INSERT INTO chat_attachments
+             (message_id, scope, source, original_name, stored_name, relative_path, mime_type, size_bytes, sha256, telegram_file_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             RETURNING id",
+        )
+        .bind(a.message_id)
+        .bind(&a.scope)
+        .bind(&a.source)
+        .bind(&a.original_name)
+        .bind(&a.stored_name)
+        .bind(&a.relative_path)
+        .bind(&a.mime_type)
+        .bind(a.size_bytes)
+        .bind(&a.sha256)
+        .bind(&a.telegram_file_id)
+        .bind(a.created_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get("id"))
+    }
+
+    pub async fn attachments_for_messages(
+        &self,
+        message_ids: &[i64],
+    ) -> Result<Vec<ChatAttachment>, sqlx::Error> {
+        if message_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("?", message_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT id, message_id, scope, source, original_name, stored_name, relative_path, mime_type, size_bytes, sha256, telegram_file_id, created_at
+             FROM chat_attachments WHERE message_id IN ({placeholders}) ORDER BY id ASC"
+        );
+        let mut query = sqlx::query(&sql);
+        for id in message_ids {
+            query = query.bind(id);
+        }
+        let rows = query.fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(row_to_attachment).collect())
+    }
+
+    pub async fn attachment(&self, id: i64) -> Result<Option<ChatAttachment>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT id, message_id, scope, source, original_name, stored_name, relative_path, mime_type, size_bytes, sha256, telegram_file_id, created_at
+             FROM chat_attachments WHERE id = ?1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(row_to_attachment))
     }
 
     /// Persist one helper-baton step linked to the final assistant message.
@@ -512,6 +606,23 @@ fn row_to_event(row: sqlx::sqlite::SqliteRow) -> TurnEvent {
     }
 }
 
+fn row_to_attachment(row: sqlx::sqlite::SqliteRow) -> ChatAttachment {
+    ChatAttachment {
+        id: row.get("id"),
+        message_id: row.get("message_id"),
+        scope: row.get("scope"),
+        source: row.get("source"),
+        original_name: row.get("original_name"),
+        stored_name: row.get("stored_name"),
+        relative_path: row.get("relative_path"),
+        mime_type: row.get("mime_type"),
+        size_bytes: row.get("size_bytes"),
+        sha256: row.get("sha256"),
+        telegram_file_id: row.get("telegram_file_id"),
+        created_at: row.get("created_at"),
+    }
+}
+
 fn row_to_live_event(row: sqlx::sqlite::SqliteRow) -> ChatLiveEvent {
     ChatLiveEvent {
         id: row.get("id"),
@@ -550,6 +661,49 @@ mod tests {
         let b = store.default_thread("global").await.unwrap();
         assert_eq!(a, b);
         assert_eq!(a, "scope:global");
+    }
+
+    #[tokio::test]
+    async fn attachments_round_trip_for_message() {
+        let store = store().await;
+        let thread = store.default_thread("user:tg-42").await.unwrap();
+        let message_id = store
+            .insert_message(&thread, "user", "請看附件", None, "complete", 100)
+            .await
+            .unwrap();
+
+        let new = NewChatAttachment {
+            message_id,
+            scope: "user:tg-42".to_string(),
+            source: "telegram".to_string(),
+            original_name: "report.pdf".to_string(),
+            stored_name: "report.pdf".to_string(),
+            relative_path: "user_tg-42/1/report.pdf".to_string(),
+            mime_type: Some("application/pdf".to_string()),
+            size_bytes: 1234,
+            sha256: Some("abc123".to_string()),
+            telegram_file_id: Some("file_1".to_string()),
+            created_at: 101,
+        };
+
+        let id = store.insert_attachment(&new).await.unwrap();
+        let attachments = store.attachments_for_messages(&[message_id]).await.unwrap();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].id, id);
+        assert_eq!(attachments[0].message_id, message_id);
+        assert_eq!(attachments[0].original_name, "report.pdf");
+        assert_eq!(attachments[0].mime_type.as_deref(), Some("application/pdf"));
+
+        let loaded = store.attachment(id).await.unwrap().unwrap();
+        assert_eq!(loaded.relative_path, "user_tg-42/1/report.pdf");
+    }
+
+    #[test]
+    fn attachment_path_parts_are_sanitized() {
+        assert_eq!(sanitize_scope("user:tg-42"), "user_tg-42");
+        assert_eq!(sanitize_filename("../report final.pdf"), "report final.pdf");
+        assert_eq!(sanitize_filename(""), "attachment");
+        assert_eq!(sanitize_filename(".."), "attachment");
     }
 
     #[tokio::test]
