@@ -114,6 +114,41 @@ wukong-chat { display: flex; flex-direction: column; flex: 1; min-height: 0; }
   gap: 0.5rem;
 }
 .bubble.error { border: 1px solid #d33; }
+.attachments {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.65rem;
+}
+.attachment-card {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 0.8rem;
+  color: inherit;
+  display: flex;
+  gap: 0.65rem;
+  max-width: 22rem;
+  padding: 0.55rem;
+  text-decoration: none;
+}
+.attachment-card:hover { background: rgba(255, 255, 255, 0.14); }
+.attachment-thumb {
+  border-radius: 0.55rem;
+  height: 4rem;
+  object-fit: cover;
+  width: 4rem;
+}
+.attachment-meta {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+}
+.attachment-meta strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-meta small { opacity: 0.72; }
 .date-separator { align-self: center; font-size: 0.8rem; opacity: 0.7; padding: 0.2rem 0.6rem; border-radius: 999px; background: #8882; }
 .empty-state, .load-error { align-self: center; opacity: 0.75; margin: 1rem; }
 .bubble pre {

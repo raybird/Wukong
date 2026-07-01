@@ -198,6 +198,51 @@ export class WukongChat extends HTMLElement {
     return resp.json();
   }
 
+  attachmentsNode(message) {
+    const attachments = message.attachments || [];
+    if (!attachments.length) return null;
+    const wrap = document.createElement('div');
+    wrap.className = 'attachments';
+    for (const attachment of attachments) {
+      const card = document.createElement('a');
+      card.className = 'attachment-card';
+      card.href = this.chatUrl(
+        attachment.download_url || '/api/chat/attachments/' + encodeURIComponent(attachment.id)
+      );
+      card.target = '_blank';
+      card.rel = 'noopener';
+      const name = escapeHTML(attachment.original_name || 'attachment');
+      const type = escapeHTML(attachment.mime_type || '檔案');
+      const size = this.formatBytes(attachment.size_bytes || 0);
+      if (attachment.preview_url) {
+        const img = document.createElement('img');
+        img.className = 'attachment-thumb';
+        img.src = this.chatUrl(attachment.preview_url);
+        img.alt = attachment.original_name || 'attachment preview';
+        card.appendChild(img);
+      }
+      const meta = document.createElement('span');
+      meta.className = 'attachment-meta';
+      meta.innerHTML =
+        '<strong>' + name + '</strong><small>' + type + ' · ' + escapeHTML(size) + '</small>';
+      card.appendChild(meta);
+      wrap.appendChild(card);
+    }
+    return wrap;
+  }
+
+  formatBytes(bytes) {
+    if (!bytes) return '0 B';
+    const units = ['B', 'KiB', 'MiB', 'GiB'];
+    let value = Number(bytes);
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+      value /= 1024;
+      unit += 1;
+    }
+    return (unit === 0 ? value.toFixed(0) : value.toFixed(1)) + ' ' + units[unit];
+  }
+
   messageNode(message) {
     const div = document.createElement('div');
     div.className = 'bubble ' + (message.role === 'user' ? 'user' : 'assistant');
@@ -208,6 +253,8 @@ export class WukongChat extends HTMLElement {
       div.textContent = message.content;
     }
     if (message.status === 'error') div.classList.add('error');
+    const attachments = this.attachmentsNode(message);
+    if (attachments) div.appendChild(attachments);
     return div;
   }
 
