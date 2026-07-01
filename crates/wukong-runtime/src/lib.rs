@@ -7,6 +7,7 @@ pub mod skill_assets;
 pub mod turn;
 
 pub use turn::{
-    run_turn, run_turn_observed, run_turn_session_passthrough, run_turn_traced, TurnOutput,
+    run_turn, run_turn_observed, run_turn_observed_with_attachments, run_turn_session_passthrough,
+    run_turn_traced, run_turn_traced_with_attachments, run_turn_with_attachments, TurnOutput,
     WukongError,
 };

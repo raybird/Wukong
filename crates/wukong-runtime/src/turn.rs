@@ -1,6 +1,6 @@
 use crate::persona;
 use thiserror::Error;
-use wukong_gateway::backend::{AgentRequest, AiBackend};
+use wukong_gateway::backend::{AgentAttachment, AgentRequest, AiBackend};
 use wukong_gateway::config::GatewayConfig;
 use wukong_memory::{Memory, MemoryItem, MemoryKind, RecallMode, RecallQuery, RememberInput};
 use wukong_orchestrator::{PlannerPreferenceHint, Role};
@@ -54,6 +54,28 @@ pub async fn run_turn(
     .await
 }
 
+pub async fn run_turn_with_attachments(
+    memory: &Memory,
+    backend: &impl AiBackend,
+    cfg: &GatewayConfig,
+    input: &str,
+    attachments: Vec<AgentAttachment>,
+    on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
+) -> Result<TurnOutput, WukongError> {
+    let mut on_role = |_| {};
+    run_turn_observed_with_attachments(
+        memory,
+        backend,
+        cfg,
+        input,
+        attachments,
+        on_event,
+        &mut on_role,
+        &mut |_, _| {},
+    )
+    .await
+}
+
 /// Same as [`run_turn`], but additionally reports each *non-final* chain step's
 /// output via `on_step(role, output)` the moment it completes (empty outputs are
 /// skipped). The final step is delivered through the returned [`TurnOutput`], not
@@ -68,11 +90,35 @@ pub async fn run_turn_observed(
     on_role: &mut dyn FnMut(Role),
     on_step: &mut dyn FnMut(Role, &str),
 ) -> Result<TurnOutput, WukongError> {
-    run_turn_traced(
+    run_turn_observed_with_attachments(
         memory,
         backend,
         cfg,
         input,
+        Vec::new(),
+        on_event,
+        on_role,
+        on_step,
+    )
+    .await
+}
+
+pub async fn run_turn_observed_with_attachments(
+    memory: &Memory,
+    backend: &impl AiBackend,
+    cfg: &GatewayConfig,
+    input: &str,
+    attachments: Vec<AgentAttachment>,
+    on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
+    on_role: &mut dyn FnMut(Role),
+    on_step: &mut dyn FnMut(Role, &str),
+) -> Result<TurnOutput, WukongError> {
+    run_turn_traced_with_attachments(
+        memory,
+        backend,
+        cfg,
+        input,
+        attachments,
         on_event,
         on_role,
         &mut |step| on_step(step.role, step.output),
@@ -85,6 +131,29 @@ pub async fn run_turn_traced(
     backend: &impl AiBackend,
     cfg: &GatewayConfig,
     input: &str,
+    on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
+    on_role: &mut dyn FnMut(Role),
+    on_step: &mut dyn FnMut(ObservedStep<'_>),
+) -> Result<TurnOutput, WukongError> {
+    run_turn_traced_with_attachments(
+        memory,
+        backend,
+        cfg,
+        input,
+        Vec::new(),
+        on_event,
+        on_role,
+        on_step,
+    )
+    .await
+}
+
+pub async fn run_turn_traced_with_attachments(
+    memory: &Memory,
+    backend: &impl AiBackend,
+    cfg: &GatewayConfig,
+    input: &str,
+    attachments: Vec<AgentAttachment>,
     on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
     on_role: &mut dyn FnMut(Role),
     on_step: &mut dyn FnMut(ObservedStep<'_>),
@@ -152,7 +221,7 @@ pub async fn run_turn_traced(
                     } else {
                         None
                     },
-                    attachments: Vec::new(),
+                    attachments: attachments.clone(),
                 },
                 on_event,
             )
@@ -204,7 +273,7 @@ pub async fn run_turn_traced(
                         session_id: captured_session.clone().or(session_id),
                         thinking: cfg.thinking,
                         model: cfg.default_model.clone(),
-                        attachments: Vec::new(),
+                        attachments: attachments.clone(),
                     },
                     on_event,
                 )
@@ -324,7 +393,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
     use tempfile::NamedTempFile;
-    use wukong_gateway::backend::{AgentRequest, AgentResponse};
+    use wukong_gateway::backend::{AgentAttachment, AgentRequest, AgentResponse};
     use wukong_gateway::GatewayError;
 
     struct MockBackend {
@@ -332,6 +401,7 @@ mod tests {
         prompts: Mutex<Vec<String>>,
         session_ids: Mutex<Vec<Option<String>>>,
         models: Mutex<Vec<Option<String>>>,
+        attachments: Mutex<Vec<Vec<AgentAttachment>>>,
     }
 
     impl MockBackend {
@@ -341,6 +411,7 @@ mod tests {
                 prompts: Mutex::new(Vec::new()),
                 session_ids: Mutex::new(Vec::new()),
                 models: Mutex::new(Vec::new()),
+                attachments: Mutex::new(Vec::new()),
             }
         }
     }
@@ -350,6 +421,7 @@ mod tests {
             self.prompts.lock().unwrap().push(req.prompt);
             self.session_ids.lock().unwrap().push(req.session_id);
             self.models.lock().unwrap().push(req.model);
+            self.attachments.lock().unwrap().push(req.attachments);
             let text = self.replies.lock().unwrap().pop_front().unwrap_or_default();
             Ok(AgentResponse {
                 text,
@@ -397,6 +469,32 @@ mod tests {
             models.last().and_then(Clone::clone).as_deref(),
             Some("opencode/deepseek-v4-flash-free")
         );
+    }
+
+    #[tokio::test]
+    async fn run_turn_with_attachments_forwards_paths_to_backend() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["oracle", "answer"]);
+        let cfg = test_cfg("project:T");
+        let attachments = vec![AgentAttachment {
+            path: std::path::PathBuf::from("/tmp/report.pdf"),
+            original_name: "report.pdf".to_string(),
+            mime_type: Some("application/pdf".to_string()),
+        }];
+
+        let _ = run_turn_with_attachments(
+            &mem,
+            &backend,
+            &cfg,
+            "請分析",
+            attachments.clone(),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        let requests = backend.attachments.lock().unwrap();
+        assert_eq!(requests.last().unwrap(), &attachments);
     }
 
     #[tokio::test]
