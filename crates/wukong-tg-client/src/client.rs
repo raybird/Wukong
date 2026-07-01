@@ -3,6 +3,14 @@
 
 use crate::error::TgError;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TgFileInfo {
+    pub file_id: String,
+    pub file_unique_id: Option<String>,
+    pub file_size: Option<i64>,
+    pub file_path: String,
+}
+
 /// The slice of the Telegram Bot API the bot and daemon need.
 pub trait TgClient {
     /// Long-poll for updates starting at `offset` (timeout baked in).
@@ -41,6 +49,16 @@ pub trait TgClient {
         chat_id: i64,
         action: &str,
     ) -> impl std::future::Future<Output = Result<(), TgError>> + Send;
+    /// Resolve Telegram file metadata before downloading bytes.
+    fn get_file(
+        &self,
+        file_id: &str,
+    ) -> impl std::future::Future<Output = Result<TgFileInfo, TgError>> + Send;
+    /// Download file bytes from a Telegram file path returned by `get_file`.
+    fn download_file(
+        &self,
+        file_path: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<u8>, TgError>> + Send;
 }
 
 /// Real client over `https://api.telegram.org/bot<token>/`.
@@ -48,6 +66,7 @@ pub trait TgClient {
 pub struct ReqwestTgClient {
     http: reqwest::Client,
     base: String,
+    file_base: String,
 }
 
 impl ReqwestTgClient {
@@ -59,6 +78,7 @@ impl ReqwestTgClient {
         Self {
             http,
             base: format!("https://api.telegram.org/bot{token}"),
+            file_base: format!("https://api.telegram.org/file/bot{token}"),
         }
     }
 
@@ -145,6 +165,38 @@ impl TgClient for ReqwestTgClient {
         .await?;
         Ok(())
     }
+
+    async fn get_file(&self, file_id: &str) -> Result<TgFileInfo, TgError> {
+        let v = self
+            .post("getFile", serde_json::json!({ "file_id": file_id }))
+            .await?;
+        let result = v
+            .get("result")
+            .ok_or_else(|| TgError::Api(format!("no file result in response: {v}")))?;
+        let file_path = result
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| TgError::Api(format!("no file_path in response: {v}")))?;
+        Ok(TgFileInfo {
+            file_id: result
+                .get("file_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(file_id)
+                .to_string(),
+            file_unique_id: result
+                .get("file_unique_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            file_size: result.get("file_size").and_then(|v| v.as_i64()),
+            file_path: file_path.to_string(),
+        })
+    }
+
+    async fn download_file(&self, file_path: &str) -> Result<Vec<u8>, TgError> {
+        let url = format!("{}/{file_path}", self.file_base);
+        let resp = self.http.get(&url).send().await?;
+        Ok(resp.bytes().await?.to_vec())
+    }
 }
 
 /// In-memory client for tests. Gated so dependent crates can opt in via the
@@ -152,6 +204,7 @@ impl TgClient for ReqwestTgClient {
 #[cfg(any(test, feature = "mock"))]
 pub mod mock {
     use super::*;
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     /// One recorded outbound message.
@@ -170,6 +223,7 @@ pub mod mock {
         pub edits: Arc<Mutex<Vec<(i64, i64, String)>>>,
         pub deletes: Arc<Mutex<Vec<(i64, i64)>>>,
         pub actions: Arc<Mutex<Vec<(i64, String)>>>,
+        files: Arc<Mutex<HashMap<String, (TgFileInfo, Vec<u8>)>>>,
         next_id: Arc<Mutex<i64>>,
     }
 
@@ -178,6 +232,22 @@ pub mod mock {
             let mut g = self.next_id.lock().unwrap();
             *g += 1;
             *g
+        }
+
+        pub fn with_file(self, file_id: &str, file_path: &str, bytes: Vec<u8>) -> Self {
+            self.files.lock().unwrap().insert(
+                file_id.to_string(),
+                (
+                    TgFileInfo {
+                        file_id: file_id.to_string(),
+                        file_unique_id: None,
+                        file_size: Some(bytes.len() as i64),
+                        file_path: file_path.to_string(),
+                    },
+                    bytes,
+                ),
+            );
+            self
         }
     }
 
@@ -224,6 +294,23 @@ pub mod mock {
                 .push((chat_id, action.to_string()));
             Ok(())
         }
+        async fn get_file(&self, file_id: &str) -> Result<TgFileInfo, TgError> {
+            self.files
+                .lock()
+                .unwrap()
+                .get(file_id)
+                .map(|(info, _)| info.clone())
+                .ok_or_else(|| TgError::Api(format!("mock file not found: {file_id}")))
+        }
+        async fn download_file(&self, file_path: &str) -> Result<Vec<u8>, TgError> {
+            self.files
+                .lock()
+                .unwrap()
+                .values()
+                .find(|(info, _)| info.file_path == file_path)
+                .map(|(_, bytes)| bytes.clone())
+                .ok_or_else(|| TgError::Api(format!("mock file path not found: {file_path}")))
+        }
     }
 
     #[cfg(test)]
@@ -240,5 +327,15 @@ pub mod mock {
         assert!(c.sent.lock().unwrap()[1].html);
         assert_eq!(c.edits.lock().unwrap()[0], (7, 1, "edited".to_string()));
         assert_eq!(c.deletes.lock().unwrap()[0], (7, 1));
+    }
+
+    #[cfg(test)]
+    #[tokio::test]
+    async fn mock_returns_file_metadata_and_bytes() {
+        let c = MockTgClient::default().with_file("file_1", "docs/report.pdf", b"hello".to_vec());
+        let info = c.get_file("file_1").await.unwrap();
+        assert_eq!(info.file_path, "docs/report.pdf");
+        let bytes = c.download_file(&info.file_path).await.unwrap();
+        assert_eq!(bytes, b"hello");
     }
 }

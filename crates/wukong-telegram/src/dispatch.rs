@@ -559,6 +559,7 @@ mod tests {
             update_id: 1,
             chat_id: 999,
             text: "hi".to_string(),
+            attachments: Vec::new(),
         };
         handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
         // No reply, no work.
@@ -575,6 +576,7 @@ mod tests {
             update_id: 1,
             chat_id: 12,
             text: "什麼是 BM25".to_string(),
+            attachments: Vec::new(),
         };
         handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
 
@@ -615,6 +617,7 @@ mod tests {
             update_id: 1,
             chat_id: 12,
             text: "hello from tg".to_string(),
+            attachments: Vec::new(),
         };
 
         handle_message(
@@ -650,6 +653,7 @@ mod tests {
             update_id: 1,
             chat_id: 12,
             text: "/new".to_string(),
+            attachments: Vec::new(),
         };
 
         handle_message(
@@ -685,6 +689,7 @@ mod tests {
             update_id: 1,
             chat_id: 42,
             text: "/set_models opencode/deepseek-v4-flash-free".to_string(),
+            attachments: Vec::new(),
         };
 
         handle_message(&client, &mem, &base_cfg(), &backend, None, &[42], &msg).await;
@@ -728,6 +733,7 @@ mod tests {
             update_id: 1,
             chat_id: 12,
             text: "hi".to_string(),
+            attachments: Vec::new(),
         };
         handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
         let edits = client.edits.lock().unwrap();
@@ -767,6 +773,7 @@ mod tests {
             update_id: 1,
             chat_id: 12,
             text: "hi".to_string(),
+            attachments: Vec::new(),
         };
         handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
         let edits = client.edits.lock().unwrap();
@@ -790,6 +797,7 @@ mod tests {
             update_id: 1,
             chat_id: 12,
             text: "hi".to_string(),
+            attachments: Vec::new(),
         };
 
         handle_message(
@@ -823,6 +831,7 @@ mod tests {
             update_id: 1,
             chat_id: 12,
             text: "hi".to_string(),
+            attachments: Vec::new(),
         };
 
         handle_message(
@@ -872,6 +881,7 @@ mod tests {
             update_id: 1,
             chat_id: 12,
             text: "hi".to_string(),
+            attachments: Vec::new(),
         };
         handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
 
@@ -895,6 +905,7 @@ mod tests {
             update_id: 1,
             chat_id: 12,
             text: "/new".to_string(),
+            attachments: Vec::new(),
         };
         handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
         {
@@ -913,6 +924,7 @@ mod tests {
             update_id: 1,
             chat_id: 12,
             text: "/model gpt".to_string(),
+            attachments: Vec::new(),
         };
         handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
         let sent = client.sent.lock().unwrap();
@@ -928,6 +940,7 @@ mod tests {
             update_id: 1,
             chat_id: 12,
             text: "/reset".to_string(),
+            attachments: Vec::new(),
         };
         handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
         let sent = client.sent.lock().unwrap();

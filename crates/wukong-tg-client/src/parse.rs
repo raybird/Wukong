@@ -1,15 +1,32 @@
 //! Pure parsing & policy helpers for the Telegram transport (no network).
 
-/// A text message extracted from a Telegram update.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TgAttachmentKind {
+    Document,
+    Photo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TgAttachment {
+    pub kind: TgAttachmentKind,
+    pub file_id: String,
+    pub unique_file_id: Option<String>,
+    pub original_name: String,
+    pub mime_type: Option<String>,
+    pub size_bytes: Option<i64>,
+}
+
+/// A message extracted from a Telegram update.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TgMessage {
     pub update_id: i64,
     pub chat_id: i64,
     pub text: String,
+    pub attachments: Vec<TgAttachment>,
 }
 
-/// Extract text messages from a getUpdates response. Updates without a
-/// top-level `message.text` (edits, photos, etc.) are skipped.
+/// Extract user messages from a getUpdates response. Updates without text,
+/// captions, or supported attachments are skipped.
 pub fn parse_updates(json: &serde_json::Value) -> Vec<TgMessage> {
     let Some(arr) = json.get("result").and_then(|r| r.as_array()) else {
         return Vec::new();
@@ -19,14 +36,79 @@ pub fn parse_updates(json: &serde_json::Value) -> Vec<TgMessage> {
             let update_id = u.get("update_id")?.as_i64()?;
             let msg = u.get("message")?;
             let chat_id = msg.get("chat")?.get("id")?.as_i64()?;
-            let text = msg.get("text")?.as_str()?.to_string();
+            let attachments = parse_attachments(msg);
+            let text = msg
+                .get("text")
+                .or_else(|| msg.get("caption"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or_else(|| {
+                    attachments
+                        .first()
+                        .map(|a| fallback_prompt(&a.original_name))
+                })?;
             Some(TgMessage {
                 update_id,
                 chat_id,
                 text,
+                attachments,
             })
         })
         .collect()
+}
+
+fn parse_attachments(msg: &serde_json::Value) -> Vec<TgAttachment> {
+    if let Some(document) = msg.get("document") {
+        if let Some(file_id) = document.get("file_id").and_then(|v| v.as_str()) {
+            return vec![TgAttachment {
+                kind: TgAttachmentKind::Document,
+                file_id: file_id.to_string(),
+                unique_file_id: document
+                    .get("file_unique_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                original_name: document
+                    .get("file_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("document")
+                    .to_string(),
+                mime_type: document
+                    .get("mime_type")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                size_bytes: document.get("file_size").and_then(|v| v.as_i64()),
+            }];
+        }
+    }
+
+    msg.get("photo")
+        .and_then(|v| v.as_array())
+        .and_then(|photos| {
+            photos
+                .iter()
+                .filter_map(|photo| Some((photo, photo.get("file_size")?.as_i64()?)))
+                .max_by_key(|(_, size)| *size)
+                .map(|(photo, _)| photo)
+        })
+        .and_then(|photo| {
+            Some(TgAttachment {
+                kind: TgAttachmentKind::Photo,
+                file_id: photo.get("file_id")?.as_str()?.to_string(),
+                unique_file_id: photo
+                    .get("file_unique_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                original_name: "photo.jpg".to_string(),
+                mime_type: Some("image/jpeg".to_string()),
+                size_bytes: photo.get("file_size").and_then(|v| v.as_i64()),
+            })
+        })
+        .into_iter()
+        .collect()
+}
+
+fn fallback_prompt(name: &str) -> String {
+    format!("使用者上傳了 {name}，請分析附件內容。")
 }
 
 /// The highest update_id across ALL updates (any type), used to advance the
@@ -134,6 +216,60 @@ mod tests {
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].update_id, 3);
         assert_eq!(msgs[0].text, "ok");
+    }
+
+    #[test]
+    fn parse_updates_extracts_document_with_caption() {
+        let json = serde_json::json!({
+            "result": [{
+                "update_id": 10,
+                "message": {
+                    "chat": {"id": 12},
+                    "caption": "請分析",
+                    "document": {
+                        "file_id": "doc_file",
+                        "file_unique_id": "doc_unique",
+                        "file_name": "report.pdf",
+                        "mime_type": "application/pdf",
+                        "file_size": 1234
+                    }
+                }
+            }]
+        });
+        let msgs = parse_updates(&json);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].text, "請分析");
+        assert_eq!(msgs[0].attachments.len(), 1);
+        assert_eq!(msgs[0].attachments[0].file_id, "doc_file");
+        assert_eq!(msgs[0].attachments[0].original_name, "report.pdf");
+    }
+
+    #[test]
+    fn parse_updates_extracts_largest_photo_with_fallback_prompt() {
+        let json = serde_json::json!({
+            "result": [{
+                "update_id": 11,
+                "message": {
+                    "chat": {"id": 12},
+                    "photo": [
+                        {"file_id": "small", "file_unique_id": "u1", "file_size": 10, "width": 100, "height": 100},
+                        {"file_id": "large", "file_unique_id": "u2", "file_size": 20, "width": 1200, "height": 900}
+                    ]
+                }
+            }]
+        });
+        let msgs = parse_updates(&json);
+        assert_eq!(msgs.len(), 1);
+        assert!(
+            msgs[0].text.contains("使用者上傳了 photo.jpg"),
+            "{}",
+            msgs[0].text
+        );
+        assert_eq!(msgs[0].attachments[0].file_id, "large");
+        assert_eq!(
+            msgs[0].attachments[0].mime_type.as_deref(),
+            Some("image/jpeg")
+        );
     }
 
     #[test]
