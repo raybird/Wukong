@@ -1,6 +1,11 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+
+static MATERIALIZE_SEQ: AtomicU64 = AtomicU64::new(0);
+static MATERIALIZE_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn resolve_skill_workspace() -> io::Result<PathBuf> {
     if let Ok(value) = std::env::var("WUKONG_WORKSPACE") {
@@ -18,6 +23,9 @@ pub fn materialize_default_runtime_skills() -> io::Result<PathBuf> {
 }
 
 pub fn materialize_runtime_skills(workspace: &Path) -> io::Result<PathBuf> {
+    let _guard = MATERIALIZE_LOCK
+        .lock()
+        .map_err(|_| io::Error::other("skill asset materialize lock poisoned"))?;
     let root = workspace.join(".wukong/skills/superpowers");
     let source = wukong_skills::source_content();
     let source_path = root.join("SOURCE.md");
@@ -35,8 +43,13 @@ pub fn materialize_runtime_skills(workspace: &Path) -> io::Result<PathBuf> {
             "skill asset root has no parent",
         )
     })?;
-    let tmp = parent.join(format!(".superpowers.tmp.{}", std::process::id()));
-    let old = parent.join(format!(".superpowers.old.{}", std::process::id()));
+    let suffix = format!(
+        "{}.{}",
+        std::process::id(),
+        MATERIALIZE_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let tmp = parent.join(format!(".superpowers.tmp.{suffix}"));
+    let old = parent.join(format!(".superpowers.old.{suffix}"));
 
     let _ = fs::remove_dir_all(&tmp);
     let _ = fs::remove_dir_all(&old);
@@ -101,5 +114,27 @@ mod tests {
         assert_eq!(root, temp.path().join(".wukong/skills/superpowers"));
         assert!(root.join("brainstorming/SKILL.md").is_file());
         assert!(root.join("SOURCE.md").is_file());
+    }
+
+    #[test]
+    fn materialize_runtime_skills_allows_concurrent_calls() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().to_path_buf();
+        let mut workers = Vec::new();
+
+        for _ in 0..8 {
+            let workspace = workspace.clone();
+            workers.push(std::thread::spawn(move || {
+                materialize_runtime_skills(&workspace)
+            }));
+        }
+
+        for worker in workers {
+            worker.join().unwrap().unwrap();
+        }
+        assert!(temp
+            .path()
+            .join(".wukong/skills/superpowers/brainstorming/SKILL.md")
+            .is_file());
     }
 }
