@@ -62,9 +62,12 @@ impl OpencodeServerBackend {
     async fn create_session(&self) -> Result<String, GatewayError> {
         let url = format!("{}/session", self.base_url);
         let value = self
-            .send_json(self.client.post(url).json(&CreateSessionBody {
-                title: "Wukong".to_string(),
-            }))
+            .send_json(
+                "create_session",
+                self.client.post(url).json(&CreateSessionBody {
+                    title: "Wukong".to_string(),
+                }),
+            )
             .await?;
         extract_session_id(&value).ok_or_else(|| GatewayError::AgentFailed {
             code: None,
@@ -74,7 +77,9 @@ impl OpencodeServerBackend {
 
     async fn health_check(&self) -> Result<(), GatewayError> {
         let url = format!("{}/global/health", self.base_url);
-        self.send_json(self.client.get(url)).await.map(|_| ())
+        self.send_json("health_check", self.client.get(url))
+            .await
+            .map(|_| ())
     }
 
     async fn send_message(
@@ -90,7 +95,8 @@ impl OpencodeServerBackend {
                 text: req.prompt.clone(),
             }],
         };
-        self.send_json(self.client.post(url).json(&body)).await
+        self.send_json("send_message", self.client.post(url).json(&body))
+            .await
     }
 
     async fn send_message_async(
@@ -106,12 +112,13 @@ impl OpencodeServerBackend {
                 text: req.prompt.clone(),
             }],
         };
-        self.send_empty(self.client.post(url).json(&body)).await
+        self.send_empty("prompt_async", self.client.post(url).json(&body))
+            .await
     }
 
     async fn list_messages(&self, session_id: &str) -> Result<Value, GatewayError> {
         let url = format!("{}/session/{}/message", self.base_url, session_id);
-        self.send_json(self.client.get(url)).await
+        self.send_json("list_messages", self.client.get(url)).await
     }
 
     async fn open_event_stream(&self) -> Result<reqwest::Response, GatewayError> {
@@ -120,44 +127,61 @@ impl OpencodeServerBackend {
             .authorize(self.client.get(url))
             .send()
             .await
-            .map_err(http_error)?;
+            .map_err(|err| http_error("event_stream open", err))?;
         let status = response.status();
         if !status.is_success() {
-            let text = response.text().await.map_err(http_error)?;
+            let text = response
+                .text()
+                .await
+                .map_err(|err| http_error("event_stream error response body", err))?;
             return Err(GatewayError::AgentFailed {
                 code: Some(status.as_u16() as i32),
-                stderr: format!("opencode server returned {status}: {text}"),
+                stderr: format!("opencode server event_stream returned {status}: {text}"),
             });
         }
         Ok(response)
     }
 
-    async fn send_json(&self, request: reqwest::RequestBuilder) -> Result<Value, GatewayError> {
+    async fn send_json(
+        &self,
+        phase: &'static str,
+        request: reqwest::RequestBuilder,
+    ) -> Result<Value, GatewayError> {
         let request = self.authorize(request);
-        let response = request.send().await.map_err(http_error)?;
+        let response = request.send().await.map_err(|err| http_error(phase, err))?;
         let status = response.status();
-        let text = response.text().await.map_err(http_error)?;
+        let text = response
+            .text()
+            .await
+            .map_err(|err| http_error(phase, err))?;
         if !status.is_success() {
             return Err(GatewayError::AgentFailed {
                 code: Some(status.as_u16() as i32),
-                stderr: format!("opencode server returned {status}: {text}"),
+                stderr: format!("opencode server {phase} returned {status}: {text}"),
             });
         }
         serde_json::from_str(&text).map_err(|err| GatewayError::AgentFailed {
             code: None,
-            stderr: format!("opencode server returned invalid JSON: {err}; body: {text}"),
+            stderr: format!("opencode server {phase} returned invalid JSON: {err}; body: {text}"),
         })
     }
 
-    async fn send_empty(&self, request: reqwest::RequestBuilder) -> Result<(), GatewayError> {
+    async fn send_empty(
+        &self,
+        phase: &'static str,
+        request: reqwest::RequestBuilder,
+    ) -> Result<(), GatewayError> {
         let request = self.authorize(request);
-        let response = request.send().await.map_err(http_error)?;
+        let response = request.send().await.map_err(|err| http_error(phase, err))?;
         let status = response.status();
-        let text = response.text().await.map_err(http_error)?;
+        let text = response
+            .text()
+            .await
+            .map_err(|err| http_error(phase, err))?;
         if !status.is_success() {
             return Err(GatewayError::AgentFailed {
                 code: Some(status.as_u16() as i32),
-                stderr: format!("opencode server returned {status}: {text}"),
+                stderr: format!("opencode server {phase} returned {status}: {text}"),
             });
         }
         Ok(())
@@ -187,7 +211,8 @@ impl OpencodeServerBackend {
 
         loop {
             let chunk = tokio::select! {
-                chunk = response.chunk() => chunk.map_err(http_error)?,
+                chunk = response.chunk() => chunk
+                    .map_err(|err| http_error("event_stream failed while reading chunk", err))?,
                 _ = &mut deadline => {
                     return Err(GatewayError::AgentFailed {
                         code: None,
@@ -353,10 +378,10 @@ fn parse_model_override(model: &str) -> Option<ModelOverride> {
     })
 }
 
-fn http_error(err: reqwest::Error) -> GatewayError {
+fn http_error(phase: &'static str, err: reqwest::Error) -> GatewayError {
     GatewayError::AgentFailed {
         code: None,
-        stderr: format!("opencode server request failed: {err}"),
+        stderr: format!("opencode server {phase} failed: {err}"),
     }
 }
 
@@ -494,6 +519,56 @@ fn event_session_id(properties: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn malformed_chunked_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 1024];
+            let _ = socket.read(&mut buf).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nnot-a-chunk\r\n")
+                .await
+                .unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    fn agent_failed_stderr(err: GatewayError) -> String {
+        match err {
+            GatewayError::AgentFailed { stderr, .. } => stderr,
+            other => panic!("expected AgentFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn health_check_decode_error_includes_phase() {
+        let backend = OpencodeServerBackend::from_env(malformed_chunked_server().await, None);
+
+        let err = backend.health_check().await.unwrap_err();
+        let stderr = agent_failed_stderr(err);
+
+        assert!(stderr.contains("opencode server health_check failed"));
+        assert!(stderr.contains("error decoding response body"));
+    }
+
+    #[tokio::test]
+    async fn event_stream_chunk_decode_error_includes_phase() {
+        let backend = OpencodeServerBackend::from_env(malformed_chunked_server().await, None);
+        let response = backend.open_event_stream().await.unwrap();
+
+        let err = backend
+            .consume_event_stream(response, "ses_1", &mut |_| {})
+            .await
+            .unwrap_err();
+        let stderr = agent_failed_stderr(err);
+
+        assert!(stderr.contains("opencode server event_stream failed while reading chunk"));
+        assert!(stderr.contains("error decoding response body"));
+    }
 
     #[test]
     fn sse_parser_collects_single_data_event() {
