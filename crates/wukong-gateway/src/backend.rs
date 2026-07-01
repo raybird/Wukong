@@ -11,6 +11,13 @@ const DSML_TOOL_CALLS_END: &str = "</｜｜DSML｜｜tool_calls>";
 const DEFAULT_AGENT_TIMEOUT_SECS: u64 = 20 * 60;
 
 /// A request to the AI backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentAttachment {
+    pub path: PathBuf,
+    pub original_name: String,
+    pub mime_type: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentRequest {
     pub prompt: String,
@@ -20,6 +27,7 @@ pub struct AgentRequest {
     pub thinking: bool,
     /// Optional opencode model override for this request.
     pub model: Option<String>,
+    pub attachments: Vec<AgentAttachment>,
 }
 
 /// The backend's textual response.
@@ -55,6 +63,7 @@ pub fn assemble_argv(
     session_id: Option<&str>,
     thinking: bool,
     model: Option<&str>,
+    attachments: &[AgentAttachment],
     prompt: &str,
 ) -> Vec<String> {
     let mut argv: Vec<String> = strip_model_args(command);
@@ -68,6 +77,10 @@ pub fn assemble_argv(
     if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
         argv.push("--model".to_string());
         argv.push(model.to_string());
+    }
+    for attachment in attachments {
+        argv.push("--file".to_string());
+        argv.push(attachment.path.to_string_lossy().to_string());
     }
     argv.push(prompt.to_string());
     argv
@@ -172,6 +185,7 @@ impl AiBackend for AgentCliBackend {
             req.session_id.as_deref(),
             req.thinking,
             req.model.as_deref(),
+            &req.attachments,
             &req.prompt,
         );
         let mut cmd = Command::new(&argv[0]);
@@ -223,6 +237,7 @@ impl AiBackend for AgentCliBackend {
             req.session_id.as_deref(),
             req.thinking,
             req.model.as_deref(),
+            &req.attachments,
             &req.prompt,
         );
         let prompt = argv.pop().expect("argv always ends with the prompt");
@@ -434,6 +449,7 @@ mod tests {
             None,
             false,
             None,
+            &[],
             "hi",
         );
         assert_eq!(argv, vec!["opencode", "run", "hi"]);
@@ -446,6 +462,7 @@ mod tests {
             Some("ses_x"),
             true,
             None,
+            &[],
             "hi",
         );
         assert_eq!(
@@ -461,6 +478,7 @@ mod tests {
             None,
             false,
             Some("opencode/deepseek-v4-flash-free"),
+            &[],
             "hi",
         );
         assert_eq!(
@@ -487,6 +505,7 @@ mod tests {
             Some("ses_x"),
             true,
             Some("new/model"),
+            &[],
             "hi",
         );
         assert_eq!(
@@ -500,6 +519,42 @@ mod tests {
                 "--model",
                 "new/model",
                 "hi"
+            ]
+        );
+    }
+
+    #[test]
+    fn assemble_argv_adds_files_before_prompt() {
+        let files = vec![
+            AgentAttachment {
+                path: std::path::PathBuf::from("/tmp/report.pdf"),
+                original_name: "report.pdf".to_string(),
+                mime_type: Some("application/pdf".to_string()),
+            },
+            AgentAttachment {
+                path: std::path::PathBuf::from("/tmp/photo.jpg"),
+                original_name: "photo.jpg".to_string(),
+                mime_type: Some("image/jpeg".to_string()),
+            },
+        ];
+        let argv = assemble_argv(
+            &["opencode".to_string(), "run".to_string()],
+            None,
+            false,
+            None,
+            &files,
+            "describe",
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "opencode",
+                "run",
+                "--file",
+                "/tmp/report.pdf",
+                "--file",
+                "/tmp/photo.jpg",
+                "describe"
             ]
         );
     }
@@ -529,6 +584,7 @@ mod tests {
                 session_id: None,
                 thinking: false,
                 model: None,
+                attachments: Vec::new(),
             })
             .await
             .unwrap();
@@ -548,6 +604,7 @@ mod tests {
                 session_id: None,
                 thinking: false,
                 model: None,
+                attachments: Vec::new(),
             })
             .await
             .unwrap_err();
@@ -570,6 +627,7 @@ mod tests {
                 session_id: None,
                 thinking: false,
                 model: None,
+                attachments: Vec::new(),
             }),
         )
         .await;
@@ -612,6 +670,7 @@ mod tests {
                     session_id: None,
                     thinking: false,
                     model: None,
+                    attachments: Vec::new(),
                 },
                 &mut |e| events.push(e),
             )
@@ -645,6 +704,7 @@ mod tests {
                     session_id: None,
                     thinking: false,
                     model: None,
+                    attachments: Vec::new(),
                 },
                 &mut |e| events.push(e),
             )
@@ -682,6 +742,7 @@ mod tests {
                     session_id: None,
                     thinking: false,
                     model: None,
+                    attachments: Vec::new(),
                 },
                 &mut |e| events.push(e),
             )
@@ -710,6 +771,7 @@ mod tests {
                     session_id: None,
                     thinking: false,
                     model: None,
+                    attachments: Vec::new(),
                 },
                 &mut |e| events.push(e),
             ),

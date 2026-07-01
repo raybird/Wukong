@@ -29,6 +29,7 @@ pub async fn run_turn(
             session_id: None,
             thinking: cfg.thinking,
             model: None,
+            attachments: Vec::new(),
         })
         .await?;
 

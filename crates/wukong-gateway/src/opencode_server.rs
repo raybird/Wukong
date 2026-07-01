@@ -251,6 +251,9 @@ impl OpencodeServerBackend {
 
 impl AiBackend for OpencodeServerBackend {
     async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+        if !req.attachments.is_empty() {
+            return Err(attachments_unsupported());
+        }
         self.health_check().await?;
 
         let mut session_id = match req.session_id.clone() {
@@ -280,6 +283,9 @@ impl AiBackend for OpencodeServerBackend {
         req: AgentRequest,
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> Result<AgentResponse, GatewayError> {
+        if !req.attachments.is_empty() {
+            return Err(attachments_unsupported());
+        }
         self.health_check().await?;
 
         let mut session_id = match req.session_id.clone() {
@@ -306,6 +312,14 @@ impl AiBackend for OpencodeServerBackend {
             text: extract_latest_assistant_text(&messages),
             session_id: Some(session_id),
         })
+    }
+}
+
+fn attachments_unsupported() -> GatewayError {
+    GatewayError::AgentFailed {
+        code: None,
+        stderr: "目前的 opencode server backend 不支援附件輸入；請改用 CLI backend 或等待 server file parts 支援。"
+            .to_string(),
     }
 }
 
@@ -518,6 +532,7 @@ fn event_session_id(properties: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::AgentAttachment;
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -542,6 +557,29 @@ mod tests {
             GatewayError::AgentFailed { stderr, .. } => stderr,
             other => panic!("expected AgentFailed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn server_backend_rejects_attachments_explicitly() {
+        let backend = OpencodeServerBackend::from_env("http://127.0.0.1:1".to_string(), None);
+        let err = backend
+            .run_streaming(
+                AgentRequest {
+                    prompt: "describe".to_string(),
+                    session_id: None,
+                    thinking: false,
+                    model: None,
+                    attachments: vec![AgentAttachment {
+                        path: std::path::PathBuf::from("/tmp/report.pdf"),
+                        original_name: "report.pdf".to_string(),
+                        mime_type: Some("application/pdf".to_string()),
+                    }],
+                },
+                &mut |_| {},
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("不支援附件輸入"), "{err}");
     }
 
     #[tokio::test]

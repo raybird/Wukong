@@ -235,6 +235,7 @@ pub async fn plan_skill_chain_with_preferences(
             session_id: None,
             thinking: false,
             model: None,
+            attachments: Vec::new(),
         })
         .await?;
     Ok(parse_skill_chain(&resp.text))
@@ -248,6 +249,7 @@ pub async fn route(backend: &impl AiBackend, task: &str) -> Result<Role, Orchest
             session_id: None,
             thinking: false,
             model: None,
+            attachments: Vec::new(),
         })
         .await?;
     Ok(parse_role(&resp.text))
@@ -264,6 +266,7 @@ pub async fn plan_chain(
             session_id: None,
             thinking: false,
             model: None,
+            attachments: Vec::new(),
         })
         .await?;
     Ok(parse_chain(&resp.text))

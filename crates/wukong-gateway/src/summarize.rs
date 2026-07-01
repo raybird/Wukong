@@ -33,6 +33,7 @@ impl<B: AiBackend + Sync> Summarizer for OpencodeSummarizer<'_, B> {
             session_id: None,
             thinking: false,
             model: None,
+            attachments: Vec::new(),
         });
         let resp = tokio::task::block_in_place(|| self.handle.block_on(fut))
             .map_err(|e| MemoryError::Other(format!("summarizer backend failed: {e}")))?;

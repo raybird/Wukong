@@ -67,6 +67,7 @@ pub async fn orchestrate(
             session_id: None,
             thinking: false,
             model: None,
+            attachments: Vec::new(),
         })
         .await?;
     Ok(Outcome {
@@ -96,6 +97,7 @@ pub async fn orchestrate_chain(
                 session_id: None,
                 thinking: false,
                 model: None,
+                attachments: Vec::new(),
             })
             .await?;
         steps.push(Outcome {

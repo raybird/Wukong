@@ -152,6 +152,7 @@ pub async fn run_turn_traced(
                     } else {
                         None
                     },
+                    attachments: Vec::new(),
                 },
                 on_event,
             )
@@ -203,6 +204,7 @@ pub async fn run_turn_traced(
                         session_id: captured_session.clone().or(session_id),
                         thinking: cfg.thinking,
                         model: cfg.default_model.clone(),
+                        attachments: Vec::new(),
                     },
                     on_event,
                 )
@@ -308,6 +310,7 @@ pub async fn run_turn_session_passthrough(
                 session_id: Some(session_id.to_string()),
                 thinking: false,
                 model: None,
+                attachments: Vec::new(),
             },
             &mut |_| {},
         )
