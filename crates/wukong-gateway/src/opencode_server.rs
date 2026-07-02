@@ -424,6 +424,107 @@ impl SseParser {
     }
 }
 
+fn format_tool_use_name(part: &Value, name: &str) -> String {
+    if name == "question" {
+        return format_question_tool_use(part, name);
+    }
+
+    let Some(input) = part.get("state").and_then(|state| state.get("input")) else {
+        return name.to_string();
+    };
+    let fields: &[&str] = match name {
+        "bash" => &["command"],
+        "read" => &["filePath"],
+        "grep" => &["pattern", "path", "include"],
+        "glob" => &["pattern", "path"],
+        _ => return name.to_string(),
+    };
+
+    let mut lines = vec![name.to_string()];
+    for field in fields {
+        if let Some(value) = input.get(field).and_then(Value::as_str) {
+            if !value.is_empty() {
+                lines.push(format!("  {field}: {}", truncate_tool_value(value)));
+            }
+        }
+    }
+
+    if lines.len() == 1 {
+        name.to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn format_question_tool_use(part: &Value, name: &str) -> String {
+    let Some(questions) = part
+        .get("state")
+        .and_then(|state| state.get("input"))
+        .and_then(|input| input.get("questions"))
+        .and_then(Value::as_array)
+    else {
+        return name.to_string();
+    };
+
+    let mut lines = vec![name.to_string()];
+    for question in questions {
+        let prompt = question.get("question").and_then(Value::as_str);
+        let header = question.get("header").and_then(Value::as_str);
+        match (header, prompt) {
+            (Some(header), Some(prompt)) if !header.is_empty() && !prompt.is_empty() => {
+                lines.push(format!("  {header}: {}", truncate_tool_value(prompt)));
+            }
+            (_, Some(prompt)) if !prompt.is_empty() => {
+                lines.push(format!("  {}", truncate_tool_value(prompt)));
+            }
+            _ => {}
+        }
+
+        if let Some(options) = question.get("options").and_then(Value::as_array) {
+            for (idx, option) in options.iter().enumerate() {
+                let label = option.get("label").and_then(Value::as_str).unwrap_or("");
+                if label.is_empty() {
+                    continue;
+                }
+                let description = option
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if description.is_empty() {
+                    lines.push(format!("  {}. {}", idx + 1, truncate_tool_value(label)));
+                } else {
+                    lines.push(format!(
+                        "  {}. {} - {}",
+                        idx + 1,
+                        truncate_tool_value(label),
+                        truncate_tool_value(description)
+                    ));
+                }
+            }
+        }
+    }
+
+    if lines.len() == 1 {
+        name.to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn truncate_tool_value(value: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let mut chars = value.chars();
+    let truncated: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!(
+            "{}...",
+            truncated.chars().take(MAX_CHARS - 3).collect::<String>()
+        )
+    } else {
+        truncated
+    }
+}
+
 #[derive(Debug, PartialEq)]
 enum ServerEventAction {
     Emit(StreamEvent),
@@ -502,7 +603,7 @@ fn map_server_event(
                 return ServerEventAction::Ignore;
             }
             let name = part.get("tool").and_then(Value::as_str).unwrap_or("tool");
-            ServerEventAction::Emit(StreamEvent::ToolUse(name.to_string()))
+            ServerEventAction::Emit(StreamEvent::ToolUse(format_tool_use_name(part, name)))
         }
         "step-start" => ServerEventAction::Emit(StreamEvent::StepStart),
         "step-finish" => ServerEventAction::Emit(StreamEvent::StepFinish),
@@ -755,6 +856,147 @@ mod tests {
         assert_eq!(
             map_server_event(&value, "ses_1", &mut seen_tools),
             ServerEventAction::Ignore
+        );
+    }
+
+    #[test]
+    fn maps_question_tool_use_with_prompt_and_options() {
+        let value = json!({
+            "payload": {
+                "type": "message.part.updated",
+                "properties": {
+                    "part": {
+                        "id": "part_tool",
+                        "sessionID": "ses_1",
+                        "messageID": "msg_1",
+                        "type": "tool",
+                        "callID": "call_1",
+                        "tool": "question",
+                        "state": {
+                            "status": "running",
+                            "input": {
+                                "questions": [{
+                                    "question": "要怎麼處理 question 工具顯示？",
+                                    "header": "顯示方式",
+                                    "options": [
+                                        {
+                                            "label": "輸出選項",
+                                            "description": "遇到 question 時直接列出可選項目"
+                                        },
+                                        {
+                                            "label": "查文件",
+                                            "description": "先確認是否有官方格式可轉換"
+                                        }
+                                    ]
+                                }]
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let mut seen_tools = std::collections::HashSet::new();
+
+        assert_eq!(
+            map_server_event(&value, "ses_1", &mut seen_tools),
+            ServerEventAction::Emit(StreamEvent::ToolUse(
+                "question\n  顯示方式: 要怎麼處理 question 工具顯示？\n  1. 輸出選項 - 遇到 question 時直接列出可選項目\n  2. 查文件 - 先確認是否有官方格式可轉換".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn maps_whitelisted_tool_use_input_summaries() {
+        fn tool_part(tool: &str, input: serde_json::Value) -> serde_json::Value {
+            json!({
+                "payload": {
+                    "type": "message.part.updated",
+                    "properties": {
+                        "part": {
+                            "id": format!("part_{tool}"),
+                            "sessionID": "ses_1",
+                            "messageID": "msg_1",
+                            "type": "tool",
+                            "callID": format!("call_{tool}"),
+                            "tool": tool,
+                            "state": {
+                                "status": "running",
+                                "input": input
+                            }
+                        }
+                    }
+                }
+            })
+        }
+
+        let cases = [
+            (
+                tool_part(
+                    "bash",
+                    json!({
+                        "command": "cargo test -p wukong-gateway",
+                        "secret": "do not show"
+                    }),
+                ),
+                "bash\n  command: cargo test -p wukong-gateway",
+            ),
+            (
+                tool_part(
+                    "read",
+                    json!({
+                        "filePath": "/workspace/crates/wukong-gateway/src/opencode_server.rs"
+                    }),
+                ),
+                "read\n  filePath: /workspace/crates/wukong-gateway/src/opencode_server.rs",
+            ),
+            (
+                tool_part(
+                    "grep",
+                    json!({
+                        "pattern": "ToolUse",
+                        "path": "/workspace/crates",
+                        "include": "*.rs"
+                    }),
+                ),
+                "grep\n  pattern: ToolUse\n  path: /workspace/crates\n  include: *.rs",
+            ),
+            (
+                tool_part(
+                    "glob",
+                    json!({
+                        "pattern": "**/*.rs",
+                        "path": "/workspace/crates"
+                    }),
+                ),
+                "glob\n  pattern: **/*.rs\n  path: /workspace/crates",
+            ),
+            (
+                tool_part(
+                    "webfetch",
+                    json!({
+                        "url": "https://example.com",
+                        "format": "markdown"
+                    }),
+                ),
+                "webfetch",
+            ),
+        ];
+
+        let mut seen_tools = std::collections::HashSet::new();
+        for (value, expected) in cases {
+            assert_eq!(
+                map_server_event(&value, "ses_1", &mut seen_tools),
+                ServerEventAction::Emit(StreamEvent::ToolUse(expected.to_string()))
+            );
+        }
+
+        let long_command = "a".repeat(130);
+        let expected_long_command = format!("bash\n  command: {}...", "a".repeat(117));
+        let value = tool_part("bash", json!({ "command": long_command }));
+        let mut seen_tools = std::collections::HashSet::new();
+        assert_eq!(
+            map_server_event(&value, "ses_1", &mut seen_tools),
+            ServerEventAction::Emit(StreamEvent::ToolUse(expected_long_command))
         );
     }
 
