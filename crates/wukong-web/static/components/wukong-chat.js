@@ -366,6 +366,10 @@ export class WukongChat extends HTMLElement {
     this.log.scrollTop = this.log.scrollHeight;
   }
 
+  scrollToBottomAfterLayout() {
+    requestAnimationFrame(() => this.scrollToBottom());
+  }
+
   maybeScrollToBottom(wasNearBottom) {
     if (wasNearBottom) this.scrollToBottom();
   }
@@ -402,7 +406,7 @@ export class WukongChat extends HTMLElement {
     } else {
       this.log.innerHTML = '';
       for (const node of nodes) this.log.appendChild(node);
-      this.scrollToBottom();
+      this.scrollToBottomAfterLayout();
     }
     this.oldestId = this.log.querySelector('[data-message-id]')?.dataset.messageId || null;
   }
@@ -527,6 +531,7 @@ export class WukongChat extends HTMLElement {
     if (!this.liveThinking) {
       this.liveThinking = document.createElement('details');
       this.liveThinking.className = 'thinking';
+      this.liveThinking.open = true;
       this.liveThinking.innerHTML = '<summary>💭 思考過程</summary><pre class="reasoning"></pre>';
       this.log.appendChild(this.liveThinking);
     }
@@ -613,6 +618,7 @@ export class WukongChat extends HTMLElement {
       if (!thinking) {
         thinking = document.createElement('details');
         thinking.className = 'thinking';
+        thinking.open = true;
         thinking.innerHTML = '<summary>💭 思考過程</summary><pre class="reasoning"></pre>';
         this.log.appendChild(thinking);
       }
@@ -624,6 +630,7 @@ export class WukongChat extends HTMLElement {
       if (!thinking) {
         thinking = document.createElement('details');
         thinking.className = 'thinking';
+        thinking.open = true;
         thinking.innerHTML = '<summary>💭 思考過程</summary><pre class="reasoning"></pre>';
         this.log.appendChild(thinking);
       }

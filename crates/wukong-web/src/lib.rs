@@ -2899,6 +2899,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn chat_component_opens_live_thinking_details() {
+        assert!(
+            CHAT_JS.contains("this.liveThinking.open = true"),
+            "live reasoning details should be open so Telegram thinking is visible"
+        );
+        assert!(
+            CHAT_JS.contains("thinking.open = true"),
+            "direct chat reasoning details should be open while streaming"
+        );
+    }
+
+    #[test]
+    fn chat_component_scrolls_to_bottom_after_layout() {
+        assert!(
+            CHAT_JS.contains("requestAnimationFrame(() => this.scrollToBottom())"),
+            "initial message load should scroll after layout has completed"
+        );
+    }
+
     #[tokio::test]
     async fn chat_streams_role_answer_done() {
         // [0] planner -> "oracle" => single Oracle step; [1] execute -> markdown.
