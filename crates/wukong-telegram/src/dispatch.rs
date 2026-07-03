@@ -703,6 +703,28 @@ fn queue_live_event(
     });
 }
 
+fn question_request_json(request: &QuestionRequest) -> String {
+    serde_json::json!({
+        "request_id": request.request_id,
+        "session_id": request.session_id,
+        "questions": request.questions.iter().map(|q| {
+            serde_json::json!({
+                "question": q.question,
+                "header": q.header,
+                "multiple": q.multiple,
+                "custom": q.custom,
+                "options": q.options.iter().map(|o| {
+                    serde_json::json!({
+                        "label": o.label,
+                        "description": o.description,
+                    })
+                }).collect::<Vec<_>>()
+            })
+        }).collect::<Vec<_>>()
+    })
+    .to_string()
+}
+
 async fn record_live_event(
     history: Option<&ChatHistoryStore>,
     scope: &str,
@@ -1126,6 +1148,13 @@ pub async fn handle_message_with_responder<C, B, R>(
                         );
                     }
                     StreamEvent::QuestionRequest(request) => {
+                        queue_live_event(
+                            &live_tx,
+                            "question",
+                            Some(&request.request_id),
+                            &question_request_json(&request),
+                            None,
+                        );
                         let _ = tx_ev.send(Progress::QuestionRequest(request));
                     }
                     StreamEvent::StepStart => {
@@ -1948,6 +1977,46 @@ mod tests {
             pending.lock().unwrap().get(&12).unwrap().request_id,
             "que_1"
         );
+    }
+
+    #[tokio::test]
+    async fn question_request_records_live_question_event_for_web_stream() {
+        let client = MockTgClient::default();
+        let (mem, db_url) = open_memory_with_url().await;
+        let history = wukong_chat_history::ChatHistoryStore::open(&db_url)
+            .await
+            .unwrap();
+        let backend = QuestionBackend;
+        let pending = Arc::new(Mutex::new(PendingQuestions::new()));
+        let msg = TgMessage {
+            update_id: 1,
+            chat_id: 12,
+            text: "hi".to_string(),
+            attachments: Vec::new(),
+        };
+
+        handle_message_with_pending(
+            &client,
+            &mem,
+            &base_cfg(),
+            &backend,
+            Some(&history),
+            &[12],
+            pending,
+            &msg,
+        )
+        .await;
+
+        let events = history
+            .live_events_after(&scope_for_chat(12), 0, 20)
+            .await
+            .unwrap();
+        let question = events
+            .iter()
+            .find(|event| event.kind == "question")
+            .expect("missing question live event");
+        assert!(question.content.contains(r#""request_id":"que_1""#));
+        assert!(question.content.contains("選一個"));
     }
 
     #[tokio::test]
