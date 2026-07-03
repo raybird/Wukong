@@ -34,7 +34,7 @@ impl<'a> StreamRenderer<'a> {
                     let _ = self.err.flush();
                 }
             }
-            StreamEvent::StepStart | StreamEvent::StepFinish => {}
+            StreamEvent::QuestionRequest(_) | StreamEvent::StepStart | StreamEvent::StepFinish => {}
         }
     }
 }

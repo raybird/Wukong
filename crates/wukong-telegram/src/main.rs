@@ -1,12 +1,18 @@
 use std::sync::Arc;
+use std::sync::Mutex;
 use wukong_chat_history::ChatHistoryStore;
 use wukong_gateway::backend::build_backend_from_env;
 use wukong_gateway::config::GatewayConfig;
 use wukong_gateway::workspace_dir;
 use wukong_memory::Memory;
 use wukong_telegram::client::{ReqwestTgClient, TgClient};
-use wukong_telegram::dispatch::handle_message;
-use wukong_telegram::parse::{highest_update_id, parse_allowlist, parse_updates};
+use wukong_telegram::dispatch::{
+    cleanup_expired_questions, handle_callback_query, handle_message_with_responder,
+    PendingQuestions,
+};
+use wukong_telegram::parse::{
+    highest_update_id, parse_allowlist, parse_update_events, TgUpdateEvent,
+};
 
 fn load_effective_telegram_settings() -> wukong_settings::TelegramSettings {
     let path = wukong_settings::default_settings_path();
@@ -104,6 +110,7 @@ async fn main() {
     );
 
     let mut offset: i64 = 0;
+    let pending_questions = Arc::new(Mutex::new(PendingQuestions::new()));
     loop {
         let latest = load_effective_telegram_settings();
         if has_token(&latest) && (latest.token != token || latest.allowed != tg_settings.allowed) {
@@ -116,20 +123,36 @@ async fn main() {
         }
         match client.get_updates(offset).await {
             Ok(json) => {
+                cleanup_expired_questions(&client, &backend, pending_questions.clone()).await;
                 if let Some(max) = highest_update_id(&json) {
                     offset = max + 1;
                 }
-                for msg in parse_updates(&json) {
-                    handle_message(
-                        &client,
-                        &memory,
-                        &base_cfg,
-                        &backend,
-                        history.as_ref(),
-                        &allow,
-                        &msg,
-                    )
-                    .await;
+                for event in parse_update_events(&json) {
+                    match event {
+                        TgUpdateEvent::Message(msg) => {
+                            handle_message_with_responder(
+                                &client,
+                                &memory,
+                                &base_cfg,
+                                &backend,
+                                &backend,
+                                history.as_ref(),
+                                &allow,
+                                pending_questions.clone(),
+                                &msg,
+                            )
+                            .await;
+                        }
+                        TgUpdateEvent::CallbackQuery(callback) => {
+                            handle_callback_query(
+                                &client,
+                                &backend,
+                                pending_questions.clone(),
+                                &callback,
+                            )
+                            .await;
+                        }
+                    }
                 }
             }
             Err(e) => {

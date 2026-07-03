@@ -11,6 +11,14 @@ pub struct TgFileInfo {
     pub file_path: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineKeyboardButton {
+    pub text: String,
+    pub callback_data: String,
+}
+
+pub type InlineKeyboard = Vec<Vec<InlineKeyboardButton>>;
+
 /// The slice of the Telegram Bot API the bot and daemon need.
 pub trait TgClient {
     /// Long-poll for updates starting at `offset` (timeout baked in).
@@ -30,11 +38,32 @@ pub trait TgClient {
         chat_id: i64,
         html: &str,
     ) -> impl std::future::Future<Output = Result<i64, TgError>> + Send;
+    /// Send a plain text message with an inline keyboard; returns message_id.
+    fn send_message_with_inline_keyboard(
+        &self,
+        chat_id: i64,
+        text: &str,
+        keyboard: InlineKeyboard,
+    ) -> impl std::future::Future<Output = Result<i64, TgError>> + Send;
     /// Edit an existing message's text (plain).
     fn edit_message_text(
         &self,
         chat_id: i64,
         message_id: i64,
+        text: &str,
+    ) -> impl std::future::Future<Output = Result<(), TgError>> + Send;
+    /// Edit an existing message's text and inline keyboard.
+    fn edit_message_text_with_inline_keyboard(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        text: &str,
+        keyboard: InlineKeyboard,
+    ) -> impl std::future::Future<Output = Result<(), TgError>> + Send;
+    /// Answer a callback query so Telegram removes the client's loading state.
+    fn answer_callback_query(
+        &self,
+        callback_query_id: &str,
         text: &str,
     ) -> impl std::future::Future<Output = Result<(), TgError>> + Send;
     /// Delete a message.
@@ -102,6 +131,22 @@ fn message_id_of(v: &serde_json::Value) -> Result<i64, TgError> {
         .ok_or_else(|| TgError::Api(format!("no message_id in response: {v}")))
 }
 
+fn inline_keyboard_markup(keyboard: InlineKeyboard) -> serde_json::Value {
+    serde_json::json!({
+        "inline_keyboard": keyboard
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|button| serde_json::json!({
+                        "text": button.text,
+                        "callback_data": button.callback_data,
+                    }))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    })
+}
+
 impl TgClient for ReqwestTgClient {
     async fn get_updates(&self, offset: i64) -> Result<serde_json::Value, TgError> {
         let url = format!("{}/getUpdates", self.base);
@@ -134,6 +179,25 @@ impl TgClient for ReqwestTgClient {
         message_id_of(&v)
     }
 
+    async fn send_message_with_inline_keyboard(
+        &self,
+        chat_id: i64,
+        text: &str,
+        keyboard: InlineKeyboard,
+    ) -> Result<i64, TgError> {
+        let v = self
+            .post(
+                "sendMessage",
+                serde_json::json!({
+                    "chat_id": chat_id,
+                    "text": text,
+                    "reply_markup": inline_keyboard_markup(keyboard),
+                }),
+            )
+            .await?;
+        message_id_of(&v)
+    }
+
     async fn edit_message_text(
         &self,
         chat_id: i64,
@@ -143,6 +207,39 @@ impl TgClient for ReqwestTgClient {
         self.post(
             "editMessageText",
             serde_json::json!({ "chat_id": chat_id, "message_id": message_id, "text": text }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn edit_message_text_with_inline_keyboard(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        text: &str,
+        keyboard: InlineKeyboard,
+    ) -> Result<(), TgError> {
+        self.post(
+            "editMessageText",
+            serde_json::json!({
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text,
+                "reply_markup": inline_keyboard_markup(keyboard),
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn answer_callback_query(
+        &self,
+        callback_query_id: &str,
+        text: &str,
+    ) -> Result<(), TgError> {
+        self.post(
+            "answerCallbackQuery",
+            serde_json::json!({ "callback_query_id": callback_query_id, "text": text }),
         )
         .await?;
         Ok(())
@@ -223,6 +320,9 @@ pub mod mock {
     pub struct MockTgClient {
         pub sent: Arc<Mutex<Vec<Sent>>>,
         pub edits: Arc<Mutex<Vec<(i64, i64, String)>>>,
+        pub inline_messages: Arc<Mutex<Vec<(i64, String, InlineKeyboard)>>>,
+        pub inline_edits: Arc<Mutex<Vec<(i64, i64, String, InlineKeyboard)>>>,
+        pub callback_answers: Arc<Mutex<Vec<(String, String)>>>,
         pub deletes: Arc<Mutex<Vec<(i64, i64)>>>,
         pub actions: Arc<Mutex<Vec<(i64, String)>>>,
         files: MockFiles,
@@ -273,6 +373,18 @@ pub mod mock {
             });
             Ok(self.alloc_id())
         }
+        async fn send_message_with_inline_keyboard(
+            &self,
+            chat_id: i64,
+            text: &str,
+            keyboard: InlineKeyboard,
+        ) -> Result<i64, TgError> {
+            self.inline_messages
+                .lock()
+                .unwrap()
+                .push((chat_id, text.to_string(), keyboard));
+            Ok(self.alloc_id())
+        }
         async fn edit_message_text(
             &self,
             chat_id: i64,
@@ -283,6 +395,32 @@ pub mod mock {
                 .lock()
                 .unwrap()
                 .push((chat_id, message_id, text.to_string()));
+            Ok(())
+        }
+        async fn edit_message_text_with_inline_keyboard(
+            &self,
+            chat_id: i64,
+            message_id: i64,
+            text: &str,
+            keyboard: InlineKeyboard,
+        ) -> Result<(), TgError> {
+            self.inline_edits.lock().unwrap().push((
+                chat_id,
+                message_id,
+                text.to_string(),
+                keyboard,
+            ));
+            Ok(())
+        }
+        async fn answer_callback_query(
+            &self,
+            callback_query_id: &str,
+            text: &str,
+        ) -> Result<(), TgError> {
+            self.callback_answers
+                .lock()
+                .unwrap()
+                .push((callback_query_id.to_string(), text.to_string()));
             Ok(())
         }
         async fn delete_message(&self, chat_id: i64, message_id: i64) -> Result<(), TgError> {
@@ -339,5 +477,37 @@ pub mod mock {
         assert_eq!(info.file_path, "docs/report.pdf");
         let bytes = c.download_file(&info.file_path).await.unwrap();
         assert_eq!(bytes, b"hello");
+    }
+
+    #[cfg(test)]
+    #[tokio::test]
+    async fn mock_records_inline_keyboard_and_callback_answers() {
+        let c = MockTgClient::default();
+        let keyboard = vec![vec![InlineKeyboardButton {
+            text: "選項 A".to_string(),
+            callback_data: "q:que_1:pick:0:0".to_string(),
+        }]];
+
+        let id = c
+            .send_message_with_inline_keyboard(7, "請選", keyboard.clone())
+            .await
+            .unwrap();
+        c.edit_message_text_with_inline_keyboard(7, id, "更新", keyboard.clone())
+            .await
+            .unwrap();
+        c.answer_callback_query("cb_1", "已收到").await.unwrap();
+
+        assert_eq!(
+            c.inline_messages.lock().unwrap()[0],
+            (7, "請選".to_string(), keyboard.clone())
+        );
+        assert_eq!(
+            c.inline_edits.lock().unwrap()[0],
+            (7, id, "更新".to_string(), keyboard)
+        );
+        assert_eq!(
+            c.callback_answers.lock().unwrap()[0],
+            ("cb_1".to_string(), "已收到".to_string())
+        );
     }
 }

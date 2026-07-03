@@ -1,6 +1,6 @@
 use crate::backend::{agent_timeout, AgentRequest, AgentResponse, AiBackend};
 use crate::error::GatewayError;
-use crate::stream::StreamEvent;
+use crate::stream::{QuestionInfo, QuestionOption, QuestionRequest, StreamEvent};
 use reqwest::StatusCode;
 use serde::Serialize;
 use serde_json::Value;
@@ -39,6 +39,11 @@ struct MessagePart {
     #[serde(rename = "type")]
     kind: &'static str,
     text: String,
+}
+
+#[derive(Debug, Serialize)]
+struct QuestionReplyBody {
+    answers: Vec<Vec<String>>,
 }
 
 impl OpencodeServerBackend {
@@ -119,6 +124,30 @@ impl OpencodeServerBackend {
     async fn list_messages(&self, session_id: &str) -> Result<Value, GatewayError> {
         let url = format!("{}/session/{}/message", self.base_url, session_id);
         self.send_json("list_messages", self.client.get(url)).await
+    }
+
+    pub async fn reply_question(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        answers: Vec<Vec<String>>,
+    ) -> Result<(), GatewayError> {
+        let url = question_reply_url(&self.base_url, session_id, request_id);
+        self.send_empty(
+            "question_reply",
+            self.client.post(url).json(&question_reply_body(answers)),
+        )
+        .await
+    }
+
+    pub async fn reject_question(
+        &self,
+        session_id: &str,
+        request_id: &str,
+    ) -> Result<(), GatewayError> {
+        let url = question_reject_url(&self.base_url, session_id, request_id);
+        self.send_empty("question_reject", self.client.post(url))
+            .await
     }
 
     async fn open_event_stream(&self) -> Result<reqwest::Response, GatewayError> {
@@ -399,6 +428,24 @@ fn http_error(phase: &'static str, err: reqwest::Error) -> GatewayError {
     }
 }
 
+fn question_reply_body(answers: Vec<Vec<String>>) -> QuestionReplyBody {
+    QuestionReplyBody { answers }
+}
+
+fn question_reply_url(base_url: &str, session_id: &str, request_id: &str) -> String {
+    format!(
+        "{}/api/session/{}/question/{}/reply",
+        base_url, session_id, request_id
+    )
+}
+
+fn question_reject_url(base_url: &str, session_id: &str, request_id: &str) -> String {
+    format!(
+        "{}/api/session/{}/question/{}/reject",
+        base_url, session_id, request_id
+    )
+}
+
 #[derive(Default)]
 struct SseParser {
     data_lines: Vec<String>,
@@ -511,6 +558,66 @@ fn format_question_tool_use(part: &Value, name: &str) -> String {
     }
 }
 
+fn parse_question_request(properties: &Value) -> Option<QuestionRequest> {
+    let request_id = properties.get("id")?.as_str()?.to_string();
+    let session_id = properties.get("sessionID")?.as_str()?.to_string();
+    let questions = properties
+        .get("questions")?
+        .as_array()?
+        .iter()
+        .filter_map(parse_question_info)
+        .collect::<Vec<_>>();
+    if questions.is_empty() {
+        return None;
+    }
+    Some(QuestionRequest {
+        request_id,
+        session_id,
+        questions,
+    })
+}
+
+fn parse_question_info(value: &Value) -> Option<QuestionInfo> {
+    let question = value.get("question")?.as_str()?.to_string();
+    let header = value
+        .get("header")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let multiple = value
+        .get("multiple")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let custom = value.get("custom").and_then(Value::as_bool).unwrap_or(true);
+    let options = value
+        .get("options")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|option| {
+                    Some(QuestionOption {
+                        label: option.get("label")?.as_str()?.to_string(),
+                        description: option
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Some(QuestionInfo {
+        question,
+        header,
+        options,
+        multiple,
+        custom,
+    })
+}
+
 fn truncate_tool_value(value: &str) -> String {
     const MAX_CHARS: usize = 120;
     let mut chars = value.chars();
@@ -565,6 +672,14 @@ fn map_server_event(
             _ => ServerEventAction::Ignore,
         };
     }
+    if event_type == "question.asked" {
+        return match parse_question_request(properties) {
+            Some(request) if request.session_id == session_id => {
+                ServerEventAction::Emit(StreamEvent::QuestionRequest(request))
+            }
+            _ => ServerEventAction::Ignore,
+        };
+    }
     if event_type != "message.part.updated" {
         return ServerEventAction::Ignore;
     }
@@ -603,6 +718,9 @@ fn map_server_event(
                 return ServerEventAction::Ignore;
             }
             let name = part.get("tool").and_then(Value::as_str).unwrap_or("tool");
+            if name == "question" {
+                return ServerEventAction::Ignore;
+            }
             ServerEventAction::Emit(StreamEvent::ToolUse(format_tool_use_name(part, name)))
         }
         "step-start" => ServerEventAction::Emit(StreamEvent::StepStart),
@@ -860,7 +978,61 @@ mod tests {
     }
 
     #[test]
-    fn maps_question_tool_use_with_prompt_and_options() {
+    fn maps_question_asked_to_question_request() {
+        let value = json!({
+            "payload": {
+                "type": "question.asked",
+                "properties": {
+                    "id": "que_1",
+                    "sessionID": "ses_1",
+                    "questions": [{
+                        "question": "要怎麼處理 question 工具顯示？",
+                        "header": "顯示方式",
+                        "multiple": true,
+                        "custom": true,
+                        "options": [
+                            {
+                                "label": "輸出選項",
+                                "description": "遇到 question 時直接列出可選項目"
+                            },
+                            {
+                                "label": "查文件",
+                                "description": "先確認是否有官方格式可轉換"
+                            }
+                        ]
+                    }]
+                }
+            }
+        });
+        let mut seen_tools = std::collections::HashSet::new();
+
+        assert_eq!(
+            map_server_event(&value, "ses_1", &mut seen_tools),
+            ServerEventAction::Emit(StreamEvent::QuestionRequest(QuestionRequest {
+                request_id: "que_1".to_string(),
+                session_id: "ses_1".to_string(),
+                questions: vec![QuestionInfo {
+                    question: "要怎麼處理 question 工具顯示？".to_string(),
+                    header: "顯示方式".to_string(),
+                    multiple: true,
+                    custom: true,
+                    options: vec![
+                        QuestionOption {
+                            label: "輸出選項".to_string(),
+                            description: "遇到 question 時直接列出可選項目".to_string(),
+                        },
+                        QuestionOption {
+                            label: "查文件".to_string(),
+                            description: "先確認是否有官方格式可轉換".to_string(),
+                        },
+                    ],
+                }],
+            }))
+        );
+    }
+
+    #[test]
+    fn ignores_question_tool_part_update_as_progress() {
         let value = json!({
             "payload": {
                 "type": "message.part.updated",
@@ -878,16 +1050,7 @@ mod tests {
                                 "questions": [{
                                     "question": "要怎麼處理 question 工具顯示？",
                                     "header": "顯示方式",
-                                    "options": [
-                                        {
-                                            "label": "輸出選項",
-                                            "description": "遇到 question 時直接列出可選項目"
-                                        },
-                                        {
-                                            "label": "查文件",
-                                            "description": "先確認是否有官方格式可轉換"
-                                        }
-                                    ]
+                                    "options": []
                                 }]
                             }
                         }
@@ -899,9 +1062,32 @@ mod tests {
 
         assert_eq!(
             map_server_event(&value, "ses_1", &mut seen_tools),
-            ServerEventAction::Emit(StreamEvent::ToolUse(
-                "question\n  顯示方式: 要怎麼處理 question 工具顯示？\n  1. 輸出選項 - 遇到 question 時直接列出可選項目\n  2. 查文件 - 先確認是否有官方格式可轉換".to_string()
-            ))
+            ServerEventAction::Ignore
+        );
+    }
+
+    #[test]
+    fn question_reply_body_serializes_answers() {
+        let body = question_reply_body(vec![
+            vec!["A".to_string()],
+            vec!["B".to_string(), "C".to_string()],
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(body).unwrap(),
+            json!({ "answers": [["A"], ["B", "C"]] })
+        );
+    }
+
+    #[test]
+    fn question_api_urls_target_session_scoped_routes() {
+        assert_eq!(
+            question_reply_url("http://server", "ses_1", "que_1"),
+            "http://server/api/session/ses_1/question/que_1/reply"
+        );
+        assert_eq!(
+            question_reject_url("http://server", "ses_1", "que_1"),
+            "http://server/api/session/ses_1/question/que_1/reject"
         );
     }
 

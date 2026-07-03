@@ -25,36 +25,80 @@ pub struct TgMessage {
     pub attachments: Vec<TgAttachment>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TgCallbackQuery {
+    pub update_id: i64,
+    pub callback_query_id: String,
+    pub chat_id: i64,
+    pub message_id: i64,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TgUpdateEvent {
+    Message(TgMessage),
+    CallbackQuery(TgCallbackQuery),
+}
+
 /// Extract user messages from a getUpdates response. Updates without text,
 /// captions, or supported attachments are skipped.
 pub fn parse_updates(json: &serde_json::Value) -> Vec<TgMessage> {
+    parse_update_events(json)
+        .into_iter()
+        .filter_map(|event| match event {
+            TgUpdateEvent::Message(message) => Some(message),
+            TgUpdateEvent::CallbackQuery(_) => None,
+        })
+        .collect()
+}
+
+pub fn parse_update_events(json: &serde_json::Value) -> Vec<TgUpdateEvent> {
     let Some(arr) = json.get("result").and_then(|r| r.as_array()) else {
         return Vec::new();
     };
     arr.iter()
         .filter_map(|u| {
-            let update_id = u.get("update_id")?.as_i64()?;
-            let msg = u.get("message")?;
-            let chat_id = msg.get("chat")?.get("id")?.as_i64()?;
-            let attachments = parse_attachments(msg);
-            let text = msg
-                .get("text")
-                .or_else(|| msg.get("caption"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .or_else(|| {
-                    attachments
-                        .first()
-                        .map(|a| fallback_prompt(&a.original_name))
-                })?;
-            Some(TgMessage {
-                update_id,
-                chat_id,
-                text,
-                attachments,
-            })
+            parse_callback_query(u)
+                .map(TgUpdateEvent::CallbackQuery)
+                .or_else(|| parse_message_update(u).map(TgUpdateEvent::Message))
         })
         .collect()
+}
+
+fn parse_message_update(u: &serde_json::Value) -> Option<TgMessage> {
+    let update_id = u.get("update_id")?.as_i64()?;
+    let msg = u.get("message")?;
+    let chat_id = msg.get("chat")?.get("id")?.as_i64()?;
+    let attachments = parse_attachments(msg);
+    let text = msg
+        .get("text")
+        .or_else(|| msg.get("caption"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            attachments
+                .first()
+                .map(|a| fallback_prompt(&a.original_name))
+        })?;
+    Some(TgMessage {
+        update_id,
+        chat_id,
+        text,
+        attachments,
+    })
+}
+
+fn parse_callback_query(u: &serde_json::Value) -> Option<TgCallbackQuery> {
+    let update_id = u.get("update_id")?.as_i64()?;
+    let callback = u.get("callback_query")?;
+    let message = callback.get("message")?;
+    Some(TgCallbackQuery {
+        update_id,
+        callback_query_id: callback.get("id")?.as_str()?.to_string(),
+        chat_id: message.get("chat")?.get("id")?.as_i64()?,
+        message_id: message.get("message_id")?.as_i64()?,
+        data: callback.get("data")?.as_str()?.to_string(),
+    })
 }
 
 fn parse_attachments(msg: &serde_json::Value) -> Vec<TgAttachment> {
@@ -216,6 +260,34 @@ mod tests {
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].update_id, 3);
         assert_eq!(msgs[0].text, "ok");
+    }
+
+    #[test]
+    fn parse_update_events_extracts_callback_query() {
+        let json = serde_json::json!({
+            "result": [{
+                "update_id": 42,
+                "callback_query": {
+                    "id": "cb_1",
+                    "data": "q:que_1:pick:0:1",
+                    "message": {
+                        "message_id": 99,
+                        "chat": { "id": 7 }
+                    }
+                }
+            }]
+        });
+
+        assert_eq!(
+            parse_update_events(&json),
+            vec![TgUpdateEvent::CallbackQuery(TgCallbackQuery {
+                update_id: 42,
+                callback_query_id: "cb_1".to_string(),
+                chat_id: 7,
+                message_id: 99,
+                data: "q:que_1:pick:0:1".to_string(),
+            })]
+        );
     }
 
     #[test]

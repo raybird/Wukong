@@ -1,6 +1,31 @@
 //! Parsing of opencode `--format json` NDJSON events into render-relevant
 //! StreamEvents. opencode emits one JSON object per line.
 
+/// One option in an OpenCode question prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionOption {
+    pub label: String,
+    pub description: String,
+}
+
+/// One question in an OpenCode question request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionInfo {
+    pub question: String,
+    pub header: String,
+    pub options: Vec<QuestionOption>,
+    pub multiple: bool,
+    pub custom: bool,
+}
+
+/// A pending OpenCode question request that must be answered or rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionRequest {
+    pub request_id: String,
+    pub session_id: String,
+    pub questions: Vec<QuestionInfo>,
+}
+
 /// One render-relevant event parsed from the agent's `--format json` stream.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
@@ -10,6 +35,8 @@ pub enum StreamEvent {
     Reasoning(String),
     /// A tool invocation by name (opencode "tool_use").
     ToolUse(String),
+    /// A pending question request from OpenCode's question tool.
+    QuestionRequest(QuestionRequest),
     /// A step begins (drives the spinner).
     StepStart,
     /// A step ends.

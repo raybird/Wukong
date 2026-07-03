@@ -1,13 +1,16 @@
 //! Per-message dispatch: allowlist → classify → run_turn → reply.
 
-use crate::client::TgClient;
+use crate::client::{InlineKeyboard, InlineKeyboardButton, TgClient};
 use crate::command::{classify_message, MessageAction};
-use crate::parse::{is_allowed, scope_for_chat, TgAttachment, TgMessage};
+use crate::parse::{is_allowed, scope_for_chat, TgAttachment, TgCallbackQuery, TgMessage};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use wukong_chat_history::{ChatHistoryStore, NewChatAttachment};
 use wukong_cli::run_turn_observed_with_attachments;
-use wukong_gateway::backend::{AgentAttachment, AiBackend};
+use wukong_gateway::backend::{AgentAttachment, AgentBackend, AiBackend};
 use wukong_gateway::config::GatewayConfig;
-use wukong_gateway::StreamEvent;
+use wukong_gateway::stream::{QuestionInfo, QuestionRequest};
+use wukong_gateway::{GatewayError, StreamEvent};
 use wukong_memory::Memory;
 use wukong_orchestrator::Role;
 
@@ -16,6 +19,491 @@ enum Progress {
     Role(Role),
     Reasoning(String),
     ToolUse(String),
+    QuestionRequest(QuestionRequest),
+}
+
+const QUESTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuestionAction {
+    Pick { question: usize, option: usize },
+    Toggle { question: usize, option: usize },
+    Custom { question: usize },
+    Next,
+    Cancel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedQuestionCallback {
+    pub request_id: String,
+    pub action: QuestionAction,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingQuestion {
+    pub chat_id: i64,
+    pub session_id: String,
+    pub request_id: String,
+    pub questions: Vec<QuestionInfo>,
+    pub current_question_index: usize,
+    pub answers: Vec<Vec<String>>,
+    pub waiting_custom_question_index: Option<usize>,
+    pub deadline: std::time::Instant,
+    pub message_id: Option<i64>,
+}
+
+pub type PendingQuestions = HashMap<i64, PendingQuestion>;
+
+pub trait QuestionResponder {
+    fn reply_question(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        answers: Vec<Vec<String>>,
+    ) -> impl std::future::Future<Output = Result<(), GatewayError>> + Send;
+
+    fn reject_question(
+        &self,
+        session_id: &str,
+        request_id: &str,
+    ) -> impl std::future::Future<Output = Result<(), GatewayError>> + Send;
+}
+
+impl QuestionResponder for AgentBackend {
+    async fn reply_question(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        answers: Vec<Vec<String>>,
+    ) -> Result<(), GatewayError> {
+        match self {
+            AgentBackend::Server(backend) => {
+                backend
+                    .reply_question(session_id, request_id, answers)
+                    .await
+            }
+            AgentBackend::Cli(_) => Err(GatewayError::AgentFailed {
+                code: None,
+                stderr: "目前只有 opencode server backend 支援 question 回答。".to_string(),
+            }),
+        }
+    }
+
+    async fn reject_question(
+        &self,
+        session_id: &str,
+        request_id: &str,
+    ) -> Result<(), GatewayError> {
+        match self {
+            AgentBackend::Server(backend) => backend.reject_question(session_id, request_id).await,
+            AgentBackend::Cli(_) => Err(GatewayError::AgentFailed {
+                code: None,
+                stderr: "目前只有 opencode server backend 支援 question 取消。".to_string(),
+            }),
+        }
+    }
+}
+
+struct NoopQuestionResponder;
+
+impl QuestionResponder for NoopQuestionResponder {
+    async fn reply_question(
+        &self,
+        _session_id: &str,
+        _request_id: &str,
+        _answers: Vec<Vec<String>>,
+    ) -> Result<(), GatewayError> {
+        Err(GatewayError::AgentFailed {
+            code: None,
+            stderr: "question responder is not configured".to_string(),
+        })
+    }
+
+    async fn reject_question(
+        &self,
+        _session_id: &str,
+        _request_id: &str,
+    ) -> Result<(), GatewayError> {
+        Err(GatewayError::AgentFailed {
+            code: None,
+            stderr: "question responder is not configured".to_string(),
+        })
+    }
+}
+
+pub fn question_callback_data(request_id: &str, action: QuestionAction) -> String {
+    match action {
+        QuestionAction::Pick { question, option } => {
+            format!("q:{request_id}:pick:{question}:{option}")
+        }
+        QuestionAction::Toggle { question, option } => {
+            format!("q:{request_id}:toggle:{question}:{option}")
+        }
+        QuestionAction::Custom { question } => format!("q:{request_id}:custom:{question}"),
+        QuestionAction::Next => format!("q:{request_id}:next"),
+        QuestionAction::Cancel => format!("q:{request_id}:cancel"),
+    }
+}
+
+pub fn parse_question_callback(data: &str) -> Option<ParsedQuestionCallback> {
+    let mut parts = data.split(':');
+    if parts.next()? != "q" {
+        return None;
+    }
+    let request_id = parts.next()?.to_string();
+    let action = match parts.next()? {
+        "pick" => QuestionAction::Pick {
+            question: parts.next()?.parse().ok()?,
+            option: parts.next()?.parse().ok()?,
+        },
+        "toggle" => QuestionAction::Toggle {
+            question: parts.next()?.parse().ok()?,
+            option: parts.next()?.parse().ok()?,
+        },
+        "custom" => QuestionAction::Custom {
+            question: parts.next()?.parse().ok()?,
+        },
+        "next" => QuestionAction::Next,
+        "cancel" => QuestionAction::Cancel,
+        _ => return None,
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(ParsedQuestionCallback { request_id, action })
+}
+
+pub fn render_pending_question(pending: &PendingQuestion) -> (String, InlineKeyboard) {
+    let question = &pending.questions[pending.current_question_index];
+    let total = pending.questions.len();
+    let current = pending.current_question_index + 1;
+    let mut text = format!("❓ 第 {current} / {total} 題");
+    if !question.header.trim().is_empty() {
+        text.push('\n');
+        text.push_str(&question.header);
+    }
+    text.push_str("\n\n");
+    text.push_str(&question.question);
+
+    let selected = pending
+        .answers
+        .get(pending.current_question_index)
+        .cloned()
+        .unwrap_or_default();
+    let mut keyboard = Vec::new();
+
+    if question.multiple {
+        for (row, chunk) in question.options.chunks(2).enumerate() {
+            let buttons = chunk
+                .iter()
+                .enumerate()
+                .map(|(offset, option)| {
+                    let option_index = row * 2 + offset;
+                    let mark = if selected.contains(&option.label) {
+                        "[x]"
+                    } else {
+                        "[ ]"
+                    };
+                    InlineKeyboardButton {
+                        text: format!("{mark} {}", option.label),
+                        callback_data: question_callback_data(
+                            &pending.request_id,
+                            QuestionAction::Toggle {
+                                question: pending.current_question_index,
+                                option: option_index,
+                            },
+                        ),
+                    }
+                })
+                .collect::<Vec<_>>();
+            keyboard.push(buttons);
+        }
+        keyboard.push(vec![InlineKeyboardButton {
+            text: if pending.current_question_index + 1 == total {
+                "送出".to_string()
+            } else {
+                "下一題".to_string()
+            },
+            callback_data: question_callback_data(&pending.request_id, QuestionAction::Next),
+        }]);
+    } else {
+        for (option_index, option) in question.options.iter().enumerate() {
+            keyboard.push(vec![InlineKeyboardButton {
+                text: option.label.clone(),
+                callback_data: question_callback_data(
+                    &pending.request_id,
+                    QuestionAction::Pick {
+                        question: pending.current_question_index,
+                        option: option_index,
+                    },
+                ),
+            }]);
+        }
+    }
+
+    if question.custom {
+        keyboard.push(vec![InlineKeyboardButton {
+            text: "自訂回答".to_string(),
+            callback_data: question_callback_data(
+                &pending.request_id,
+                QuestionAction::Custom {
+                    question: pending.current_question_index,
+                },
+            ),
+        }]);
+    }
+    keyboard.push(vec![InlineKeyboardButton {
+        text: "取消".to_string(),
+        callback_data: question_callback_data(&pending.request_id, QuestionAction::Cancel),
+    }]);
+
+    (text, keyboard)
+}
+
+fn toggle_answer(answers: &mut Vec<String>, label: &str) {
+    if let Some(index) = answers.iter().position(|answer| answer == label) {
+        answers.remove(index);
+    } else {
+        answers.push(label.to_string());
+    }
+}
+
+async fn edit_pending_question<C: TgClient>(client: &C, pending: &PendingQuestion) {
+    let Some(message_id) = pending.message_id else {
+        return;
+    };
+    let (text, keyboard) = render_pending_question(pending);
+    let _ = client
+        .edit_message_text_with_inline_keyboard(pending.chat_id, message_id, &text, keyboard)
+        .await;
+}
+
+async fn advance_or_reply<C: TgClient, R: QuestionResponder>(
+    client: &C,
+    responder: &R,
+    pending_questions: Arc<Mutex<PendingQuestions>>,
+    chat_id: i64,
+) {
+    let mut reply_payload = None;
+    let mut edit_pending = None;
+    {
+        let mut pending_questions = pending_questions.lock().unwrap();
+        let Some(pending) = pending_questions.get_mut(&chat_id) else {
+            return;
+        };
+        if pending.current_question_index + 1 < pending.questions.len() {
+            pending.current_question_index += 1;
+            pending.waiting_custom_question_index = None;
+            edit_pending = Some(pending.clone());
+        } else if let Some(pending) = pending_questions.remove(&chat_id) {
+            reply_payload = Some((
+                pending.session_id,
+                pending.request_id,
+                pending.answers,
+                pending.message_id,
+            ));
+        }
+    }
+
+    if let Some(pending) = edit_pending {
+        edit_pending_question(client, &pending).await;
+    }
+    if let Some((session_id, request_id, answers, message_id)) = reply_payload {
+        match responder
+            .reply_question(&session_id, &request_id, answers)
+            .await
+        {
+            Ok(()) => {
+                if let Some(message_id) = message_id {
+                    let _ = client
+                        .edit_message_text(chat_id, message_id, "已送出回答。")
+                        .await;
+                }
+            }
+            Err(err) => {
+                let _ = client
+                    .send_message(chat_id, &format!("⚠️ 回答送出失敗：{err}"))
+                    .await;
+            }
+        }
+    }
+}
+
+async fn reject_and_clear_question<C: TgClient, R: QuestionResponder>(
+    client: &C,
+    responder: &R,
+    pending_questions: Arc<Mutex<PendingQuestions>>,
+    chat_id: i64,
+    message: &str,
+) {
+    let pending = pending_questions.lock().unwrap().remove(&chat_id);
+    let Some(pending) = pending else {
+        return;
+    };
+    let _ = responder
+        .reject_question(&pending.session_id, &pending.request_id)
+        .await;
+    if let Some(message_id) = pending.message_id {
+        let _ = client.edit_message_text(chat_id, message_id, message).await;
+    }
+}
+
+async fn complete_custom_answer<C: TgClient, R: QuestionResponder>(
+    client: &C,
+    responder: &R,
+    pending_questions: Arc<Mutex<PendingQuestions>>,
+    chat_id: i64,
+    answer: String,
+) {
+    {
+        let mut pending_questions = pending_questions.lock().unwrap();
+        let Some(pending) = pending_questions.get_mut(&chat_id) else {
+            return;
+        };
+        let Some(index) = pending.waiting_custom_question_index.take() else {
+            return;
+        };
+        if pending.questions[index].multiple {
+            if !pending.answers[index].contains(&answer) {
+                pending.answers[index].push(answer);
+            }
+        } else {
+            pending.answers[index] = vec![answer];
+        }
+    }
+    advance_or_reply(client, responder, pending_questions, chat_id).await;
+}
+
+pub async fn cleanup_expired_questions<C: TgClient, R: QuestionResponder>(
+    client: &C,
+    responder: &R,
+    pending_questions: Arc<Mutex<PendingQuestions>>,
+) {
+    let now = std::time::Instant::now();
+    let expired = pending_questions
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|(chat_id, pending)| (pending.deadline <= now).then_some(*chat_id))
+        .collect::<Vec<_>>();
+
+    for chat_id in expired {
+        reject_and_clear_question(
+            client,
+            responder,
+            pending_questions.clone(),
+            chat_id,
+            "問題已逾時，已取消。",
+        )
+        .await;
+    }
+}
+
+pub async fn handle_callback_query<C: TgClient, R: QuestionResponder>(
+    client: &C,
+    responder: &R,
+    pending_questions: Arc<Mutex<PendingQuestions>>,
+    callback: &TgCallbackQuery,
+) {
+    let Some(parsed) = parse_question_callback(&callback.data) else {
+        let _ = client
+            .answer_callback_query(&callback.callback_query_id, "無法處理這個操作")
+            .await;
+        return;
+    };
+    let mut edit_pending = None;
+    let mut reject = false;
+    let mut advance = false;
+    let mut callback_message = "";
+
+    {
+        let mut pending_questions_guard = pending_questions.lock().unwrap();
+        let Some(pending) = pending_questions_guard.get_mut(&callback.chat_id) else {
+            drop(pending_questions_guard);
+            let _ = client
+                .answer_callback_query(&callback.callback_query_id, "這個問題已失效")
+                .await;
+            return;
+        };
+        if pending.request_id != parsed.request_id {
+            drop(pending_questions_guard);
+            let _ = client
+                .answer_callback_query(&callback.callback_query_id, "這個問題已失效")
+                .await;
+            return;
+        }
+
+        match parsed.action {
+            QuestionAction::Pick { question, option } => {
+                if question != pending.current_question_index {
+                    callback_message = "題目已更新";
+                } else if let Some(label) = pending.questions[question]
+                    .options
+                    .get(option)
+                    .map(|option| option.label.clone())
+                {
+                    pending.answers[question] = vec![label];
+                    advance = true;
+                }
+            }
+            QuestionAction::Toggle { question, option } => {
+                if question == pending.current_question_index {
+                    if let Some(label) = pending.questions[question]
+                        .options
+                        .get(option)
+                        .map(|option| option.label.clone())
+                    {
+                        toggle_answer(&mut pending.answers[question], &label);
+                        edit_pending = Some(pending.clone());
+                    }
+                }
+            }
+            QuestionAction::Custom { question } => {
+                pending.waiting_custom_question_index = Some(question);
+                if let Some(message_id) = pending.message_id {
+                    let _ = client
+                        .edit_message_text(
+                            pending.chat_id,
+                            message_id,
+                            "請直接傳下一則文字作為自訂回答。",
+                        )
+                        .await;
+                }
+            }
+            QuestionAction::Next => {
+                advance = true;
+            }
+            QuestionAction::Cancel => {
+                reject = true;
+            }
+        }
+    }
+
+    if let Some(pending) = edit_pending {
+        edit_pending_question(client, &pending).await;
+    }
+    if advance {
+        advance_or_reply(
+            client,
+            responder,
+            pending_questions.clone(),
+            callback.chat_id,
+        )
+        .await;
+    }
+    if reject {
+        reject_and_clear_question(
+            client,
+            responder,
+            pending_questions.clone(),
+            callback.chat_id,
+            "已取消問題。",
+        )
+        .await;
+    }
+    let _ = client
+        .answer_callback_query(&callback.callback_query_id, callback_message)
+        .await;
 }
 
 /// Compose the status-bubble text from the current role and accumulated reasoning.
@@ -249,10 +737,94 @@ pub async fn handle_message<C, B>(
     C: TgClient + Clone + Send + Sync + 'static,
     B: AiBackend,
 {
+    let pending_questions = Arc::new(Mutex::new(PendingQuestions::new()));
+    handle_message_with_pending(
+        client,
+        mem,
+        base_cfg,
+        backend,
+        history,
+        allow,
+        pending_questions,
+        msg,
+    )
+    .await;
+}
+
+pub async fn handle_message_with_pending<C, B>(
+    client: &C,
+    mem: &Memory,
+    base_cfg: &GatewayConfig,
+    backend: &B,
+    history: Option<&ChatHistoryStore>,
+    allow: &[i64],
+    pending_questions: Arc<Mutex<PendingQuestions>>,
+    msg: &TgMessage,
+) where
+    C: TgClient + Clone + Send + Sync + 'static,
+    B: AiBackend,
+{
+    handle_message_with_responder(
+        client,
+        mem,
+        base_cfg,
+        backend,
+        &NoopQuestionResponder,
+        history,
+        allow,
+        pending_questions,
+        msg,
+    )
+    .await;
+}
+
+pub async fn handle_message_with_responder<C, B, R>(
+    client: &C,
+    mem: &Memory,
+    base_cfg: &GatewayConfig,
+    backend: &B,
+    responder: &R,
+    history: Option<&ChatHistoryStore>,
+    allow: &[i64],
+    pending_questions: Arc<Mutex<PendingQuestions>>,
+    msg: &TgMessage,
+) where
+    C: TgClient + Clone + Send + Sync + 'static,
+    B: AiBackend,
+    R: QuestionResponder,
+{
     if !is_allowed(msg.chat_id, allow) {
         return; // silently ignore non-allowlisted chats
     }
     let chat_id = msg.chat_id;
+    let waiting_custom = pending_questions
+        .lock()
+        .unwrap()
+        .get(&chat_id)
+        .and_then(|pending| pending.waiting_custom_question_index);
+    if waiting_custom.is_some() {
+        if msg.text.trim().is_empty() || !msg.attachments.is_empty() {
+            let _ = client
+                .send_message(chat_id, "請傳文字答案，不要傳附件。")
+                .await;
+            return;
+        }
+        complete_custom_answer(
+            client,
+            responder,
+            pending_questions.clone(),
+            chat_id,
+            msg.text.trim().to_string(),
+        )
+        .await;
+        return;
+    }
+    if pending_questions.lock().unwrap().contains_key(&chat_id) {
+        let _ = client
+            .send_message(chat_id, "請先回答目前問題，或按取消。")
+            .await;
+        return;
+    }
     match classify_message(&msg.text) {
         MessageAction::Command { name, args } => {
             let mut cfg = base_cfg.clone();
@@ -429,6 +1001,7 @@ pub async fn handle_message<C, B>(
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
             let progress = {
                 let c = client.clone();
+                let pending_questions = pending_questions.clone();
                 tokio::spawn(async move {
                     let mut role: Option<String> = None;
                     let mut reasoning = String::new();
@@ -474,6 +1047,28 @@ pub async fn handle_message<C, B>(
                                         &bubble_text(role.as_deref(), &reasoning),
                                     )
                                     .await;
+                            }
+                            Progress::QuestionRequest(request) => {
+                                let pending = PendingQuestion {
+                                    chat_id,
+                                    session_id: request.session_id.clone(),
+                                    request_id: request.request_id.clone(),
+                                    answers: vec![Vec::new(); request.questions.len()],
+                                    questions: request.questions.clone(),
+                                    current_question_index: 0,
+                                    waiting_custom_question_index: None,
+                                    deadline: std::time::Instant::now() + QUESTION_TIMEOUT,
+                                    message_id: None,
+                                };
+                                let (text, keyboard) = render_pending_question(&pending);
+                                if let Ok(message_id) = c
+                                    .send_message_with_inline_keyboard(chat_id, &text, keyboard)
+                                    .await
+                                {
+                                    let mut pending = pending;
+                                    pending.message_id = Some(message_id);
+                                    pending_questions.lock().unwrap().insert(chat_id, pending);
+                                }
                             }
                         }
                     }
@@ -529,6 +1124,9 @@ pub async fn handle_message<C, B>(
                             events_buf.last().map(|e| e.3.as_str()).unwrap_or(""),
                             None,
                         );
+                    }
+                    StreamEvent::QuestionRequest(request) => {
+                        let _ = tx_ev.send(Progress::QuestionRequest(request));
                     }
                     StreamEvent::StepStart => {
                         let now = now_unix();
@@ -621,7 +1219,7 @@ mod tests {
     use crate::client::mock::MockTgClient;
     use crate::parse::{TgAttachment, TgAttachmentKind};
     use std::collections::VecDeque;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use tempfile::NamedTempFile;
     use wukong_gateway::backend::{AgentRequest, AgentResponse};
     use wukong_gateway::GatewayError;
@@ -668,6 +1266,329 @@ mod tests {
                 session_id: None,
             })
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingResponder {
+        replies: Mutex<Vec<(String, String, Vec<Vec<String>>)>>,
+        rejects: Mutex<Vec<(String, String)>>,
+    }
+
+    impl QuestionResponder for RecordingResponder {
+        async fn reply_question(
+            &self,
+            session_id: &str,
+            request_id: &str,
+            answers: Vec<Vec<String>>,
+        ) -> Result<(), GatewayError> {
+            self.replies.lock().unwrap().push((
+                session_id.to_string(),
+                request_id.to_string(),
+                answers,
+            ));
+            Ok(())
+        }
+
+        async fn reject_question(
+            &self,
+            session_id: &str,
+            request_id: &str,
+        ) -> Result<(), GatewayError> {
+            self.rejects
+                .lock()
+                .unwrap()
+                .push((session_id.to_string(), request_id.to_string()));
+            Ok(())
+        }
+    }
+
+    fn sample_pending_question(multiple: bool) -> PendingQuestion {
+        PendingQuestion {
+            chat_id: 7,
+            session_id: "ses_1".to_string(),
+            request_id: "que_1".to_string(),
+            questions: vec![wukong_gateway::stream::QuestionInfo {
+                question: if multiple { "選多個" } else { "選一個" }.to_string(),
+                header: "偏好".to_string(),
+                multiple,
+                custom: true,
+                options: vec![
+                    wukong_gateway::stream::QuestionOption {
+                        label: "A".to_string(),
+                        description: "".to_string(),
+                    },
+                    wukong_gateway::stream::QuestionOption {
+                        label: "B".to_string(),
+                        description: "".to_string(),
+                    },
+                ],
+            }],
+            current_question_index: 0,
+            answers: vec![Vec::new()],
+            waiting_custom_question_index: None,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(600),
+            message_id: Some(10),
+        }
+    }
+
+    #[test]
+    fn question_callback_data_is_compact_and_parseable() {
+        let data = question_callback_data(
+            "que_1",
+            QuestionAction::Pick {
+                question: 0,
+                option: 2,
+            },
+        );
+        assert_eq!(data, "q:que_1:pick:0:2");
+        assert_eq!(
+            parse_question_callback(&data),
+            Some(ParsedQuestionCallback {
+                request_id: "que_1".to_string(),
+                action: QuestionAction::Pick {
+                    question: 0,
+                    option: 2,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn render_single_choice_question_has_option_custom_and_cancel_buttons() {
+        let pending = sample_pending_question(false);
+        let (text, keyboard) = render_pending_question(&pending);
+
+        assert!(text.contains("第 1 / 1 題"));
+        assert!(text.contains("選一個"));
+        assert_eq!(keyboard.len(), 4);
+        assert_eq!(keyboard[0][0].text, "A");
+        assert_eq!(keyboard[2][0].text, "自訂回答");
+        assert_eq!(keyboard[3][0].text, "取消");
+    }
+
+    #[test]
+    fn render_multi_choice_question_marks_selected_options() {
+        let mut pending = sample_pending_question(true);
+        pending.answers[0] = vec!["A".to_string()];
+        let (_text, keyboard) = render_pending_question(&pending);
+
+        assert_eq!(keyboard[0][0].text, "[x] A");
+        assert_eq!(keyboard[0][1].text, "[ ] B");
+        assert_eq!(keyboard[1][0].text, "送出");
+    }
+
+    fn callback(data: &str) -> TgCallbackQuery {
+        TgCallbackQuery {
+            update_id: 1,
+            callback_query_id: "cb_1".to_string(),
+            chat_id: 7,
+            message_id: 10,
+            data: data.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn single_choice_callback_records_answer_and_replies() {
+        let client = MockTgClient::default();
+        let responder = RecordingResponder::default();
+        let pending = Arc::new(Mutex::new(PendingQuestions::new()));
+        pending
+            .lock()
+            .unwrap()
+            .insert(7, sample_pending_question(false));
+
+        handle_callback_query(
+            &client,
+            &responder,
+            pending.clone(),
+            &callback("q:que_1:pick:0:0"),
+        )
+        .await;
+
+        assert!(pending.lock().unwrap().get(&7).is_none());
+        assert_eq!(
+            responder.replies.lock().unwrap()[0],
+            (
+                "ses_1".to_string(),
+                "que_1".to_string(),
+                vec![vec!["A".to_string()]],
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_choice_callback_toggles_and_submit_replies() {
+        let client = MockTgClient::default();
+        let responder = RecordingResponder::default();
+        let pending = Arc::new(Mutex::new(PendingQuestions::new()));
+        pending
+            .lock()
+            .unwrap()
+            .insert(7, sample_pending_question(true));
+
+        handle_callback_query(
+            &client,
+            &responder,
+            pending.clone(),
+            &callback("q:que_1:toggle:0:0"),
+        )
+        .await;
+        handle_callback_query(
+            &client,
+            &responder,
+            pending.clone(),
+            &callback("q:que_1:toggle:0:1"),
+        )
+        .await;
+        handle_callback_query(
+            &client,
+            &responder,
+            pending.clone(),
+            &callback("q:que_1:next"),
+        )
+        .await;
+
+        assert_eq!(
+            responder.replies.lock().unwrap()[0].2,
+            vec![vec!["A".to_string(), "B".to_string()]]
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_callback_rejects_and_clears_pending() {
+        let client = MockTgClient::default();
+        let responder = RecordingResponder::default();
+        let pending = Arc::new(Mutex::new(PendingQuestions::new()));
+        pending
+            .lock()
+            .unwrap()
+            .insert(7, sample_pending_question(false));
+
+        handle_callback_query(
+            &client,
+            &responder,
+            pending.clone(),
+            &callback("q:que_1:cancel"),
+        )
+        .await;
+
+        assert!(pending.lock().unwrap().get(&7).is_none());
+        assert_eq!(
+            responder.rejects.lock().unwrap()[0],
+            ("ses_1".to_string(), "que_1".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_callback_answers_callback_query_without_mutating_state() {
+        let client = MockTgClient::default();
+        let responder = RecordingResponder::default();
+        let pending = Arc::new(Mutex::new(PendingQuestions::new()));
+
+        handle_callback_query(&client, &responder, pending, &callback("q:que_1:pick:0:0")).await;
+
+        assert_eq!(
+            client.callback_answers.lock().unwrap()[0],
+            ("cb_1".to_string(), "這個問題已失效".to_string())
+        );
+        assert!(responder.replies.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn custom_text_is_consumed_as_answer_without_starting_turn() {
+        let client = MockTgClient::default();
+        let mem = open_memory().await;
+        let backend = RecordingBackend::new(&["should not run"]);
+        let responder = RecordingResponder::default();
+        let pending = Arc::new(Mutex::new(PendingQuestions::new()));
+        let mut question = sample_pending_question(false);
+        question.waiting_custom_question_index = Some(0);
+        pending.lock().unwrap().insert(7, question);
+        let msg = TgMessage {
+            update_id: 2,
+            chat_id: 7,
+            text: "我的自訂答案".to_string(),
+            attachments: Vec::new(),
+        };
+
+        handle_message_with_responder(
+            &client,
+            &mem,
+            &base_cfg(),
+            &backend,
+            &responder,
+            None,
+            &[7],
+            pending,
+            &msg,
+        )
+        .await;
+
+        assert!(backend.requests.lock().unwrap().is_empty());
+        assert_eq!(
+            responder.replies.lock().unwrap()[0].2,
+            vec![vec!["我的自訂答案".to_string()]]
+        );
+    }
+
+    #[tokio::test]
+    async fn attachment_only_custom_answer_is_rejected_with_prompt() {
+        let client = MockTgClient::default();
+        let mem = open_memory().await;
+        let backend = RecordingBackend::new(&["should not run"]);
+        let responder = RecordingResponder::default();
+        let pending = Arc::new(Mutex::new(PendingQuestions::new()));
+        let mut question = sample_pending_question(false);
+        question.waiting_custom_question_index = Some(0);
+        pending.lock().unwrap().insert(7, question);
+        let msg = TgMessage {
+            update_id: 2,
+            chat_id: 7,
+            text: "附件說明".to_string(),
+            attachments: vec![TgAttachment {
+                kind: TgAttachmentKind::Document,
+                file_id: "file_1".to_string(),
+                unique_file_id: None,
+                original_name: "a.txt".to_string(),
+                mime_type: Some("text/plain".to_string()),
+                size_bytes: Some(10),
+            }],
+        };
+
+        handle_message_with_responder(
+            &client,
+            &mem,
+            &base_cfg(),
+            &backend,
+            &responder,
+            None,
+            &[7],
+            pending.clone(),
+            &msg,
+        )
+        .await;
+
+        assert!(pending.lock().unwrap().contains_key(&7));
+        assert!(responder.replies.lock().unwrap().is_empty());
+        assert!(client.sent.lock().unwrap()[0].text.contains("請傳文字答案"));
+    }
+
+    #[tokio::test]
+    async fn expired_question_rejects_and_clears_pending() {
+        let client = MockTgClient::default();
+        let responder = RecordingResponder::default();
+        let pending = Arc::new(Mutex::new(PendingQuestions::new()));
+        let mut question = sample_pending_question(false);
+        question.deadline = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        pending.lock().unwrap().insert(7, question);
+
+        cleanup_expired_questions(&client, &responder, pending.clone()).await;
+
+        assert!(pending.lock().unwrap().is_empty());
+        assert_eq!(
+            responder.rejects.lock().unwrap()[0],
+            ("ses_1".to_string(), "que_1".to_string())
+        );
     }
 
     async fn open_memory_with_url() -> (Memory, String) {
@@ -959,6 +1880,74 @@ mod tests {
             on_event(wukong_gateway::StreamEvent::ToolUse("read".to_string()));
             self.run(req).await
         }
+    }
+
+    struct QuestionBackend;
+    impl AiBackend for QuestionBackend {
+        async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+            Ok(AgentResponse {
+                text: "done".to_string(),
+                session_id: Some("ses_1".to_string()),
+            })
+        }
+
+        async fn run_streaming(
+            &self,
+            req: AgentRequest,
+            on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
+        ) -> Result<AgentResponse, GatewayError> {
+            on_event(wukong_gateway::StreamEvent::QuestionRequest(
+                wukong_gateway::stream::QuestionRequest {
+                    request_id: "que_1".to_string(),
+                    session_id: "ses_1".to_string(),
+                    questions: vec![wukong_gateway::stream::QuestionInfo {
+                        question: "選一個".to_string(),
+                        header: "偏好".to_string(),
+                        multiple: false,
+                        custom: true,
+                        options: vec![wukong_gateway::stream::QuestionOption {
+                            label: "A".to_string(),
+                            description: "".to_string(),
+                        }],
+                    }],
+                },
+            ));
+            self.run(req).await
+        }
+    }
+
+    #[tokio::test]
+    async fn question_request_sends_inline_keyboard_and_tracks_pending() {
+        let client = MockTgClient::default();
+        let mem = open_memory().await;
+        let backend = QuestionBackend;
+        let pending = Arc::new(Mutex::new(PendingQuestions::new()));
+        let msg = TgMessage {
+            update_id: 1,
+            chat_id: 12,
+            text: "hi".to_string(),
+            attachments: Vec::new(),
+        };
+
+        handle_message_with_pending(
+            &client,
+            &mem,
+            &base_cfg(),
+            &backend,
+            None,
+            &[12],
+            pending.clone(),
+            &msg,
+        )
+        .await;
+
+        assert!(client.inline_messages.lock().unwrap()[0]
+            .1
+            .contains("選一個"));
+        assert_eq!(
+            pending.lock().unwrap().get(&12).unwrap().request_id,
+            "que_1"
+        );
     }
 
     #[tokio::test]

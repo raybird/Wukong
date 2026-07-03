@@ -499,7 +499,8 @@ where
                             ));
                             event_seq += 1;
                         }
-                        wukong_gateway::StreamEvent::Text(_) => {}
+                        wukong_gateway::StreamEvent::QuestionRequest(_)
+                        | wukong_gateway::StreamEvent::Text(_) => {}
                     },
                     &mut |role| {
                         let _ = role_tx.send(SseMsg::Role(role.name().to_string()));
