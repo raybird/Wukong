@@ -370,12 +370,30 @@ export class WukongChat extends HTMLElement {
     this.log.scrollTop = this.log.scrollHeight;
   }
 
-  scrollToBottomAfterLayout() {
-    requestAnimationFrame(() => this.scrollToBottom());
+  nextFrame() {
+    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  }
+
+  async waitForLayoutContent() {
+    await this.nextFrame();
+    await this.nextFrame();
+    const images = Array.from(this.log.querySelectorAll('img'))
+      .filter((img) => !img.complete)
+      .slice(0, 8);
+    await Promise.allSettled(images.map((img) => (img.decode ? img.decode() : Promise.resolve())));
+  }
+
+  async scrollToBottomAfterRender() {
+    await this.waitForLayoutContent();
+    this.scrollToBottom();
+  }
+
+  preserveScrollPosition(previousHeight) {
+    this.log.scrollTop = this.log.scrollHeight - previousHeight;
   }
 
   maybeScrollToBottom(wasNearBottom) {
-    if (wasNearBottom) this.scrollToBottom();
+    if (wasNearBottom) void this.scrollToBottomAfterRender();
   }
 
   renderMessages(messages, mode) {
@@ -406,11 +424,11 @@ export class WukongChat extends HTMLElement {
     if (mode === 'prepend') {
       const previousHeight = this.log.scrollHeight;
       for (const node of nodes.reverse()) this.log.prepend(node);
-      this.log.scrollTop = this.log.scrollHeight - previousHeight;
+      this.preserveScrollPosition(previousHeight);
     } else {
       this.log.innerHTML = '';
       for (const node of nodes) this.log.appendChild(node);
-      this.scrollToBottomAfterLayout();
+      void this.scrollToBottomAfterRender();
     }
     this.oldestId = this.log.querySelector('[data-message-id]')?.dataset.messageId || null;
   }
@@ -502,7 +520,7 @@ export class WukongChat extends HTMLElement {
     div.className = 'bubble ' + cls;
     div.innerHTML = innerHTML;
     this.log.appendChild(div);
-    this.log.scrollTop = this.log.scrollHeight;
+    void this.scrollToBottomAfterRender();
     return div;
   }
 
@@ -812,7 +830,7 @@ export class WukongChat extends HTMLElement {
         this.log.appendChild(thinking);
       }
       thinking.querySelector('.reasoning').textContent += ev.data;
-      this.log.scrollTop = this.log.scrollHeight;
+      void this.scrollToBottomAfterRender();
     });
     es.addEventListener('tool', (ev) => {
       progress.innerHTML = '🐵 使用工具 ' + escapeHTML(ev.data) + '…';
@@ -824,7 +842,7 @@ export class WukongChat extends HTMLElement {
         this.log.appendChild(thinking);
       }
       thinking.querySelector('.reasoning').textContent += '\n▸ 使用工具 ' + ev.data + '\n';
-      this.log.scrollTop = this.log.scrollHeight;
+      void this.scrollToBottomAfterRender();
     });
     es.addEventListener('step', (ev) => {
       // Helper-baton output: a collapsed, visually-secondary card above the answer.
@@ -846,7 +864,7 @@ export class WukongChat extends HTMLElement {
         '<div class="baton-body">' + stepHtml + '</div>';
       this.log.appendChild(details);
       this.enhanceCodeBlocks(details);
-      this.log.scrollTop = this.log.scrollHeight;
+      void this.scrollToBottomAfterRender();
     });
     es.addEventListener('question', (ev) => {
       let request = null;
@@ -856,7 +874,7 @@ export class WukongChat extends HTMLElement {
         return;
       }
       this.renderQuestionCard(request, 'direct');
-      this.scrollToBottomAfterLayout();
+      void this.scrollToBottomAfterRender();
     });
     es.addEventListener('answer', (ev) => {
       progress.remove();

@@ -3304,8 +3304,32 @@ mod tests {
     #[test]
     fn chat_component_scrolls_to_bottom_after_layout() {
         assert!(
-            CHAT_JS.contains("requestAnimationFrame(() => this.scrollToBottom())"),
+            CHAT_JS.contains("scrollToBottomAfterRender"),
             "initial message load should scroll after layout has completed"
+        );
+    }
+
+    #[test]
+    fn chat_component_scrolls_after_render_and_layout() {
+        assert!(
+            CHAT_JS.contains("scrollToBottomAfterRender"),
+            "chat should centralize post-render bottom scrolling"
+        );
+        assert!(
+            CHAT_JS.contains("requestAnimationFrame") && CHAT_JS.contains("decode()"),
+            "bottom scroll should wait for animation frames and image decode/layout"
+        );
+    }
+
+    #[test]
+    fn chat_component_preserves_position_when_loading_older() {
+        assert!(
+            CHAT_JS.contains("preserveScrollPosition"),
+            "loadOlder should use a named preserve-position helper"
+        );
+        assert!(
+            CHAT_JS.contains("this.renderMessages(data.messages, 'prepend')"),
+            "older messages should still render in prepend mode"
         );
     }
 
