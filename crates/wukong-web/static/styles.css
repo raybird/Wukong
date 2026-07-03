@@ -239,6 +239,76 @@ wukong-chat { display: flex; flex-direction: column; flex: 1; min-height: 0; }
   overflow-y: auto;
 }
 
+.question-card {
+  align-self: flex-start;
+  background: rgba(234, 179, 8, 0.06);
+  border: 1px solid rgba(234, 179, 8, 0.22);
+  border-radius: var(--border-radius);
+  display: grid;
+  gap: 0.65rem;
+  max-width: min(36rem, 92%);
+  padding: 0.9rem;
+}
+.question-title {
+  color: var(--accent-gold);
+  font-weight: 700;
+}
+.question-header {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+.question-text { line-height: 1.5; }
+.question-options { display: grid; gap: 0.45rem; }
+.question-option {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border-color);
+  border-radius: 0.75rem;
+  color: var(--text-primary);
+  cursor: pointer;
+  display: grid;
+  gap: 0.15rem;
+  padding: 0.65rem 0.75rem;
+  text-align: left;
+}
+.question-option.picked {
+  background: rgba(234, 179, 8, 0.12);
+  border-color: var(--accent-gold);
+}
+.question-option small { color: var(--text-secondary); }
+.question-custom {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 0.75rem;
+  color: var(--text-primary);
+  font: inherit;
+  padding: 0.65rem;
+  resize: vertical;
+}
+.question-footer {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+.question-footer button {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  color: var(--text-primary);
+  cursor: pointer;
+  padding: 0.45rem 0.9rem;
+}
+.question-footer button:last-child {
+  background: var(--accent-sun);
+  border-color: transparent;
+}
+.question-status {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  min-height: 1em;
+}
+.question-status.error { color: #fca5a5; }
+.question-done { color: var(--text-secondary); }
+
 /* Helper-baton output: visually secondary to the final answer (neutral, muted,
    collapsed by default) so it informs without competing for attention. */
 .baton {

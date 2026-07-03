@@ -11,6 +11,7 @@ export class WukongChat extends HTMLElement {
     this.renderedMessageIds = new Set();
     this.liveProgress = null;
     this.liveThinking = null;
+    this.activeQuestionCard = null;
     this.innerHTML = html`
       <div class="chat-toolbar">
         <label class="chat-source">來源 <select id="chat-scope"></select></label>
@@ -114,6 +115,7 @@ export class WukongChat extends HTMLElement {
     }
     this.liveProgress = null;
     this.liveThinking = null;
+    this.activeQuestionCard = null;
   }
 
   startLiveStream() {
@@ -126,6 +128,7 @@ export class WukongChat extends HTMLElement {
     stream.addEventListener('reasoning', (ev) => this.handleLiveEvent(ev));
     stream.addEventListener('tool', (ev) => this.handleLiveEvent(ev));
     stream.addEventListener('step', (ev) => this.handleLiveEvent(ev));
+    stream.addEventListener('question', (ev) => this.handleLiveEvent(ev));
     stream.addEventListener('answer', (ev) => this.handleLiveEvent(ev));
     stream.addEventListener('error', (ev) => {
       if (ev.data) this.handleLiveEvent(ev);
@@ -169,6 +172,7 @@ export class WukongChat extends HTMLElement {
     this.renderedMessageIds.clear();
     this.liveProgress = null;
     this.liveThinking = null;
+    this.activeQuestionCard = null;
     this.log.innerHTML = '';
   }
 
@@ -510,6 +514,183 @@ export class WukongChat extends HTMLElement {
     return div;
   }
 
+  async questionRequest(path, body) {
+    const resp = await fetch(this.chatUrl(path), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(text || 'HTTP ' + resp.status);
+    }
+  }
+
+  renderQuestionCard(request, source) {
+    if (!request || !request.request_id || !request.session_id || !Array.isArray(request.questions)) return null;
+    if (this.activeQuestionCard) this.activeQuestionCard.remove();
+
+    const state = {
+      tab: 0,
+      answers: request.questions.map(() => []),
+      custom: request.questions.map(() => ''),
+      sending: false,
+    };
+
+    const card = document.createElement('section');
+    card.className = 'question-card';
+    card.dataset.requestId = request.request_id;
+    card.dataset.source = source || '';
+    this.activeQuestionCard = card;
+
+    const setStatus = (text, cls = '') => {
+      const status = card.querySelector('.question-status');
+      if (!status) return;
+      status.textContent = text;
+      status.className = 'question-status ' + cls;
+    };
+
+    const finish = (text) => {
+      card.classList.add('question-card-done');
+      card.innerHTML = '<div class="question-done">' + escapeHTML(text) + '</div>';
+      if (this.activeQuestionCard === card) this.activeQuestionCard = null;
+    };
+
+    const submit = async () => {
+      if (state.sending) return;
+      state.sending = true;
+      setStatus('送出中…');
+      try {
+        await this.questionRequest('/api/questions/' + encodeURIComponent(request.request_id) + '/reply', {
+          session_id: request.session_id,
+          answers: state.answers,
+        });
+        finish('已送出回答。');
+      } catch (err) {
+        state.sending = false;
+        setStatus('送出失敗：' + err.message, 'error');
+      }
+    };
+
+    const reject = async () => {
+      if (state.sending) return;
+      state.sending = true;
+      setStatus('取消中…');
+      try {
+        await this.questionRequest('/api/questions/' + encodeURIComponent(request.request_id) + '/reject', {
+          session_id: request.session_id,
+        });
+        finish('已取消問題。');
+      } catch (err) {
+        state.sending = false;
+        setStatus('取消失敗：' + err.message, 'error');
+      }
+    };
+
+    const render = () => {
+      const question = request.questions[state.tab];
+      if (!question) return;
+      const isLast = state.tab >= request.questions.length - 1;
+      const selected = state.answers[state.tab] || [];
+      card.innerHTML = '';
+
+      const title = document.createElement('div');
+      title.className = 'question-title';
+      title.textContent = '問題 ' + (state.tab + 1) + ' / ' + request.questions.length;
+      card.appendChild(title);
+
+      if (question.header) {
+        const header = document.createElement('div');
+        header.className = 'question-header';
+        header.textContent = question.header;
+        card.appendChild(header);
+      }
+
+      const text = document.createElement('div');
+      text.className = 'question-text';
+      text.textContent = question.question || '';
+      card.appendChild(text);
+
+      const options = document.createElement('div');
+      options.className = 'question-options';
+      for (const option of question.options || []) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'question-option';
+        const picked = selected.includes(option.label);
+        if (picked) button.classList.add('picked');
+        button.innerHTML =
+          '<span>' + escapeHTML(picked ? '✓ ' : '') + escapeHTML(option.label || '') + '</span>' +
+          (option.description ? '<small>' + escapeHTML(option.description) + '</small>' : '');
+        button.addEventListener('click', () => {
+          if (question.multiple) {
+            state.answers[state.tab] = picked
+              ? selected.filter((item) => item !== option.label)
+              : [...selected, option.label];
+            render();
+            return;
+          }
+          state.answers[state.tab] = [option.label];
+          if (isLast) void submit();
+          else {
+            state.tab += 1;
+            render();
+          }
+        });
+        options.appendChild(button);
+      }
+      card.appendChild(options);
+
+      if (question.custom) {
+        const custom = document.createElement('textarea');
+        custom.className = 'question-custom';
+        custom.rows = 2;
+        custom.placeholder = '自訂回答…';
+        custom.value = state.custom[state.tab] || '';
+        custom.addEventListener('input', () => {
+          state.custom[state.tab] = custom.value;
+        });
+        card.appendChild(custom);
+      }
+
+      const status = document.createElement('div');
+      status.className = 'question-status';
+      card.appendChild(status);
+
+      const footer = document.createElement('div');
+      footer.className = 'question-footer';
+
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.textContent = '取消';
+      cancel.addEventListener('click', () => void reject());
+      footer.appendChild(cancel);
+
+      const next = document.createElement('button');
+      next.type = 'button';
+      next.textContent = isLast ? '送出' : '下一題';
+      next.addEventListener('click', () => {
+        const custom = (state.custom[state.tab] || '').trim();
+        if (custom) {
+          state.answers[state.tab] = question.multiple
+            ? Array.from(new Set([...(state.answers[state.tab] || []), custom]))
+            : [custom];
+        }
+        if (isLast) void submit();
+        else {
+          state.tab += 1;
+          render();
+        }
+      });
+      footer.appendChild(next);
+      card.appendChild(footer);
+    };
+
+    render();
+    this.log.appendChild(card);
+    return card;
+  }
+
   parseLiveEvent(ev) {
     try {
       const data = JSON.parse(ev.data);
@@ -569,6 +750,14 @@ export class WukongChat extends HTMLElement {
         '<div class="baton-body">' + (data.content || '') + '</div>';
       this.log.appendChild(details);
       this.enhanceCodeBlocks(details);
+    } else if (data.kind === 'question') {
+      let request = null;
+      try {
+        request = typeof data.content === 'string' ? JSON.parse(data.content) : data.content;
+      } catch (_err) {
+        return;
+      }
+      this.renderQuestionCard(request, 'live');
     } else if (data.kind === 'answer') {
       if (this.liveProgress) this.liveProgress.remove();
       this.liveProgress = null;
@@ -658,6 +847,16 @@ export class WukongChat extends HTMLElement {
       this.log.appendChild(details);
       this.enhanceCodeBlocks(details);
       this.log.scrollTop = this.log.scrollHeight;
+    });
+    es.addEventListener('question', (ev) => {
+      let request = null;
+      try {
+        request = JSON.parse(ev.data);
+      } catch (_err) {
+        return;
+      }
+      this.renderQuestionCard(request, 'direct');
+      this.scrollToBottomAfterLayout();
     });
     es.addEventListener('answer', (ev) => {
       progress.remove();

@@ -3309,6 +3309,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn chat_component_handles_question_events() {
+        assert!(
+            CHAT_JS.contains("addEventListener('question'")
+                || CHAT_JS.contains("addEventListener(\"question\""),
+            "direct chat SSE should listen for question events"
+        );
+        assert!(
+            CHAT_JS.contains("data.kind === 'question'"),
+            "live stream should handle question live events"
+        );
+        assert!(
+            CHAT_JS.contains("renderQuestionCard"),
+            "question UI should use a shared renderer"
+        );
+        assert!(
+            CHAT_JS.contains("/api/questions/")
+                && CHAT_JS.contains("/reply")
+                && CHAT_JS.contains("/reject"),
+            "question UI should call reply and reject APIs"
+        );
+    }
+
+    #[test]
+    fn chat_styles_include_question_card() {
+        assert!(STYLES_CSS.contains(".question-card"));
+        assert!(STYLES_CSS.contains(".question-option"));
+        assert!(STYLES_CSS.contains(".question-footer"));
+    }
+
     #[tokio::test]
     async fn chat_streams_role_answer_done() {
         // [0] planner -> "oracle" => single Oracle step; [1] execute -> markdown.
