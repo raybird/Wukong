@@ -12,6 +12,8 @@ use axum::response::sse::{Event, Sse};
 use axum::Json;
 use chrono::{NaiveDate, TimeZone, Utc};
 use std::convert::Infallible;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt;
@@ -182,6 +184,67 @@ fn web_question_request(req: wukong_gateway::stream::QuestionRequest) -> WebQues
     }
 }
 
+pub type WebQuestionFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(), wukong_gateway::GatewayError>> + Send + 'a>>;
+
+pub trait WebQuestionResponder {
+    fn reply_web_question<'a>(
+        &'a self,
+        session_id: &'a str,
+        request_id: &'a str,
+        answers: Vec<Vec<String>>,
+    ) -> WebQuestionFuture<'a>;
+
+    fn reject_web_question<'a>(
+        &'a self,
+        session_id: &'a str,
+        request_id: &'a str,
+    ) -> WebQuestionFuture<'a>;
+}
+
+impl WebQuestionResponder for wukong_gateway::backend::AgentBackend {
+    fn reply_web_question<'a>(
+        &'a self,
+        session_id: &'a str,
+        request_id: &'a str,
+        answers: Vec<Vec<String>>,
+    ) -> WebQuestionFuture<'a> {
+        Box::pin(async move {
+            match self {
+                wukong_gateway::backend::AgentBackend::Server(server) => {
+                    server.reply_question(session_id, request_id, answers).await
+                }
+                wukong_gateway::backend::AgentBackend::Cli(_) => {
+                    Err(wukong_gateway::GatewayError::AgentFailed {
+                        code: None,
+                        stderr: "目前只有 opencode server backend 支援 question 回答。".to_string(),
+                    })
+                }
+            }
+        })
+    }
+
+    fn reject_web_question<'a>(
+        &'a self,
+        session_id: &'a str,
+        request_id: &'a str,
+    ) -> WebQuestionFuture<'a> {
+        Box::pin(async move {
+            match self {
+                wukong_gateway::backend::AgentBackend::Server(server) => {
+                    server.reject_question(session_id, request_id).await
+                }
+                wukong_gateway::backend::AgentBackend::Cli(_) => {
+                    Err(wukong_gateway::GatewayError::AgentFailed {
+                        code: None,
+                        stderr: "目前只有 opencode server backend 支援 question 取消。".to_string(),
+                    })
+                }
+            }
+        })
+    }
+}
+
 impl SseMsg {
     fn into_event(self) -> Event {
         match self {
@@ -238,6 +301,17 @@ struct ChatStreamQuery {
     token: Option<String>,
     scope: Option<String>,
     after: Option<i64>,
+}
+
+#[derive(serde::Deserialize)]
+struct QuestionReplyRequest {
+    session_id: String,
+    answers: Vec<Vec<String>>,
+}
+
+#[derive(serde::Deserialize)]
+struct QuestionRejectRequest {
+    session_id: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -1413,10 +1487,60 @@ where
     }
 }
 
+async fn post_question_reply<B>(
+    State(state): State<AppState<B>>,
+    Path(request_id): Path<String>,
+    Query(params): Query<SettingsQuery>,
+    Json(req): Json<QuestionReplyRequest>,
+) -> axum::response::Response
+where
+    B: AiBackend + WebQuestionResponder + Send + Sync + 'static,
+{
+    use axum::response::IntoResponse;
+
+    if !authorized(&state.token, params.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    match state
+        .backend
+        .reply_web_question(&req.session_id, &request_id, req.answers)
+        .await
+    {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    }
+}
+
+async fn post_question_reject<B>(
+    State(state): State<AppState<B>>,
+    Path(request_id): Path<String>,
+    Query(params): Query<SettingsQuery>,
+    Json(req): Json<QuestionRejectRequest>,
+) -> axum::response::Response
+where
+    B: AiBackend + WebQuestionResponder + Send + Sync + 'static,
+{
+    use axum::response::IntoResponse;
+
+    if !authorized(&state.token, params.token.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    match state
+        .backend
+        .reject_web_question(&req.session_id, &request_id)
+        .await
+    {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    }
+}
+
 /// Build the application router from shared state.
 pub fn build_router<B>(state: AppState<B>) -> axum::Router
 where
-    B: AiBackend + Send + Sync + 'static,
+    B: AiBackend + WebQuestionResponder + Send + Sync + 'static,
 {
     axum::Router::new()
         .route("/", axum::routing::get(index::<B>))
@@ -1470,6 +1594,14 @@ where
         .route(
             "/api/chat/attachments/:id/preview",
             axum::routing::get(get_attachment_preview::<B>),
+        )
+        .route(
+            "/api/questions/:request_id/reply",
+            axum::routing::post(post_question_reply::<B>),
+        )
+        .route(
+            "/api/questions/:request_id/reject",
+            axum::routing::post(post_question_reject::<B>),
         )
         .route(
             "/api/settings",
@@ -1545,6 +1677,43 @@ mod tests {
             })
         }
     }
+
+    macro_rules! unsupported_question_responder {
+        ($backend:ty) => {
+            impl WebQuestionResponder for $backend {
+                fn reply_web_question<'a>(
+                    &'a self,
+                    _session_id: &'a str,
+                    _request_id: &'a str,
+                    _answers: Vec<Vec<String>>,
+                ) -> WebQuestionFuture<'a> {
+                    Box::pin(async move {
+                        Err(GatewayError::AgentFailed {
+                            code: None,
+                            stderr: "question responder is not configured for this test backend"
+                                .to_string(),
+                        })
+                    })
+                }
+
+                fn reject_web_question<'a>(
+                    &'a self,
+                    _session_id: &'a str,
+                    _request_id: &'a str,
+                ) -> WebQuestionFuture<'a> {
+                    Box::pin(async move {
+                        Err(GatewayError::AgentFailed {
+                            code: None,
+                            stderr: "question responder is not configured for this test backend"
+                                .to_string(),
+                        })
+                    })
+                }
+            }
+        };
+    }
+
+    unsupported_question_responder!(MockBackend);
 
     async fn state(token: Option<&str>, replies: &[&str]) -> AppState<MockBackend> {
         let f = NamedTempFile::new().unwrap();
@@ -1871,6 +2040,7 @@ mod tests {
             self.run(req).await
         }
     }
+    unsupported_question_responder!(ReasoningBackend);
 
     async fn reasoning_state(reasoning: &'static str) -> AppState<ReasoningBackend> {
         let f = NamedTempFile::new().unwrap();
@@ -1920,6 +2090,7 @@ mod tests {
             self.run(req).await
         }
     }
+    unsupported_question_responder!(QuestionState);
 
     async fn question_state() -> AppState<QuestionState> {
         let f = NamedTempFile::new().unwrap();
@@ -1933,6 +2104,121 @@ mod tests {
             token: None,
             settings_path: tempfile::NamedTempFile::new().unwrap().path().to_path_buf(),
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingQuestionBackend {
+        replies: Mutex<Vec<(String, String, Vec<Vec<String>>)>>,
+        rejects: Mutex<Vec<(String, String)>>,
+    }
+
+    impl AiBackend for RecordingQuestionBackend {
+        async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+            Ok(AgentResponse {
+                text: "ok".to_string(),
+                session_id: None,
+            })
+        }
+    }
+
+    impl WebQuestionResponder for RecordingQuestionBackend {
+        fn reply_web_question<'a>(
+            &'a self,
+            session_id: &'a str,
+            request_id: &'a str,
+            answers: Vec<Vec<String>>,
+        ) -> WebQuestionFuture<'a> {
+            Box::pin(async move {
+                self.replies.lock().unwrap().push((
+                    session_id.to_string(),
+                    request_id.to_string(),
+                    answers,
+                ));
+                Ok(())
+            })
+        }
+
+        fn reject_web_question<'a>(
+            &'a self,
+            session_id: &'a str,
+            request_id: &'a str,
+        ) -> WebQuestionFuture<'a> {
+            Box::pin(async move {
+                self.rejects
+                    .lock()
+                    .unwrap()
+                    .push((session_id.to_string(), request_id.to_string()));
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn question_reply_api_records_answers() {
+        let backend = Arc::new(RecordingQuestionBackend::default());
+        let f = NamedTempFile::new().unwrap();
+        let url = format!("sqlite://{}", f.path().display());
+        std::mem::forget(f);
+        let app = build_router(AppState {
+            memory: Arc::new(Memory::open(&url).await.unwrap()),
+            backend: backend.clone(),
+            scope: "global".to_string(),
+            db_url: url,
+            token: None,
+            settings_path: tempfile::NamedTempFile::new().unwrap().path().to_path_buf(),
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/questions/que_1/reply")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"session_id":"ses_1","answers":[["A"]]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            backend.replies.lock().unwrap().as_slice(),
+            &[(
+                "ses_1".to_string(),
+                "que_1".to_string(),
+                vec![vec!["A".to_string()]],
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn question_reject_api_records_reject() {
+        let backend = Arc::new(RecordingQuestionBackend::default());
+        let f = NamedTempFile::new().unwrap();
+        let url = format!("sqlite://{}", f.path().display());
+        std::mem::forget(f);
+        let app = build_router(AppState {
+            memory: Arc::new(Memory::open(&url).await.unwrap()),
+            backend: backend.clone(),
+            scope: "global".to_string(),
+            db_url: url,
+            token: None,
+            settings_path: tempfile::NamedTempFile::new().unwrap().path().to_path_buf(),
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/questions/que_1/reject")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"session_id":"ses_1"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            backend.rejects.lock().unwrap().as_slice(),
+            &[("ses_1".to_string(), "que_1".to_string())]
+        );
     }
 
     struct ReasoningToolBackend;
@@ -1954,6 +2240,7 @@ mod tests {
             self.run(req).await
         }
     }
+    unsupported_question_responder!(ReasoningToolBackend);
 
     async fn reasoning_tool_state() -> AppState<ReasoningToolBackend> {
         let f = NamedTempFile::new().unwrap();
