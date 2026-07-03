@@ -123,6 +123,7 @@ enum SseMsg {
     Role(String),
     Reasoning(String),
     ToolUse(String),
+    Question(WebQuestionRequest),
     /// A non-final (helper) baton's rendered output, surfaced as a collapsible card.
     Step {
         role: String,
@@ -134,12 +135,62 @@ enum SseMsg {
     Done,
 }
 
+#[derive(serde::Serialize)]
+struct WebQuestionOption {
+    label: String,
+    description: String,
+}
+
+#[derive(serde::Serialize)]
+struct WebQuestionInfo {
+    question: String,
+    header: String,
+    options: Vec<WebQuestionOption>,
+    multiple: bool,
+    custom: bool,
+}
+
+#[derive(serde::Serialize)]
+struct WebQuestionRequest {
+    request_id: String,
+    session_id: String,
+    questions: Vec<WebQuestionInfo>,
+}
+
+fn web_question_request(req: wukong_gateway::stream::QuestionRequest) -> WebQuestionRequest {
+    WebQuestionRequest {
+        request_id: req.request_id,
+        session_id: req.session_id,
+        questions: req
+            .questions
+            .into_iter()
+            .map(|q| WebQuestionInfo {
+                question: q.question,
+                header: q.header,
+                options: q
+                    .options
+                    .into_iter()
+                    .map(|o| WebQuestionOption {
+                        label: o.label,
+                        description: o.description,
+                    })
+                    .collect(),
+                multiple: q.multiple,
+                custom: q.custom,
+            })
+            .collect(),
+    }
+}
+
 impl SseMsg {
     fn into_event(self) -> Event {
         match self {
             SseMsg::Role(r) => Event::default().event("role").data(r),
             SseMsg::Reasoning(t) => Event::default().event("reasoning").data(t),
             SseMsg::ToolUse(name) => Event::default().event("tool").data(name),
+            SseMsg::Question(request) => Event::default()
+                .event("question")
+                .data(serde_json::to_string(&request).unwrap_or_else(|_| "{}".to_string())),
             SseMsg::Step { role, skill, html } => Event::default().event("step").data(
                 serde_json::json!({ "role": role, "skill": skill, "html": html }).to_string(),
             ),
@@ -499,8 +550,10 @@ where
                             ));
                             event_seq += 1;
                         }
-                        wukong_gateway::StreamEvent::QuestionRequest(_)
-                        | wukong_gateway::StreamEvent::Text(_) => {}
+                        wukong_gateway::StreamEvent::QuestionRequest(request) => {
+                            let _ = ev_tx.send(SseMsg::Question(web_question_request(request)));
+                        }
+                        wukong_gateway::StreamEvent::Text(_) => {}
                     },
                     &mut |role| {
                         let _ = role_tx.send(SseMsg::Role(role.name().to_string()));
@@ -1833,6 +1886,55 @@ mod tests {
         }
     }
 
+    struct QuestionState;
+
+    impl AiBackend for QuestionState {
+        async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+            Ok(AgentResponse {
+                text: "done".to_string(),
+                session_id: Some("ses_1".to_string()),
+            })
+        }
+
+        async fn run_streaming(
+            &self,
+            req: AgentRequest,
+            on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
+        ) -> Result<AgentResponse, GatewayError> {
+            on_event(wukong_gateway::StreamEvent::QuestionRequest(
+                wukong_gateway::stream::QuestionRequest {
+                    request_id: "que_1".to_string(),
+                    session_id: "ses_1".to_string(),
+                    questions: vec![wukong_gateway::stream::QuestionInfo {
+                        question: "選一個".to_string(),
+                        header: "偏好".to_string(),
+                        options: vec![wukong_gateway::stream::QuestionOption {
+                            label: "A".to_string(),
+                            description: "第一個".to_string(),
+                        }],
+                        multiple: false,
+                        custom: true,
+                    }],
+                },
+            ));
+            self.run(req).await
+        }
+    }
+
+    async fn question_state() -> AppState<QuestionState> {
+        let f = NamedTempFile::new().unwrap();
+        let url = format!("sqlite://{}", f.path().display());
+        std::mem::forget(f);
+        AppState {
+            memory: Arc::new(Memory::open(&url).await.unwrap()),
+            backend: Arc::new(QuestionState),
+            scope: "global".to_string(),
+            db_url: url,
+            token: None,
+            settings_path: tempfile::NamedTempFile::new().unwrap().path().to_path_buf(),
+        }
+    }
+
     struct ReasoningToolBackend;
     impl AiBackend for ReasoningToolBackend {
         async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
@@ -2945,6 +3047,35 @@ mod tests {
             "answer not rendered:\n{body}"
         );
         assert!(body.contains("event: done"), "missing done event:\n{body}");
+    }
+
+    #[tokio::test]
+    async fn chat_streams_question_event() {
+        let app = build_router(question_state().await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/chat?q=hi")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains("event: question"),
+            "missing question event:\n{body}"
+        );
+        assert!(
+            body.contains(r#""request_id":"que_1""#),
+            "missing request id:\n{body}"
+        );
+        assert!(
+            body.contains(r#""session_id":"ses_1""#),
+            "missing session id:\n{body}"
+        );
+        assert!(body.contains("選一個"), "missing question text:\n{body}");
     }
 
     #[tokio::test]
