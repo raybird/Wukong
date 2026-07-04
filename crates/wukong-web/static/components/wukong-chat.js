@@ -26,6 +26,8 @@ export class WukongChat extends HTMLElement {
     this.unreadDivider = null;
     this.userInteractedWithChat = false;
     this.initialAnchoring = false;
+    this.reconnectTimeout = null;
+    this.reconnectDelay = 1000;
     this.innerHTML = html`
       <section class="chat-workbench">
         ${unsafe(threadHeaderTemplate())}
@@ -63,6 +65,7 @@ export class WukongChat extends HTMLElement {
         textarea.style.height = 'auto';
       }
     });
+    this.setupSlashMenu(textarea);
     this.loadingOlder = false;
     this.hasMore = false;
     this.oldestId = null;
@@ -89,6 +92,130 @@ export class WukongChat extends HTMLElement {
     this.log.addEventListener('pointerdown', markInteraction);
     this.log.addEventListener('keydown', markInteraction);
     this.initialize();
+  }
+
+  setupSlashMenu(textarea) {
+    const commands = [
+      { cmd: '/model', desc: '變更或查看悟空所使用的 AI 模型' },
+      { cmd: '/skills', desc: '配置或查看您的角色與技能偏好' },
+      { cmd: '/schedules', desc: '查看當前正在運行的排程任務' },
+      { cmd: '/learn', desc: '讓悟空學習新的工作習慣與自訂規則' },
+      { cmd: '/goal', desc: '啟動深思熟慮模式，直到徹底達成目標' },
+      { cmd: '/grill-me', desc: '啟動互動式對話對齊，澄清設計決策' }
+    ];
+
+    let menu = null;
+    let activeIndex = 0;
+
+    const wrapper = textarea.closest('.textarea-wrapper');
+
+    const renderMenu = () => {
+      if (menu) menu.remove();
+      menu = document.createElement('div');
+      menu.className = 'slash-menu';
+      commands.forEach((item, idx) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = `slash-item${idx === activeIndex ? ' active' : ''}`;
+        btn.innerHTML = `<strong>${item.cmd}</strong><span>${item.desc}</span>`;
+        btn.addEventListener('click', () => {
+          selectCommand(item.cmd);
+        });
+        menu.appendChild(btn);
+      });
+      wrapper.appendChild(menu);
+    };
+
+    const removeMenu = () => {
+      if (menu) {
+        menu.remove();
+        menu = null;
+      }
+    };
+
+    const selectCommand = (cmd) => {
+      textarea.value = cmd + ' ';
+      removeMenu();
+      textarea.focus();
+      textarea.dispatchEvent(new Event('input'));
+    };
+
+    textarea.addEventListener('input', () => {
+      const val = textarea.value;
+      if (val === '/') {
+        activeIndex = 0;
+        renderMenu();
+      } else if (!val.startsWith('/')) {
+        removeMenu();
+      } else {
+        if (menu) {
+          const items = menu.querySelectorAll('.slash-item');
+          items.forEach((itemNode, idx) => {
+            const cmdText = commands[idx].cmd;
+            if (cmdText.startsWith(val)) {
+              itemNode.style.display = 'flex';
+            } else {
+              itemNode.style.display = 'none';
+            }
+          });
+          const visibleIdxs = [];
+          items.forEach((node, idx) => {
+            if (node.style.display !== 'none') visibleIdxs.push(idx);
+          });
+          if (visibleIdxs.length > 0) {
+            if (!visibleIdxs.includes(activeIndex)) {
+              activeIndex = visibleIdxs[0];
+            }
+            items.forEach((node, idx) => {
+              node.classList.toggle('active', idx === activeIndex);
+            });
+          } else {
+            removeMenu();
+          }
+        }
+      }
+    });
+
+    textarea.addEventListener('keydown', (e) => {
+      if (!menu) return;
+
+      const items = Array.from(menu.querySelectorAll('.slash-item'));
+      const visibleItems = items.filter(node => node.style.display !== 'none');
+      const visibleIdxs = visibleItems.map(node => items.indexOf(node));
+
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        const currentPos = visibleIdxs.indexOf(activeIndex);
+        const nextPos = (currentPos + 1) % visibleIdxs.length;
+        activeIndex = visibleIdxs[nextPos];
+        items.forEach((node, idx) => {
+          node.classList.toggle('active', idx === activeIndex);
+          if (idx === activeIndex) node.scrollIntoView({ block: 'nearest' });
+        });
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        const currentPos = visibleIdxs.indexOf(activeIndex);
+        const prevPos = (currentPos - 1 + visibleIdxs.length) % visibleIdxs.length;
+        activeIndex = visibleIdxs[prevPos];
+        items.forEach((node, idx) => {
+          node.classList.toggle('active', idx === activeIndex);
+          if (idx === activeIndex) node.scrollIntoView({ block: 'nearest' });
+        });
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        const selectedCmd = commands[activeIndex].cmd;
+        selectCommand(selectedCmd);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        removeMenu();
+      }
+    });
+
+    document.addEventListener('click', (e) => {
+      if (menu && !wrapper.contains(e.target)) {
+        removeMenu();
+      }
+    });
   }
 
   disconnectedCallback() {
@@ -130,6 +257,10 @@ export class WukongChat extends HTMLElement {
       this.liveStream.close();
       this.liveStream = null;
     }
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
     this.liveProgress = null;
     this.liveThinking = null;
     this.activeQuestionCard = null;
@@ -138,8 +269,15 @@ export class WukongChat extends HTMLElement {
   startLiveStream() {
     this.closeLiveStream();
     if (!this.isTelegramScope()) return;
-    const stream = new EventSource(this.chatUrl('/api/chat/stream', { after: this.liveCursor }));
+    
+    const url = this.chatUrl('/api/chat/stream', { after: this.liveCursor });
+    const stream = new EventSource(url);
     this.liveStream = stream;
+    
+    stream.onopen = () => {
+      this.reconnectDelay = 1000;
+    };
+    
     stream.addEventListener('user', (ev) => this.handleLiveEvent(ev));
     stream.addEventListener('role', (ev) => this.handleLiveEvent(ev));
     stream.addEventListener('reasoning', (ev) => this.handleLiveEvent(ev));
@@ -148,7 +286,22 @@ export class WukongChat extends HTMLElement {
     stream.addEventListener('question', (ev) => this.handleLiveEvent(ev));
     stream.addEventListener('answer', (ev) => this.handleLiveEvent(ev));
     stream.addEventListener('error', (ev) => {
-      if (ev.data) this.handleLiveEvent(ev);
+      if (ev.data) {
+        this.handleLiveEvent(ev);
+      }
+      
+      // Close connection and trigger backoff reconnection
+      stream.close();
+      if (this.liveStream === stream) {
+        this.liveStream = null;
+      }
+      
+      if (this.reconnectTimeout) clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = setTimeout(() => {
+        this.startLiveStream();
+      }, this.reconnectDelay);
+      
+      this.reconnectDelay = Math.min(this.reconnectDelay * 2, 16000);
     });
   }
 
