@@ -366,6 +366,7 @@ struct ChatMessageResponse {
 struct ChatMessagesResponse {
     messages: Vec<ChatMessageResponse>,
     has_more: bool,
+    latest_live_event_id: Option<i64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -826,6 +827,12 @@ where
                     .or_default()
                     .push(attachment_response(attachment));
             }
+            let latest_live_event_id = match store.latest_live_event_id(&scope).await {
+                Ok(val) => val,
+                Err(e) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+                }
+            };
             let messages = messages
                 .into_iter()
                 .map(|message| ChatMessageResponse {
@@ -833,7 +840,12 @@ where
                     message,
                 })
                 .collect();
-            Json(ChatMessagesResponse { messages, has_more }).into_response()
+            Json(ChatMessagesResponse {
+                messages,
+                has_more,
+                latest_live_event_id,
+            })
+            .into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -3104,6 +3116,35 @@ mod tests {
         assert!(body.contains("m9"), "body: {body}");
         assert!(!body.contains("m10"), "body should stop after five rows: {body}");
         assert!(body.contains(r#""has_more":true"#), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn chat_messages_includes_latest_live_event_id() {
+        let app_state = state(None, &[]).await;
+        let store = ChatHistoryStore::open(&app_state.db_url).await.unwrap();
+        let scope = app_state.scope.clone();
+        
+        let event_id = store
+            .insert_live_event(&scope, "user", None, "test event", None, 100)
+            .await
+            .unwrap();
+
+        let app = build_router(app_state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/chat/messages?limit=5")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains(&format!(r#""latest_live_event_id":{event_id}"#)),
+            "body should include the latest live event id: {body}"
+        );
     }
 
     #[tokio::test]

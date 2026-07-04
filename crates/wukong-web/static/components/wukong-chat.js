@@ -498,22 +498,59 @@ export class WukongChat extends HTMLElement {
   async loadLatest() {
     try {
       const marker = readLastSeenMessageId(this.storage(), this.selectedScope);
-      let data = await this.fetchMessages(
-        marker === null ? 'limit=10' : 'after=' + encodeURIComponent(marker) + '&limit=5'
-      );
-      if (marker !== null && !data.messages.length) {
-        data = await this.fetchMessages('limit=10');
+      let messages = [];
+      let hasMore = false;
+      let latestLiveEventId = null;
+
+      if (marker !== null) {
+        try {
+          const [beforeData, afterData] = await Promise.all([
+            this.fetchMessages('before=' + encodeURIComponent(marker + 1) + '&limit=10'),
+            this.fetchMessages('after=' + encodeURIComponent(marker) + '&limit=50')
+          ]);
+
+          latestLiveEventId = afterData.latest_live_event_id ?? beforeData.latest_live_event_id ?? null;
+
+          if (afterData.messages.length > 0) {
+            const map = new Map();
+            for (const m of beforeData.messages) map.set(m.id, m);
+            for (const m of afterData.messages) map.set(m.id, m);
+            messages = Array.from(map.values()).sort((a, b) => a.id - b.id);
+            hasMore = beforeData.has_more;
+          } else {
+            const data = await this.fetchMessages('limit=10');
+            messages = data.messages;
+            hasMore = data.has_more;
+            latestLiveEventId = data.latest_live_event_id ?? null;
+          }
+        } catch (_err) {
+          const data = await this.fetchMessages('limit=10');
+          messages = data.messages;
+          hasMore = data.has_more;
+          latestLiveEventId = data.latest_live_event_id ?? null;
+        }
+      } else {
+        const data = await this.fetchMessages('limit=10');
+        messages = data.messages;
+        hasMore = data.has_more;
+        latestLiveEventId = data.latest_live_event_id ?? null;
       }
-      if (!data.messages.length) {
+
+      if (latestLiveEventId !== null) {
+        this.liveCursor = latestLiveEventId;
+      }
+
+      if (!messages.length) {
         this.log.innerHTML = '<p class="empty-state">還沒有對話，問悟空第一個問題。</p>';
         return;
       }
-      this.hasMore = marker === null ? data.has_more : true;
-      const unreadIndex = marker === null ? -1 : firstUnreadIndex(data.messages, marker);
-      const { unreadDivider } = this.renderMessages(data.messages, 'replace', { unreadIndex });
+
+      this.hasMore = hasMore;
+      const unreadIndex = marker === null ? -1 : firstUnreadIndex(messages, marker);
+      const { unreadDivider } = this.renderMessages(messages, 'replace', { unreadIndex });
       await this.anchorInitialView(unreadDivider);
       if (marker === null) {
-        const latest = latestMessageId(data.messages);
+        const latest = latestMessageId(messages);
         if (latest !== null) writeLastSeenMessageId(this.storage(), this.selectedScope, latest);
       }
     } catch (err) {
