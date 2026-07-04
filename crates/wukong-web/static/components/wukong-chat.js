@@ -586,15 +586,46 @@ export class WukongChat extends HTMLElement {
     this.scrollToBottom();
   }
 
+  scrollIntoViewWithinContainer(element) {
+    if (!element) return;
+    const container = this.log;
+    const containerRect = container.getBoundingClientRect();
+    const elementRect = element.getBoundingClientRect();
+    const relativeTop = elementRect.top - containerRect.top + container.scrollTop;
+    container.scrollTop = relativeTop - (container.clientHeight / 2);
+  }
+
   async anchorInitialView(unreadDivider) {
     this.initialAnchoring = true;
-    await this.waitForLayoutContent();
-    if (unreadDivider) {
-      unreadDivider.scrollIntoView({ block: 'center', behavior: 'auto' });
-    } else {
-      this.scrollToBottom();
+
+    // Wait until the container has clientHeight (i.e. stylesheet loaded and layout computed)
+    for (let i = 0; i < 30; i++) {
+      if (this.log.clientHeight > 0) break;
+      await this.nextFrame();
     }
-    await this.nextFrame();
+
+    await this.waitForLayoutContent();
+
+    const doScroll = () => {
+      if (unreadDivider) {
+        this.scrollIntoViewWithinContainer(unreadDivider);
+      } else {
+        this.scrollToBottom();
+      }
+    };
+
+    doScroll();
+
+    // Multi-frame catch-up in case lazy layout rendering updates scrollHeight asynchronously
+    let prevHeight = this.log.scrollHeight;
+    for (let i = 0; i < 8; i++) {
+      await this.nextFrame();
+      if (this.log.scrollHeight !== prevHeight) {
+        prevHeight = this.log.scrollHeight;
+        doScroll();
+      }
+    }
+
     this.initialAnchoring = false;
   }
 
