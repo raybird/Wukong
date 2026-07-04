@@ -53,6 +53,7 @@ const INDEX_HTML: &str = include_str!("../static/index.html");
 
 const APP_JS: &str = include_str!("../static/app.js");
 const HTML_JS: &str = include_str!("../static/lib/html.js");
+const UNREAD_MARKER_JS: &str = include_str!("../static/lib/unread-marker.mjs");
 const CHAT_JS: &str = include_str!("../static/components/wukong-chat.js");
 const MEMORY_JS: &str = include_str!("../static/components/wukong-memory.js");
 const SKILLS_JS: &str = include_str!("../static/components/wukong-skills.js");
@@ -97,6 +98,9 @@ async fn app_js() -> axum::response::Response {
 }
 async fn html_js() -> axum::response::Response {
     asset(JS, HTML_JS)
+}
+async fn unread_marker_js() -> axum::response::Response {
+    asset(JS, UNREAD_MARKER_JS)
 }
 async fn chat_js() -> axum::response::Response {
     asset(JS, CHAT_JS)
@@ -1546,6 +1550,7 @@ where
         .route("/", axum::routing::get(index::<B>))
         .route("/app.js", axum::routing::get(app_js))
         .route("/lib/html.js", axum::routing::get(html_js))
+        .route("/lib/unread-marker.mjs", axum::routing::get(unread_marker_js))
         .route("/components/wukong-chat.js", axum::routing::get(chat_js))
         .route(
             "/components/wukong-memory.js",
@@ -1761,6 +1766,14 @@ mod tests {
             content_type(build_router(state(None, &[]).await), "/lib/html.js")
                 .await
                 .contains("javascript")
+        );
+        assert!(
+            content_type(
+                build_router(state(None, &[]).await),
+                "/lib/unread-marker.mjs"
+            )
+            .await
+            .contains("javascript")
         );
         assert!(content_type(
             build_router(state(None, &[]).await),
