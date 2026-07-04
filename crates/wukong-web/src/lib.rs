@@ -3361,13 +3361,27 @@ mod tests {
     #[test]
     fn chat_component_opens_live_thinking_details() {
         assert!(
-            CHAT_JS.contains("this.liveThinking.open = true"),
-            "live reasoning details should be open so Telegram thinking is visible"
+            CHAT_JS.contains("liveThinkingNode"),
+            "chat should use the shared live thinking renderer"
         );
         assert!(
-            CHAT_JS.contains("thinking.open = true"),
-            "direct chat reasoning details should be open while streaming"
+            CHAT_ACTIVITY_JS.contains("details.open = true"),
+            "live reasoning details should be open while streaming"
         );
+        assert!(
+            CHAT_ACTIVITY_JS.contains("className = 'activity-card thinking'"),
+            "live thinking should render as an activity card"
+        );
+    }
+
+    #[test]
+    fn chat_component_uses_workbench_modules() {
+        assert!(CHAT_JS.contains("/components/chat-thread-header.js"));
+        assert!(CHAT_JS.contains("/components/chat-message.js"));
+        assert!(CHAT_JS.contains("/components/chat-activity.js"));
+        assert!(CHAT_JS.contains("/components/chat-question-card.js"));
+        assert!(CHAT_JS.contains("chat-workbench"));
+        assert!(CHAT_JS.contains("conversation-rail"));
     }
 
     #[test]

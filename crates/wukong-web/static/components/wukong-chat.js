@@ -1,4 +1,8 @@
 import { html, unsafe, escapeHTML } from '/lib/html.js';
+import { threadHeaderTemplate } from '/components/chat-thread-header.js';
+import { bubbleNode, dateSeparatorNode, messageFrameNode, unreadDividerNode } from '/components/chat-message.js';
+import { activityDetailsNode, liveThinkingNode } from '/components/chat-activity.js';
+import { questionCardNode } from '/components/chat-question-card.js';
 import {
   firstUnreadIndex,
   latestMessageId,
@@ -22,24 +26,20 @@ export class WukongChat extends HTMLElement {
     this.userInteractedWithChat = false;
     this.initialAnchoring = false;
     this.innerHTML = html`
-      <div class="chat-toolbar">
-        <label class="chat-source">來源 <select id="chat-scope"></select></label>
-        <label>跳到日期 <input id="jump-date" type="date" /></label>
-        <button id="jump-button" type="button">前往</button>
-        <span id="chat-model-status" class="tag">模型：載入中</span>
-        <span id="chat-skill-status" class="tag">技能偏好：Phase 2</span>
-      </div>
-      <div class="log" id="log"></div>
-      <form id="form" class="composer">
-        <div class="textarea-wrapper">
-          <textarea id="q" rows="1" autocomplete="off" placeholder="問悟空… (Enter 送出, Shift+Enter 換行)"></textarea>
-        </div>
-        <button type="submit" class="send-btn" title="送出">
-          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
-          </svg>
-        </button>
-      </form>
+      <section class="chat-workbench">
+        ${unsafe(threadHeaderTemplate())}
+        <div class="conversation-rail log" id="log"></div>
+        <form id="form" class="composer">
+          <div class="textarea-wrapper">
+            <textarea id="q" rows="1" autocomplete="off" placeholder="問悟空… (Enter 送出, Shift+Enter 換行)"></textarea>
+          </div>
+          <button type="submit" class="send-btn" title="送出">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+              <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+            </svg>
+          </button>
+        </form>
+      </section>
     `.toString();
     this.log = this.querySelector('#log');
     const textarea = this.querySelector('#q');
@@ -225,13 +225,6 @@ export class WukongChat extends HTMLElement {
     if (this.unreadDivider) this.removeUnreadDivider({ record: true });
   }
 
-  unreadDividerNode() {
-    const div = document.createElement('div');
-    div.className = 'unread-divider';
-    div.textContent = '以下是上次離開後的新紀錄';
-    return div;
-  }
-
   async loadScopes() {
     try {
       const resp = await fetch('/api/chat/scopes' + this.tokenParam('?'));
@@ -304,35 +297,30 @@ export class WukongChat extends HTMLElement {
   }
 
   messageNode(message) {
-    const div = document.createElement('div');
-    div.className = 'bubble ' + (message.role === 'user' ? 'user' : 'assistant');
-    div.dataset.messageId = message.id;
-    if (message.role === 'assistant' && message.content_html) {
-      div.innerHTML = message.content_html;
-    } else {
-      div.textContent = message.content;
-    }
-    if (message.status === 'error') div.classList.add('error');
-    const attachments = this.attachmentsNode(message);
-    if (attachments) div.appendChild(attachments);
-    return div;
+    const { frame, body } = messageFrameNode(message, {
+      attachmentsNode: (msg) => this.attachmentsNode(msg),
+    });
+    if (message.role === 'assistant') this.enhanceCodeBlocks(body);
+    return frame;
   }
 
   // Collapsible group for an assistant message's helper-baton steps; the steps
   // are fetched lazily the first time the user expands it (most turns have none,
   // so we only attach this when step_count > 0).
   lazyStepsNode(message) {
-    const details = document.createElement('details');
-    details.className = 'baton-group';
     const label =
       message.step_count > 1 ? '🔍 推理過程（' + message.step_count + ' 棒）' : '🔍 推理過程';
-    details.innerHTML =
-      '<summary>' + escapeHTML(label) + '</summary><div class="baton-group-body"></div>';
+    const details = activityDetailsNode({
+      className: 'baton-group',
+      summary: label,
+      loadingText: '載入中…',
+    });
+    const bodySelector = '.activity-card-body';
     let loaded = false;
     details.addEventListener('toggle', async () => {
       if (!details.open || loaded) return;
       loaded = true;
-      const body = details.querySelector('.baton-group-body');
+      const body = details.querySelector(bodySelector);
       body.innerHTML = '<p class="baton-loading">載入中…</p>';
       try {
         const resp = await fetch(
@@ -362,15 +350,17 @@ export class WukongChat extends HTMLElement {
   }
 
   lazyEventsNode(message) {
-    const details = document.createElement('details');
-    details.className = 'turn-events-group';
-    details.innerHTML =
-      '<summary>💭 思考與工具紀錄</summary><div class="turn-events-body"></div>';
+    const details = activityDetailsNode({
+      className: 'turn-events-group',
+      summary: '💭 思考與工具紀錄',
+      loadingText: '載入中…',
+    });
+    const bodySelector = '.activity-card-body';
     let loaded = false;
     details.addEventListener('toggle', async () => {
       if (!details.open || loaded) return;
       loaded = true;
-      const body = details.querySelector('.turn-events-body');
+      const body = details.querySelector(bodySelector);
       body.innerHTML = '<p class="baton-loading">載入中…</p>';
       try {
         const resp = await fetch(
@@ -386,10 +376,7 @@ export class WukongChat extends HTMLElement {
 
         body.innerHTML = '';
         if (reasoning.trim()) {
-          const block = document.createElement('details');
-          block.className = 'thinking';
-          block.open = true;
-          block.innerHTML = '<summary>💭 思考過程</summary><pre class="reasoning"></pre>';
+          const block = liveThinkingNode();
           block.querySelector('.reasoning').textContent = reasoning;
           body.appendChild(block);
         }
@@ -472,17 +459,14 @@ export class WukongChat extends HTMLElement {
     let lastDate = null;
     for (const [index, message] of messages.entries()) {
       if (index === unreadIndex) {
-        unreadDivider = this.unreadDividerNode();
+        unreadDivider = unreadDividerNode();
         nodes.push(unreadDivider);
       }
       const date = new Date(message.created_at * 1000).toLocaleDateString('zh-TW', {
         year: 'numeric', month: 'long', day: 'numeric',
       });
       if (date !== lastDate) {
-        const sep = document.createElement('div');
-        sep.className = 'date-separator';
-        sep.textContent = date;
-        nodes.push(sep);
+        nodes.push(dateSeparatorNode(date));
         lastDate = date;
       }
       const bubbleNode = this.messageNode(message);
@@ -599,18 +583,14 @@ export class WukongChat extends HTMLElement {
   }
 
   bubble(cls, innerHTML) {
-    const div = document.createElement('div');
-    div.className = 'bubble ' + cls;
-    div.innerHTML = innerHTML;
+    const div = bubbleNode(cls, innerHTML);
     this.log.appendChild(div);
     void this.scrollToBottomAfterRender();
     return div;
   }
 
   appendBubble(cls, innerHTML) {
-    const div = document.createElement('div');
-    div.className = 'bubble ' + cls;
-    div.innerHTML = innerHTML;
+    const div = bubbleNode(cls, innerHTML);
     this.log.appendChild(div);
     return div;
   }
@@ -628,166 +608,19 @@ export class WukongChat extends HTMLElement {
   }
 
   renderQuestionCard(request, source) {
-    if (!request || !request.request_id || !request.session_id || !Array.isArray(request.questions)) return null;
     if (this.activeQuestionCard) this.activeQuestionCard.remove();
-
-    const state = {
-      tab: 0,
-      answers: request.questions.map(() => []),
-      custom: request.questions.map(() => ''),
-      sending: false,
-    };
-
-    const card = document.createElement('section');
-    card.className = 'question-card';
-    card.dataset.requestId = request.request_id;
-    card.dataset.source = source || '';
+    const card = questionCardNode(request, source, {
+      onSubmit: (req, answers) => this.questionRequest(
+        '/api/questions/' + encodeURIComponent(req.request_id) + '/reply',
+        { session_id: req.session_id, answers }
+      ),
+      onReject: (req) => this.questionRequest(
+        '/api/questions/' + encodeURIComponent(req.request_id) + '/reject',
+        { session_id: req.session_id }
+      ),
+    });
+    if (!card) return null;
     this.activeQuestionCard = card;
-
-    const setStatus = (text, cls = '') => {
-      const status = card.querySelector('.question-status');
-      if (!status) return;
-      status.textContent = text;
-      status.className = 'question-status ' + cls;
-    };
-
-    const finish = (text) => {
-      card.classList.add('question-card-done');
-      card.innerHTML = '<div class="question-done">' + escapeHTML(text) + '</div>';
-      if (this.activeQuestionCard === card) this.activeQuestionCard = null;
-    };
-
-    const submit = async () => {
-      if (state.sending) return;
-      state.sending = true;
-      setStatus('送出中…');
-      try {
-        await this.questionRequest('/api/questions/' + encodeURIComponent(request.request_id) + '/reply', {
-          session_id: request.session_id,
-          answers: state.answers,
-        });
-        finish('已送出回答。');
-      } catch (err) {
-        state.sending = false;
-        setStatus('送出失敗：' + err.message, 'error');
-      }
-    };
-
-    const reject = async () => {
-      if (state.sending) return;
-      state.sending = true;
-      setStatus('取消中…');
-      try {
-        await this.questionRequest('/api/questions/' + encodeURIComponent(request.request_id) + '/reject', {
-          session_id: request.session_id,
-        });
-        finish('已取消問題。');
-      } catch (err) {
-        state.sending = false;
-        setStatus('取消失敗：' + err.message, 'error');
-      }
-    };
-
-    const render = () => {
-      const question = request.questions[state.tab];
-      if (!question) return;
-      const isLast = state.tab >= request.questions.length - 1;
-      const selected = state.answers[state.tab] || [];
-      card.innerHTML = '';
-
-      const title = document.createElement('div');
-      title.className = 'question-title';
-      title.textContent = '問題 ' + (state.tab + 1) + ' / ' + request.questions.length;
-      card.appendChild(title);
-
-      if (question.header) {
-        const header = document.createElement('div');
-        header.className = 'question-header';
-        header.textContent = question.header;
-        card.appendChild(header);
-      }
-
-      const text = document.createElement('div');
-      text.className = 'question-text';
-      text.textContent = question.question || '';
-      card.appendChild(text);
-
-      const options = document.createElement('div');
-      options.className = 'question-options';
-      for (const option of question.options || []) {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'question-option';
-        const picked = selected.includes(option.label);
-        if (picked) button.classList.add('picked');
-        button.innerHTML =
-          '<span>' + escapeHTML(picked ? '✓ ' : '') + escapeHTML(option.label || '') + '</span>' +
-          (option.description ? '<small>' + escapeHTML(option.description) + '</small>' : '');
-        button.addEventListener('click', () => {
-          if (question.multiple) {
-            state.answers[state.tab] = picked
-              ? selected.filter((item) => item !== option.label)
-              : [...selected, option.label];
-            render();
-            return;
-          }
-          state.answers[state.tab] = [option.label];
-          if (isLast) void submit();
-          else {
-            state.tab += 1;
-            render();
-          }
-        });
-        options.appendChild(button);
-      }
-      card.appendChild(options);
-
-      if (question.custom) {
-        const custom = document.createElement('textarea');
-        custom.className = 'question-custom';
-        custom.rows = 2;
-        custom.placeholder = '自訂回答…';
-        custom.value = state.custom[state.tab] || '';
-        custom.addEventListener('input', () => {
-          state.custom[state.tab] = custom.value;
-        });
-        card.appendChild(custom);
-      }
-
-      const status = document.createElement('div');
-      status.className = 'question-status';
-      card.appendChild(status);
-
-      const footer = document.createElement('div');
-      footer.className = 'question-footer';
-
-      const cancel = document.createElement('button');
-      cancel.type = 'button';
-      cancel.textContent = '取消';
-      cancel.addEventListener('click', () => void reject());
-      footer.appendChild(cancel);
-
-      const next = document.createElement('button');
-      next.type = 'button';
-      next.textContent = isLast ? '送出' : '下一題';
-      next.addEventListener('click', () => {
-        const custom = (state.custom[state.tab] || '').trim();
-        if (custom) {
-          state.answers[state.tab] = question.multiple
-            ? Array.from(new Set([...(state.answers[state.tab] || []), custom]))
-            : [custom];
-        }
-        if (isLast) void submit();
-        else {
-          state.tab += 1;
-          render();
-        }
-      });
-      footer.appendChild(next);
-      card.appendChild(footer);
-    };
-
-    render();
     this.log.appendChild(card);
     return card;
   }
@@ -811,10 +644,7 @@ export class WukongChat extends HTMLElement {
 
   ensureLiveThinking() {
     if (!this.liveThinking) {
-      this.liveThinking = document.createElement('details');
-      this.liveThinking.className = 'thinking';
-      this.liveThinking.open = true;
-      this.liveThinking.innerHTML = '<summary>💭 思考過程</summary><pre class="reasoning"></pre>';
+      this.liveThinking = liveThinkingNode();
       this.log.appendChild(this.liveThinking);
     }
     return this.liveThinking;
@@ -907,10 +737,7 @@ export class WukongChat extends HTMLElement {
     });
     es.addEventListener('reasoning', (ev) => {
       if (!thinking) {
-        thinking = document.createElement('details');
-        thinking.className = 'thinking';
-        thinking.open = true;
-        thinking.innerHTML = '<summary>💭 思考過程</summary><pre class="reasoning"></pre>';
+        thinking = liveThinkingNode();
         this.log.appendChild(thinking);
       }
       thinking.querySelector('.reasoning').textContent += ev.data;
@@ -919,10 +746,7 @@ export class WukongChat extends HTMLElement {
     es.addEventListener('tool', (ev) => {
       progress.innerHTML = '🐵 使用工具 ' + escapeHTML(ev.data) + '…';
       if (!thinking) {
-        thinking = document.createElement('details');
-        thinking.className = 'thinking';
-        thinking.open = true;
-        thinking.innerHTML = '<summary>💭 思考過程</summary><pre class="reasoning"></pre>';
+        thinking = liveThinkingNode();
         this.log.appendChild(thinking);
       }
       thinking.querySelector('.reasoning').textContent += '\n▸ 使用工具 ' + ev.data + '\n';
