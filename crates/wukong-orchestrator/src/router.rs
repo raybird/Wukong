@@ -229,12 +229,15 @@ pub async fn plan_skill_chain_with_preferences(
     skills: &[SkillRouteOption],
     preferences: Option<&PlannerPreferenceHint>,
 ) -> Result<Vec<PlannedStep>, OrchestratorError> {
+    let tool_overrides = std::collections::BTreeMap::from([("question".to_string(), false)]);
     let resp = backend
         .run(AgentRequest {
             prompt: skill_planning_prompt_with_preferences(task, skills, preferences),
             session_id: None,
             thinking: false,
             model: None,
+            agent: Some("plan".to_string()),
+            tool_overrides,
             attachments: Vec::new(),
         })
         .await?;
@@ -243,12 +246,15 @@ pub async fn plan_skill_chain_with_preferences(
 
 /// Phase 1: ask the backend which role should handle the task.
 pub async fn route(backend: &impl AiBackend, task: &str) -> Result<Role, OrchestratorError> {
+    let tool_overrides = std::collections::BTreeMap::from([("question".to_string(), false)]);
     let resp = backend
         .run(AgentRequest {
             prompt: routing_prompt(task),
             session_id: None,
             thinking: false,
             model: None,
+            agent: Some("plan".to_string()),
+            tool_overrides,
             attachments: Vec::new(),
         })
         .await?;
@@ -260,12 +266,15 @@ pub async fn plan_chain(
     backend: &impl AiBackend,
     task: &str,
 ) -> Result<Vec<Role>, OrchestratorError> {
+    let tool_overrides = std::collections::BTreeMap::from([("question".to_string(), false)]);
     let resp = backend
         .run(AgentRequest {
             prompt: planning_prompt(task),
             session_id: None,
             thinking: false,
             model: None,
+            agent: Some("plan".to_string()),
+            tool_overrides,
             attachments: Vec::new(),
         })
         .await?;
@@ -457,5 +466,33 @@ mod tests {
         let prompt = skill_planning_prompt_with_preferences("fix it", &skills, Some(&hint));
 
         assert!(!prompt.contains("[User Preferences]"));
+    }
+
+    #[tokio::test]
+    async fn skill_planning_uses_plan_agent_without_question_tool() {
+        struct Backend(std::sync::Mutex<Option<AgentRequest>>);
+
+        impl AiBackend for Backend {
+            async fn run(
+                &self,
+                req: AgentRequest,
+            ) -> Result<wukong_gateway::backend::AgentResponse, wukong_gateway::GatewayError>
+            {
+                *self.0.lock().unwrap() = Some(req);
+                Ok(wukong_gateway::backend::AgentResponse {
+                    text: "fixer|none".into(),
+                    session_id: None,
+                })
+            }
+        }
+
+        let backend = Backend(std::sync::Mutex::new(None));
+        let _ = plan_skill_chain_with_preferences(&backend, "pull updates", &[], None)
+            .await
+            .unwrap();
+
+        let req = backend.0.lock().unwrap().take().unwrap();
+        assert_eq!(req.agent.as_deref(), Some("plan"));
+        assert_eq!(req.tool_overrides.get("question"), Some(&false));
     }
 }

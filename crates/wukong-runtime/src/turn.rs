@@ -223,6 +223,8 @@ pub async fn run_turn_traced_with_attachments(
                     } else {
                         None
                     },
+                    agent: None,
+                    tool_overrides: std::collections::BTreeMap::new(),
                     attachments: attachments.clone(),
                 },
                 on_event,
@@ -275,6 +277,8 @@ pub async fn run_turn_traced_with_attachments(
                         session_id: captured_session.clone().or(session_id),
                         thinking: cfg.thinking,
                         model: cfg.default_model.clone(),
+                        agent: None,
+                        tool_overrides: std::collections::BTreeMap::new(),
                         attachments: attachments.clone(),
                     },
                     on_event,
@@ -381,6 +385,8 @@ pub async fn run_turn_session_passthrough(
                 session_id: Some(session_id.to_string()),
                 thinking: false,
                 model: None,
+                agent: None,
+                tool_overrides: std::collections::BTreeMap::new(),
                 attachments: Vec::new(),
             },
             &mut |_| {},
@@ -395,8 +401,8 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
     use tempfile::NamedTempFile;
-    use wukong_gateway::backend::{AgentAttachment, AgentRequest, AgentResponse};
     use wukong_gateway::GatewayError;
+    use wukong_gateway::backend::{AgentAttachment, AgentRequest, AgentResponse};
 
     struct MockBackend {
         replies: Mutex<VecDeque<String>>,
@@ -896,10 +902,11 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(r
-            .data
-            .iter()
-            .any(|h| h.text.contains("Assistant: 找到了根因")));
+        assert!(
+            r.data
+                .iter()
+                .any(|h| h.text.contains("Assistant: 找到了根因"))
+        );
     }
 
     #[tokio::test]
@@ -933,10 +940,11 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(r
-            .data
-            .iter()
-            .any(|h| h.text.contains("Assistant: 直接回答原問題")));
+        assert!(
+            r.data
+                .iter()
+                .any(|h| h.text.contains("Assistant: 直接回答原問題"))
+        );
     }
 
     #[tokio::test]

@@ -33,6 +33,8 @@ impl<B: AiBackend + Sync> Summarizer for OpencodeSummarizer<'_, B> {
             session_id: None,
             thinking: false,
             model: None,
+            agent: None,
+            tool_overrides: std::collections::BTreeMap::new(),
             attachments: Vec::new(),
         });
         let resp = tokio::task::block_in_place(|| self.handle.block_on(fut))

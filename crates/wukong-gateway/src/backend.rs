@@ -1,5 +1,6 @@
 use crate::error::GatewayError;
-use crate::stream::{parse_event, parse_session_id, StreamEvent};
+use crate::stream::{StreamEvent, parse_event, parse_session_id};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -27,6 +28,10 @@ pub struct AgentRequest {
     pub thinking: bool,
     /// Optional opencode model override for this request.
     pub model: Option<String>,
+    /// Optional opencode agent override, e.g. `plan` for internal routing.
+    pub agent: Option<String>,
+    /// Per-tool opencode server overrides. `false` disables a tool for this request.
+    pub tool_overrides: BTreeMap<String, bool>,
     pub attachments: Vec<AgentAttachment>,
 }
 
@@ -584,6 +589,8 @@ mod tests {
                 session_id: None,
                 thinking: false,
                 model: None,
+                agent: None,
+                tool_overrides: BTreeMap::new(),
                 attachments: Vec::new(),
             })
             .await
@@ -604,6 +611,8 @@ mod tests {
                 session_id: None,
                 thinking: false,
                 model: None,
+                agent: None,
+                tool_overrides: BTreeMap::new(),
                 attachments: Vec::new(),
             })
             .await
@@ -627,6 +636,8 @@ mod tests {
                 session_id: None,
                 thinking: false,
                 model: None,
+                agent: None,
+                tool_overrides: BTreeMap::new(),
                 attachments: Vec::new(),
             }),
         )
@@ -670,6 +681,8 @@ mod tests {
                     session_id: None,
                     thinking: false,
                     model: None,
+                    agent: None,
+                    tool_overrides: BTreeMap::new(),
                     attachments: Vec::new(),
                 },
                 &mut |e| events.push(e),
@@ -704,6 +717,8 @@ mod tests {
                     session_id: None,
                     thinking: false,
                     model: None,
+                    agent: None,
+                    tool_overrides: BTreeMap::new(),
                     attachments: Vec::new(),
                 },
                 &mut |e| events.push(e),
@@ -742,6 +757,8 @@ mod tests {
                     session_id: None,
                     thinking: false,
                     model: None,
+                    agent: None,
+                    tool_overrides: BTreeMap::new(),
                     attachments: Vec::new(),
                 },
                 &mut |e| events.push(e),
@@ -771,6 +788,8 @@ mod tests {
                     session_id: None,
                     thinking: false,
                     model: None,
+                    agent: None,
+                    tool_overrides: BTreeMap::new(),
                     attachments: Vec::new(),
                 },
                 &mut |e| events.push(e),

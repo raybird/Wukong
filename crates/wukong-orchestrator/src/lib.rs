@@ -7,10 +7,10 @@ pub mod router;
 pub use error::OrchestratorError;
 pub use role::Role;
 pub use router::{
-    parse_chain, parse_role, parse_skill_chain, plan_chain, plan_skill_chain,
-    plan_skill_chain_with_preferences, planning_prompt, route, routing_prompt,
-    skill_planning_prompt, skill_planning_prompt_with_preferences, PlannedStep,
-    PlannerPreferenceHint, SkillRouteOption,
+    PlannedStep, PlannerPreferenceHint, SkillRouteOption, parse_chain, parse_role,
+    parse_skill_chain, plan_chain, plan_skill_chain, plan_skill_chain_with_preferences,
+    planning_prompt, route, routing_prompt, skill_planning_prompt,
+    skill_planning_prompt_with_preferences,
 };
 
 use wukong_gateway::backend::{AgentRequest, AiBackend};
@@ -67,6 +67,8 @@ pub async fn orchestrate(
             session_id: None,
             thinking: false,
             model: None,
+            agent: None,
+            tool_overrides: std::collections::BTreeMap::new(),
             attachments: Vec::new(),
         })
         .await?;
@@ -97,6 +99,8 @@ pub async fn orchestrate_chain(
                 session_id: None,
                 thinking: false,
                 model: None,
+                agent: None,
+                tool_overrides: std::collections::BTreeMap::new(),
                 attachments: Vec::new(),
             })
             .await?;
@@ -113,8 +117,8 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::Mutex;
-    use wukong_gateway::backend::{AgentRequest, AgentResponse};
     use wukong_gateway::GatewayError;
+    use wukong_gateway::backend::{AgentRequest, AgentResponse};
 
     /// Replies with scripted responses in order; records every prompt seen.
     struct MockBackend {

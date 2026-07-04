@@ -1,9 +1,10 @@
-use crate::backend::{agent_timeout, AgentRequest, AgentResponse, AiBackend};
+use crate::backend::{AgentRequest, AgentResponse, AiBackend, agent_timeout};
 use crate::error::GatewayError;
 use crate::stream::{QuestionInfo, QuestionOption, QuestionRequest, StreamEvent};
 use reqwest::StatusCode;
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub struct OpencodeServerBackend {
@@ -23,6 +24,10 @@ struct CreateSessionBody {
 struct MessageBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<ModelOverride>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    tools: BTreeMap<String, bool>,
     parts: Vec<MessagePart>,
 }
 
@@ -95,6 +100,8 @@ impl OpencodeServerBackend {
         let url = format!("{}/session/{}/message", self.base_url, session_id);
         let body = MessageBody {
             model: req.model.as_deref().and_then(parse_model_override),
+            agent: req.agent.clone(),
+            tools: req.tool_overrides.clone(),
             parts: vec![MessagePart {
                 kind: "text",
                 text: req.prompt.clone(),
@@ -112,6 +119,8 @@ impl OpencodeServerBackend {
         let url = format!("{}/session/{}/prompt_async", self.base_url, session_id);
         let body = MessageBody {
             model: req.model.as_deref().and_then(parse_model_override),
+            agent: req.agent.clone(),
+            tools: req.tool_overrides.clone(),
             parts: vec![MessagePart {
                 kind: "text",
                 text: req.prompt.clone(),
@@ -788,6 +797,8 @@ mod tests {
                     session_id: None,
                     thinking: false,
                     model: None,
+                    agent: None,
+                    tool_overrides: BTreeMap::new(),
                     attachments: vec![AgentAttachment {
                         path: std::path::PathBuf::from("/tmp/report.pdf"),
                         original_name: "report.pdf".to_string(),

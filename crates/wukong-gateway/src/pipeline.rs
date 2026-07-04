@@ -29,6 +29,8 @@ pub async fn run_turn(
             session_id: None,
             thinking: cfg.thinking,
             model: None,
+            agent: None,
+            tool_overrides: std::collections::BTreeMap::new(),
             attachments: Vec::new(),
         })
         .await?;
