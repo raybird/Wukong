@@ -55,6 +55,10 @@ const APP_JS: &str = include_str!("../static/app.js");
 const HTML_JS: &str = include_str!("../static/lib/html.js");
 const UNREAD_MARKER_JS: &str = include_str!("../static/lib/unread-marker.mjs");
 const CHAT_JS: &str = include_str!("../static/components/wukong-chat.js");
+const CHAT_THREAD_HEADER_JS: &str = include_str!("../static/components/chat-thread-header.js");
+const CHAT_MESSAGE_JS: &str = include_str!("../static/components/chat-message.js");
+const CHAT_ACTIVITY_JS: &str = include_str!("../static/components/chat-activity.js");
+const CHAT_QUESTION_CARD_JS: &str = include_str!("../static/components/chat-question-card.js");
 const MEMORY_JS: &str = include_str!("../static/components/wukong-memory.js");
 const SKILLS_JS: &str = include_str!("../static/components/wukong-skills.js");
 const SETTINGS_JS: &str = include_str!("../static/components/wukong-settings.js");
@@ -104,6 +108,18 @@ async fn unread_marker_js() -> axum::response::Response {
 }
 async fn chat_js() -> axum::response::Response {
     asset(JS, CHAT_JS)
+}
+async fn chat_thread_header_js() -> axum::response::Response {
+    asset(JS, CHAT_THREAD_HEADER_JS)
+}
+async fn chat_message_js() -> axum::response::Response {
+    asset(JS, CHAT_MESSAGE_JS)
+}
+async fn chat_activity_js() -> axum::response::Response {
+    asset(JS, CHAT_ACTIVITY_JS)
+}
+async fn chat_question_card_js() -> axum::response::Response {
+    asset(JS, CHAT_QUESTION_CARD_JS)
 }
 async fn memory_js() -> axum::response::Response {
     asset(JS, MEMORY_JS)
@@ -1553,6 +1569,22 @@ where
         .route("/lib/unread-marker.mjs", axum::routing::get(unread_marker_js))
         .route("/components/wukong-chat.js", axum::routing::get(chat_js))
         .route(
+            "/components/chat-thread-header.js",
+            axum::routing::get(chat_thread_header_js),
+        )
+        .route(
+            "/components/chat-message.js",
+            axum::routing::get(chat_message_js),
+        )
+        .route(
+            "/components/chat-activity.js",
+            axum::routing::get(chat_activity_js),
+        )
+        .route(
+            "/components/chat-question-card.js",
+            axum::routing::get(chat_question_card_js),
+        )
+        .route(
             "/components/wukong-memory.js",
             axum::routing::get(memory_js),
         )
@@ -1778,6 +1810,30 @@ mod tests {
         assert!(content_type(
             build_router(state(None, &[]).await),
             "/components/wukong-chat.js"
+        )
+        .await
+        .contains("javascript"));
+        assert!(content_type(
+            build_router(state(None, &[]).await),
+            "/components/chat-thread-header.js"
+        )
+        .await
+        .contains("javascript"));
+        assert!(content_type(
+            build_router(state(None, &[]).await),
+            "/components/chat-message.js"
+        )
+        .await
+        .contains("javascript"));
+        assert!(content_type(
+            build_router(state(None, &[]).await),
+            "/components/chat-activity.js"
+        )
+        .await
+        .contains("javascript"));
+        assert!(content_type(
+            build_router(state(None, &[]).await),
+            "/components/chat-question-card.js"
         )
         .await
         .contains("javascript"));
