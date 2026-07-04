@@ -491,6 +491,29 @@ impl ChatHistoryStore {
         Ok(rows.into_iter().map(row_to_message).collect())
     }
 
+    pub async fn messages_after(
+        &self,
+        thread_id: &str,
+        after: i64,
+        limit: i64,
+    ) -> Result<Vec<ChatMessage>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id, thread_id, role, content, content_html, status, created_at,
+                    (SELECT COUNT(*) FROM turn_steps ts WHERE ts.message_id = chat_messages.id) AS step_count,
+                    (SELECT COUNT(*) FROM turn_events te WHERE te.message_id = chat_messages.id) AS event_count
+             FROM chat_messages
+             WHERE thread_id = ?1 AND id > ?2
+             ORDER BY id ASC
+             LIMIT ?3",
+        )
+        .bind(thread_id)
+        .bind(after)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(row_to_message).collect())
+    }
+
     pub async fn messages_for_date(
         &self,
         thread_id: &str,

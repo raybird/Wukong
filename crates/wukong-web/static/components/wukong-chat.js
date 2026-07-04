@@ -3,6 +3,7 @@ import { threadHeaderTemplate } from '/components/chat-thread-header.js';
 import { bubbleNode, dateSeparatorNode, messageFrameNode, unreadDividerNode } from '/components/chat-message.js';
 import { activityDetailsNode, liveThinkingNode } from '/components/chat-activity.js';
 import { questionCardNode } from '/components/chat-question-card.js';
+import { waitForStableScrollHeight } from '/lib/chat-layout.mjs';
 import {
   firstUnreadIndex,
   latestMessageId,
@@ -424,6 +425,7 @@ export class WukongChat extends HTMLElement {
       .filter((img) => !img.complete)
       .slice(0, 8);
     await Promise.allSettled(images.map((img) => (img.decode ? img.decode() : Promise.resolve())));
+    await waitForStableScrollHeight(this.log, () => this.nextFrame());
   }
 
   async scrollToBottomAfterRender() {
@@ -495,14 +497,19 @@ export class WukongChat extends HTMLElement {
 
   async loadLatest() {
     try {
-      const data = await this.fetchMessages('limit=10');
+      const marker = readLastSeenMessageId(this.storage(), this.selectedScope);
+      let data = await this.fetchMessages(
+        marker === null ? 'limit=10' : 'after=' + encodeURIComponent(marker) + '&limit=5'
+      );
+      if (marker !== null && !data.messages.length) {
+        data = await this.fetchMessages('limit=10');
+      }
       if (!data.messages.length) {
         this.log.innerHTML = '<p class="empty-state">還沒有對話，問悟空第一個問題。</p>';
         return;
       }
-      this.hasMore = data.has_more;
-      const marker = readLastSeenMessageId(this.storage(), this.selectedScope);
-      const unreadIndex = firstUnreadIndex(data.messages, marker);
+      this.hasMore = marker === null ? data.has_more : true;
+      const unreadIndex = marker === null ? -1 : firstUnreadIndex(data.messages, marker);
       const { unreadDivider } = this.renderMessages(data.messages, 'replace', { unreadIndex });
       await this.anchorInitialView(unreadDivider);
       if (marker === null) {
@@ -528,7 +535,7 @@ export class WukongChat extends HTMLElement {
     this.log.prepend(skeleton);
 
     try {
-      const data = await this.fetchMessages('before=' + encodeURIComponent(this.oldestId) + '&limit=10');
+      const data = await this.fetchMessages('before=' + encodeURIComponent(this.oldestId) + '&limit=20');
       this.hasMore = data.has_more;
       this.renderMessages(data.messages, 'prepend');
     } catch (_err) {

@@ -53,6 +53,7 @@ const INDEX_HTML: &str = include_str!("../static/index.html");
 
 const APP_JS: &str = include_str!("../static/app.js");
 const HTML_JS: &str = include_str!("../static/lib/html.js");
+const CHAT_LAYOUT_JS: &str = include_str!("../static/lib/chat-layout.mjs");
 const UNREAD_MARKER_JS: &str = include_str!("../static/lib/unread-marker.mjs");
 const CHAT_JS: &str = include_str!("../static/components/wukong-chat.js");
 const CHAT_THREAD_HEADER_JS: &str = include_str!("../static/components/chat-thread-header.js");
@@ -102,6 +103,9 @@ async fn app_js() -> axum::response::Response {
 }
 async fn html_js() -> axum::response::Response {
     asset(JS, HTML_JS)
+}
+async fn chat_layout_js() -> axum::response::Response {
+    asset(JS, CHAT_LAYOUT_JS)
 }
 async fn unread_marker_js() -> axum::response::Response {
     asset(JS, UNREAD_MARKER_JS)
@@ -310,6 +314,7 @@ struct ChatQuery {
 #[derive(serde::Deserialize)]
 struct ChatMessagesQuery {
     token: Option<String>,
+    after: Option<i64>,
     before: Option<i64>,
     date: Option<String>,
     limit: Option<i64>,
@@ -778,6 +783,7 @@ where
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
 
+    let trimming_from_front = params.after.is_none();
     let result = if let Some(date) = params.date.as_deref() {
         match date_bounds_utc(date) {
             Ok((start, end)) => {
@@ -787,6 +793,8 @@ where
             }
             Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
         }
+    } else if let Some(after) = params.after {
+        store.messages_after(&thread, after, limit + 1).await
     } else if let Some(before) = params.before {
         store.messages_before(&thread, before, limit + 1).await
     } else {
@@ -797,7 +805,11 @@ where
         Ok(mut messages) => {
             let has_more = messages.len() as i64 > limit;
             if has_more {
-                messages.remove(0);
+                if trimming_from_front {
+                    messages.remove(0);
+                } else {
+                    messages.pop();
+                }
             }
             let message_ids = messages.iter().map(|m| m.id).collect::<Vec<_>>();
             let attachments = match store.attachments_for_messages(&message_ids).await {
@@ -1566,6 +1578,7 @@ where
         .route("/", axum::routing::get(index::<B>))
         .route("/app.js", axum::routing::get(app_js))
         .route("/lib/html.js", axum::routing::get(html_js))
+        .route("/lib/chat-layout.mjs", axum::routing::get(chat_layout_js))
         .route("/lib/unread-marker.mjs", axum::routing::get(unread_marker_js))
         .route("/components/wukong-chat.js", axum::routing::get(chat_js))
         .route(
@@ -1796,6 +1809,11 @@ mod tests {
         );
         assert!(
             content_type(build_router(state(None, &[]).await), "/lib/html.js")
+                .await
+                .contains("javascript")
+        );
+        assert!(
+            content_type(build_router(state(None, &[]).await), "/lib/chat-layout.mjs")
                 .await
                 .contains("javascript")
         );
@@ -3056,6 +3074,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chat_messages_after_returns_next_five() {
+        let app_state = state(None, &[]).await;
+        let store = ChatHistoryStore::open(&app_state.db_url).await.unwrap();
+        let thread = store.default_thread(&app_state.scope).await.unwrap();
+        let mut ids = Vec::new();
+        for i in 0..12 {
+            ids.push(
+                store
+                    .insert_message(&thread, "user", &format!("m{i}"), None, "complete", 100 + i)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let app = build_router(app_state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/chat/messages?after={}&limit=5", ids[4]))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(!body.contains("m4"), "body should omit boundary row: {body}");
+        assert!(body.contains("m5"), "body: {body}");
+        assert!(body.contains("m9"), "body: {body}");
+        assert!(!body.contains("m10"), "body should stop after five rows: {body}");
+        assert!(body.contains(r#""has_more":true"#), "body: {body}");
+    }
+
+    #[tokio::test]
     async fn chat_turn_records_user_and_assistant_messages() {
         let app_state = state(None, &["oracle", "**ans**"]).await;
         let db_url = app_state.db_url.clone();
@@ -3413,6 +3464,18 @@ mod tests {
         assert!(
             CHAT_JS.contains("this.renderMessages(data.messages, 'prepend')"),
             "older messages should still render in prepend mode"
+        );
+    }
+
+    #[test]
+    fn chat_component_loads_from_last_seen_marker_first() {
+        assert!(
+            CHAT_JS.contains("readLastSeenMessageId") && CHAT_JS.contains("after="),
+            "initial chat load should fetch from the localStorage cursor instead of latest history"
+        );
+        assert!(
+            CHAT_JS.contains("limit=5"),
+            "initial cursor load should fetch only a small window after the marker"
         );
     }
 
