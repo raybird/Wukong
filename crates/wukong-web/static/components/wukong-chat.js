@@ -1,4 +1,10 @@
 import { html, unsafe, escapeHTML } from '/lib/html.js';
+import {
+  firstUnreadIndex,
+  latestMessageId,
+  readLastSeenMessageId,
+  writeLastSeenMessageId,
+} from '/lib/unread-marker.mjs';
 
 // <wukong-chat>: message log + composer + SSE wiring. Self-contained custom
 // element (no router/services), per plainvanillaweb core conventions.
@@ -12,6 +18,9 @@ export class WukongChat extends HTMLElement {
     this.liveProgress = null;
     this.liveThinking = null;
     this.activeQuestionCard = null;
+    this.unreadDivider = null;
+    this.userInteractedWithChat = false;
+    this.initialAnchoring = false;
     this.innerHTML = html`
       <div class="chat-toolbar">
         <label class="chat-source">來源 <select id="chat-scope"></select></label>
@@ -57,6 +66,7 @@ export class WukongChat extends HTMLElement {
     this.hasMore = false;
     this.oldestId = null;
     this.scopeSelect.addEventListener('change', () => {
+      if (!this.unreadDivider || this.userInteractedWithChat) this.recordLatestSeenMessage();
       this.closeLiveStream();
       this.selectedScope = this.scopeSelect.value;
       this.liveCursor = 0;
@@ -69,8 +79,14 @@ export class WukongChat extends HTMLElement {
     });
     this.querySelector('#jump-button').addEventListener('click', () => this.jumpToDate());
     this.log.addEventListener('scroll', () => {
+      if (this.initialAnchoring) return;
       if (this.log.scrollTop < 80) this.loadOlder();
     });
+    const markInteraction = () => this.handleChatInteraction();
+    this.log.addEventListener('wheel', markInteraction, { passive: true });
+    this.log.addEventListener('touchstart', markInteraction, { passive: true });
+    this.log.addEventListener('pointerdown', markInteraction);
+    this.log.addEventListener('keydown', markInteraction);
     this.initialize();
   }
 
@@ -173,7 +189,47 @@ export class WukongChat extends HTMLElement {
     this.liveProgress = null;
     this.liveThinking = null;
     this.activeQuestionCard = null;
+    this.unreadDivider = null;
+    this.userInteractedWithChat = false;
+    this.initialAnchoring = false;
     this.log.innerHTML = '';
+  }
+
+  storage() {
+    return window.localStorage;
+  }
+
+  currentLatestMessageId() {
+    const ids = Array.from(this.log.querySelectorAll('[data-message-id]'))
+      .map((node) => Number.parseInt(node.dataset.messageId, 10))
+      .filter((id) => Number.isFinite(id) && id > 0);
+    return ids.length ? Math.max(...ids) : null;
+  }
+
+  recordLatestSeenMessage() {
+    const latest = this.currentLatestMessageId();
+    if (latest !== null) writeLastSeenMessageId(this.storage(), this.selectedScope, latest);
+  }
+
+  removeUnreadDivider({ record = true } = {}) {
+    if (this.unreadDivider) {
+      this.unreadDivider.remove();
+      this.unreadDivider = null;
+    }
+    if (record) this.recordLatestSeenMessage();
+  }
+
+  handleChatInteraction() {
+    if (this.initialAnchoring) return;
+    this.userInteractedWithChat = true;
+    if (this.unreadDivider) this.removeUnreadDivider({ record: true });
+  }
+
+  unreadDividerNode() {
+    const div = document.createElement('div');
+    div.className = 'unread-divider';
+    div.textContent = '以下是上次離開後的新紀錄';
+    return div;
   }
 
   async loadScopes() {
@@ -388,6 +444,18 @@ export class WukongChat extends HTMLElement {
     this.scrollToBottom();
   }
 
+  async anchorInitialView(unreadDivider) {
+    this.initialAnchoring = true;
+    await this.waitForLayoutContent();
+    if (unreadDivider) {
+      unreadDivider.scrollIntoView({ block: 'center', behavior: 'auto' });
+    } else {
+      this.scrollToBottom();
+    }
+    await this.nextFrame();
+    this.initialAnchoring = false;
+  }
+
   preserveScrollPosition(previousHeight) {
     this.log.scrollTop = this.log.scrollHeight - previousHeight;
   }
@@ -396,11 +464,17 @@ export class WukongChat extends HTMLElement {
     if (wasNearBottom) void this.scrollToBottomAfterRender();
   }
 
-  renderMessages(messages, mode) {
+  renderMessages(messages, mode, options = {}) {
     if (mode !== 'prepend') this.renderedMessageIds.clear();
+    const unreadIndex = options.unreadIndex ?? -1;
     const nodes = [];
+    let unreadDivider = null;
     let lastDate = null;
-    for (const message of messages) {
+    for (const [index, message] of messages.entries()) {
+      if (index === unreadIndex) {
+        unreadDivider = this.unreadDividerNode();
+        nodes.push(unreadDivider);
+      }
       const date = new Date(message.created_at * 1000).toLocaleDateString('zh-TW', {
         year: 'numeric', month: 'long', day: 'numeric',
       });
@@ -428,9 +502,11 @@ export class WukongChat extends HTMLElement {
     } else {
       this.log.innerHTML = '';
       for (const node of nodes) this.log.appendChild(node);
-      void this.scrollToBottomAfterRender();
+      this.unreadDivider = unreadDivider;
+      if (!unreadDivider) void this.scrollToBottomAfterRender();
     }
     this.oldestId = this.log.querySelector('[data-message-id]')?.dataset.messageId || null;
+    return { unreadDivider };
   }
 
   async loadLatest() {
@@ -441,7 +517,14 @@ export class WukongChat extends HTMLElement {
         return;
       }
       this.hasMore = data.has_more;
-      this.renderMessages(data.messages, 'replace');
+      const marker = readLastSeenMessageId(this.storage(), this.selectedScope);
+      const unreadIndex = firstUnreadIndex(data.messages, marker);
+      const { unreadDivider } = this.renderMessages(data.messages, 'replace', { unreadIndex });
+      await this.anchorInitialView(unreadDivider);
+      if (marker === null) {
+        const latest = latestMessageId(data.messages);
+        if (latest !== null) writeLastSeenMessageId(this.storage(), this.selectedScope, latest);
+      }
     } catch (err) {
       this.log.innerHTML = '<p class="empty-state">無法讀取對話歷史：' + escapeHTML(err.message) + '</p>';
     }
@@ -807,6 +890,7 @@ export class WukongChat extends HTMLElement {
   send() {
     const text = this.input.value.trim();
     if (!text) return;
+    this.handleChatInteraction();
     this.input.value = '';
     this.input.style.height = 'auto';
     if (this.log.querySelector('.empty-state')) this.log.innerHTML = '';
