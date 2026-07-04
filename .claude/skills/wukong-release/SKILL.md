@@ -36,6 +36,7 @@ Confirm:
 - `main` points at the intended release commit.
 - The latest RC tag points at the commit to promote.
 - Dirty files are understood and unrelated to release tagging.
+- If `Dockerfile` is dirty, inspect whether it is only a local default `ARG VERSION` bump. Do not include that bump in a hotfix release unless changing the source Dockerfile default is the release's explicit purpose; release Docker bundles are generated from the tag by CI.
 - Existing stable version and next stable version are clear.
 
 ## Verify Candidate
@@ -136,4 +137,5 @@ Confirm:
 - Editing release notes from memory: always compare with at least one previous stable release via `gh release view`.
 - Publishing from the wrong commit: verify `git log --decorate` shows the intended RC or stable commit.
 - Mixing release doc updates with unrelated dirty files: commit only intended files, or avoid committing entirely before tagging.
+- Committing a stale source `Dockerfile` `ARG VERSION` bump: CI writes the tagged version into the release Docker bundle, so a local source Dockerfile bump can accidentally ship the wrong default in a hotfix.
 - Trusting RC release bodies: RC releases may have empty bodies; use stable release style as the source of truth.

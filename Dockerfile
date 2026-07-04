@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # ── Build stage: download release binaries ──
-ARG VERSION=v0.16.1
+ARG VERSION=v0.16.27
 ARG TARGET=x86_64-unknown-linux-musl
 ARG REPO=raybird/Wukong
 FROM debian:bookworm-slim AS downloader
