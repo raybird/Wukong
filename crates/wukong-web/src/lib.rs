@@ -3444,6 +3444,12 @@ mod tests {
         assert!(STYLES_CSS.contains(".question-card"));
         assert!(STYLES_CSS.contains(".question-option"));
         assert!(STYLES_CSS.contains(".question-footer"));
+        assert!(STYLES_CSS.contains(".chat-workbench"));
+        assert!(STYLES_CSS.contains(".chat-thread-header"));
+        assert!(STYLES_CSS.contains(".conversation-rail"));
+        assert!(STYLES_CSS.contains(".message-frame"));
+        assert!(STYLES_CSS.contains(".activity-rail"));
+        assert!(STYLES_CSS.contains("@media (max-width: 720px)"));
     }
 
     #[tokio::test]
