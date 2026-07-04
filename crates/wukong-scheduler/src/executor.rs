@@ -4,6 +4,8 @@ use wukong_gateway::config::GatewayConfig;
 use wukong_memory::Memory;
 use wukong_runtime::maintenance::{memory_consolidate, memory_prune, memory_snapshot};
 
+const SCHEDULED_TURN_AUTONOMY_HINT: &str = "\n\n[無人值守排程]\n這是由 scheduler 觸發的無人值守任務。不得呼叫 question 或要求使用者確認；如果流程、技能或工具規則需要使用者選擇，請直接自動採用推薦選項，並繼續完成任務。";
+
 pub struct ExecutionContext<'a, B: AiBackend + Sync> {
     pub memory: &'a Memory,
     pub backend: &'a B,
@@ -40,11 +42,12 @@ async fn execute_job_inner<B: AiBackend + Sync>(
         JobKind::Turn { scope, prompt } => {
             let mut cfg = ctx.base_config.clone();
             cfg.scope = scope.clone();
+            let prompt = format!("{prompt}{SCHEDULED_TURN_AUTONOMY_HINT}");
             let out = wukong_runtime::run_turn(
                 ctx.memory,
                 ctx.backend,
                 &cfg,
-                prompt,
+                &prompt,
                 &mut |_| {},
                 &mut |_| {},
             )
@@ -183,6 +186,22 @@ mod tests {
 
         assert!(!out.success);
         assert!(out.message.contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn turn_job_instructs_agent_to_auto_choose_recommended_options() {
+        let memory = open_memory().await;
+        let backend = MockBackend::new(vec![Ok("oracle"), Ok("done")]);
+        let cfg = cfg("project:Base");
+        let ctx = ExecutionContext { memory: &memory, backend: &backend, base_config: &cfg };
+        let job = job(JobKind::Turn { scope: "project:Scheduled".to_string(), prompt: "do it".to_string() });
+
+        let out = execute_job(&ctx, &job).await;
+
+        assert!(out.success);
+        let prompts = backend.prompts.lock().unwrap();
+        assert!(prompts.iter().any(|p| p.contains("無人值守排程")));
+        assert!(prompts.iter().any(|p| p.contains("自動採用推薦選項")));
     }
 
     #[tokio::test]
