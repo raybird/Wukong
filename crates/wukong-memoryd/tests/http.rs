@@ -69,6 +69,80 @@ async fn remember_then_recall_over_http() {
 }
 
 #[tokio::test]
+async fn malformed_remember_payload_returns_400() {
+    let app = test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/remember")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"scope":"global","items":"bad"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn unknown_memory_kind_returns_400() {
+    let app = test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/remember")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"scope":"global","items":[{"kind":"unknown","text":"x"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn empty_items_returns_400() {
+    let app = test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/remember")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"scope":"global","items":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn blank_recall_query_returns_400() {
+    let app = test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/recall")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"query":"   "}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn invalid_scope_returns_400() {
     let app = test_app().await;
     let req = Request::builder()

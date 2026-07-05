@@ -118,6 +118,17 @@ impl Memory {
     /// Persist a batch of memories. Returns the new row ids.
     pub async fn remember(&self, input: RememberInput) -> Result<WukongResult<Vec<i64>>> {
         let start = Instant::now();
+        if input.items.is_empty() {
+            return Err(MemoryError::InvalidQuery(
+                "remember requires at least one item".to_string(),
+            ));
+        }
+        if input.items.iter().any(|item| item.text.trim().is_empty()) {
+            return Err(MemoryError::InvalidQuery(
+                "memory item text is required".to_string(),
+            ));
+        }
+
         let scope = Scope::parse(&input.scope)?;
         let scope_str = scope.to_string();
         let now = now_unix();
@@ -175,6 +186,11 @@ impl Memory {
     /// Recall memories relevant to a query.
     pub async fn recall(&self, query: RecallQuery) -> Result<WukongResult<Vec<RecallHit>>> {
         let start = Instant::now();
+        if query.query.trim().is_empty() {
+            return Err(MemoryError::InvalidQuery(
+                "recall query is required".to_string(),
+            ));
+        }
 
         // Adaptive gate: skip trivial queries.
         if is_trivial(&query.query) {

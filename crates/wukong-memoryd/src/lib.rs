@@ -1,5 +1,6 @@
 //! wukong-memoryd: axum HTTP transport over wukong-memory.
 
+use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -72,15 +73,17 @@ async fn snapshot(State(mem): State<Arc<Memory>>) -> Result<impl IntoResponse, A
 
 async fn remember(
     State(mem): State<Arc<Memory>>,
-    Json(input): Json<RememberInput>,
+    input: std::result::Result<Json<RememberInput>, JsonRejection>,
 ) -> Result<impl IntoResponse, AppError> {
+    let Json(input) = input.map_err(|err| AppError(MemoryError::InvalidQuery(err.to_string())))?;
     Ok(Json(mem.remember(input).await?))
 }
 
 async fn recall(
     State(mem): State<Arc<Memory>>,
-    Json(query): Json<RecallQuery>,
+    query: std::result::Result<Json<RecallQuery>, JsonRejection>,
 ) -> Result<impl IntoResponse, AppError> {
+    let Json(query) = query.map_err(|err| AppError(MemoryError::InvalidQuery(err.to_string())))?;
     Ok(Json(mem.recall(query).await?))
 }
 
