@@ -1,7 +1,8 @@
 use crate::embed::blob_to_embedding;
 use crate::error::Result;
 use crate::model::{
-    AgeBuckets, EmbeddingCoverage, KindCount, MemoryKind, MemoryRecord, ScopeCount, Snapshot, Stats,
+    AgeBuckets, EmbeddingCoverage, KindCount, MemoryKind, MemoryRecord, RecallTelemetryInput,
+    RecallTelemetrySummary, ScopeCount, Snapshot, Stats,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -43,6 +44,18 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     scope       TEXT PRIMARY KEY,
     session_id  TEXT NOT NULL,
     updated_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS recall_telemetry (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    query_hash        TEXT NOT NULL,
+    mode              TEXT NOT NULL,
+    top_k             INTEGER NOT NULL,
+    scope             TEXT,
+    hit_count         INTEGER NOT NULL,
+    top_relevance     REAL NOT NULL,
+    skipped           INTEGER NOT NULL,
+    latency_ms        INTEGER NOT NULL,
+    created_at        INTEGER NOT NULL
 );
 "#;
 
@@ -587,6 +600,44 @@ impl Store {
                 )
             })
             .collect())
+    }
+
+    /// Record one recall query for aggregate diagnostics. Query text is hashed by caller.
+    pub async fn insert_recall_telemetry(&self, input: &RecallTelemetryInput) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO recall_telemetry
+             (query_hash, mode, top_k, scope, hit_count, top_relevance, skipped, latency_ms, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )
+        .bind(&input.query_hash)
+        .bind(input.mode.as_str())
+        .bind(input.top_k as i64)
+        .bind(input.scope.as_deref())
+        .bind(input.hit_count as i64)
+        .bind(input.top_relevance)
+        .bind(if input.skipped { 1_i64 } else { 0_i64 })
+        .bind(input.latency_ms as i64)
+        .bind(input.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Aggregate recall telemetry for diagnostics.
+    pub async fn recall_telemetry_summary(&self) -> Result<RecallTelemetrySummary> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS total_queries,
+                    COALESCE(SUM(skipped), 0) AS skipped_queries,
+                    COALESCE(AVG(CASE WHEN skipped = 0 THEN top_relevance END), 0.0) AS avg_top_relevance
+             FROM recall_telemetry",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(RecallTelemetrySummary {
+            total_queries: row.get::<i64, _>("total_queries"),
+            skipped_queries: row.get::<i64, _>("skipped_queries"),
+            avg_top_relevance: row.get::<f64, _>("avg_top_relevance"),
+        })
     }
 
     /// Total memory count and per-scope breakdown.

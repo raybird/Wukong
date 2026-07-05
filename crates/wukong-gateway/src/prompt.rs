@@ -30,6 +30,7 @@ mod tests {
             explanation: RecallExplanation {
                 lexical: 1.0,
                 semantic: 0.0,
+                relevance: 1.0,
                 decay: 1.0,
                 importance: 1.0,
                 recall_bonus: 0.0,

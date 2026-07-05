@@ -166,6 +166,7 @@ pub fn rank(candidates: Vec<Candidate>, now: i64, top_k: usize, weights: &Weight
             };
             let age = (now - c.created_at).max(0);
             let decay = time_decay(age, HALF_LIFE_DAYS);
+            let relevance = lexical_norm.max(semantic_norm);
             let recall_bonus = 0.02 * (1.0 + c.recall_count.max(0) as f64).ln();
             let score = combined_score(
                 lexical_norm,
@@ -184,6 +185,7 @@ pub fn rank(candidates: Vec<Candidate>, now: i64, top_k: usize, weights: &Weight
                 explanation: RecallExplanation {
                     lexical: lexical_norm,
                     semantic: semantic_norm,
+                    relevance,
                     decay,
                     importance: c.importance,
                     recall_bonus,

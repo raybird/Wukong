@@ -21,8 +21,8 @@ pub use error::{MemoryError, Result};
 pub use markdown::MarkdownSink;
 pub use model::{
     AgeBuckets, EmbeddingCoverage, Evidence, KindCount, MemoryItem, MemoryKind, MemoryRecord,
-    MemoryRecordsPage, RecallExplanation, RecallHit, RecallMode, RecallQuery, RememberInput,
-    ScopeCount, Snapshot, Stats, WukongResult,
+    MemoryRecordsPage, RecallExplanation, RecallHit, RecallMode, RecallQuery, RecallTelemetryInput,
+    RecallTelemetrySummary, RememberInput, ScopeCount, Snapshot, Stats, WukongResult,
 };
 pub use prune::PrunePolicy;
 pub use scope::Scope;
@@ -47,6 +47,15 @@ fn now_unix() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+fn query_hash(query: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in query.trim().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 /// The public memory facade. Wraps the store, ranking weights, and an optional
@@ -194,11 +203,26 @@ impl Memory {
 
         // Adaptive gate: skip trivial queries.
         if is_trivial(&query.query) {
+            let latency_ms = start.elapsed().as_millis() as u64;
+            let _ = self
+                .store
+                .insert_recall_telemetry(&RecallTelemetryInput {
+                    query_hash: query_hash(&query.query),
+                    mode: query.mode,
+                    top_k: query.top_k,
+                    scope: query.scope.clone(),
+                    hit_count: 0,
+                    top_relevance: 0.0,
+                    skipped: true,
+                    latency_ms,
+                    created_at: now_unix(),
+                })
+                .await;
             return Ok(WukongResult {
                 data: Vec::new(),
                 evidence: Vec::new(),
                 confidence: 0.0,
-                latency_ms: start.elapsed().as_millis() as u64,
+                latency_ms,
             });
         }
 
@@ -273,8 +297,10 @@ impl Memory {
             .collect();
         let confidence = scored
             .first()
-            .map(|s| s.score.clamp(0.0, 1.0))
+            .map(|s| s.explanation.relevance.clamp(0.0, 1.0))
             .unwrap_or(0.0);
+        let top_relevance = confidence;
+        let hit_count = scored.len();
         let hits: Vec<RecallHit> = scored
             .into_iter()
             .map(|s| RecallHit {
@@ -286,13 +312,33 @@ impl Memory {
                 explanation: s.explanation,
             })
             .collect();
+        let latency_ms = start.elapsed().as_millis() as u64;
+        let _ = self
+            .store
+            .insert_recall_telemetry(&RecallTelemetryInput {
+                query_hash: query_hash(&query.query),
+                mode: query.mode,
+                top_k: query.top_k,
+                scope: query.scope.clone(),
+                hit_count,
+                top_relevance,
+                skipped: false,
+                latency_ms,
+                created_at: now,
+            })
+            .await;
 
         Ok(WukongResult {
             data: hits,
             evidence,
             confidence,
-            latency_ms: start.elapsed().as_millis() as u64,
+            latency_ms,
         })
+    }
+
+    /// Aggregate recall telemetry for diagnostics.
+    pub async fn recall_telemetry_summary(&self) -> Result<RecallTelemetrySummary> {
+        self.store.recall_telemetry_summary().await
     }
 
     /// Plan (without executing) which source ids would fold into each summary.

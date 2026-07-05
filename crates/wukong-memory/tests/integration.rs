@@ -249,6 +249,67 @@ async fn populated_old_database_upgrades_and_remains_recallable() {
 }
 
 #[tokio::test]
+async fn recall_confidence_uses_decay_free_relevance() {
+    let mem = open_memory().await;
+    mem.remember(RememberInput {
+        scope: "global".to_string(),
+        session_id: None,
+        items: vec![item("sqlite migration confidence check")],
+    })
+    .await
+    .unwrap();
+
+    let res = mem
+        .recall(RecallQuery {
+            query: "sqlite migration".to_string(),
+            top_k: 5,
+            scope: None,
+            mode: RecallMode::Hybrid,
+        })
+        .await
+        .unwrap();
+
+    assert!(!res.data.is_empty());
+    assert_eq!(res.confidence, res.data[0].explanation.relevance);
+}
+
+#[tokio::test]
+async fn recall_telemetry_records_hit_and_skip_cases() {
+    let mem = open_memory().await;
+    mem.remember(RememberInput {
+        scope: "global".to_string(),
+        session_id: None,
+        items: vec![item("telemetry sqlite row")],
+    })
+    .await
+    .unwrap();
+
+    let _hit = mem
+        .recall(RecallQuery {
+            query: "telemetry sqlite".to_string(),
+            top_k: 5,
+            scope: None,
+            mode: RecallMode::Hybrid,
+        })
+        .await
+        .unwrap();
+    let _skip = mem
+        .recall(RecallQuery {
+            query: "of".to_string(),
+            top_k: 5,
+            scope: None,
+            mode: RecallMode::Hybrid,
+        })
+        .await
+        .unwrap();
+
+    let summary = mem.recall_telemetry_summary().await.unwrap();
+    assert_eq!(summary.total_queries, 2);
+    assert_eq!(summary.skipped_queries, 1);
+    assert!(summary.avg_top_relevance > 0.0);
+}
+
+#[tokio::test]
 async fn remember_writes_embedding_and_backfill_fills_old_rows() {
     use std::sync::Arc;
     use wukong_memory::MockEmbedder;

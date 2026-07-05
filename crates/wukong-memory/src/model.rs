@@ -68,6 +68,17 @@ pub enum RecallMode {
     Hybrid,
 }
 
+impl RecallMode {
+    /// Stable lowercase string used for DB storage.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RecallMode::Keyword => "keyword",
+            RecallMode::Tree => "tree",
+            RecallMode::Hybrid => "hybrid",
+        }
+    }
+}
+
 fn default_top_k() -> usize {
     5
 }
@@ -100,12 +111,35 @@ pub struct RecallHit {
 pub struct RecallExplanation {
     pub lexical: f64,
     pub semantic: f64,
+    pub relevance: f64,
     pub decay: f64,
     pub importance: f64,
     pub recall_bonus: f64,
     pub age_seconds: i64,
     pub recall_count: i64,
     pub source_signals: Vec<String>,
+}
+
+/// Persisted recall telemetry. Stores a query hash, never raw query text.
+#[derive(Debug, Clone)]
+pub struct RecallTelemetryInput {
+    pub query_hash: String,
+    pub mode: RecallMode,
+    pub top_k: usize,
+    pub scope: Option<String>,
+    pub hit_count: usize,
+    pub top_relevance: f64,
+    pub skipped: bool,
+    pub latency_ms: u64,
+    pub created_at: i64,
+}
+
+/// Aggregate recall telemetry for diagnostics.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecallTelemetrySummary {
+    pub total_queries: i64,
+    pub skipped_queries: i64,
+    pub avg_top_relevance: f64,
 }
 
 /// Provenance entry attached to every result envelope.
