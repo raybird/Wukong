@@ -14,7 +14,12 @@ let mem = Memory::open("sqlite://./memory.db").await?;
 mem.remember(RememberInput {
     scope: "project:Wukong".into(),
     session_id: None,
-    items: vec![MemoryItem { kind: MemoryKind::Decision, text: "用 Rust 重寫".into(), importance: None }],
+    items: vec![MemoryItem {
+        kind: MemoryKind::Decision,
+        text: "用 Rust 重寫".into(),
+        importance: None,
+        dedupe_key: None,
+    }],
 }).await?;
 
 let hits = mem.recall(RecallQuery {
@@ -36,7 +41,9 @@ let stats = mem.stats().await?;
 | `Hybrid`（預設） | 合併詞彙＋近期＋語意，依綜合分重排 |
 
 綜合分：`α·正規化BM25 + δ·語意相似 + β·時間衰減(90天半衰期) + γ·importance`，常被召回者加成。
-過短／全停用詞的查詢由 adaptive gate 直接略過。
+過短／全停用詞的查詢由 adaptive gate 直接略過；CJK 查詢使用字元權重，短中文關鍵詞可召回，低資訊量回覆會跳過。
+回應 `confidence` 取 top hit 的 decay-free `relevance = max(lexical, semantic)`；排序仍使用完整綜合分。
+`recall_telemetry_summary()` 可讀取聚合 telemetry。Telemetry 只儲存 query hash，不保存原始查詢文字。
 
 ## 語意向量召回（選用增強層）
 
@@ -84,6 +91,7 @@ let snap = mem.snapshot(Some("project:X")).await?;
 ## 儲存
 
 SQLite（WAL）+ FTS5 外部內容表。schema 啟動時冪等套用。回應信封：`WukongResult<T> { data, evidence[], confidence, latency_ms }`。
+`MemoryItem::dedupe_key` 可由系統產生的記憶寫入提供；相同 key 會回傳既有 row id，避免重試造成重複記憶。人工輸入可保持 `None`。
 
 詳見 [`docs/superpowers/specs/2026-06-05-wukong-memory-design.md`](../../docs/superpowers/specs/2026-06-05-wukong-memory-design.md)
 與語意層 [`docs/superpowers/specs/2026-06-06-semantic-recall-design.md`](../../docs/superpowers/specs/2026-06-06-semantic-recall-design.md)。
