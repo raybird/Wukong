@@ -13,6 +13,7 @@ fn item(text: &str) -> MemoryItem {
         kind: MemoryKind::Note,
         text: text.to_string(),
         importance: None,
+        dedupe_key: None,
     }
 }
 
@@ -164,6 +165,87 @@ async fn invalid_scope_is_rejected() {
         })
         .await;
     assert!(err.is_err());
+}
+
+#[tokio::test]
+async fn duplicate_dedupe_key_returns_existing_id() {
+    let mem = open_memory().await;
+    let input = RememberInput {
+        scope: "global".to_string(),
+        session_id: Some("turn-1".to_string()),
+        items: vec![MemoryItem {
+            kind: MemoryKind::Event,
+            text: "User: deploy it".to_string(),
+            importance: None,
+            dedupe_key: Some("runtime:turn-1:user".to_string()),
+        }],
+    };
+
+    let first = mem.remember(input.clone()).await.unwrap();
+    let second = mem.remember(input).await.unwrap();
+
+    assert_eq!(first.data, second.data);
+    let stats = mem.stats().await.unwrap();
+    assert_eq!(stats.total, 1);
+}
+
+#[tokio::test]
+async fn populated_old_database_upgrades_and_remains_recallable() {
+    let file = NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", file.path().display());
+    std::mem::forget(file);
+
+    {
+        let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+        sqlx::raw_sql(
+            r#"
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                scope TEXT NOT NULL,
+                project TEXT,
+                created_at INTEGER NOT NULL,
+                summary TEXT
+            );
+            CREATE TABLE memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT,
+                scope TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                text TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                last_recalled_at INTEGER,
+                recall_count INTEGER NOT NULL DEFAULT 0,
+                importance REAL NOT NULL DEFAULT 1.0
+            );
+            CREATE VIRTUAL TABLE memories_fts USING fts5(text, content='memories', content_rowid='id');
+            CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+                INSERT INTO memories_fts(rowid, text) VALUES (new.id, new.text);
+            END;
+            INSERT INTO memories (scope, kind, text, created_at, importance)
+            VALUES ('global', 'note', 'legacy sqlite migration memory', 100, 1.0);
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+    }
+
+    let mem = Memory::open(&url).await.unwrap();
+    let hits = mem
+        .recall(RecallQuery {
+            query: "sqlite migration".to_string(),
+            top_k: 5,
+            scope: None,
+            mode: RecallMode::Hybrid,
+        })
+        .await
+        .unwrap();
+
+    assert!(hits.data.iter().any(|hit| hit.text.contains("legacy")));
+    drop(mem);
+    let reopened = Memory::open(&url).await.unwrap();
+    assert_eq!(reopened.stats().await.unwrap().total, 1);
 }
 
 #[tokio::test]

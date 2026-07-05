@@ -43,6 +43,10 @@ pub struct MemoryItem {
     /// Defaults to 1.0 when omitted (see remember()).
     #[serde(default)]
     pub importance: Option<f64>,
+    /// Optional caller-provided idempotency key. When present, repeated writes
+    /// return the existing row id instead of inserting a duplicate.
+    #[serde(default)]
+    pub dedupe_key: Option<String>,
 }
 
 /// Input to `remember`.

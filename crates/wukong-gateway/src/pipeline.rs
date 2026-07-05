@@ -35,6 +35,8 @@ pub async fn run_turn(
         })
         .await?;
 
+    let turn_key = format!("gateway:{}:{}", cfg.scope, input);
+
     memory
         .remember(RememberInput {
             scope: cfg.scope.clone(),
@@ -44,11 +46,13 @@ pub async fn run_turn(
                     kind: MemoryKind::Event,
                     text: format!("User: {input}"),
                     importance: None,
+                    dedupe_key: Some(format!("{turn_key}:user")),
                 },
                 MemoryItem {
                     kind: MemoryKind::Event,
                     text: format!("Assistant: {}", resp.text),
                     importance: None,
+                    dedupe_key: Some(format!("{turn_key}:assistant")),
                 },
             ],
         })
@@ -136,6 +140,7 @@ mod tests {
                 kind: MemoryKind::Event,
                 text: "earlier decision about Rust".to_string(),
                 importance: None,
+                dedupe_key: None,
             }],
         })
         .await

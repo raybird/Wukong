@@ -305,6 +305,11 @@ pub async fn run_turn_traced_with_attachments(
         last
     };
 
+    let turn_key = captured_session
+        .clone()
+        .or_else(|| stored.clone())
+        .unwrap_or_else(|| format!("scope:{}:input:{}", cfg.scope, input));
+
     memory
         .remember(RememberInput {
             scope: cfg.scope.clone(),
@@ -314,11 +319,13 @@ pub async fn run_turn_traced_with_attachments(
                     kind: MemoryKind::Event,
                     text: format!("User: {input}"),
                     importance: None,
+                    dedupe_key: Some(format!("runtime:{turn_key}:user")),
                 },
                 MemoryItem {
                     kind: MemoryKind::Event,
                     text: format!("Assistant: {}", answer.output),
                     importance: None,
+                    dedupe_key: Some(format!("runtime:{turn_key}:assistant")),
                 },
             ],
         })

@@ -90,6 +90,7 @@ mod tests {
                 kind: MemoryKind::Note,
                 text: "note".to_string(),
                 importance: None,
+                dedupe_key: None,
             }],
         })
         .await

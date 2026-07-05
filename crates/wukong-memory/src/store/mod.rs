@@ -115,10 +115,21 @@ impl Store {
         text: &str,
         importance: f64,
         now: i64,
-    ) -> Result<i64> {
+        dedupe_key: Option<&str>,
+    ) -> Result<(i64, bool)> {
+        if let Some(key) = dedupe_key {
+            if let Some(row) = sqlx::query("SELECT id FROM memories WHERE dedupe_key = ?1")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await?
+            {
+                return Ok((row.get::<i64, _>("id"), false));
+            }
+        }
+
         let row = sqlx::query(
-            "INSERT INTO memories (session_id, scope, kind, text, created_at, importance)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO memories (session_id, scope, kind, text, created_at, importance, dedupe_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              RETURNING id",
         )
         .bind(session_id)
@@ -127,9 +138,10 @@ impl Store {
         .bind(text)
         .bind(now)
         .bind(importance)
+        .bind(dedupe_key)
         .fetch_one(&self.pool)
         .await?;
-        Ok(row.get::<i64, _>("id"))
+        Ok((row.get::<i64, _>("id"), true))
     }
 
     /// Keyword candidates ranked by FTS5 bm25 (best first).
@@ -620,6 +632,18 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
             .execute(pool)
             .await?;
     }
+    if !names.iter().any(|n| n == "dedupe_key") {
+        sqlx::query("ALTER TABLE memories ADD COLUMN dedupe_key TEXT")
+            .execute(pool)
+            .await?;
+    }
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS memories_dedupe_key_idx
+         ON memories(dedupe_key)
+         WHERE dedupe_key IS NOT NULL",
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -671,7 +695,7 @@ mod tests {
         // Fails loudly if the bundled sqlite lacks FTS5.
         let store = test_store().await;
         store
-            .insert_memory(None, "global", MemoryKind::Note, "hello world", 1.0, 100)
+            .insert_memory(None, "global", MemoryKind::Note, "hello world", 1.0, 100, None)
             .await
             .unwrap();
         let hits = store.keyword_candidates("\"hello\"", 10).await.unwrap();
@@ -683,11 +707,11 @@ mod tests {
     async fn insert_and_recent() {
         let store = test_store().await;
         store
-            .insert_memory(None, "global", MemoryKind::Note, "first", 1.0, 100)
+            .insert_memory(None, "global", MemoryKind::Note, "first", 1.0, 100, None)
             .await
             .unwrap();
         store
-            .insert_memory(None, "global", MemoryKind::Note, "second", 1.0, 200)
+            .insert_memory(None, "global", MemoryKind::Note, "second", 1.0, 200, None)
             .await
             .unwrap();
         let recent = store.recent_candidates(10).await.unwrap();
@@ -700,11 +724,11 @@ mod tests {
     async fn stats_counts_by_scope() {
         let store = test_store().await;
         store
-            .insert_memory(None, "global", MemoryKind::Note, "a", 1.0, 100)
+            .insert_memory(None, "global", MemoryKind::Note, "a", 1.0, 100, None)
             .await
             .unwrap();
         store
-            .insert_memory(None, "project:X", MemoryKind::Note, "b", 1.0, 100)
+            .insert_memory(None, "project:X", MemoryKind::Note, "b", 1.0, 100, None)
             .await
             .unwrap();
         let stats = store.stats().await.unwrap();
@@ -718,7 +742,7 @@ mod tests {
         let now = 1_700_000_000;
 
         store
-            .insert_memory(None, "global", MemoryKind::Note, "global note", 0.7, now)
+            .insert_memory(None, "global", MemoryKind::Note, "global note", 0.7, now, None)
             .await
             .unwrap();
         store
@@ -729,6 +753,7 @@ mod tests {
                 "keep this",
                 1.0,
                 now + 1,
+                None,
             )
             .await
             .unwrap();
@@ -740,6 +765,7 @@ mod tests {
                 "skip kind",
                 0.4,
                 now + 2,
+                None,
             )
             .await
             .unwrap();
@@ -759,9 +785,10 @@ mod tests {
     async fn touch_recalled_bumps_count() {
         let store = test_store().await;
         let id = store
-            .insert_memory(None, "global", MemoryKind::Note, "a", 1.0, 100)
+            .insert_memory(None, "global", MemoryKind::Note, "a", 1.0, 100, None)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         store.touch_recalled(&[id], 500).await.unwrap();
         let recent = store.recent_candidates(1).await.unwrap();
         assert_eq!(recent[0].recall_count, 1);
@@ -794,9 +821,10 @@ mod tests {
         use crate::embed::embedding_to_blob;
         let store = test_store().await;
         let id = store
-            .insert_memory(None, "global", MemoryKind::Note, "vec me", 1.0, 100)
+            .insert_memory(None, "global", MemoryKind::Note, "vec me", 1.0, 100, None)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         let v = vec![0.1f32, 0.2, 0.3];
         store
             .update_embedding(id, &embedding_to_blob(&v), "mock")
@@ -813,11 +841,12 @@ mod tests {
         use crate::embed::embedding_to_blob;
         let store = test_store().await;
         let a = store
-            .insert_memory(None, "global", MemoryKind::Note, "a", 1.0, 100)
+            .insert_memory(None, "global", MemoryKind::Note, "a", 1.0, 100, None)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         let _b = store
-            .insert_memory(None, "global", MemoryKind::Note, "b", 1.0, 100)
+            .insert_memory(None, "global", MemoryKind::Note, "b", 1.0, 100, None)
             .await
             .unwrap();
         store
@@ -833,21 +862,22 @@ mod tests {
     async fn consolidation_candidates_excludes_consolidated_and_nonfoldable() {
         let store = test_store().await;
         let e1 = store
-            .insert_memory(Some("s1"), "project:X", MemoryKind::Event, "e1", 1.0, 100)
+            .insert_memory(Some("s1"), "project:X", MemoryKind::Event, "e1", 1.0, 100, None)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         let _e2 = store
-            .insert_memory(None, "project:X", MemoryKind::Note, "n1", 2.0, 110)
+            .insert_memory(None, "project:X", MemoryKind::Note, "n1", 2.0, 110, None)
             .await
             .unwrap();
         // Decision is never foldable.
         let _d = store
-            .insert_memory(None, "project:X", MemoryKind::Decision, "d1", 1.0, 120)
+            .insert_memory(None, "project:X", MemoryKind::Decision, "d1", 1.0, 120, None)
             .await
             .unwrap();
         // Different scope must not appear.
         let _o = store
-            .insert_memory(None, "global", MemoryKind::Event, "other", 1.0, 130)
+            .insert_memory(None, "global", MemoryKind::Event, "other", 1.0, 130, None)
             .await
             .unwrap();
         // Mark e1 as already consolidated.
@@ -867,15 +897,16 @@ mod tests {
         let now = 1_000_000_000i64;
         let old = now - 40 * 86_400;
         let e1 = store
-            .insert_memory(None, "project:X", MemoryKind::Event, "e1", 1.0, now)
+            .insert_memory(None, "project:X", MemoryKind::Event, "e1", 1.0, now, None)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         let _n1 = store
-            .insert_memory(None, "project:X", MemoryKind::Note, "n1", 0.2, old)
+            .insert_memory(None, "project:X", MemoryKind::Note, "n1", 0.2, old, None)
             .await
             .unwrap();
         let _d1 = store
-            .insert_memory(None, "project:X", MemoryKind::Decision, "d1", 1.0, now)
+            .insert_memory(None, "project:X", MemoryKind::Decision, "d1", 1.0, now, None)
             .await
             .unwrap();
         store
@@ -906,28 +937,30 @@ mod tests {
         let old = now - 40 * 86_400; // 40 days old
                                      // (a) consolidated event => prunable via main path.
         let a = store
-            .insert_memory(None, "project:X", MemoryKind::Event, "a", 1.0, old)
+            .insert_memory(None, "project:X", MemoryKind::Event, "a", 1.0, old, None)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         store.mark_consolidated(&[a], 999).await.unwrap();
         // (b) old, never recalled, low importance note => prunable via fallback.
         let b = store
-            .insert_memory(None, "project:X", MemoryKind::Note, "b", 0.2, old)
+            .insert_memory(None, "project:X", MemoryKind::Note, "b", 0.2, old, None)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         // (c) old but high importance => NOT prunable.
         let _c = store
-            .insert_memory(None, "project:X", MemoryKind::Note, "c", 0.9, old)
+            .insert_memory(None, "project:X", MemoryKind::Note, "c", 0.9, old, None)
             .await
             .unwrap();
         // (d) decision is never prunable, even if old/low.
         let _d = store
-            .insert_memory(None, "project:X", MemoryKind::Decision, "d", 0.1, old)
+            .insert_memory(None, "project:X", MemoryKind::Decision, "d", 0.1, old, None)
             .await
             .unwrap();
         // (e) recent low-importance note => NOT prunable (too new).
         let _e = store
-            .insert_memory(None, "project:X", MemoryKind::Note, "e", 0.1, now)
+            .insert_memory(None, "project:X", MemoryKind::Note, "e", 0.1, now, None)
             .await
             .unwrap();
 
@@ -944,9 +977,10 @@ mod tests {
     async fn delete_memories_removes_rows_and_fts() {
         let store = test_store().await;
         let id = store
-            .insert_memory(None, "global", MemoryKind::Note, "gizmo", 1.0, 100)
+            .insert_memory(None, "global", MemoryKind::Note, "gizmo", 1.0, 100, None)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         let n = store.delete_memories(&[id]).await.unwrap();
         assert_eq!(n, 1);
         assert_eq!(store.recent_candidates(10).await.unwrap().len(), 0);
@@ -982,9 +1016,11 @@ mod tests {
                 "deletable widget",
                 1.0,
                 100,
+                None,
             )
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         assert_eq!(
             store
                 .keyword_candidates("\"widget\"", 10)

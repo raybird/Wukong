@@ -131,7 +131,7 @@ impl Memory {
         let mut ids = Vec::with_capacity(input.items.len());
         for item in &input.items {
             let importance = item.importance.unwrap_or(1.0);
-            let id = self
+            let (id, inserted) = self
                 .store
                 .insert_memory(
                     input.session_id.as_deref(),
@@ -140,23 +140,26 @@ impl Memory {
                     &item.text,
                     importance,
                     now,
+                    item.dedupe_key.as_deref(),
                 )
                 .await?;
             ids.push(id);
-            if let Some(emb) = &self.embedder {
-                match emb.embed(&item.text) {
-                    Ok(v) => {
-                        let _ = self
-                            .store
-                            .update_embedding(id, &embedding_to_blob(&v), emb.model_id())
-                            .await;
+            if inserted {
+                if let Some(emb) = &self.embedder {
+                    match emb.embed(&item.text) {
+                        Ok(v) => {
+                            let _ = self
+                                .store
+                                .update_embedding(id, &embedding_to_blob(&v), emb.model_id())
+                                .await;
+                        }
+                        Err(e) => eprintln!("wukong-memory: embed on remember failed: {e}"),
                     }
-                    Err(e) => eprintln!("wukong-memory: embed on remember failed: {e}"),
                 }
-            }
-            if let Some(sink) = &self.md_sink {
-                if let Err(e) = sink.append(&scope_str, now, item.kind, &item.text) {
-                    eprintln!("wukong-memory: markdown append failed: {e}");
+                if let Some(sink) = &self.md_sink {
+                    if let Err(e) = sink.append(&scope_str, now, item.kind, &item.text) {
+                        eprintln!("wukong-memory: markdown append failed: {e}");
+                    }
                 }
             }
         }
@@ -311,7 +314,7 @@ impl Memory {
             let texts: Vec<String> = batch.iter().map(|r| r.text.clone()).collect();
             let importance = batch.iter().map(|r| r.importance).fold(0.0_f64, f64::max);
             let summary_text = summarizer.summarize(&texts)?;
-            let summary_id = self
+            let (summary_id, _) = self
                 .store
                 .insert_memory(
                     None,
@@ -320,6 +323,7 @@ impl Memory {
                     &summary_text,
                     importance,
                     now,
+                    None,
                 )
                 .await?;
             let src_ids: Vec<i64> = batch.iter().map(|r| r.id).collect();
@@ -478,6 +482,7 @@ mod tests {
                 kind: MemoryKind::Event,
                 text: text.to_string(),
                 importance: None,
+                dedupe_key: None,
             }],
         })
         .await

@@ -2572,6 +2572,7 @@ mod tests {
                     kind: wukong_memory::MemoryKind::Decision,
                     text: "Use Web Console as control center".to_string(),
                     importance: Some(1.0),
+                    dedupe_key: None,
                 }],
             })
             .await
@@ -2606,6 +2607,7 @@ mod tests {
                     kind: wukong_memory::MemoryKind::Note,
                     text: "Memory panel can read records".to_string(),
                     importance: Some(0.8),
+                    dedupe_key: None,
                 }],
             })
             .await
@@ -2640,6 +2642,7 @@ mod tests {
                     kind: wukong_memory::MemoryKind::Note,
                     text: "scheduler memory query note".to_string(),
                     importance: Some(0.8),
+                    dedupe_key: None,
                 }],
             })
             .await
