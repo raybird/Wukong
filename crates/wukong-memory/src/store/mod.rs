@@ -157,6 +157,32 @@ impl Store {
             .collect())
     }
 
+    /// Bounded fallback for short CJK queries when FTS5 has no keyword hits.
+    pub async fn cjk_fallback_candidates(&self, query: &str, limit: i64) -> Result<Vec<Candidate>> {
+        let pattern = format!("%{}%", query.trim());
+        let rows = sqlx::query(
+            "SELECT id, scope, kind, text, created_at, recall_count, importance,
+                    NULL AS bm25
+             FROM memories
+             WHERE text LIKE ?1
+             ORDER BY created_at DESC
+             LIMIT ?2",
+        )
+        .bind(pattern)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let mut c = row_to_candidate(r);
+                c.source_signals.push("cjk_fallback".to_string());
+                c
+            })
+            .collect())
+    }
+
     /// Most recent memories (tree/recency source). bm25 is None.
     pub async fn recent_candidates(&self, limit: i64) -> Result<Vec<Candidate>> {
         let rows = sqlx::query(

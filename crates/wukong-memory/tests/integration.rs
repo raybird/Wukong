@@ -101,6 +101,59 @@ async fn trivial_query_returns_empty() {
 }
 
 #[tokio::test]
+async fn short_cjk_query_is_not_treated_as_trivial() {
+    let mem = open_memory().await;
+    mem.remember(RememberInput {
+        scope: "global".to_string(),
+        session_id: None,
+        items: vec![item("連線池設定使用 SQLite WAL")],
+    })
+    .await
+    .unwrap();
+
+    let res = mem
+        .recall(RecallQuery {
+            query: "連線".to_string(),
+            top_k: 5,
+            scope: None,
+            mode: RecallMode::Hybrid,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        res.data.iter().any(|hit| hit.text.contains("連線池設定")),
+        "expected CJK query to recall the Chinese memory, got: {:?}",
+        res.data.iter().map(|hit| &hit.text).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn low_information_cjk_query_is_skipped() {
+    let mem = open_memory().await;
+    mem.remember(RememberInput {
+        scope: "global".to_string(),
+        session_id: None,
+        items: vec![item("可以部署的資料庫設定")],
+    })
+    .await
+    .unwrap();
+
+    let res = mem
+        .recall(RecallQuery {
+            query: "可以".to_string(),
+            top_k: 5,
+            scope: None,
+            mode: RecallMode::Hybrid,
+        })
+        .await
+        .unwrap();
+
+    assert!(res.data.is_empty());
+    assert_eq!(res.confidence, 0.0);
+}
+
+#[tokio::test]
 async fn invalid_scope_is_rejected() {
     let mem = open_memory().await;
     let err = mem

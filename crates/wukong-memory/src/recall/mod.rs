@@ -8,9 +8,45 @@ const STOPWORDS: &[&str] = &[
     "the", "a", "an", "is", "of", "to", "and", "it", "in", "on", "for",
 ];
 
+const LOW_INFORMATION_CJK: &[&str] = &["好", "嗯", "可以", "謝謝", "谢谢", "了解", "收到"];
+
+fn is_cjk_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x3040..=0x30FF
+            | 0xAC00..=0xD7AF
+    )
+}
+
+pub fn contains_cjk(query: &str) -> bool {
+    query.chars().any(is_cjk_char)
+}
+
+pub fn is_low_information_cjk(query: &str) -> bool {
+    let normalized = query.trim();
+    LOW_INFORMATION_CJK.contains(&normalized)
+}
+
+pub fn cjk_weighted_len(query: &str) -> usize {
+    query
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .map(|ch| if is_cjk_char(ch) { 2 } else { 1 })
+        .sum()
+}
+
 /// Trivial queries (too short or only stopwords) skip recall entirely.
 pub fn is_trivial(query: &str) -> bool {
     let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    if contains_cjk(trimmed) {
+        return is_low_information_cjk(trimmed) || cjk_weighted_len(trimmed) < 4;
+    }
     if trimmed.chars().count() < 3 {
         return true;
     }
@@ -242,6 +278,10 @@ mod tests {
         assert!(is_trivial("a the"));
         assert!(is_trivial("  "));
         assert!(!is_trivial("sqlite migration"));
+        assert!(!is_trivial("連線池設定"));
+        assert!(!is_trivial("連線"));
+        assert!(is_trivial("可以"));
+        assert!(contains_cjk("連線池設定"));
     }
 
     #[test]

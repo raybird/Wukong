@@ -30,8 +30,8 @@ pub use scoring::Weights;
 
 use embed::embedding_to_blob;
 use recall::{
-    apply_vector_sims, build_vector_candidates, filter_by_scope, fts_match_string, is_trivial,
-    merge_candidates, rank, sources_for_mode,
+    apply_vector_sims, build_vector_candidates, contains_cjk, filter_by_scope, fts_match_string,
+    is_trivial, merge_candidates, rank, sources_for_mode,
 };
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -193,7 +193,16 @@ impl Memory {
 
         let keyword = if use_keyword {
             match fts_match_string(&query.query) {
-                Some(expr) => self.store.keyword_candidates(&expr, limit).await?,
+                Some(expr) => {
+                    let hits = self.store.keyword_candidates(&expr, limit).await?;
+                    if hits.is_empty() && contains_cjk(&query.query) {
+                        self.store
+                            .cjk_fallback_candidates(&query.query, limit)
+                            .await?
+                    } else {
+                        hits
+                    }
+                }
                 None => Vec::new(),
             }
         } else {
