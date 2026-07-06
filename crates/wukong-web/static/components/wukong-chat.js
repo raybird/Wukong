@@ -471,7 +471,7 @@ export class WukongChat extends HTMLElement {
     });
     const bodySelector = '.activity-card-body';
     let loaded = false;
-    details.addEventListener('toggle', async () => {
+    const loadEvents = async () => {
       if (!details.open || loaded) return;
       loaded = true;
       const body = details.querySelector(bodySelector);
@@ -555,7 +555,10 @@ export class WukongChat extends HTMLElement {
         body.innerHTML = '<p class="baton-loading">載入失敗：' + escapeHTML(err.message) + '</p>';
         loaded = false;
       }
-    });
+    };
+    details.addEventListener('toggle', loadEvents);
+    details.open = true;
+    void loadEvents();
     return details;
   }
 
