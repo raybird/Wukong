@@ -10,6 +10,34 @@ fn escape_html(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Whether a link/image URL is safe to emit as a clickable `href`/`src`.
+///
+/// Only `http`, `https`, `mailto`, `tel` and scheme-relative/relative URLs are
+/// allowed. Everything else (notably `javascript:` and `data:`) is rejected so
+/// an LLM answer cannot inject a clickable script URL. Whitespace and control
+/// characters inside the scheme are ignored to defeat obfuscation like
+/// `java\tscript:`.
+fn is_safe_url(url: &str) -> bool {
+    let mut scheme = String::new();
+    for ch in url.trim_start().chars() {
+        match ch {
+            ':' => {
+                return matches!(
+                    scheme.to_ascii_lowercase().as_str(),
+                    "http" | "https" | "mailto" | "tel"
+                );
+            }
+            // A path/query/fragment separator before any ':' means the URL is
+            // relative — no scheme, so it is safe.
+            '/' | '?' | '#' => return true,
+            c if c.is_ascii_whitespace() || c.is_control() => continue,
+            c => scheme.push(c),
+        }
+    }
+    // No ':' at all → relative URL.
+    true
+}
+
 /// Render GFM markdown into Telegram-supported HTML, split into chunks of at
 /// most 4096 chars. Empty input yields an empty Vec.
 pub fn to_telegram_html(markdown: &str) -> Vec<String> {
@@ -35,14 +63,33 @@ pub fn to_web_html(markdown: &str) -> String {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
-    let events = Parser::new_ext(markdown, opts).map(|ev| match ev {
-        // Treat any raw HTML as literal text → push_html will escape it.
-        Event::Html(t) => Event::Text(t),
-        Event::InlineHtml(t) => Event::Text(t),
-        other => other,
-    });
+    let mut events: Vec<Event> = Vec::new();
+    let mut stripped_link = 0usize;
+    let mut stripped_image = 0usize;
+    for ev in Parser::new_ext(markdown, opts) {
+        match ev {
+            // Treat any raw HTML as literal text → push_html will escape it.
+            Event::Html(t) => events.push(Event::Text(t)),
+            Event::InlineHtml(t) => events.push(Event::Text(t)),
+            // Drop anchors/images with an unsafe scheme but keep their inner
+            // text, so a `javascript:`/`data:` URL never becomes clickable.
+            Event::Start(Tag::Link { ref dest_url, .. }) if !is_safe_url(dest_url) => {
+                stripped_link += 1;
+            }
+            Event::End(TagEnd::Link) if stripped_link > 0 => {
+                stripped_link -= 1;
+            }
+            Event::Start(Tag::Image { ref dest_url, .. }) if !is_safe_url(dest_url) => {
+                stripped_image += 1;
+            }
+            Event::End(TagEnd::Image) if stripped_image > 0 => {
+                stripped_image -= 1;
+            }
+            other => events.push(other),
+        }
+    }
     let mut html = String::new();
-    pulldown_cmark::html::push_html(&mut html, events);
+    pulldown_cmark::html::push_html(&mut html, events.into_iter());
     html.trim().to_string()
 }
 
@@ -59,6 +106,8 @@ fn render_html(markdown: &str) -> String {
     let mut table: Vec<Vec<String>> = Vec::new();
     let mut row: Vec<String> = Vec::new();
     let mut cell = String::new();
+    // True while inside a link whose scheme was rejected: emit the text, no anchor.
+    let mut link_stripped = false;
 
     for ev in parser {
         if in_table {
@@ -95,9 +144,19 @@ fn render_html(markdown: &str) -> String {
             Event::Start(Tag::Item) => out.push_str("• "),
             Event::End(TagEnd::Item) => out.push('\n'),
             Event::Start(Tag::Link { dest_url, .. }) => {
-                out.push_str(&format!(r#"<a href="{}">"#, escape_html(&dest_url)));
+                if is_safe_url(&dest_url) {
+                    out.push_str(&format!(r#"<a href="{}">"#, escape_html(&dest_url)));
+                } else {
+                    link_stripped = true;
+                }
             }
-            Event::End(TagEnd::Link) => out.push_str("</a>"),
+            Event::End(TagEnd::Link) => {
+                if link_stripped {
+                    link_stripped = false;
+                } else {
+                    out.push_str("</a>");
+                }
+            }
             Event::Start(Tag::Table(_)) => {
                 in_table = true;
                 table.clear();
@@ -146,32 +205,179 @@ fn render_table(rows: &[Vec<String>]) -> String {
     s
 }
 
-/// Split rendered HTML into chunks ≤ max chars, breaking on newline boundaries
-/// so HTML tags are never split mid-tag.
+/// A token from our own Telegram HTML output: either a full tag (`<pre>`,
+/// `</pre>`, `<a href="…">`) or a run of literal text. Because `render_html`
+/// escapes every `<`/`>`/`&` in text, any literal `<` here starts a real tag,
+/// which makes tokenizing unambiguous.
+enum Token<'a> {
+    Tag(&'a str),
+    Text(&'a str),
+}
+
+fn tokenize(html: &str) -> Vec<Token<'_>> {
+    let mut toks = Vec::new();
+    let bytes = html.as_bytes();
+    let (mut i, mut text_start) = (0usize, 0usize);
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            if text_start < i {
+                toks.push(Token::Text(&html[text_start..i]));
+            }
+            match html[i..].find('>') {
+                Some(rel) => {
+                    let end = i + rel + 1;
+                    toks.push(Token::Tag(&html[i..end]));
+                    i = end;
+                    text_start = end;
+                }
+                // Unterminated '<' (should not happen) — treat the rest as text.
+                None => break,
+            }
+        } else {
+            i += 1;
+        }
+    }
+    if text_start < bytes.len() {
+        toks.push(Token::Text(&html[text_start..]));
+    }
+    toks
+}
+
+/// Tag name from a full tag string: `<pre>`→`pre`, `</pre>`→`pre`, `<a href=…>`→`a`.
+fn tag_name(tag: &str) -> &str {
+    let inner = tag
+        .trim_start_matches('<')
+        .trim_start_matches('/')
+        .trim_end_matches('>');
+    let end = inner.find([' ', '\t']).unwrap_or(inner.len());
+    &inner[..end]
+}
+
+fn close_tag_for(open_tag: &str) -> String {
+    format!("</{}>", tag_name(open_tag))
+}
+
+/// Bytes needed to close every currently-open tag (`</name>` = name + 3).
+fn closing_len(stack: &[&str]) -> usize {
+    stack.iter().map(|t| tag_name(t).len() + 3).sum()
+}
+
+/// Bytes needed to reopen every currently-open tag on a fresh chunk.
+fn reopen_len(stack: &[&str]) -> usize {
+    stack.iter().map(|t| t.len()).sum()
+}
+
+/// Close all open tags (reverse order), push the chunk, then seed the next chunk
+/// by reopening the same tags — so every emitted chunk is individually balanced.
+fn flush_balanced(cur: &mut String, stack: &[&str], chunks: &mut Vec<String>) {
+    for t in stack.iter().rev() {
+        cur.push_str(&close_tag_for(t));
+    }
+    let finished = std::mem::take(cur);
+    if !finished.trim().is_empty() {
+        chunks.push(finished);
+    }
+    for t in stack.iter() {
+        cur.push_str(t);
+    }
+}
+
+/// Largest char-boundary cut ≤ `avail`, preferring to break just after the last
+/// newline so we split on line boundaries when possible.
+fn best_break(s: &str, avail: usize) -> usize {
+    let mut hard = avail.min(s.len());
+    while hard > 0 && !s.is_char_boundary(hard) {
+        hard -= 1;
+    }
+    match s[..hard].rfind('\n') {
+        Some(nl) => nl + 1,
+        None => hard,
+    }
+}
+
+/// Split rendered Telegram HTML into chunks ≤ `max` bytes. Never splits a
+/// multi-byte character (Task 2.1) and never leaves a tag unclosed: open tags
+/// are closed at a chunk's end and reopened at the next chunk's start (Task 2.2).
 fn split_chunks(html: &str, max: usize) -> Vec<String> {
     if html.len() <= max {
         return vec![html.to_string()];
     }
-    let mut chunks = Vec::new();
+    let mut chunks: Vec<String> = Vec::new();
+    let mut stack: Vec<&str> = Vec::new();
     let mut cur = String::new();
-    for line in html.split_inclusive('\n') {
-        if cur.len() + line.len() > max && !cur.is_empty() {
-            chunks.push(std::mem::take(&mut cur).trim_end().to_string());
-        }
-        if line.len() > max {
-            let mut rest = line;
-            while rest.len() > max {
-                let (a, b) = rest.split_at(max);
-                chunks.push(a.to_string());
-                rest = b;
+
+    for tok in tokenize(html) {
+        match tok {
+            Token::Tag(tag) if tag.starts_with("</") => {
+                cur.push_str(tag);
+                let name = tag_name(tag);
+                if let Some(pos) = stack.iter().rposition(|t| tag_name(t) == name) {
+                    stack.remove(pos);
+                }
             }
-            cur.push_str(rest);
-        } else {
-            cur.push_str(line);
+            Token::Tag(tag) => {
+                // Reserve room for this tag plus its eventual closing tag.
+                let projected =
+                    cur.len() + tag.len() + closing_len(&stack) + tag_name(tag).len() + 3;
+                if projected > max && cur.len() > reopen_len(&stack) {
+                    flush_balanced(&mut cur, &stack, &mut chunks);
+                }
+                cur.push_str(tag);
+                stack.push(tag);
+            }
+            Token::Text(t) => {
+                let mut remaining = t;
+                loop {
+                    let avail = max
+                        .saturating_sub(closing_len(&stack))
+                        .saturating_sub(cur.len());
+                    if remaining.len() <= avail {
+                        cur.push_str(remaining);
+                        break;
+                    }
+                    if avail == 0 {
+                        // On a pathologically small budget the tags alone may fill
+                        // a fresh chunk; hard-slice one char-safe piece to guarantee
+                        // forward progress before flushing.
+                        if cur.len() <= reopen_len(&stack) {
+                            let cap = max.saturating_sub(cur.len()).max(1);
+                            let mut cut = cap.min(remaining.len());
+                            while cut > 0 && !remaining.is_char_boundary(cut) {
+                                cut -= 1;
+                            }
+                            if cut == 0 {
+                                cut = remaining.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+                            }
+                            if cut == 0 {
+                                break;
+                            }
+                            let (head, tail) = remaining.split_at(cut);
+                            cur.push_str(head);
+                            remaining = tail;
+                        }
+                        flush_balanced(&mut cur, &stack, &mut chunks);
+                        continue;
+                    }
+                    let cut = best_break(remaining, avail);
+                    if cut == 0 {
+                        flush_balanced(&mut cur, &stack, &mut chunks);
+                        continue;
+                    }
+                    let (head, tail) = remaining.split_at(cut);
+                    cur.push_str(head);
+                    remaining = tail;
+                    flush_balanced(&mut cur, &stack, &mut chunks);
+                }
+            }
         }
     }
-    if !cur.trim().is_empty() {
-        chunks.push(cur.trim_end().to_string());
+
+    for t in stack.iter().rev() {
+        cur.push_str(&close_tag_for(t));
+    }
+    let last = cur.trim_end().to_string();
+    if !last.trim().is_empty() {
+        chunks.push(last);
     }
     chunks
 }
@@ -283,5 +489,128 @@ mod tests {
             chunks.len()
         );
         assert!(chunks.iter().all(|c| c.len() <= 4096));
+    }
+
+    // ---- Task 2.1: never split a multi-byte character ----
+
+    #[test]
+    fn long_cjk_paragraph_splits_without_panicking() {
+        // 3000 CJK chars (3 bytes each = 9000 bytes) in one paragraph, no newline.
+        let md = "測".repeat(3000);
+        let chunks = to_telegram_html(&md);
+        assert!(chunks.len() > 1, "expected a split, got {}", chunks.len());
+        for c in &chunks {
+            assert!(c.len() <= 4096, "chunk over limit: {} bytes", c.len());
+        }
+        // No character is lost or corrupted across the split.
+        assert_eq!(chunks.join("").matches('測').count(), 3000);
+    }
+
+    #[test]
+    fn split_chunks_respects_char_boundaries_with_small_max() {
+        let s = "日本語テキスト".repeat(50); // multi-byte, no newline
+        let chunks = split_chunks(&s, 20);
+        for c in &chunks {
+            assert!(c.len() <= 20, "chunk over limit: {} bytes", c.len());
+            // String is UTF-8 by construction; the real assertion is "no panic".
+        }
+        assert_eq!(chunks.join("").matches('語').count(), 50);
+    }
+
+    // ---- Task 2.2: chunks stay tag-balanced ----
+
+    #[test]
+    fn long_pre_block_stays_balanced_across_chunks() {
+        let code = (0..600)
+            .map(|i| format!("line {i} of some code"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let md = format!("```\n{code}\n```");
+        let chunks = to_telegram_html(&md);
+        assert!(chunks.len() > 1, "expected a split, got {}", chunks.len());
+        for c in &chunks {
+            assert!(c.len() <= 4096, "chunk over limit: {} bytes", c.len());
+            assert_eq!(
+                c.matches("<pre>").count(),
+                c.matches("</pre>").count(),
+                "unbalanced <pre> in chunk: {c}"
+            );
+        }
+    }
+
+    #[test]
+    fn long_blockquote_stays_balanced_across_chunks() {
+        let body = "> ".to_string() + &"引用文字很長很長。".repeat(600);
+        let chunks = to_telegram_html(&body);
+        assert!(chunks.len() > 1, "expected a split, got {}", chunks.len());
+        for c in &chunks {
+            assert_eq!(
+                c.matches("<blockquote>").count(),
+                c.matches("</blockquote>").count(),
+                "unbalanced <blockquote> in chunk"
+            );
+        }
+    }
+
+    // ---- Task 2.3: reject dangerous URL schemes ----
+
+    #[test]
+    fn is_safe_url_accepts_and_rejects() {
+        for ok in [
+            "https://x.io",
+            "http://x.io",
+            "mailto:a@b.com",
+            "tel:+123",
+            "/rel/path",
+            "#frag",
+            "?q=1",
+            "path/only",
+            "",
+        ] {
+            assert!(is_safe_url(ok), "should be safe: {ok:?}");
+        }
+        for bad in [
+            "javascript:alert(1)",
+            "JavaScript:alert(1)",
+            "data:text/html,x",
+            "vbscript:x",
+            "  javascript:x",
+            "java\tscript:alert(1)",
+        ] {
+            assert!(!is_safe_url(bad), "should be unsafe: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn web_strips_javascript_link_keeps_text() {
+        let out = to_web_html("[click me](javascript:alert(document.cookie))");
+        assert!(!out.contains("javascript:"), "js url leaked: {out}");
+        assert!(!out.contains("<a "), "anchor emitted for unsafe url: {out}");
+        assert!(out.contains("click me"), "inner text dropped: {out}");
+    }
+
+    #[test]
+    fn web_strips_data_url() {
+        let out = to_web_html("[x](data:text/html,hi)");
+        assert!(!out.to_ascii_lowercase().contains("data:text/html"));
+        assert!(!out.contains("<a "));
+    }
+
+    #[test]
+    fn web_keeps_safe_links() {
+        assert!(to_web_html("[x](https://example.com)").contains(r#"href="https://example.com""#));
+        assert!(to_web_html("[x](mailto:a@b.com)").contains("mailto:a@b.com"));
+        assert!(to_web_html("[x](/local/path)").contains(r#"href="/local/path""#));
+    }
+
+    #[test]
+    fn telegram_strips_javascript_link_keeps_text() {
+        let out = to_telegram_html("[click me](javascript:alert(1))").join("");
+        assert!(!out.contains("javascript:"), "js url leaked: {out}");
+        assert!(
+            !out.contains("<a href"),
+            "anchor emitted for unsafe url: {out}"
+        );
+        assert!(out.contains("click me"), "inner text dropped: {out}");
     }
 }
