@@ -11,13 +11,18 @@
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-07
+
+> 本版收束 2026-07-07 的專案健康度改進批次（Phases 1–7 累積於 v0.16.35–38），
+> 並含一項使用者可感知的相容性變更（移除 Intel Mac 預建二進位），故進 minor。
+
 ### Changed
 
 - Release workflow 改為「並行建置 → 單一 `publish` job 統一上傳」，消除多個 matrix
   job 並行寫入同一 GitHub Release 造成的資產上傳競態。
-- 停止發佈 Intel Mac（`x86_64-apple-darwin`）預建二進位，改為僅發佈 Apple Silicon
-  （`aarch64-apple-darwin`）。`scripts/install.sh` 於 Intel Mac 改給 Docker／
-  原始碼建置指引，而非下載不存在的資產。
+- **（相容性）停止發佈 Intel Mac（`x86_64-apple-darwin`）預建二進位**，改為僅發佈
+  Apple Silicon（`aarch64-apple-darwin`）。`scripts/install.sh` 於 Intel Mac 改給
+  Docker／原始碼建置指引，而非下載不存在的資產。
 
 ## [0.16.38] - 2026-07-07
 
@@ -84,7 +89,8 @@
   不安全綁定（`0.0.0.0` + 空 token）啟動即拒絕（fail-closed，可用
   `WUKONG_WEB_ALLOW_INSECURE=1` 覆寫）；Telegram callback 加白名單檢查。
 
-[Unreleased]: https://github.com/raybird/Wukong/compare/v0.16.38...HEAD
+[Unreleased]: https://github.com/raybird/Wukong/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/raybird/Wukong/compare/v0.16.38...v0.17.0
 [0.16.38]: https://github.com/raybird/Wukong/compare/v0.16.37...v0.16.38
 [0.16.37]: https://github.com/raybird/Wukong/compare/v0.16.36...v0.16.37
 [0.16.36]: https://github.com/raybird/Wukong/compare/v0.16.35...v0.16.36
