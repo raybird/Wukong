@@ -44,36 +44,13 @@ async fn run_bot() {
         );
     }
 
-    let db_url = std::env::var("WUKONG_MEMORY_DB").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let dir = format!("{home}/.wukong");
-        let _ = std::fs::create_dir_all(&dir);
-        format!("sqlite://{dir}/memory.db")
-    });
-    let memory = match Memory::open(&db_url).await {
+    let db_url = wukong_runtime::util::db_url_from_env();
+    let memory = match wukong_runtime::bootstrap::open_memory_from_env(&db_url).await {
         Ok(m) => m,
         Err(e) => {
             eprintln!("error: failed to open memory: {e}");
             std::process::exit(1);
         }
-    };
-
-    #[cfg(feature = "embed")]
-    let memory = if std::env::var("WUKONG_EMBED").as_deref() == Ok("1") {
-        match wukong_memory::FastembedBackend::new() {
-            Ok(b) => memory.with_embedder(Arc::new(b)),
-            Err(e) => {
-                eprintln!("🐵 語意層停用（模型載入失敗）：{e}");
-                memory
-            }
-        }
-    } else {
-        memory
-    };
-
-    let memory = match std::env::var("WUKONG_MD_DIR") {
-        Ok(dir) if !dir.is_empty() => memory.with_markdown(dir),
-        _ => memory,
     };
     let memory = Arc::new(memory);
 
@@ -85,15 +62,7 @@ async fn run_bot() {
         }
     };
 
-    let agent_command = std::env::var("WUKONG_AGENT_CMD")
-        .ok()
-        .map(|s| {
-            s.split_whitespace()
-                .map(|t| t.to_string())
-                .collect::<Vec<_>>()
-        })
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| vec!["opencode".to_string(), "run".to_string()]);
+    let agent_command = wukong_runtime::util::agent_command_from_env();
     let backend = Arc::new(build_backend_from_env(agent_command, workspace_dir()));
 
     let base_cfg = GatewayConfig {

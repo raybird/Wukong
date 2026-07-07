@@ -5,7 +5,6 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod opencode_server;
-pub mod pipeline;
 pub mod prompt;
 pub mod stream;
 pub mod summarize;

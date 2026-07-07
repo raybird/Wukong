@@ -9,9 +9,8 @@ use wukong_gateway::workspace_dir;
 use wukong_gateway::StreamEvent;
 use wukong_memory::Memory;
 use wukong_runtime::maintenance::{memory_consolidate, memory_prune, memory_snapshot};
-use wukong_scheduler::{
-    execute_job, ExecutionContext, Job, JobKind, MaintenanceTask, NewJob, RunStatus, SchedulerStore,
-};
+use wukong_runtime::util::now_unix;
+use wukong_scheduler::{ExecutionContext, Job, JobKind, MaintenanceTask, NewJob, SchedulerStore};
 
 #[tokio::main]
 async fn main() {
@@ -21,30 +20,12 @@ async fn main() {
     let settings = wukong_settings::load_settings(&settings_path).unwrap_or_default();
     apply_settings_to_config(&mut cfg, &settings);
 
-    let memory = match Memory::open(&cfg.db_url).await {
+    let memory = match wukong_runtime::bootstrap::open_memory_from_env(&cfg.db_url).await {
         Ok(m) => m,
         Err(e) => {
             eprintln!("error: failed to open memory: {e}");
             std::process::exit(1);
         }
-    };
-
-    #[cfg(feature = "embed")]
-    let memory = if std::env::var("WUKONG_EMBED").as_deref() == Ok("1") {
-        match wukong_memory::FastembedBackend::new() {
-            Ok(backend) => memory.with_embedder(std::sync::Arc::new(backend)),
-            Err(e) => {
-                eprintln!("🐵 語意層停用（模型載入失敗）：{e}");
-                memory
-            }
-        }
-    } else {
-        memory
-    };
-
-    let memory = match std::env::var("WUKONG_MD_DIR") {
-        Ok(dir) if !dir.is_empty() => memory.with_markdown(dir),
-        _ => memory,
     };
 
     let backend = build_backend_from_env(cfg.agent_command.clone(), workspace_dir());
@@ -108,7 +89,15 @@ async fn main() {
                     }
                 }
                 LineAction::Turn(input) => {
-                    if let Err(e) = run_one(&memory, &backend, &cfg_repl, &input).await {
+                    // Reload persisted settings each turn so a meta-command like
+                    // /set_models applies to the very next question (scope from
+                    // /scope is preserved via the cfg_repl clone).
+                    let mut cfg_turn = cfg_repl.clone();
+                    let settings =
+                        wukong_settings::load_settings(&wukong_settings::default_settings_path())
+                            .unwrap_or_default();
+                    apply_settings_to_config(&mut cfg_turn, &settings);
+                    if let Err(e) = run_one(&memory, &backend, &cfg_turn, &input).await {
                         eprintln!("error: {e}");
                     }
                 }
@@ -270,41 +259,26 @@ async fn trigger_job(
     job: &Job,
     worker_id: &str,
 ) -> Result<(), wukong_cli::WukongError> {
-    let started_at = now_unix();
-    let run_id = store
-        .start_run(&job.id, started_at)
-        .await
-        .map_err(to_wukong_error)?;
     let ctx = ExecutionContext {
         memory,
         backend,
         base_config: cfg,
     };
-    let output = execute_job(&ctx, job).await;
-    let finished_at = now_unix();
-    let status = if output.success {
-        RunStatus::Success
-    } else {
-        RunStatus::Failure
-    };
-    store
-        .finish_run(run_id, status, &output.message, finished_at)
-        .await
-        .map_err(to_wukong_error)?;
-    if !store
-        .complete_claimed_job(job, worker_id, finished_at)
+    match wukong_scheduler::run_claimed_job(store, &ctx, job, worker_id)
         .await
         .map_err(to_wukong_error)?
     {
-        return Err(to_wukong_error_string(
+        wukong_scheduler::ClaimedJobOutcome::Completed(output) => {
+            println!("{}", output.message);
+            if output.success {
+                Ok(())
+            } else {
+                Err(to_wukong_error_string(output.message))
+            }
+        }
+        wukong_scheduler::ClaimedJobOutcome::LeaseLost(_) => Err(to_wukong_error_string(
             "排程 lease 已被其他 worker 接手".to_string(),
-        ));
-    }
-    println!("{}", output.message);
-    if output.success {
-        Ok(())
-    } else {
-        Err(to_wukong_error_string(output.message))
+        )),
     }
 }
 
@@ -332,13 +306,6 @@ fn format_opt_ts(ts: Option<i64>) -> String {
     ts.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string())
 }
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 fn to_wukong_error(err: wukong_scheduler::SchedulerError) -> wukong_cli::WukongError {
     to_wukong_error_string(err.to_string())
 }
@@ -356,19 +323,10 @@ async fn run_one(
     input: &str,
 ) -> Result<(), wukong_cli::WukongError> {
     if cfg.stream {
-        let mut sink = |ev: StreamEvent| match ev {
-            StreamEvent::Text(t) => {
-                print!("{t}");
-                let _ = std::io::stdout().flush();
-            }
-            StreamEvent::ToolUse(n) => {
-                eprintln!("  ▸ 使用工具 {n}");
-            }
-            StreamEvent::Reasoning(t) if !t.trim().is_empty() => {
-                eprintln!("  💭 {t}");
-            }
-            _ => {}
-        };
+        let mut out = std::io::stdout();
+        let mut err = std::io::stderr();
+        let mut renderer = wukong_cli::render::StreamRenderer::new(&mut out, &mut err);
+        let mut sink = |ev: StreamEvent| renderer.on_event(&ev);
         run_turn(memory, backend, cfg, input, &mut sink, &mut |role| {
             eprintln!("🐵 悟空·{}", role.name());
         })

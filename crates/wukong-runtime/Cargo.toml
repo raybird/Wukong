@@ -7,6 +7,11 @@ version.workspace = true
 name = "wukong_runtime"
 path = "src/lib.rs"
 
+[features]
+# Forwarded to wukong-memory so entrypoints can enable local embedding through
+# the shared bootstrap helper. Off by default (BM25-only recall).
+embed = ["wukong-memory/embed"]
+
 [dependencies]
 wukong-memory = { path = "../wukong-memory" }
 wukong-gateway = { path = "../wukong-gateway" }

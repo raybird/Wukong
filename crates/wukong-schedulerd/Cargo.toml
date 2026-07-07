@@ -26,4 +26,4 @@ wukong-tg-client = { path = "../wukong-tg-client", features = ["mock"] }
 tempfile = { workspace = true }
 
 [features]
-embed = ["wukong-memory/embed"]
+embed = ["wukong-memory/embed", "wukong-runtime/embed"]

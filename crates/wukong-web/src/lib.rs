@@ -22,6 +22,7 @@ use wukong_cli::run_turn_traced;
 use wukong_gateway::backend::AiBackend;
 use wukong_gateway::config::GatewayConfig;
 use wukong_memory::{Memory, RecallMode, RecallQuery};
+use wukong_runtime::util::{now_unix, upload_root};
 use wukong_scheduler::SchedulerStore;
 use wukong_settings::TelegramSettings;
 
@@ -536,23 +537,6 @@ fn date_bounds_utc(date: &str) -> Result<(i64, i64), String> {
         Utc.from_utc_datetime(&start).timestamp(),
         Utc.from_utc_datetime(&end).timestamp(),
     ))
-}
-
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-fn upload_root() -> std::path::PathBuf {
-    std::env::var("WUKONG_WORKSPACE")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-        })
-        .join(".wukong")
-        .join("uploads")
 }
 
 fn attachment_response(a: ChatAttachment) -> ChatAttachmentResponse {

@@ -15,6 +15,7 @@ path = "src/lib.rs"
 wukong-memory = { path = "../wukong-memory" }
 wukong-gateway = { path = "../wukong-gateway" }
 wukong-cli = { path = "../wukong-cli" }
+wukong-runtime = { path = "../wukong-runtime" }
 wukong-orchestrator = { path = "../wukong-orchestrator" }
 wukong-render = { path = "../wukong-render" }
 wukong-settings = { path = "../wukong-settings" }
@@ -34,4 +35,4 @@ tempfile = { workspace = true }
 tower = { workspace = true }
 
 [features]
-embed = ["wukong-memory/embed", "wukong-cli/embed"]
+embed = ["wukong-memory/embed", "wukong-cli/embed", "wukong-runtime/embed"]

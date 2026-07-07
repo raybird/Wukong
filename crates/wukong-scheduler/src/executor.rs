@@ -1,4 +1,5 @@
-use crate::job::{Job, JobKind, MaintenanceTask};
+use crate::job::{Job, JobKind, MaintenanceTask, SchedulerError};
+use crate::store::{RunStatus, SchedulerStore};
 use wukong_gateway::backend::AiBackend;
 use wukong_gateway::config::GatewayConfig;
 use wukong_memory::Memory;
@@ -31,6 +32,53 @@ pub async fn execute_job<B: AiBackend + Sync>(
             success: false,
             message: err.to_string(),
         },
+    }
+}
+
+/// Outcome of running a single already-claimed job to completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimedJobOutcome {
+    /// The job ran and its completion was recorded while the lease was still held.
+    Completed(ExecutionOutput),
+    /// Another worker took the lease before completion could be recorded. The
+    /// job still executed (output attached), but this worker did not own the
+    /// finish, so it must not reschedule or announce success.
+    LeaseLost(ExecutionOutput),
+}
+
+/// Run one already-claimed `job` through its full lifecycle: record a run start,
+/// execute it, record the run result, then release the lease and reschedule.
+///
+/// This is the single source of truth for the `start_run → execute → finish_run
+/// → complete_claimed_job` sequence shared by the CLI (`wukong schedule run`)
+/// and the daemon (`wukong-schedulerd`). It returns
+/// [`ClaimedJobOutcome::LeaseLost`] when the lease was stolen before completion;
+/// callers decide how to surface success, failure, and lease loss.
+pub async fn run_claimed_job<B: AiBackend + Sync>(
+    store: &SchedulerStore,
+    ctx: &ExecutionContext<'_, B>,
+    job: &Job,
+    worker_id: &str,
+) -> Result<ClaimedJobOutcome, SchedulerError> {
+    let started_at = chrono::Utc::now().timestamp();
+    let run_id = store.start_run(&job.id, started_at).await?;
+    let output = execute_job(ctx, job).await;
+    let finished_at = chrono::Utc::now().timestamp();
+    let status = if output.success {
+        RunStatus::Success
+    } else {
+        RunStatus::Failure
+    };
+    store
+        .finish_run(run_id, status, &output.message, finished_at)
+        .await?;
+    if store
+        .complete_claimed_job(job, worker_id, finished_at)
+        .await?
+    {
+        Ok(ClaimedJobOutcome::Completed(output))
+    } else {
+        Ok(ClaimedJobOutcome::LeaseLost(output))
     }
 }
 

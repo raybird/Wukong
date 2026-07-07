@@ -201,3 +201,62 @@
 
 - **Task 5.5（confidence 退化修正）延後**：`docs/superpowers/plans/2026-07-05-memory-optimization-parity.md` 的「Task 4: Recall Telemetry And Confidence Relevance」正在重做 confidence 語意（`recall_confidence_uses_decay_free_relevance`、`confidence == explanation.relevance`）。為避免與該進行中計畫衝突／重工，5.5 待該計畫落地後再依其成果調整。
 - 向量全量掃描設 10_000 上限：超大 store 仍會截斷最舊列，已於程式碼註記；真正的 ANN／sqlite-vec 另立設計（原計畫已載明本任務不做）。
+
+---
+
+## Phase 6 — 共用化與死碼清理 ✅（2026-07-07，v0.16.35 發佈後）
+
+> 於 Phase 1–5 合併並發佈 `v0.16.35` 之後進行；本 Phase 以獨立分支承載（大型跨 crate 重構，適合單獨 review／PR）。
+
+### Summary
+
+把跨進入點複製貼上的膠水碼下沉到 `wukong-runtime` 共用模組，並移除 v1 遺留死碼。執行前先以精確測繪校正 decomposition 的依賴假設與重複數量（見「偏離計畫處」），只對**真實重複**下手，避免為了對齊誇大的數字而改壞分歧行為。全程 `fmt`／`clippy -D warnings`／`test` 綠燈（446 passed）。
+
+### Implemented Changes
+
+**Task 6.1 — 共用 util／bootstrap 模組**
+- 新增 `crates/wukong-runtime/src/util.rs`：`now_unix`、`upload_root`、`default_db_url`、`db_url_from_env`、`agent_command_from_env`（純 std，零新依賴）+ 4 個單元測試。
+- 新增 `crates/wukong-runtime/src/bootstrap.rs`：`open_memory_from_env(db_url)` 封裝「`Memory::open` → embed gate（`WUKONG_EMBED`）→ markdown（`WUKONG_MD_DIR`）」三步。
+- `wukong-runtime/Cargo.toml` 新增 `embed = ["wukong-memory/embed"]`；`wukong-cli`／`wukong-web`／`wukong-telegram`／`wukong-schedulerd` 的 `embed` feature 皆補上 `wukong-runtime/embed` 透傳。
+
+**Task 6.2／6.3 — 進入點改用共用 util**
+- `now_unix`／`upload_root` 下沉：`wukong-cli`、`wukong-web`（lib.rs）、`wukong-telegram`（dispatch.rs）、`wukong-schedulerd`（main.rs、notify.rs）改 `use wukong_runtime::util::…`，刪除各自本地副本。
+- memory bootstrap 下沉：cli/web/telegram/schedulerd 四處 `Memory::open + embed + markdown` 區塊改呼叫 `bootstrap::open_memory_from_env`。
+- `agent_command_from_env`／`db_url_from_env` 取代 web／telegram main.rs 的 `WUKONG_AGENT_CMD`／`WUKONG_MEMORY_DB` 重複區塊；schedulerd `resolve_config` 改用共用 `default_db_url`。
+- `wukong-web`／`wukong-telegram` 補 `wukong-runtime` 直接依賴（原僅透過 `wukong-cli` 間接依賴；無循環）。
+
+**Task 6.4 — 排程執行編排收斂**
+- `wukong-scheduler` 新增 `run_claimed_job()` + `ClaimedJobOutcome{Completed,LeaseLost}`，封裝 `start_run → execute → finish_run → complete_claimed_job`（含 lease 檢查）。
+- `wukong-cli::trigger_job` 與 `wukong-schedulerd::run_scan` 改用之，各自保留原尾巴（cli：println + Ok/Err；schedulerd：eprintln + continue + Telegram 通知）。lease 語意不變（呼叫順序完全相同）。
+
+**Task 6.5 — CLI 串流渲染統一 + REPL 逐回合 reload**
+- `run_one` 串流分支改用 `render::StreamRenderer`（原內嵌閉包與其 `on_event` 路由完全相同），消除「渲染器閒置、閉包重複」的壞味道。
+- 真實 stdin REPL 的 Turn 分支補上**逐回合 settings 重載**（`apply_settings_to_config`），修掉「REPL 中 `/set_models` 後下一題不生效」的真實不一致。
+
+**Task 6.6 — 移除 `gateway/pipeline.rs` 死碼**
+- 確認零 production 呼叫者（`pub mod pipeline` 無 re-export、`grep pipeline::` 無匹配）、已被 `wukong_runtime::run_turn` 取代 → 刪除模組與 `lib.rs` 匯出。
+- 協調 `2026-07-05-memory-optimization-parity` 計畫（39 checkbox 全未執行）：移除其 4 處 `pipeline.rs` 引用，導向它已涵蓋的 `runtime/turn.rs`（唯一活路徑），並加日期註記。
+
+### Verification
+
+- `cargo build --workspace` ✓、`cargo fmt --all -- --check` ✓、`cargo clippy --all-targets --locked -- -D warnings` ✓、`cargo test --workspace --locked` ✓（**446 passed**，原 444：+4 util 測試、−2 pipeline 自帶測試）。
+- lease 併發、REPL loop、scheduler executor 既有測試守護行為不回歸。
+
+### Modified Files
+
+- Create `crates/wukong-runtime/src/util.rs`、`crates/wukong-runtime/src/bootstrap.rs`
+- Modify `crates/wukong-runtime/src/lib.rs`、`crates/wukong-runtime/Cargo.toml`
+- Modify `crates/wukong-scheduler/src/executor.rs`、`crates/wukong-scheduler/src/lib.rs`
+- Modify `crates/wukong-cli/src/main.rs`、`crates/wukong-cli/Cargo.toml`
+- Modify `crates/wukong-web/src/main.rs`、`crates/wukong-web/src/lib.rs`、`crates/wukong-web/Cargo.toml`
+- Modify `crates/wukong-telegram/src/main.rs`、`crates/wukong-telegram/src/dispatch.rs`、`crates/wukong-telegram/Cargo.toml`
+- Modify `crates/wukong-schedulerd/src/main.rs`、`crates/wukong-schedulerd/src/notify.rs`、`crates/wukong-schedulerd/Cargo.toml`
+- Delete `crates/wukong-gateway/src/pipeline.rs`；Modify `crates/wukong-gateway/src/lib.rs`
+- Modify `docs/superpowers/plans/2026-07-05-memory-optimization-parity.md`
+
+### 備註 / 偏離計畫處
+
+- **依賴假設校正**：decomposition 假設 `wukong-scheduler` 在 `wukong-runtime` 之下、須保留本地副本；實際上 scheduler **依賴** runtime（在其之上）。真正在 runtime 之下、保留本地 `now_unix` 的只有 `wukong-memory`、`wukong-chat-history`（依賴方向不可倒灌）。
+- **`apply_settings_to_config` 不搬 runtime**：decomposition 稱其重複 5 處，實測只有 1 處（cli）；且各進入點的 settings 套用**行為本就分歧**（cli 全套、schedulerd 只 model、web／telegram 不套）。強制統一會改變行為（非純 dedup），故保留於 cli，僅由 REPL 逐回合 reload 復用，避免給 runtime 增加 `wukong-settings` 依賴。
+- **Task 6.5 完整 loop 合一延後**：`run_repl_loop` 是「消費 iterator + 遇錯即中止」語意，真實 stdin REPL 是「互動式提示 + 遇錯續跑」；直接替換會改變錯誤韌性與互動行為。故本次只落地計畫的真實意圖（`StreamRenderer` 復用 + 逐回合 reload），完整 loop 合一待重整 `run_repl_loop` 契約時再做。
+- **embed feature 本地未能完整編譯驗證**：`cargo check -p wukong-runtime --features embed` 於 `openssl-sys`（fastembed→hf-hub 的原生傳遞依賴）build script 失敗，屬 sandbox 缺 OpenSSL 的環境限制，非程式碼問題；cargo 已成功解析並開始建置 fastembed，證明 feature 透傳佈線正確，且搬移的 cfg 區塊與原可編譯之進入點程式碼逐字相同。embed 於 CI／release 皆不啟用。

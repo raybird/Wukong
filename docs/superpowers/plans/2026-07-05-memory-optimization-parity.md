@@ -19,8 +19,9 @@
 - Modify `crates/wukong-memory/tests/integration.rs`: end-to-end memory tests for Chinese recall, dedupe, old DB upgrade, telemetry.
 - Modify `crates/wukong-memoryd/src/lib.rs`: map Axum JSON rejections to `400`, validate blank recall query and empty items through core behavior.
 - Modify `crates/wukong-memoryd/tests/http.rs`: HTTP contract tests for malformed and semantically invalid payloads.
-- Modify `crates/wukong-runtime/src/turn.rs`: pass stable dedupe keys for generated runtime turn memories.
-- Modify `crates/wukong-gateway/src/pipeline.rs`: pass stable dedupe keys for generated gateway turn memories.
+- Modify `crates/wukong-runtime/src/turn.rs`: pass stable dedupe keys for generated runtime turn memories. This is the single live turn path for every entrypoint.
+
+> Note (2026-07-07): `crates/wukong-gateway/src/pipeline.rs` was removed as dead code (no production caller; superseded by `wukong_runtime::run_turn`). The dedupe-key work below applies only to `wukong-runtime/src/turn.rs`.
 
 ## Task 1: CJK-Aware Recall Gate And Fallback
 
@@ -227,7 +228,6 @@ git commit -m "fix(memory): support short CJK recall queries"
 - Modify: `crates/wukong-memory/src/store/mod.rs`
 - Modify: `crates/wukong-memory/src/lib.rs`
 - Modify: `crates/wukong-runtime/src/turn.rs`
-- Modify: `crates/wukong-gateway/src/pipeline.rs`
 - Test: `crates/wukong-memory/tests/integration.rs`
 
 - [ ] **Step 1: Write failing dedupe test**
@@ -449,13 +449,7 @@ dedupe_key: Some(format!("runtime:{turn_key}:user")),
 dedupe_key: Some(format!("runtime:{turn_key}:assistant")),
 ```
 
-In `crates/wukong-gateway/src/pipeline.rs`, use:
-
-```rust
-let turn_key = format!("gateway:{}:{}", cfg.scope, input);
-```
-
-and set `dedupe_key` on its generated user/assistant event items.
+(The former `crates/wukong-gateway/src/pipeline.rs` path was removed as dead code, so no gateway-side dedupe key is needed.)
 
 - [ ] **Step 8: Run focused tests**
 
@@ -470,7 +464,7 @@ Expected: both pass.
 Run:
 
 ```bash
-git add crates/wukong-memory crates/wukong-runtime/src/turn.rs crates/wukong-gateway/src/pipeline.rs
+git add crates/wukong-memory crates/wukong-runtime/src/turn.rs
 git commit -m "fix(memory): make generated writes idempotent"
 ```
 

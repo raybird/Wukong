@@ -13,6 +13,7 @@ use wukong_gateway::stream::{QuestionInfo, QuestionRequest};
 use wukong_gateway::{GatewayError, StreamEvent};
 use wukong_memory::Memory;
 use wukong_orchestrator::Role;
+use wukong_runtime::util::{now_unix, upload_root};
 
 /// Progress updates fed to the single status bubble.
 enum Progress {
@@ -522,13 +523,6 @@ fn bubble_text(role: Option<&str>, reasoning: &str) -> String {
     format!("{base}\n💭　{r}")
 }
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 /// Log a failed Telegram send instead of silently dropping it, so a rejected
 /// message (e.g. a 400 on malformed HTML) is visible rather than lost.
 fn log_send<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) {
@@ -539,16 +533,6 @@ fn log_send<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) {
 
 const MAX_ATTACHMENT_BYTES: i64 = 25 * 1024 * 1024;
 const MAX_ATTACHMENTS_PER_MESSAGE: usize = 5;
-
-fn upload_root() -> std::path::PathBuf {
-    std::env::var("WUKONG_WORKSPACE")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-        })
-        .join(".wukong")
-        .join("uploads")
-}
 
 async fn store_telegram_attachments<C: TgClient>(
     client: &C,

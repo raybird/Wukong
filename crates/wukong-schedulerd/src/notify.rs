@@ -6,6 +6,7 @@
 //! (e.g. `project:X` created from the CLI) are never delivered to a chat.
 
 use wukong_chat_history::ChatHistoryStore;
+use wukong_runtime::util::now_unix;
 use wukong_scheduler::{ExecutionOutput, Job, JobKind};
 use wukong_tg_client::client::TgClient;
 use wukong_tg_client::error::TgError;
@@ -20,13 +21,6 @@ fn failure_summary(message: &str) -> String {
         .unwrap_or("")
         .trim();
     line.chars().take(300).collect()
-}
-
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 async fn record_history(

@@ -4074,6 +4074,7 @@ dependencies = [
  "wukong-memory",
  "wukong-orchestrator",
  "wukong-render",
+ "wukong-runtime",
  "wukong-settings",
  "wukong-tg-client",
 ]
@@ -4107,6 +4108,7 @@ dependencies = [
  "wukong-memory",
  "wukong-orchestrator",
  "wukong-render",
+ "wukong-runtime",
  "wukong-scheduler",
  "wukong-settings",
  "wukong-skills",

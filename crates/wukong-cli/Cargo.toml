@@ -21,7 +21,7 @@ tokio = { workspace = true }
 clap = { workspace = true }
 
 [features]
-embed = ["wukong-memory/embed"]
+embed = ["wukong-memory/embed", "wukong-runtime/embed"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
