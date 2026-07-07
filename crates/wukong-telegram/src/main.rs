@@ -190,7 +190,7 @@ async fn dispatch_update_event<C, B>(
             });
         }
         TgUpdateEvent::CallbackQuery(callback) => {
-            handle_callback_query(&client, &*backend, pending_questions, &callback).await;
+            handle_callback_query(&client, &*backend, &allow, pending_questions, &callback).await;
         }
     }
 }

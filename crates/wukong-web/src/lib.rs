@@ -78,12 +78,17 @@ where
 {
     let html = match &state.token {
         Some(t) => {
-            // Tokens are short opaque strings; escape the two chars that could
-            // break out of the JS string literal.
-            let safe = t.replace('\\', "\\\\").replace('"', "\\\"");
+            // Serialize as a JSON string literal, then neutralize the sequences
+            // that could break out of the inline <script> (`</script>`, HTML
+            // metacharacters). `\uXXXX` renders back to the original char in JS.
+            let json = serde_json::to_string(t).unwrap_or_else(|_| "null".to_string());
+            let safe = json
+                .replace('<', "\\u003c")
+                .replace('>', "\\u003e")
+                .replace('&', "\\u0026");
             INDEX_HTML.replace(
                 "window.WUKONG_TOKEN = null;",
-                &format!(r#"window.WUKONG_TOKEN = "{safe}";"#),
+                &format!("window.WUKONG_TOKEN = {safe};"),
             )
         }
         None => INDEX_HTML.to_string(),
@@ -405,9 +410,105 @@ struct SaveModelSettingsRequest {
 
 fn authorized(expected: &Option<String>, provided: Option<&str>) -> bool {
     match expected {
-        Some(t) => provided == Some(t.as_str()),
+        Some(t) => provided
+            .map(|p| ct_eq(p.as_bytes(), t.as_bytes()))
+            .unwrap_or(false),
         None => true,
     }
+}
+
+/// Constant-time byte comparison so token checks don't leak length-independent
+/// timing. (Length itself is not hidden, which is standard for bearer tokens.)
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Pull the request's bearer token from `Authorization: Bearer <t>`, falling
+/// back to the `?token=` query parameter.
+fn request_token(request: &axum::extract::Request) -> Option<String> {
+    if let Some(bearer) = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+    {
+        let t = bearer.trim();
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    axum::extract::Query::<std::collections::HashMap<String, String>>::try_from_uri(request.uri())
+        .ok()
+        .and_then(|axum::extract::Query(m)| m.get("token").cloned())
+}
+
+/// Auth gate for every protected route: rejects requests whose token does not
+/// match the configured one. This is the single choke point — a new protected
+/// route is covered automatically, without relying on a per-handler check. When
+/// the token arrives via header, it is copied into the query so the existing
+/// per-handler checks (defense in depth) also see it.
+async fn require_token<B>(
+    axum::extract::State(state): axum::extract::State<AppState<B>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response
+where
+    B: AiBackend + WebQuestionResponder + Send + Sync + 'static,
+{
+    use axum::response::IntoResponse;
+    let Some(expected) = state.token.as_deref() else {
+        return next.run(request).await;
+    };
+    let provided = request_token(&request);
+    if !provided
+        .as_deref()
+        .map(|p| ct_eq(p.as_bytes(), expected.as_bytes()))
+        .unwrap_or(false)
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let request = ensure_query_token(request, expected);
+    next.run(request).await
+}
+
+/// If the request has no `?token=`, append the validated token so query-based
+/// per-handler checks succeed for header-authenticated clients.
+fn ensure_query_token(request: axum::extract::Request, token: &str) -> axum::extract::Request {
+    let has_query_token =
+        axum::extract::Query::<std::collections::HashMap<String, String>>::try_from_uri(
+            request.uri(),
+        )
+        .ok()
+        .map(|axum::extract::Query(m)| m.contains_key("token"))
+        .unwrap_or(false);
+    if has_query_token {
+        return request;
+    }
+    let (mut parts, body) = request.into_parts();
+    let path = parts.uri.path();
+    let new_pq = match parts.uri.query() {
+        Some(q) if !q.is_empty() => format!("{path}?{q}&token={token}"),
+        _ => format!("{path}?token={token}"),
+    };
+    if let Ok(uri) = new_pq.parse::<axum::http::Uri>() {
+        parts.uri = uri;
+    }
+    axum::extract::Request::from_parts(parts, body)
+}
+
+/// Whether the console must refuse to start: no token configured while bound to
+/// a non-loopback interface, unless the operator explicitly opted into an
+/// insecure bind. Keeps the "public + no auth" footgun from happening silently.
+pub fn should_refuse_insecure_start(token: Option<&str>, host: &str, allow_insecure: bool) -> bool {
+    let is_loopback = matches!(host, "127.0.0.1" | "localhost" | "::1");
+    token.is_none() && !is_loopback && !allow_insecure
 }
 
 fn capped_limit(limit: Option<i64>) -> i64 {
@@ -1586,127 +1687,91 @@ pub fn build_router<B>(state: AppState<B>) -> axum::Router
 where
     B: AiBackend + WebQuestionResponder + Send + Sync + 'static,
 {
-    axum::Router::new()
-        .route("/", axum::routing::get(index::<B>))
-        .route("/app.js", axum::routing::get(app_js))
-        .route("/lib/html.js", axum::routing::get(html_js))
-        .route("/lib/chat-layout.mjs", axum::routing::get(chat_layout_js))
-        .route(
-            "/lib/unread-marker.mjs",
-            axum::routing::get(unread_marker_js),
-        )
-        .route("/components/wukong-chat.js", axum::routing::get(chat_js))
+    use axum::routing::{get, post};
+    // Public: the SPA shell and its static assets, served without a token so the
+    // UI can load and prompt for one.
+    let public = axum::Router::new()
+        .route("/", get(index::<B>))
+        .route("/app.js", get(app_js))
+        .route("/lib/html.js", get(html_js))
+        .route("/lib/chat-layout.mjs", get(chat_layout_js))
+        .route("/lib/unread-marker.mjs", get(unread_marker_js))
+        .route("/components/wukong-chat.js", get(chat_js))
         .route(
             "/components/chat-thread-header.js",
-            axum::routing::get(chat_thread_header_js),
+            get(chat_thread_header_js),
         )
-        .route(
-            "/components/chat-message.js",
-            axum::routing::get(chat_message_js),
-        )
-        .route(
-            "/components/chat-activity.js",
-            axum::routing::get(chat_activity_js),
-        )
+        .route("/components/chat-message.js", get(chat_message_js))
+        .route("/components/chat-activity.js", get(chat_activity_js))
         .route(
             "/components/chat-question-card.js",
-            axum::routing::get(chat_question_card_js),
+            get(chat_question_card_js),
         )
-        .route(
-            "/components/wukong-memory.js",
-            axum::routing::get(memory_js),
-        )
-        .route(
-            "/components/wukong-skills.js",
-            axum::routing::get(skills_js),
-        )
-        .route(
-            "/components/wukong-settings.js",
-            axum::routing::get(settings_js),
-        )
-        .route(
-            "/components/wukong-schedules.js",
-            axum::routing::get(schedules_js),
-        )
-        .route(
-            "/components/wukong-system.js",
-            axum::routing::get(system_js),
-        )
-        .route("/styles.css", axum::routing::get(styles_css))
-        .route("/settings", axum::routing::get(index::<B>))
-        .route("/chat", axum::routing::get(chat::<B>))
-        .route("/api/chat/scopes", axum::routing::get(get_chat_scopes::<B>))
-        .route(
-            "/api/chat/stream",
-            axum::routing::get(stream_chat_events::<B>),
-        )
-        .route(
-            "/api/chat/messages",
-            axum::routing::get(get_chat_messages::<B>),
-        )
-        .route(
-            "/api/chat/messages/:id/steps",
-            axum::routing::get(get_chat_steps::<B>),
-        )
-        .route(
-            "/api/chat/messages/:id/events",
-            axum::routing::get(get_chat_events::<B>),
-        )
-        .route(
-            "/api/chat/attachments/:id",
-            axum::routing::get(get_attachment::<B>),
-        )
+        .route("/components/wukong-memory.js", get(memory_js))
+        .route("/components/wukong-skills.js", get(skills_js))
+        .route("/components/wukong-settings.js", get(settings_js))
+        .route("/components/wukong-schedules.js", get(schedules_js))
+        .route("/components/wukong-system.js", get(system_js))
+        .route("/styles.css", get(styles_css))
+        .route("/settings", get(index::<B>));
+
+    // Protected: everything that touches memory/agent/settings. The auth
+    // middleware is the single choke point covering all of these.
+    let protected = axum::Router::new()
+        .route("/chat", get(chat::<B>))
+        .route("/api/chat/scopes", get(get_chat_scopes::<B>))
+        .route("/api/chat/stream", get(stream_chat_events::<B>))
+        .route("/api/chat/messages", get(get_chat_messages::<B>))
+        .route("/api/chat/messages/:id/steps", get(get_chat_steps::<B>))
+        .route("/api/chat/messages/:id/events", get(get_chat_events::<B>))
+        .route("/api/chat/attachments/:id", get(get_attachment::<B>))
         .route(
             "/api/chat/attachments/:id/preview",
-            axum::routing::get(get_attachment_preview::<B>),
+            get(get_attachment_preview::<B>),
         )
         .route(
             "/api/questions/:request_id/reply",
-            axum::routing::post(post_question_reply::<B>),
+            post(post_question_reply::<B>),
         )
         .route(
             "/api/questions/:request_id/reject",
-            axum::routing::post(post_question_reject::<B>),
+            post(post_question_reject::<B>),
         )
         .route(
             "/api/settings",
-            axum::routing::get(get_settings::<B>).post(post_settings::<B>),
+            get(get_settings::<B>).post(post_settings::<B>),
         )
         .route(
             "/api/settings/model",
-            axum::routing::get(get_model_settings::<B>).put(put_model_settings::<B>),
+            get(get_model_settings::<B>).put(put_model_settings::<B>),
         )
-        .route(
-            "/api/memory/summary",
-            axum::routing::get(get_memory_summary::<B>),
-        )
-        .route(
-            "/api/memory/records",
-            axum::routing::get(get_memory_records::<B>),
-        )
+        .route("/api/memory/summary", get(get_memory_summary::<B>))
+        .route("/api/memory/records", get(get_memory_records::<B>))
         .route(
             "/api/memory/recall-preview",
-            axum::routing::post(post_memory_recall_preview::<B>),
+            post(post_memory_recall_preview::<B>),
         )
-        .route(
-            "/api/skills/catalog",
-            axum::routing::get(get_skills_catalog::<B>),
-        )
+        .route("/api/skills/catalog", get(get_skills_catalog::<B>))
         .route(
             "/api/skills/preferences",
-            axum::routing::get(get_skills_preferences::<B>).put(put_skills_preferences::<B>),
+            get(get_skills_preferences::<B>).put(put_skills_preferences::<B>),
         )
-        .route("/api/schedules", axum::routing::get(list_schedules::<B>))
+        .route("/api/schedules", get(list_schedules::<B>))
         .route(
             "/api/schedules/:id/:action",
-            axum::routing::post(set_schedule_enabled::<B>),
+            post(set_schedule_enabled::<B>),
         )
         .route(
             "/api/schedules/:id",
             axum::routing::delete(delete_schedule::<B>),
         )
-        .route("/api/system", axum::routing::get(get_system::<B>))
-        .with_state(state)
+        .route("/api/system", get(get_system::<B>))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_token::<B>,
+        ));
+
+    public.merge(protected).with_state(state)
 }
 
 #[cfg(test)]
@@ -1933,6 +1998,47 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn chat_accepts_bearer_header_token() {
+        let app = build_router(state(Some("sekret"), &["oracle", "ans"]).await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/chat?q=hi")
+                    .header("authorization", "Bearer sekret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn chat_rejects_wrong_bearer_header() {
+        let app = build_router(state(Some("sekret"), &["oracle", "ans"]).await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/chat?q=hi")
+                    .header("authorization", "Bearer nope")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn refuses_insecure_public_bind_only_when_unsafe() {
+        assert!(should_refuse_insecure_start(None, "0.0.0.0", false));
+        assert!(!should_refuse_insecure_start(None, "127.0.0.1", false));
+        assert!(!should_refuse_insecure_start(None, "localhost", false));
+        assert!(!should_refuse_insecure_start(None, "0.0.0.0", true));
+        assert!(!should_refuse_insecure_start(Some("t"), "0.0.0.0", false));
     }
 
     #[tokio::test]

@@ -402,9 +402,14 @@ pub async fn cleanup_expired_questions<C: TgClient, R: QuestionResponder>(
 pub async fn handle_callback_query<C: TgClient, R: QuestionResponder>(
     client: &C,
     responder: &R,
+    allow: &[i64],
     pending_questions: Arc<Mutex<PendingQuestions>>,
     callback: &TgCallbackQuery,
 ) {
+    // Enforce the allowlist on callbacks too, consistent with message handling.
+    if !is_allowed(callback.chat_id, allow) {
+        return;
+    }
     let Some(parsed) = parse_question_callback(&callback.data) else {
         let _ = client
             .answer_callback_query(&callback.callback_query_id, "無法處理這個操作")
@@ -1429,6 +1434,7 @@ mod tests {
         handle_callback_query(
             &client,
             &responder,
+            &[7],
             pending.clone(),
             &callback("q:que_1:pick:0:0"),
         )
@@ -1458,6 +1464,7 @@ mod tests {
         handle_callback_query(
             &client,
             &responder,
+            &[7],
             pending.clone(),
             &callback("q:que_1:toggle:0:0"),
         )
@@ -1465,6 +1472,7 @@ mod tests {
         handle_callback_query(
             &client,
             &responder,
+            &[7],
             pending.clone(),
             &callback("q:que_1:toggle:0:1"),
         )
@@ -1472,6 +1480,7 @@ mod tests {
         handle_callback_query(
             &client,
             &responder,
+            &[7],
             pending.clone(),
             &callback("q:que_1:next"),
         )
@@ -1496,6 +1505,7 @@ mod tests {
         handle_callback_query(
             &client,
             &responder,
+            &[7],
             pending.clone(),
             &callback("q:que_1:cancel"),
         )
@@ -1514,12 +1524,45 @@ mod tests {
         let responder = RecordingResponder::default();
         let pending = Arc::new(Mutex::new(PendingQuestions::new()));
 
-        handle_callback_query(&client, &responder, pending, &callback("q:que_1:pick:0:0")).await;
+        handle_callback_query(
+            &client,
+            &responder,
+            &[7],
+            pending,
+            &callback("q:que_1:pick:0:0"),
+        )
+        .await;
 
         assert_eq!(
             client.callback_answers.lock().unwrap()[0],
             ("cb_1".to_string(), "這個問題已失效".to_string())
         );
+        assert!(responder.replies.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn callback_from_disallowed_chat_is_ignored() {
+        let client = MockTgClient::default();
+        let responder = RecordingResponder::default();
+        let pending = Arc::new(Mutex::new(PendingQuestions::new()));
+        pending
+            .lock()
+            .unwrap()
+            .insert(7, sample_pending_question(false));
+
+        // chat_id 7 is not in the allowlist → the callback must be dropped
+        // without touching pending state or answering the query.
+        handle_callback_query(
+            &client,
+            &responder,
+            &[999],
+            pending.clone(),
+            &callback("q:que_1:pick:0:0"),
+        )
+        .await;
+
+        assert!(pending.lock().unwrap().get(&7).is_some());
+        assert!(client.callback_answers.lock().unwrap().is_empty());
         assert!(responder.replies.lock().unwrap().is_empty());
     }
 

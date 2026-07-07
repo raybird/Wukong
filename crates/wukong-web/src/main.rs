@@ -13,6 +13,22 @@ async fn main() {
         .ok()
         .filter(|t| !t.is_empty());
 
+    // Fail closed: refuse to expose an unauthenticated console on a non-loopback
+    // interface. The console can trigger agent turns, read memory, and edit
+    // settings, so a public bind with no token is a footgun.
+    let allow_insecure = std::env::var("WUKONG_WEB_ALLOW_INSECURE").as_deref() == Ok("1");
+    if wukong_web::should_refuse_insecure_start(token.as_deref(), &host, allow_insecure) {
+        eprintln!(
+            "error: refusing to start — WUKONG_WEB_TOKEN is empty while binding to a \
+             non-loopback host ({host})."
+        );
+        eprintln!(
+            "       Set WUKONG_WEB_TOKEN=<secret> to require auth, or \
+             WUKONG_WEB_ALLOW_INSECURE=1 to override."
+        );
+        std::process::exit(1);
+    }
+
     let db_url = std::env::var("WUKONG_MEMORY_DB").unwrap_or_else(|_| {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         let dir = format!("{home}/.wukong");

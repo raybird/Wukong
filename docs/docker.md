@@ -149,7 +149,10 @@ services:
 | `WUKONG_TG_TOKEN` | Telegram Bot Token（選用；可由 Web `/settings` 設定，env 優先） | — |
 | `WUKONG_TG_ALLOWED` | 允許的 Telegram chat ID（選用；可由 Web `/settings` 設定，env 優先） | — |
 | `WUKONG_WEB_HOST` / `WUKONG_WEB_PORT` | Web Console 綁定位址與埠 | `0.0.0.0:8787` |
-| `WUKONG_WEB_TOKEN` | Web Console 存取密鑰（選用） | — |
+| `WUKONG_WEB_TOKEN` | Web Console 存取密鑰。**綁定非 loopback（如 `0.0.0.0`）且未設此值時，服務會拒絕啟動**（防止無認證對外開放）。可用 `Authorization: Bearer <token>` 標頭或 `?token=` 查詢字串提供 | — |
+| `WUKONG_WEB_ALLOW_INSECURE` | 設為 `1` 時，允許在無 token 下對外綁定（僅限可信內網）；否則對外綁定必須設 token | — |
+| `WUKONG_MEMORY_HOST` | `wukong-memoryd` 綁定位址（預設僅本機，避免記憶未認證外洩） | `127.0.0.1` |
+| `WUKONG_MEMORY_TOKEN` | `wukong-memoryd` 存取密鑰（選用；設定後除 `/v1/health` 外皆需 `Authorization: Bearer <token>`） | — |
 | `WUKONG_THINKING` | 啟用思考過程顯示 | `1` |
 | `WUKONG_EMBED` | 啟用語意向量召回 | `0` |
 | `WUKONG_BIN` | 注入排程能力提示詞時使用的 `wukong` 指令路徑（agent 自行建排程時用） | `wukong` |

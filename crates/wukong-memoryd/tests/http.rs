@@ -7,11 +7,15 @@ use wukong_memory::Memory;
 use wukong_memoryd::build_router;
 
 async fn test_app() -> axum::Router {
+    build_app(None).await
+}
+
+async fn build_app(token: Option<String>) -> axum::Router {
     let file = NamedTempFile::new().unwrap();
     let url = format!("sqlite://{}", file.path().display());
     std::mem::forget(file);
     let memory = Memory::open(&url).await.unwrap();
-    build_router(Arc::new(memory))
+    build_router(Arc::new(memory), token)
 }
 
 async fn body_json(resp: axum::response::Response) -> serde_json::Value {
@@ -36,6 +40,68 @@ async fn health_returns_ok() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     assert_eq!(json["status"], "ok");
+}
+
+#[tokio::test]
+async fn protected_route_rejects_missing_token() {
+    let app = build_app(Some("s3cret".to_string())).await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/stats")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn protected_route_rejects_wrong_token() {
+    let app = build_app(Some("s3cret".to_string())).await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/stats")
+                .header("authorization", "Bearer nope")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn protected_route_accepts_correct_token() {
+    let app = build_app(Some("s3cret".to_string())).await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/stats")
+                .header("authorization", "Bearer s3cret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn health_stays_open_with_token_configured() {
+    let app = build_app(Some("s3cret".to_string())).await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 #[tokio::test]

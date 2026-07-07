@@ -78,3 +78,50 @@
 ### Modified Files
 
 - Modify `crates/wukong-render/src/lib.rs`（is_safe_url、to_web_html/render_html scheme 過濾、split_chunks 重寫、9 個新測試）
+
+---
+
+## Phase 3 — 認證與部署加固 ✅（2026-07-07）
+
+### Summary
+
+將 Web Console 與 memoryd 的認證改為結構性防漏且 fail-closed，並修補 token 注入與 Telegram callback 白名單缺口。新增 8 個測試。
+
+### Implemented Changes
+
+**Task 3.1 — Web 認證 middleware + Bearer header**
+- 新增 `require_token` axum middleware，套在「受保護路由群組」（`/chat` + 所有 `/api/*`）的 `route_layer`；`build_router` 拆成 public（靜態資產 + index shell）與 protected 兩組。這是單一 choke point，日後新增受保護路由自動被涵蓋。
+- Token 來源支援 `Authorization: Bearer <t>` 標頭 **或** `?token=`；header 驗證通過後由 `ensure_query_token` 回填 query，讓既有 per-handler 檢查（保留為 defense-in-depth）對 header 客戶端也成立。
+- `authorized` 改用常數時間比較 `ct_eq`。
+- 決策：保留 28 處 per-handler 檢查（防禦縱深），不做高風險的大量刪除；middleware 為主閘門。
+
+**Task 3.2 — Web 空 token fail-closed**
+- 新增 `should_refuse_insecure_start(token, host, allow_insecure)`（可測純函式）；`main.rs` 在「空 token + 非 loopback + 未設 `WUKONG_WEB_ALLOW_INSECURE=1`」時拒絕啟動並輸出明確指引。
+- `docker-compose.yml` 補 `WUKONG_WEB_ALLOW_INSECURE` 與安全註解；`docs/docker.md` 更新警示。**注意：既有以 0.0.0.0 + 空 token 部署者升級後需設 token 或 `WUKONG_WEB_ALLOW_INSECURE=1`。**
+
+**Task 3.3 — memoryd 認證與預設綁定**
+- `Config` 新增 `host`（預設 `127.0.0.1`，不再 `0.0.0.0`）與 `token`（`WUKONG_MEMORY_TOKEN`）。
+- `build_router(mem, token)` 新增 bearer middleware，保護 `/v1/{stats,snapshot,remember,recall}`，`/v1/health` 維持公開（供 liveness）。
+- 測試補 401（缺 token / 錯 token）、200（正確 token）、health 公開。
+
+**Task 3.4 — 次要注入與白名單修補**
+- `index()` token 注入改用 `serde_json` 序列化 + `<`/`>`/`&` → `\uXXXX`，防 `</script>` 突破 inline script。
+- `handle_callback_query` 新增 `allow: &[i64]` 參數與 `is_allowed` 白名單檢查（與訊息處理一致）；`main.rs` callback 路徑傳入 `allow`；補「非白名單 callback 被忽略」測試。
+
+### Verification
+
+- `cargo fmt --all -- --check` ✓、`cargo clippy --all-targets --locked -- -D warnings` ✓（EXIT 0）、`cargo test --workspace --locked` ✓（438 passed）
+- 新測試：web Bearer header accept/reject、fail-closed 邏輯、memoryd 401/200/health、Telegram 非白名單 callback 忽略。
+
+### Modified Files
+
+- Modify `crates/wukong-web/src/lib.rs`（middleware、router 拆分、ct_eq、index JSON 注入、fail-closed helper、5 個新測試）
+- Modify `crates/wukong-web/src/main.rs`（fail-closed 啟動檢查）
+- Modify `crates/wukong-memoryd/src/lib.rs`（Config host/token、bearer middleware）、`crates/wukong-memoryd/src/main.rs`、`crates/wukong-memoryd/tests/http.rs`（4 個新測試）
+- Modify `crates/wukong-telegram/src/dispatch.rs`（callback 白名單 + 測試）、`crates/wukong-telegram/src/main.rs`
+- Modify `docker-compose.yml`、`docs/docker.md`
+
+### 備註 / 偏離計畫處
+
+- Task 3.1 原計畫「移除各 handler 內的手動檢查」；改為「middleware 為主閘門 + 保留 per-handler 檢查為防禦縱深」，避免在 3647 行安全關鍵檔案上大量刪除造成回歸風險。header 支援以 query 回填達成，不動 28 個 handler 簽章。完整移除 per-handler 檢查併入 Phase 7 Task 7.5（web/lib.rs 拆分）時處理較安全。
+- fail-closed 是刻意的破壞性變更（提升安全預設）；已在 compose／docs 標註升級遷移路徑。

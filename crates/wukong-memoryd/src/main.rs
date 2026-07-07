@@ -8,9 +8,9 @@ async fn main() {
     let memory = Memory::open(&config.db_url)
         .await
         .expect("failed to open memory database");
-    let app = build_router(Arc::new(memory));
+    let app = build_router(Arc::new(memory), config.token);
 
-    let addr = format!("0.0.0.0:{}", config.port);
+    let addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("failed to bind");

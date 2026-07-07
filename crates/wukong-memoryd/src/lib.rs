@@ -13,12 +13,16 @@ use wukong_memory::{Memory, MemoryError, RecallQuery, RememberInput};
 pub struct Config {
     pub db_url: String,
     pub port: u16,
+    pub host: String,
+    pub token: Option<String>,
 }
 
 impl Config {
     /// Build config from env vars, with sensible defaults:
-    /// WUKONG_MEMORY_DB (default $HOME/.wukong/memory.db) and
-    /// WUKONG_MEMORY_PORT (default 3917).
+    /// WUKONG_MEMORY_DB (default $HOME/.wukong/memory.db),
+    /// WUKONG_MEMORY_PORT (default 3917), WUKONG_MEMORY_HOST (default
+    /// 127.0.0.1 — do not expose memory unauthenticated by default), and
+    /// WUKONG_MEMORY_TOKEN (optional bearer token; when set it is required).
     pub fn from_env() -> Config {
         let db_url = match std::env::var("WUKONG_MEMORY_DB") {
             Ok(v) => v,
@@ -33,7 +37,16 @@ impl Config {
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(3917);
-        Config { db_url, port }
+        let host = std::env::var("WUKONG_MEMORY_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+        let token = std::env::var("WUKONG_MEMORY_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty());
+        Config {
+            db_url,
+            port,
+            host,
+            token,
+        }
     }
 }
 
@@ -87,13 +100,55 @@ async fn recall(
     Ok(Json(mem.recall(query).await?))
 }
 
-/// Build the axum router over a shared Memory instance.
-pub fn build_router(mem: Arc<Memory>) -> Router {
-    Router::new()
-        .route("/v1/health", get(health))
+/// Constant-time byte comparison for token checks.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Require `Authorization: Bearer <token>` on protected routes when a token is
+/// configured. `/v1/health` is left open for liveness checks.
+async fn require_token(
+    State(token): State<Option<String>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let Some(expected) = token.as_deref() else {
+        return next.run(request).await;
+    };
+    let provided = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.trim());
+    if provided
+        .map(|p| ct_eq(p.as_bytes(), expected.as_bytes()))
+        .unwrap_or(false)
+    {
+        next.run(request).await
+    } else {
+        StatusCode::UNAUTHORIZED.into_response()
+    }
+}
+
+/// Build the axum router over a shared Memory instance. When `token` is `Some`,
+/// every route except `/v1/health` requires a matching bearer token.
+pub fn build_router(mem: Arc<Memory>, token: Option<String>) -> Router {
+    let protected = Router::new()
         .route("/v1/stats", get(stats))
         .route("/v1/snapshot", get(snapshot))
         .route("/v1/remember", post(remember))
         .route("/v1/recall", post(recall))
+        .route_layer(axum::middleware::from_fn_with_state(token, require_token));
+    Router::new()
+        .route("/v1/health", get(health))
+        .merge(protected)
         .with_state(mem)
 }

@@ -106,9 +106,14 @@ services:
       - WUKONG_MEMORY_DB=sqlite:///data/memory.db
       - WUKONG_THINKING=${WUKONG_THINKING:-1}
       # Web-specific
+      # SECURITY: the console can run agent turns, read memory, and edit settings.
+      # Binding to 0.0.0.0 with an empty WUKONG_WEB_TOKEN now REFUSES to start.
+      # Set WUKONG_WEB_TOKEN=<secret> (recommended), or set
+      # WUKONG_WEB_ALLOW_INSECURE=1 to explicitly run without auth (trusted LAN only).
       - WUKONG_WEB_HOST=${WUKONG_WEB_HOST:-0.0.0.0}
       - WUKONG_WEB_PORT=${WUKONG_WEB_PORT:-8787}
       - WUKONG_WEB_TOKEN=${WUKONG_WEB_TOKEN:-}
+      - WUKONG_WEB_ALLOW_INSECURE=${WUKONG_WEB_ALLOW_INSECURE:-}
     volumes:
       - ${WUKONG_HOST_WORKSPACE:-./workspace}:/workspace
       - opencode-config:/home/wukong/.config/opencode
