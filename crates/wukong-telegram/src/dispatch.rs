@@ -414,71 +414,67 @@ pub async fn handle_callback_query<C: TgClient, R: QuestionResponder>(
     let mut edit_pending = None;
     let mut reject = false;
     let mut advance = false;
+    let mut custom_edit: Option<(i64, i64)> = None;
     let mut callback_message = "";
 
+    // Decide everything under the lock without awaiting, then release the guard
+    // before any network call — holding the std Mutex across an await risks
+    // blocking the executor.
+    let mut invalid = false;
     {
         let mut pending_questions_guard = pending_questions.lock().unwrap();
-        let Some(pending) = pending_questions_guard.get_mut(&callback.chat_id) else {
-            drop(pending_questions_guard);
-            let _ = client
-                .answer_callback_query(&callback.callback_query_id, "這個問題已失效")
-                .await;
-            return;
-        };
-        if pending.request_id != parsed.request_id {
-            drop(pending_questions_guard);
-            let _ = client
-                .answer_callback_query(&callback.callback_query_id, "這個問題已失效")
-                .await;
-            return;
-        }
-
-        match parsed.action {
-            QuestionAction::Pick { question, option } => {
-                if question != pending.current_question_index {
-                    callback_message = "題目已更新";
-                } else if let Some(label) = pending.questions[question]
-                    .options
-                    .get(option)
-                    .map(|option| option.label.clone())
-                {
-                    pending.answers[question] = vec![label];
-                    advance = true;
-                }
-            }
-            QuestionAction::Toggle { question, option } => {
-                if question == pending.current_question_index {
-                    if let Some(label) = pending.questions[question]
+        match pending_questions_guard.get_mut(&callback.chat_id) {
+            None => invalid = true,
+            Some(pending) if pending.request_id != parsed.request_id => invalid = true,
+            Some(pending) => match parsed.action {
+                QuestionAction::Pick { question, option } => {
+                    if question != pending.current_question_index {
+                        callback_message = "題目已更新";
+                    } else if let Some(label) = pending.questions[question]
                         .options
                         .get(option)
                         .map(|option| option.label.clone())
                     {
-                        toggle_answer(&mut pending.answers[question], &label);
-                        edit_pending = Some(pending.clone());
+                        pending.answers[question] = vec![label];
+                        advance = true;
                     }
                 }
-            }
-            QuestionAction::Custom { question } => {
-                pending.waiting_custom_question_index = Some(question);
-                if let Some(message_id) = pending.message_id {
-                    let _ = client
-                        .edit_message_text(
-                            pending.chat_id,
-                            message_id,
-                            "請直接傳下一則文字作為自訂回答。",
-                        )
-                        .await;
+                QuestionAction::Toggle { question, option } => {
+                    if question == pending.current_question_index {
+                        if let Some(label) = pending.questions[question]
+                            .options
+                            .get(option)
+                            .map(|option| option.label.clone())
+                        {
+                            toggle_answer(&mut pending.answers[question], &label);
+                            edit_pending = Some(pending.clone());
+                        }
+                    }
                 }
-            }
-            QuestionAction::Next => {
-                advance = true;
-            }
-            QuestionAction::Cancel => {
-                reject = true;
-            }
+                QuestionAction::Custom { question } => {
+                    pending.waiting_custom_question_index = Some(question);
+                    if let Some(message_id) = pending.message_id {
+                        custom_edit = Some((pending.chat_id, message_id));
+                    }
+                }
+                QuestionAction::Next => advance = true,
+                QuestionAction::Cancel => reject = true,
+            },
         }
     }
 
+    if invalid {
+        let _ = client
+            .answer_callback_query(&callback.callback_query_id, "這個問題已失效")
+            .await;
+        return;
+    }
+
+    if let Some((chat_id, message_id)) = custom_edit {
+        let _ = client
+            .edit_message_text(chat_id, message_id, "請直接傳下一則文字作為自訂回答。")
+            .await;
+    }
     if let Some(pending) = edit_pending {
         edit_pending_question(client, &pending).await;
     }
@@ -773,6 +769,7 @@ pub async fn handle_message<C, B>(
     .await;
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_message_with_pending<C, B>(
     client: &C,
     mem: &Memory,
@@ -800,6 +797,7 @@ pub async fn handle_message_with_pending<C, B>(
     .await;
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_message_with_responder<C, B, R>(
     client: &C,
     mem: &Memory,
@@ -1297,9 +1295,11 @@ mod tests {
         }
     }
 
+    type QuestionReplyLog = Mutex<Vec<(String, String, Vec<Vec<String>>)>>;
+
     #[derive(Default)]
     struct RecordingResponder {
-        replies: Mutex<Vec<(String, String, Vec<Vec<String>>)>>,
+        replies: QuestionReplyLog,
         rejects: Mutex<Vec<(String, String)>>,
     }
 

@@ -443,17 +443,13 @@ impl ChatHistoryStore {
         Ok(result.rows_affected())
     }
 
-    pub async fn latest_live_event_id(
-        &self,
-        scope: &str,
-    ) -> Result<Option<i64>, sqlx::Error> {
-        let row: Option<sqlx::sqlite::SqliteRow> = sqlx::query(
-            "SELECT MAX(id) as max_id FROM chat_live_events WHERE scope = ?1",
-        )
-        .bind(scope)
-        .fetch_optional(&self.pool)
-        .await?;
-        
+    pub async fn latest_live_event_id(&self, scope: &str) -> Result<Option<i64>, sqlx::Error> {
+        let row: Option<sqlx::sqlite::SqliteRow> =
+            sqlx::query("SELECT MAX(id) as max_id FROM chat_live_events WHERE scope = ?1")
+                .bind(scope)
+                .fetch_optional(&self.pool)
+                .await?;
+
         match row {
             Some(r) => {
                 let val: Option<i64> = r.get("max_id");
@@ -462,7 +458,6 @@ impl ChatHistoryStore {
             None => Ok(None),
         }
     }
-
 
     pub async fn latest_messages(
         &self,
@@ -996,22 +991,33 @@ mod tests {
     #[tokio::test]
     async fn latest_live_event_id_returns_max_id_for_scope() {
         let store = store().await;
-        assert_eq!(store.latest_live_event_id("user:tg-12").await.unwrap(), None);
+        assert_eq!(
+            store.latest_live_event_id("user:tg-12").await.unwrap(),
+            None
+        );
 
         let first = store
             .insert_live_event("user:tg-12", "user", None, "old", None, 100)
             .await
             .unwrap();
-        assert_eq!(store.latest_live_event_id("user:tg-12").await.unwrap(), Some(first));
+        assert_eq!(
+            store.latest_live_event_id("user:tg-12").await.unwrap(),
+            Some(first)
+        );
 
         let second = store
             .insert_live_event("user:tg-12", "answer", None, "new", Some(2), 200)
             .await
             .unwrap();
-        assert_eq!(store.latest_live_event_id("user:tg-12").await.unwrap(), Some(second));
-        assert_eq!(store.latest_live_event_id("user:tg-99").await.unwrap(), None);
+        assert_eq!(
+            store.latest_live_event_id("user:tg-12").await.unwrap(),
+            Some(second)
+        );
+        assert_eq!(
+            store.latest_live_event_id("user:tg-99").await.unwrap(),
+            None
+        );
     }
-
 
     #[test]
     fn labels_known_scope_prefixes() {

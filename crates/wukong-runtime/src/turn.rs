@@ -408,8 +408,8 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
     use tempfile::NamedTempFile;
-    use wukong_gateway::GatewayError;
     use wukong_gateway::backend::{AgentAttachment, AgentRequest, AgentResponse};
+    use wukong_gateway::GatewayError;
 
     struct MockBackend {
         replies: Mutex<VecDeque<String>>,
@@ -909,11 +909,10 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(
-            r.data
-                .iter()
-                .any(|h| h.text.contains("Assistant: 找到了根因"))
-        );
+        assert!(r
+            .data
+            .iter()
+            .any(|h| h.text.contains("Assistant: 找到了根因")));
     }
 
     #[tokio::test]
@@ -947,11 +946,10 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(
-            r.data
-                .iter()
-                .any(|h| h.text.contains("Assistant: 直接回答原問題"))
-        );
+        assert!(r
+            .data
+            .iter()
+            .any(|h| h.text.contains("Assistant: 直接回答原問題")));
     }
 
     #[tokio::test]

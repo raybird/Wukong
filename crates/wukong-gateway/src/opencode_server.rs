@@ -1,4 +1,4 @@
-use crate::backend::{AgentRequest, AgentResponse, AiBackend, agent_timeout};
+use crate::backend::{agent_timeout, AgentRequest, AgentResponse, AiBackend};
 use crate::error::GatewayError;
 use crate::stream::{QuestionInfo, QuestionOption, QuestionRequest, StreamEvent};
 use reqwest::StatusCode;

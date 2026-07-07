@@ -193,8 +193,15 @@ mod tests {
         let memory = open_memory().await;
         let backend = MockBackend::new(vec![Ok("oracle"), Ok("done")]);
         let cfg = cfg("project:Base");
-        let ctx = ExecutionContext { memory: &memory, backend: &backend, base_config: &cfg };
-        let job = job(JobKind::Turn { scope: "project:Scheduled".to_string(), prompt: "do it".to_string() });
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &backend,
+            base_config: &cfg,
+        };
+        let job = job(JobKind::Turn {
+            scope: "project:Scheduled".to_string(),
+            prompt: "do it".to_string(),
+        });
 
         let out = execute_job(&ctx, &job).await;
 

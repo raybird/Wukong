@@ -120,6 +120,8 @@ impl Store {
     }
 
     /// Insert one memory and return its row id.
+    // Low-level insert helper: each column is an explicit parameter by design.
+    #[allow(clippy::too_many_arguments)]
     pub async fn insert_memory(
         &self,
         session_id: Option<&str>,
@@ -746,7 +748,15 @@ mod tests {
         // Fails loudly if the bundled sqlite lacks FTS5.
         let store = test_store().await;
         store
-            .insert_memory(None, "global", MemoryKind::Note, "hello world", 1.0, 100, None)
+            .insert_memory(
+                None,
+                "global",
+                MemoryKind::Note,
+                "hello world",
+                1.0,
+                100,
+                None,
+            )
             .await
             .unwrap();
         let hits = store.keyword_candidates("\"hello\"", 10).await.unwrap();
@@ -793,7 +803,15 @@ mod tests {
         let now = 1_700_000_000;
 
         store
-            .insert_memory(None, "global", MemoryKind::Note, "global note", 0.7, now, None)
+            .insert_memory(
+                None,
+                "global",
+                MemoryKind::Note,
+                "global note",
+                0.7,
+                now,
+                None,
+            )
             .await
             .unwrap();
         store
@@ -913,7 +931,15 @@ mod tests {
     async fn consolidation_candidates_excludes_consolidated_and_nonfoldable() {
         let store = test_store().await;
         let e1 = store
-            .insert_memory(Some("s1"), "project:X", MemoryKind::Event, "e1", 1.0, 100, None)
+            .insert_memory(
+                Some("s1"),
+                "project:X",
+                MemoryKind::Event,
+                "e1",
+                1.0,
+                100,
+                None,
+            )
             .await
             .unwrap()
             .0;
@@ -923,7 +949,15 @@ mod tests {
             .unwrap();
         // Decision is never foldable.
         let _d = store
-            .insert_memory(None, "project:X", MemoryKind::Decision, "d1", 1.0, 120, None)
+            .insert_memory(
+                None,
+                "project:X",
+                MemoryKind::Decision,
+                "d1",
+                1.0,
+                120,
+                None,
+            )
             .await
             .unwrap();
         // Different scope must not appear.
@@ -957,7 +991,15 @@ mod tests {
             .await
             .unwrap();
         let _d1 = store
-            .insert_memory(None, "project:X", MemoryKind::Decision, "d1", 1.0, now, None)
+            .insert_memory(
+                None,
+                "project:X",
+                MemoryKind::Decision,
+                "d1",
+                1.0,
+                now,
+                None,
+            )
             .await
             .unwrap();
         store

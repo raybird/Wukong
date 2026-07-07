@@ -1591,7 +1591,10 @@ where
         .route("/app.js", axum::routing::get(app_js))
         .route("/lib/html.js", axum::routing::get(html_js))
         .route("/lib/chat-layout.mjs", axum::routing::get(chat_layout_js))
-        .route("/lib/unread-marker.mjs", axum::routing::get(unread_marker_js))
+        .route(
+            "/lib/unread-marker.mjs",
+            axum::routing::get(unread_marker_js),
+        )
         .route("/components/wukong-chat.js", axum::routing::get(chat_js))
         .route(
             "/components/chat-thread-header.js",
@@ -1829,14 +1832,12 @@ mod tests {
                 .await
                 .contains("javascript")
         );
-        assert!(
-            content_type(
-                build_router(state(None, &[]).await),
-                "/lib/unread-marker.mjs"
-            )
-            .await
-            .contains("javascript")
-        );
+        assert!(content_type(
+            build_router(state(None, &[]).await),
+            "/lib/unread-marker.mjs"
+        )
+        .await
+        .contains("javascript"));
         assert!(content_type(
             build_router(state(None, &[]).await),
             "/components/wukong-chat.js"
@@ -2205,9 +2206,11 @@ mod tests {
         }
     }
 
+    type QuestionReplyLog = Mutex<Vec<(String, String, Vec<Vec<String>>)>>;
+
     #[derive(Default)]
     struct RecordingQuestionBackend {
-        replies: Mutex<Vec<(String, String, Vec<Vec<String>>)>>,
+        replies: QuestionReplyLog,
         rejects: Mutex<Vec<(String, String)>>,
     }
 
@@ -3114,10 +3117,16 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
-        assert!(!body.contains("m4"), "body should omit boundary row: {body}");
+        assert!(
+            !body.contains("m4"),
+            "body should omit boundary row: {body}"
+        );
         assert!(body.contains("m5"), "body: {body}");
         assert!(body.contains("m9"), "body: {body}");
-        assert!(!body.contains("m10"), "body should stop after five rows: {body}");
+        assert!(
+            !body.contains("m10"),
+            "body should stop after five rows: {body}"
+        );
         assert!(body.contains(r#""has_more":true"#), "body: {body}");
     }
 
@@ -3126,7 +3135,7 @@ mod tests {
         let app_state = state(None, &[]).await;
         let store = ChatHistoryStore::open(&app_state.db_url).await.unwrap();
         let scope = app_state.scope.clone();
-        
+
         let event_id = store
             .insert_live_event(&scope, "user", None, "test event", None, 100)
             .await

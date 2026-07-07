@@ -1,5 +1,5 @@
 use crate::error::GatewayError;
-use crate::stream::{StreamEvent, parse_event, parse_session_id};
+use crate::stream::{parse_event, parse_session_id, StreamEvent};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Stdio;

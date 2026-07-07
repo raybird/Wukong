@@ -313,6 +313,7 @@ pub mod mock {
     }
 
     type MockFiles = Arc<Mutex<HashMap<String, (TgFileInfo, Vec<u8>)>>>;
+    type InlineEditLog = Arc<Mutex<Vec<(i64, i64, String, InlineKeyboard)>>>;
 
     /// In-memory client: scripts no updates, records all calls. Returns
     /// monotonically increasing message_ids starting at 1.
@@ -321,7 +322,7 @@ pub mod mock {
         pub sent: Arc<Mutex<Vec<Sent>>>,
         pub edits: Arc<Mutex<Vec<(i64, i64, String)>>>,
         pub inline_messages: Arc<Mutex<Vec<(i64, String, InlineKeyboard)>>>,
-        pub inline_edits: Arc<Mutex<Vec<(i64, i64, String, InlineKeyboard)>>>,
+        pub inline_edits: InlineEditLog,
         pub callback_answers: Arc<Mutex<Vec<(String, String)>>>,
         pub deletes: Arc<Mutex<Vec<(i64, i64)>>>,
         pub actions: Arc<Mutex<Vec<(i64, String)>>>,

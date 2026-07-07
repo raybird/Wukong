@@ -155,6 +155,7 @@ async fn run_bot() {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_update_event<C, B>(
     client: C,
     memory: Arc<Memory>,
