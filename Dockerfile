@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1
 # ── Build stage: download release binaries ──
-ARG VERSION=v0.16.27
+# VERSION is the wukong release tag to pull binaries from. The release workflow
+# rewrites this default for the packaged docker bundle; for a local `docker
+# build` pass --build-arg VERSION=vX.Y.Z to select a specific release.
+ARG VERSION=v0.16.36
 ARG TARGET=x86_64-unknown-linux-musl
 ARG REPO=raybird/Wukong
 FROM debian:bookworm-slim AS downloader
@@ -28,10 +31,14 @@ RUN set -eux; \
 # ── Runtime stage ──
 FROM debian:bookworm-slim
 
-# Install runtime deps + gosu + current opencode npm package
+# OPENCODE_VERSION pins the opencode CLI for reproducible builds. Defaults to
+# `latest`; pass --build-arg OPENCODE_VERSION=X.Y.Z to lock a known-good release.
+ARG OPENCODE_VERSION=latest
+
+# Install runtime deps + gosu + opencode npm package (pinned via OPENCODE_VERSION)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl git gh gosu nodejs npm python3 python3-pip pipx ripgrep fzf && \
-    npm install -g opencode-ai@latest && \
+    npm install -g "opencode-ai@${OPENCODE_VERSION}" && \
     opencode --version && \
     rm -rf /var/lib/apt/lists/* /root/.npm
 

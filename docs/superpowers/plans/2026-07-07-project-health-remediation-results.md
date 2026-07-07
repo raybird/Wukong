@@ -260,3 +260,49 @@
 - **`apply_settings_to_config` 不搬 runtime**：decomposition 稱其重複 5 處，實測只有 1 處（cli）；且各進入點的 settings 套用**行為本就分歧**（cli 全套、schedulerd 只 model、web／telegram 不套）。強制統一會改變行為（非純 dedup），故保留於 cli，僅由 REPL 逐回合 reload 復用，避免給 runtime 增加 `wukong-settings` 依賴。
 - **Task 6.5 完整 loop 合一延後**：`run_repl_loop` 是「消費 iterator + 遇錯即中止」語意，真實 stdin REPL 是「互動式提示 + 遇錯續跑」；直接替換會改變錯誤韌性與互動行為。故本次只落地計畫的真實意圖（`StreamRenderer` 復用 + 逐回合 reload），完整 loop 合一待重整 `run_repl_loop` 契約時再做。
 - **embed feature 本地未能完整編譯驗證**：`cargo check -p wukong-runtime --features embed` 於 `openssl-sys`（fastembed→hf-hub 的原生傳遞依賴）build script 失敗，屬 sandbox 缺 OpenSSL 的環境限制，非程式碼問題；cargo 已成功解析並開始建置 fastembed，證明 feature 透傳佈線正確，且搬移的 cfg 區塊與原可編譯之進入點程式碼逐字相同。embed 於 CI／release 皆不啟用。
+
+---
+
+## Phase 7 — 治理與結構整理（部分完成，2026-07-07，v0.16.36 發佈後）
+
+> 本 Phase 異質性高（治理 + 3 個獨立大檔拆分）。治理／正確性項目於此 commit 完成；三個純結構的大檔拆分（7.4/7.5/7.6）體量大、彼此獨立，各自更適合獨立 PR，暫緩。
+
+### Implemented Changes
+
+**Task 7.1 — CHANGELOG**
+- 新增 `CHANGELOG.md`（Keep a Changelog 格式），自 `v0.16.35` 起維護，含 v0.16.35／v0.16.36 條目與 compare 連結；更早版本指向 GitHub Releases。維護方式（發佈前整理 `Unreleased`）寫在檔頭。
+
+**Task 7.2 — 文件與依賴 pin 同步**
+- `Dockerfile`：`ARG VERSION` 由過期的 `v0.16.27` 更新為 `v0.16.36`，並註明 release workflow 會覆寫、本地可用 `--build-arg VERSION=` 指定。
+- opencode 依賴可 pin：新增 `ARG OPENCODE_VERSION=latest`，`npm install -g "opencode-ai@${OPENCODE_VERSION}"`（預設 latest，可於 build 時鎖版），不硬編可能過期／破壞的版本。
+- （README 測試徽章、CLAUDE.md 15 crate + `wukong-chat-history` 已於前批文件同步處理。）
+
+**Task 7.3 — healthcheck**
+- `wukong-web` 新增免認證 `/healthz`（回 200、空 body、屬 public 路由群，繞過 auth middleware）+ 測試 `healthz_is_public_and_returns_200_even_with_token_set`。
+- `docker-compose.yml`：為 `wukong-web` 加 `healthcheck`（`CMD-SHELL` 內插 `WUKONG_WEB_PORT`，curl 已在 image 內）。
+- memoryd 的 `/v1/health` 本就存在且公開；惟 memoryd 未納入本 compose，故 compose 側只加 web。
+
+**Task 7.7 — server backend text 串流行為決議**
+- 確認為**刻意設計**：server backend（`opencode serve`）的 `map_server_event` 對 `text` part 走 `_ => Ignore`，最終回答文字於 `run` 收尾由 `list_messages` + `extract_latest_assistant_text` 一次取回；若同時吐 text delta 會重複渲染。
+- 於 `opencode_server.rs` 該 match arm 加註解說明；於 `docs/entrypoints.md` 新增「兩種 agent backend 的串流行為差異」段落記錄（CLI 逐字串流 vs server 收尾整段）。
+
+### Verification
+
+- `cargo fmt --all -- --check` ✓、`cargo clippy --all-targets --locked -- -D warnings` ✓、`cargo test --workspace --locked` ✓（**447 passed**，+1 healthz 測試）。
+- `docker compose config -q` ✓（compose 檔含新 healthcheck 仍有效）。
+
+### Modified Files
+
+- Create `CHANGELOG.md`
+- Modify `Dockerfile`、`docker-compose.yml`
+- Modify `crates/wukong-web/src/lib.rs`（healthz handler + route + test）
+- Modify `crates/wukong-gateway/src/opencode_server.rs`（text-ignore 決議註解）
+- Modify `docs/entrypoints.md`（backend 串流差異）
+
+### 尚未完成（建議各自獨立 PR）
+
+- **Task 7.4 拆分 `opencode_server.rs`**（1395 行）→ `sse.rs` + `event_map.rs`（純搬移）。
+- **Task 7.5 拆分 `web/lib.rs`**（3746 行）→ 依既有 `*_api.rs` 慣例續拆 chat handlers／SSE／static。
+- **Task 7.6 拆分 `wukong-chat.js`**（1037 行）→ 抽 SSE 事件處理模組，同步 `include_str!` 清單。
+
+> 這三項皆為**純結構搬移、無行為變更**，但各觸及一個大檔、彼此獨立，混入單一 commit 會嚴重損及可 review 性。建議每個拆分各一 PR、各自跑 `test` 守護後合併。

@@ -734,6 +734,12 @@ fn map_server_event(
         }
         "step-start" => ServerEventAction::Emit(StreamEvent::StepStart),
         "step-finish" => ServerEventAction::Emit(StreamEvent::StepFinish),
+        // `text` parts are intentionally NOT streamed here. The server backend
+        // fetches the final assistant text once via `list_messages` at the end
+        // of `run` (see `extract_latest_assistant_text`); emitting text deltas
+        // too would double-render the answer. Only reasoning/tool/step activity
+        // is streamed live. The CLI backend does stream text — this deliberate
+        // difference is documented in docs/entrypoints.md.
         _ => ServerEventAction::Ignore,
     }
 }

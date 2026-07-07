@@ -125,6 +125,18 @@ services:
     depends_on:
       - opencode-server
     restart: unless-stopped
+    # Unauthenticated liveness probe (see wukong-web /healthz). Uses the same
+    # WUKONG_WEB_PORT the app binds, so overriding the port keeps the check valid.
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://localhost:${WUKONG_WEB_PORT:-8787}/healthz || exit 1",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   # ── Scheduler Daemon ──
   wukong-schedulerd:

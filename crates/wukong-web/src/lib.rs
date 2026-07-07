@@ -1667,6 +1667,13 @@ where
 }
 
 /// Build the application router from shared state.
+/// Unauthenticated liveness probe for container healthchecks. Returns 200 with
+/// an empty body so it leaks nothing about state or auth. Deliberately part of
+/// the public router group (no token required).
+async fn healthz() -> StatusCode {
+    StatusCode::OK
+}
+
 pub fn build_router<B>(state: AppState<B>) -> axum::Router
 where
     B: AiBackend + WebQuestionResponder + Send + Sync + 'static,
@@ -1676,6 +1683,7 @@ where
     // UI can load and prompt for one.
     let public = axum::Router::new()
         .route("/", get(index::<B>))
+        .route("/healthz", get(healthz))
         .route("/app.js", get(app_js))
         .route("/lib/html.js", get(html_js))
         .route("/lib/chat-layout.mjs", get(chat_layout_js))
@@ -3725,6 +3733,23 @@ mod tests {
         let body = body_string(resp).await;
         assert!(body.contains(r#"id="app""#));
         assert!(body.contains(r##"href="#/chat""##));
+    }
+
+    #[tokio::test]
+    async fn healthz_is_public_and_returns_200_even_with_token_set() {
+        // A token is configured, yet the liveness probe must pass without one.
+        let app = build_router(state(Some("secret"), &[]).await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(body_string(resp).await.is_empty());
     }
 
     #[tokio::test]

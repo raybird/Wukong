@@ -14,6 +14,15 @@
   - **Web**：以可折疊的「💭 思考過程」區塊呈現。
   - *注意：此功能僅在模型輸出明文推理時生效（例如 OpenAI 系推理模型的推理過程如為加密傳輸則無法顯示）。*
 
+### 兩種 agent backend 的串流行為差異
+
+Wukong 有兩條底層 agent 路徑，回答文字的串流方式**刻意不同**：
+
+- **CLI backend（`opencode run`，預設）**：逐字（token）串流回答文字，`StreamEvent::Text` 即時吐出。
+- **Server backend（`opencode serve`，設 `WUKONG_AGENT_SERVER_URL`）**：**不**串流回答文字的增量；只即時串流 `reasoning`／`tool`／`step` 活動。最終回答文字在該回合結束時，經 `list_messages` 一次性取回（`opencode_server.rs::extract_latest_assistant_text`）。這是刻意設計——server 事件流的 `text` part 若也逐段吐出，會與收尾的整段抓取**重複渲染**。
+
+因此在 server backend 下，使用者會即時看到「思考過程／工具活動」，但**完整答案於收尾一次顯示**（非逐字浮現）。此為預期行為，非缺陷。
+
 ## Telegram bot（選用）
 
 `wukong-telegram` 將對話引擎無縫串接至 Telegram，其內部運作流程如下：
