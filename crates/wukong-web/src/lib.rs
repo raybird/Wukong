@@ -6,25 +6,22 @@ pub mod schedule_api;
 pub mod skills_api;
 pub mod system_api;
 
+mod chat_api;
+mod static_assets;
+
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
-use axum::response::sse::{Event, Sse};
+use axum::http::StatusCode;
 use axum::Json;
 use chrono::{NaiveDate, TimeZone, Utc};
-use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio_stream::wrappers::UnboundedReceiverStream;
-use tokio_stream::StreamExt;
-use wukong_chat_history::{ChatAttachment, ChatHistoryStore, ChatMessage};
-use wukong_cli::run_turn_traced;
 use wukong_gateway::backend::AiBackend;
-use wukong_gateway::config::GatewayConfig;
 use wukong_memory::{Memory, RecallMode, RecallQuery};
-use wukong_runtime::util::{now_unix, upload_root};
 use wukong_scheduler::SchedulerStore;
 use wukong_settings::TelegramSettings;
+
+use crate::static_assets::INDEX_HTML;
 
 /// Shared router state. Generic over the backend so tests inject a mock.
 pub struct AppState<B: AiBackend> {
@@ -50,27 +47,6 @@ impl<B: AiBackend> Clone for AppState<B> {
     }
 }
 
-const INDEX_HTML: &str = include_str!("../static/index.html");
-
-const APP_JS: &str = include_str!("../static/app.js");
-const HTML_JS: &str = include_str!("../static/lib/html.js");
-const CHAT_LAYOUT_JS: &str = include_str!("../static/lib/chat-layout.mjs");
-const UNREAD_MARKER_JS: &str = include_str!("../static/lib/unread-marker.mjs");
-const CHAT_JS: &str = include_str!("../static/components/wukong-chat.js");
-const CHAT_THREAD_HEADER_JS: &str = include_str!("../static/components/chat-thread-header.js");
-const CHAT_MESSAGE_JS: &str = include_str!("../static/components/chat-message.js");
-const CHAT_ACTIVITY_JS: &str = include_str!("../static/components/chat-activity.js");
-const CHAT_QUESTION_CARD_JS: &str = include_str!("../static/components/chat-question-card.js");
-const MEMORY_JS: &str = include_str!("../static/components/wukong-memory.js");
-const SKILLS_JS: &str = include_str!("../static/components/wukong-skills.js");
-const SETTINGS_JS: &str = include_str!("../static/components/wukong-settings.js");
-const SCHEDULES_JS: &str = include_str!("../static/components/wukong-schedules.js");
-const SYSTEM_JS: &str = include_str!("../static/components/wukong-system.js");
-const STYLES_CSS: &str = include_str!("../static/styles.css");
-
-const JS: &str = "application/javascript";
-const CSS: &str = "text/css";
-
 /// Serve the SPA shell at `/`, injecting the token (if configured) so the
 /// bundled UI can authenticate.
 async fn index<B>(State(state): State<AppState<B>>) -> axum::response::Html<String>
@@ -95,123 +71,6 @@ where
         None => INDEX_HTML.to_string(),
     };
     axum::response::Html(html)
-}
-
-/// Build a static-asset response with an explicit content type.
-fn asset(content_type: &'static str, body: &'static str) -> axum::response::Response {
-    use axum::http::header::CONTENT_TYPE;
-    use axum::response::IntoResponse;
-    ([(CONTENT_TYPE, content_type)], body).into_response()
-}
-
-async fn app_js() -> axum::response::Response {
-    asset(JS, APP_JS)
-}
-async fn html_js() -> axum::response::Response {
-    asset(JS, HTML_JS)
-}
-async fn chat_layout_js() -> axum::response::Response {
-    asset(JS, CHAT_LAYOUT_JS)
-}
-async fn unread_marker_js() -> axum::response::Response {
-    asset(JS, UNREAD_MARKER_JS)
-}
-async fn chat_js() -> axum::response::Response {
-    asset(JS, CHAT_JS)
-}
-async fn chat_thread_header_js() -> axum::response::Response {
-    asset(JS, CHAT_THREAD_HEADER_JS)
-}
-async fn chat_message_js() -> axum::response::Response {
-    asset(JS, CHAT_MESSAGE_JS)
-}
-async fn chat_activity_js() -> axum::response::Response {
-    asset(JS, CHAT_ACTIVITY_JS)
-}
-async fn chat_question_card_js() -> axum::response::Response {
-    asset(JS, CHAT_QUESTION_CARD_JS)
-}
-async fn memory_js() -> axum::response::Response {
-    asset(JS, MEMORY_JS)
-}
-async fn skills_js() -> axum::response::Response {
-    asset(JS, SKILLS_JS)
-}
-async fn settings_js() -> axum::response::Response {
-    asset(JS, SETTINGS_JS)
-}
-async fn schedules_js() -> axum::response::Response {
-    asset(JS, SCHEDULES_JS)
-}
-async fn system_js() -> axum::response::Response {
-    asset(JS, SYSTEM_JS)
-}
-async fn styles_css() -> axum::response::Response {
-    asset(CSS, STYLES_CSS)
-}
-
-/// Messages pushed from the turn task to the SSE stream.
-enum SseMsg {
-    Role(String),
-    Reasoning(String),
-    ToolUse(String),
-    Question(WebQuestionRequest),
-    /// A non-final (helper) baton's rendered output, surfaced as a collapsible card.
-    Step {
-        role: String,
-        skill: Option<String>,
-        html: String,
-    },
-    Answer(String),
-    Error(String),
-    Done,
-}
-
-#[derive(serde::Serialize)]
-struct WebQuestionOption {
-    label: String,
-    description: String,
-}
-
-#[derive(serde::Serialize)]
-struct WebQuestionInfo {
-    question: String,
-    header: String,
-    options: Vec<WebQuestionOption>,
-    multiple: bool,
-    custom: bool,
-}
-
-#[derive(serde::Serialize)]
-struct WebQuestionRequest {
-    request_id: String,
-    session_id: String,
-    questions: Vec<WebQuestionInfo>,
-}
-
-fn web_question_request(req: wukong_gateway::stream::QuestionRequest) -> WebQuestionRequest {
-    WebQuestionRequest {
-        request_id: req.request_id,
-        session_id: req.session_id,
-        questions: req
-            .questions
-            .into_iter()
-            .map(|q| WebQuestionInfo {
-                question: q.question,
-                header: q.header,
-                options: q
-                    .options
-                    .into_iter()
-                    .map(|o| WebQuestionOption {
-                        label: o.label,
-                        description: o.description,
-                    })
-                    .collect(),
-                multiple: q.multiple,
-                custom: q.custom,
-            })
-            .collect(),
-    }
 }
 
 pub type WebQuestionFuture<'a> =
@@ -275,65 +134,6 @@ impl WebQuestionResponder for wukong_gateway::backend::AgentBackend {
     }
 }
 
-impl SseMsg {
-    fn into_event(self) -> Event {
-        match self {
-            SseMsg::Role(r) => Event::default().event("role").data(r),
-            SseMsg::Reasoning(t) => Event::default().event("reasoning").data(t),
-            SseMsg::ToolUse(name) => Event::default().event("tool").data(name),
-            SseMsg::Question(request) => Event::default()
-                .event("question")
-                .data(serde_json::to_string(&request).unwrap_or_else(|_| "{}".to_string())),
-            SseMsg::Step { role, skill, html } => Event::default().event("step").data(
-                serde_json::json!({ "role": role, "skill": skill, "html": html }).to_string(),
-            ),
-            SseMsg::Answer(h) => Event::default().event("answer").data(h),
-            SseMsg::Error(e) => Event::default().event("error").data(e),
-            SseMsg::Done => Event::default().event("done").data("ok"),
-        }
-    }
-}
-
-fn live_event_to_sse(event: wukong_chat_history::ChatLiveEvent) -> Event {
-    let mut payload = serde_json::json!({
-        "id": event.id,
-        "scope": event.scope,
-        "kind": event.kind,
-        "content": event.content,
-        "message_id": event.message_id,
-        "created_at": event.created_at,
-    });
-    if let Some(label) = event.label {
-        payload["label"] = serde_json::Value::String(label);
-    }
-    let name = payload["kind"].as_str().unwrap_or("message").to_string();
-    Event::default().event(name).data(payload.to_string())
-}
-
-#[derive(serde::Deserialize)]
-struct ChatQuery {
-    q: Option<String>,
-    token: Option<String>,
-    scope: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct ChatMessagesQuery {
-    token: Option<String>,
-    after: Option<i64>,
-    before: Option<i64>,
-    date: Option<String>,
-    limit: Option<i64>,
-    scope: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct ChatStreamQuery {
-    token: Option<String>,
-    scope: Option<String>,
-    after: Option<i64>,
-}
-
 #[derive(serde::Deserialize)]
 struct QuestionReplyRequest {
     session_id: String,
@@ -346,38 +146,8 @@ struct QuestionRejectRequest {
 }
 
 #[derive(serde::Deserialize)]
-struct AttachmentQuery {
-    token: Option<String>,
-    scope: Option<String>,
-}
-
-#[derive(serde::Serialize)]
-struct ChatAttachmentResponse {
-    id: i64,
-    original_name: String,
-    mime_type: Option<String>,
-    size_bytes: i64,
-    download_url: String,
-    preview_url: Option<String>,
-}
-
-#[derive(serde::Serialize)]
-struct ChatMessageResponse {
-    #[serde(flatten)]
-    message: ChatMessage,
-    attachments: Vec<ChatAttachmentResponse>,
-}
-
-#[derive(serde::Serialize)]
-struct ChatMessagesResponse {
-    messages: Vec<ChatMessageResponse>,
-    has_more: bool,
-    latest_live_event_id: Option<i64>,
-}
-
-#[derive(serde::Deserialize)]
-struct SettingsQuery {
-    token: Option<String>,
+pub(crate) struct SettingsQuery {
+    pub(crate) token: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -409,7 +179,7 @@ struct SaveModelSettingsRequest {
     model: String,
 }
 
-fn authorized(expected: &Option<String>, provided: Option<&str>) -> bool {
+pub(crate) fn authorized(expected: &Option<String>, provided: Option<&str>) -> bool {
     match expected {
         Some(t) => provided
             .map(|p| ct_eq(p.as_bytes(), t.as_bytes()))
@@ -512,18 +282,18 @@ pub fn should_refuse_insecure_start(token: Option<&str>, host: &str, allow_insec
     token.is_none() && !is_loopback && !allow_insecure
 }
 
-fn capped_limit(limit: Option<i64>) -> i64 {
+pub(crate) fn capped_limit(limit: Option<i64>) -> i64 {
     limit.unwrap_or(10).clamp(1, 50)
 }
 
-fn selected_scope(default_scope: &str, requested: Option<String>) -> String {
+pub(crate) fn selected_scope(default_scope: &str, requested: Option<String>) -> String {
     requested
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| default_scope.to_string())
 }
 
-fn date_bounds_utc(date: &str) -> Result<(i64, i64), String> {
+pub(crate) fn date_bounds_utc(date: &str) -> Result<(i64, i64), String> {
     let day = NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|e| e.to_string())?;
     let start = day
         .and_hms_opt(0, 0, 0)
@@ -537,627 +307,6 @@ fn date_bounds_utc(date: &str) -> Result<(i64, i64), String> {
         Utc.from_utc_datetime(&start).timestamp(),
         Utc.from_utc_datetime(&end).timestamp(),
     ))
-}
-
-fn attachment_response(a: ChatAttachment) -> ChatAttachmentResponse {
-    let is_image = a.mime_type.as_deref().unwrap_or("").starts_with("image/");
-    ChatAttachmentResponse {
-        id: a.id,
-        original_name: a.original_name,
-        mime_type: a.mime_type,
-        size_bytes: a.size_bytes,
-        download_url: format!("/api/chat/attachments/{}", a.id),
-        preview_url: is_image.then(|| format!("/api/chat/attachments/{}/preview", a.id)),
-    }
-}
-
-fn content_disposition_name(name: &str) -> String {
-    let safe = wukong_chat_history::sanitize_filename(name);
-    format!("attachment; filename=\"{}\"", safe.replace('"', "_"))
-}
-
-/// `GET /chat?q=` — run a turn, streaming role progress then the rendered answer.
-async fn chat<B>(
-    State(state): State<AppState<B>>,
-    Query(params): Query<ChatQuery>,
-) -> axum::response::Response
-where
-    B: AiBackend + Send + Sync + 'static,
-{
-    use axum::response::IntoResponse;
-
-    if !authorized(&state.token, params.token.as_deref()) {
-        return axum::http::StatusCode::UNAUTHORIZED.into_response();
-    }
-
-    let q = params.q.unwrap_or_default();
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseMsg>();
-
-    if q.trim().is_empty() {
-        let _ = tx.send(SseMsg::Error("空白訊息".to_string()));
-        let _ = tx.send(SseMsg::Done);
-    } else {
-        let store = match ChatHistoryStore::open(&state.db_url).await {
-            Ok(store) => store,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-        };
-        let scope = selected_scope(&state.scope, params.scope.clone());
-        let thread = match store.default_thread(&scope).await {
-            Ok(thread) => thread,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-        };
-        if let Err(e) = store
-            .insert_message(&thread, "user", &q, None, "complete", now_unix())
-            .await
-        {
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-        }
-
-        let mem = state.memory.clone();
-        let backend = state.backend.clone();
-        let db_url = state.db_url.clone();
-        let settings_path = state.settings_path.clone();
-        // run_turn's future is not Send (AiBackend uses async_fn_in_trait and the
-        // callbacks are dyn FnMut), so it can't ride tokio::spawn or the axum
-        // handler future. Drive it on a dedicated thread with its own
-        // current-thread runtime; only the Send channel crosses back.
-        std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    let _ = tx.send(SseMsg::Error(format!("runtime: {e}")));
-                    let _ = tx.send(SseMsg::Done);
-                    return;
-                }
-            };
-            rt.block_on(async move {
-                let cfg = GatewayConfig {
-                    scope,
-                    db_url: String::new(),
-                    agent_command: vec![],
-                    default_model: None,
-                    planner_preferences: None,
-                    thinking: true,
-                    recall_top_k: 5,
-                    stream: false,
-                };
-                let mut cfg = cfg;
-                let settings = wukong_settings::load_settings(&settings_path).unwrap_or_default();
-                let agent_settings = wukong_settings::effective_agent_settings(&settings);
-                cfg.apply_default_model(agent_settings.default_model.as_deref());
-                let planner_preferences = wukong_settings::effective_planner_preferences(&settings);
-                cfg.apply_planner_preferences(
-                    planner_preferences.enabled,
-                    planner_preferences.roles,
-                    planner_preferences.skills,
-                );
-                // Leading-slash inputs are session commands, not turns.
-                let trimmed = q.trim();
-                if let Some(rest) = trimmed.strip_prefix('/') {
-                    let mut parts = rest.splitn(2, char::is_whitespace);
-                    let name = parts.next().unwrap_or("").to_string();
-                    let args = parts.next().unwrap_or("").trim().to_string();
-                    let reply = match wukong_cli::parse_session_command(&name, &args) {
-                        Some(cmd) => match wukong_cli::run_session_command(
-                            mem.as_ref(),
-                            backend.as_ref(),
-                            &cfg,
-                            &settings_path,
-                            cmd,
-                        )
-                        .await
-                        {
-                            Ok(t) => t,
-                            Err(e) => format!("⚠️ 失敗：{e}"),
-                        },
-                        None => format!("指令 /{name} 尚未支援"),
-                    };
-                    let html = wukong_render::to_web_html(&reply);
-                    if let Ok(store) = ChatHistoryStore::open(&db_url).await {
-                        let _ = store
-                            .insert_message(
-                                &thread,
-                                "assistant",
-                                &reply,
-                                Some(&html),
-                                "complete",
-                                now_unix(),
-                            )
-                            .await;
-                    }
-                    let _ = tx.send(SseMsg::Answer(html));
-                    let _ = tx.send(SseMsg::Done);
-                    return;
-                }
-
-                let role_tx = tx.clone();
-                let ev_tx = tx.clone();
-                let step_tx = tx.clone();
-                // Buffer helper-baton steps to persist them after the turn, linked
-                // to the final assistant message. (role, raw content, rendered html)
-                let mut steps_buf: Vec<(String, String, String)> = Vec::new();
-                let mut events_buf: Vec<(i64, String, Option<String>, String, i64)> = Vec::new();
-                let mut event_seq: i64 = 0;
-                let result = run_turn_traced(
-                    mem.as_ref(),
-                    backend.as_ref(),
-                    &cfg,
-                    &q,
-                    &mut |ev| match ev {
-                        wukong_gateway::StreamEvent::Reasoning(t) => {
-                            if !t.trim().is_empty() {
-                                let now = now_unix();
-                                events_buf.push((
-                                    event_seq,
-                                    "reasoning".to_string(),
-                                    None,
-                                    t.clone(),
-                                    now,
-                                ));
-                                event_seq += 1;
-                                let _ = ev_tx.send(SseMsg::Reasoning(t));
-                            }
-                        }
-                        wukong_gateway::StreamEvent::ToolUse(name) => {
-                            let now = now_unix();
-                            events_buf.push((
-                                event_seq,
-                                "tool_use".to_string(),
-                                Some(name.clone()),
-                                format!("使用工具 {name}"),
-                                now,
-                            ));
-                            event_seq += 1;
-                            let _ = ev_tx.send(SseMsg::ToolUse(name));
-                        }
-                        wukong_gateway::StreamEvent::StepStart => {
-                            let now = now_unix();
-                            events_buf.push((
-                                event_seq,
-                                "step_start".to_string(),
-                                None,
-                                "step_start".to_string(),
-                                now,
-                            ));
-                            event_seq += 1;
-                        }
-                        wukong_gateway::StreamEvent::StepFinish => {
-                            let now = now_unix();
-                            events_buf.push((
-                                event_seq,
-                                "step_finish".to_string(),
-                                None,
-                                "step_finish".to_string(),
-                                now,
-                            ));
-                            event_seq += 1;
-                        }
-                        wukong_gateway::StreamEvent::QuestionRequest(request) => {
-                            let _ = ev_tx.send(SseMsg::Question(web_question_request(request)));
-                        }
-                        wukong_gateway::StreamEvent::Text(_) => {}
-                    },
-                    &mut |role| {
-                        let _ = role_tx.send(SseMsg::Role(role.name().to_string()));
-                    },
-                    &mut |step| {
-                        let html = wukong_render::to_web_html(step.output);
-                        let _ = step_tx.send(SseMsg::Step {
-                            role: step.role.name().to_string(),
-                            skill: step.skill_name.map(str::to_string),
-                            html: html.clone(),
-                        });
-                        steps_buf.push((
-                            step.role.name().to_string(),
-                            step.output.to_string(),
-                            html,
-                        ));
-                    },
-                )
-                .await;
-                match result {
-                    Ok(out) => {
-                        let html = wukong_render::to_web_html(&out.text);
-                        if let Ok(store) = ChatHistoryStore::open(&db_url).await {
-                            let now = now_unix();
-                            if let Ok(message_id) = store
-                                .insert_message(
-                                    &thread,
-                                    "assistant",
-                                    &out.text,
-                                    Some(&html),
-                                    "complete",
-                                    now,
-                                )
-                                .await
-                            {
-                                for (seq, kind, label, content, created_at) in &events_buf {
-                                    let _ = store
-                                        .insert_event(
-                                            message_id,
-                                            *seq,
-                                            kind,
-                                            label.as_deref(),
-                                            content,
-                                            *created_at,
-                                        )
-                                        .await;
-                                }
-                                // best-effort: surface failures don't block the answer.
-                                for (seq, (role, content, step_html)) in
-                                    steps_buf.iter().enumerate()
-                                {
-                                    let _ = store
-                                        .insert_step(
-                                            message_id,
-                                            seq as i64,
-                                            role,
-                                            content,
-                                            Some(step_html),
-                                            now,
-                                        )
-                                        .await;
-                                }
-                            }
-                        }
-                        let _ = tx.send(SseMsg::Answer(html));
-                    }
-                    Err(e) => {
-                        let msg = e.to_string();
-                        if let Ok(store) = ChatHistoryStore::open(&db_url).await {
-                            if let Ok(message_id) = store
-                                .insert_message(
-                                    &thread,
-                                    "assistant",
-                                    &msg,
-                                    None,
-                                    "error",
-                                    now_unix(),
-                                )
-                                .await
-                            {
-                                for (seq, kind, label, content, created_at) in &events_buf {
-                                    let _ = store
-                                        .insert_event(
-                                            message_id,
-                                            *seq,
-                                            kind,
-                                            label.as_deref(),
-                                            content,
-                                            *created_at,
-                                        )
-                                        .await;
-                                }
-                            }
-                        }
-                        let _ = tx.send(SseMsg::Error(msg));
-                    }
-                }
-                let _ = tx.send(SseMsg::Done);
-            });
-        });
-    }
-
-    let stream = UnboundedReceiverStream::new(rx).map(|m| Ok::<Event, Infallible>(m.into_event()));
-    Sse::new(stream).into_response()
-}
-
-async fn get_chat_messages<B>(
-    State(state): State<AppState<B>>,
-    Query(params): Query<ChatMessagesQuery>,
-) -> axum::response::Response
-where
-    B: AiBackend + Send + Sync + 'static,
-{
-    use axum::response::IntoResponse;
-
-    if !authorized(&state.token, params.token.as_deref()) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
-    let limit = capped_limit(params.limit);
-    let store = match ChatHistoryStore::open(&state.db_url).await {
-        Ok(store) => store,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-    let scope = selected_scope(&state.scope, params.scope.clone());
-    let thread = match store.default_thread(&scope).await {
-        Ok(thread) => thread,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-
-    let trimming_from_front = params.after.is_none();
-    let result = if let Some(date) = params.date.as_deref() {
-        match date_bounds_utc(date) {
-            Ok((start, end)) => {
-                store
-                    .messages_for_date(&thread, start, end, limit + 1)
-                    .await
-            }
-            Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
-        }
-    } else if let Some(after) = params.after {
-        store.messages_after(&thread, after, limit + 1).await
-    } else if let Some(before) = params.before {
-        store.messages_before(&thread, before, limit + 1).await
-    } else {
-        store.latest_messages(&thread, limit + 1).await
-    };
-
-    match result {
-        Ok(mut messages) => {
-            let has_more = messages.len() as i64 > limit;
-            if has_more {
-                if trimming_from_front {
-                    messages.remove(0);
-                } else {
-                    messages.pop();
-                }
-            }
-            let message_ids = messages.iter().map(|m| m.id).collect::<Vec<_>>();
-            let attachments = match store.attachments_for_messages(&message_ids).await {
-                Ok(attachments) => attachments,
-                Err(e) => {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
-                }
-            };
-            let mut by_message: std::collections::HashMap<i64, Vec<ChatAttachmentResponse>> =
-                std::collections::HashMap::new();
-            for attachment in attachments {
-                by_message
-                    .entry(attachment.message_id)
-                    .or_default()
-                    .push(attachment_response(attachment));
-            }
-            let latest_live_event_id = match store.latest_live_event_id(&scope).await {
-                Ok(val) => val,
-                Err(e) => {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
-                }
-            };
-            let messages = messages
-                .into_iter()
-                .map(|message| ChatMessageResponse {
-                    attachments: by_message.remove(&message.id).unwrap_or_default(),
-                    message,
-                })
-                .collect();
-            Json(ChatMessagesResponse {
-                messages,
-                has_more,
-                latest_live_event_id,
-            })
-            .into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
-}
-
-async fn get_attachment<B>(
-    State(state): State<AppState<B>>,
-    Path(id): Path<i64>,
-    Query(params): Query<AttachmentQuery>,
-) -> axum::response::Response
-where
-    B: AiBackend + Send + Sync + 'static,
-{
-    attachment_file_response(state, id, params, false).await
-}
-
-async fn get_attachment_preview<B>(
-    State(state): State<AppState<B>>,
-    Path(id): Path<i64>,
-    Query(params): Query<AttachmentQuery>,
-) -> axum::response::Response
-where
-    B: AiBackend + Send + Sync + 'static,
-{
-    attachment_file_response(state, id, params, true).await
-}
-
-async fn attachment_file_response<B>(
-    state: AppState<B>,
-    id: i64,
-    params: AttachmentQuery,
-    preview: bool,
-) -> axum::response::Response
-where
-    B: AiBackend + Send + Sync + 'static,
-{
-    use axum::body::Body;
-    use axum::response::IntoResponse;
-
-    if !authorized(&state.token, params.token.as_deref()) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
-    let store = match ChatHistoryStore::open(&state.db_url).await {
-        Ok(store) => store,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-    let attachment = match store.attachment(id).await {
-        Ok(Some(attachment)) => attachment,
-        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-    if params
-        .scope
-        .as_deref()
-        .is_some_and(|scope| attachment.scope != scope)
-    {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    let mime = attachment
-        .mime_type
-        .clone()
-        .unwrap_or_else(|| "application/octet-stream".to_string());
-    if preview && !mime.starts_with("image/") {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    let path = match wukong_chat_history::resolve_under_upload_root(
-        &upload_root(),
-        &attachment.relative_path,
-    ) {
-        Some(path) => path,
-        None => return StatusCode::NOT_FOUND.into_response(),
-    };
-    let bytes = match tokio::fs::read(path).await {
-        Ok(bytes) => bytes,
-        Err(_) => return StatusCode::NOT_FOUND.into_response(),
-    };
-
-    let mut builder = axum::response::Response::builder().header(header::CONTENT_TYPE, mime);
-    if !preview {
-        builder = builder.header(
-            header::CONTENT_DISPOSITION,
-            content_disposition_name(&attachment.original_name),
-        );
-    }
-    builder
-        .body(Body::from(bytes))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
-}
-
-/// `GET /api/chat/messages/:id/steps` — the helper-baton steps for one assistant
-/// message, lazily fetched when the user expands the collapsible card.
-async fn get_chat_steps<B>(
-    State(state): State<AppState<B>>,
-    Path(message_id): Path<i64>,
-    Query(params): Query<SettingsQuery>,
-) -> axum::response::Response
-where
-    B: AiBackend + Send + Sync + 'static,
-{
-    use axum::response::IntoResponse;
-
-    if !authorized(&state.token, params.token.as_deref()) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let store = match ChatHistoryStore::open(&state.db_url).await {
-        Ok(store) => store,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-    match store.list_steps(message_id).await {
-        Ok(steps) => Json(steps).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
-}
-
-/// `GET /api/chat/messages/:id/events` — raw turn stream events for one
-/// assistant message, lazily fetched for the reasoning/tool history expander.
-async fn get_chat_events<B>(
-    State(state): State<AppState<B>>,
-    Path(message_id): Path<i64>,
-    Query(params): Query<SettingsQuery>,
-) -> axum::response::Response
-where
-    B: AiBackend + Send + Sync + 'static,
-{
-    use axum::response::IntoResponse;
-
-    if !authorized(&state.token, params.token.as_deref()) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let store = match ChatHistoryStore::open(&state.db_url).await {
-        Ok(store) => store,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-    match store.list_events(message_id).await {
-        Ok(events) => Json(events).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
-}
-
-async fn get_chat_scopes<B>(
-    State(state): State<AppState<B>>,
-    Query(params): Query<ChatMessagesQuery>,
-) -> axum::response::Response
-where
-    B: AiBackend + Send + Sync + 'static,
-{
-    use axum::response::IntoResponse;
-
-    if !authorized(&state.token, params.token.as_deref()) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
-    let store = match ChatHistoryStore::open(&state.db_url).await {
-        Ok(store) => store,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-    match store.list_scopes(&state.scope).await {
-        Ok(scopes) => Json(scopes).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
-}
-
-async fn stream_chat_events<B>(
-    State(state): State<AppState<B>>,
-    Query(params): Query<ChatStreamQuery>,
-) -> axum::response::Response
-where
-    B: AiBackend + Send + Sync + 'static,
-{
-    use axum::response::IntoResponse;
-
-    if !authorized(&state.token, params.token.as_deref()) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
-    let scope = match params
-        .scope
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        Some(scope) => scope,
-        None => return (StatusCode::BAD_REQUEST, "missing scope").into_response(),
-    };
-    let db_url = state.db_url.clone();
-    let mut cursor = params.after.unwrap_or(0).max(0);
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
-
-    tokio::spawn(async move {
-        let store = match ChatHistoryStore::open(&db_url).await {
-            Ok(store) => store,
-            Err(e) => {
-                let _ = tx.send(Event::default().event("error").data(e.to_string()));
-                return;
-            }
-        };
-        let mut idle_ticks = 0;
-        loop {
-            match store.live_events_after(&scope, cursor, 50).await {
-                Ok(events) => {
-                    if events.is_empty() {
-                        idle_ticks += 1;
-                    } else {
-                        idle_ticks = 0;
-                    }
-                    for event in events {
-                        cursor = event.id;
-                        if tx.send(live_event_to_sse(event)).is_err() {
-                            return;
-                        }
-                    }
-                }
-                Err(e) => {
-                    let _ = tx.send(Event::default().event("error").data(e.to_string()));
-                    return;
-                }
-            }
-
-            if idle_ticks >= 2 && cfg!(test) {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        }
-    });
-
-    let stream = UnboundedReceiverStream::new(rx).map(Ok::<Event, Infallible>);
-    Sse::new(stream).into_response()
 }
 
 async fn get_settings<B>(
@@ -1684,42 +833,75 @@ where
     let public = axum::Router::new()
         .route("/", get(index::<B>))
         .route("/healthz", get(healthz))
-        .route("/app.js", get(app_js))
-        .route("/lib/html.js", get(html_js))
-        .route("/lib/chat-layout.mjs", get(chat_layout_js))
-        .route("/lib/unread-marker.mjs", get(unread_marker_js))
-        .route("/components/wukong-chat.js", get(chat_js))
+        .route("/app.js", get(static_assets::app_js))
+        .route("/lib/html.js", get(static_assets::html_js))
+        .route("/lib/chat-layout.mjs", get(static_assets::chat_layout_js))
+        .route(
+            "/lib/unread-marker.mjs",
+            get(static_assets::unread_marker_js),
+        )
+        .route("/components/wukong-chat.js", get(static_assets::chat_js))
         .route(
             "/components/chat-thread-header.js",
-            get(chat_thread_header_js),
+            get(static_assets::chat_thread_header_js),
         )
-        .route("/components/chat-message.js", get(chat_message_js))
-        .route("/components/chat-activity.js", get(chat_activity_js))
+        .route(
+            "/components/chat-message.js",
+            get(static_assets::chat_message_js),
+        )
+        .route(
+            "/components/chat-activity.js",
+            get(static_assets::chat_activity_js),
+        )
         .route(
             "/components/chat-question-card.js",
-            get(chat_question_card_js),
+            get(static_assets::chat_question_card_js),
         )
-        .route("/components/wukong-memory.js", get(memory_js))
-        .route("/components/wukong-skills.js", get(skills_js))
-        .route("/components/wukong-settings.js", get(settings_js))
-        .route("/components/wukong-schedules.js", get(schedules_js))
-        .route("/components/wukong-system.js", get(system_js))
-        .route("/styles.css", get(styles_css))
+        .route(
+            "/components/wukong-memory.js",
+            get(static_assets::memory_js),
+        )
+        .route(
+            "/components/wukong-skills.js",
+            get(static_assets::skills_js),
+        )
+        .route(
+            "/components/wukong-settings.js",
+            get(static_assets::settings_js),
+        )
+        .route(
+            "/components/wukong-schedules.js",
+            get(static_assets::schedules_js),
+        )
+        .route(
+            "/components/wukong-system.js",
+            get(static_assets::system_js),
+        )
+        .route("/styles.css", get(static_assets::styles_css))
         .route("/settings", get(index::<B>));
 
     // Protected: everything that touches memory/agent/settings. The auth
     // middleware is the single choke point covering all of these.
     let protected = axum::Router::new()
-        .route("/chat", get(chat::<B>))
-        .route("/api/chat/scopes", get(get_chat_scopes::<B>))
-        .route("/api/chat/stream", get(stream_chat_events::<B>))
-        .route("/api/chat/messages", get(get_chat_messages::<B>))
-        .route("/api/chat/messages/:id/steps", get(get_chat_steps::<B>))
-        .route("/api/chat/messages/:id/events", get(get_chat_events::<B>))
-        .route("/api/chat/attachments/:id", get(get_attachment::<B>))
+        .route("/chat", get(chat_api::chat::<B>))
+        .route("/api/chat/scopes", get(chat_api::get_chat_scopes::<B>))
+        .route("/api/chat/stream", get(chat_api::stream_chat_events::<B>))
+        .route("/api/chat/messages", get(chat_api::get_chat_messages::<B>))
+        .route(
+            "/api/chat/messages/:id/steps",
+            get(chat_api::get_chat_steps::<B>),
+        )
+        .route(
+            "/api/chat/messages/:id/events",
+            get(chat_api::get_chat_events::<B>),
+        )
+        .route(
+            "/api/chat/attachments/:id",
+            get(chat_api::get_attachment::<B>),
+        )
         .route(
             "/api/chat/attachments/:id/preview",
-            get(get_attachment_preview::<B>),
+            get(chat_api::get_attachment_preview::<B>),
         )
         .route(
             "/api/questions/:request_id/reply",
@@ -1769,12 +951,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::static_assets::{CHAT_ACTIVITY_JS, CHAT_JS, STYLES_CSS};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use std::collections::VecDeque;
     use std::sync::Mutex;
     use tempfile::NamedTempFile;
     use tower::ServiceExt;
+    use wukong_chat_history::ChatHistoryStore;
     use wukong_gateway::backend::{AgentRequest, AgentResponse};
     use wukong_gateway::GatewayError;
 
