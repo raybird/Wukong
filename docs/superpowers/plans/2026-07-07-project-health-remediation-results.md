@@ -299,10 +299,10 @@
 - Modify `crates/wukong-gateway/src/opencode_server.rs`（text-ignore 決議註解）
 - Modify `docs/entrypoints.md`（backend 串流差異）
 
-### 尚未完成（建議各自獨立 PR）
+### 大檔拆分（各一 commit，純搬移、以測試守門）
 
-- **Task 7.4 拆分 `opencode_server.rs`**（1395 行）→ `sse.rs` + `event_map.rs`（純搬移）。
-- **Task 7.5 拆分 `web/lib.rs`**（3746 行）→ 依既有 `*_api.rs` 慣例續拆 chat handlers／SSE／static。
-- **Task 7.6 拆分 `wukong-chat.js`**（1037 行）→ 抽 SSE 事件處理模組，同步 `include_str!` 清單。
+- **Task 7.4 ✅ 拆分 `opencode_server.rs`**（commit `aee5a44`）：1401 → 640 行，抽出 `opencode_server/sse.rs`（`SseParser`，57 行）與 `opencode_server/event_map.rs`（`ServerEventAction` + `map_server_event` + tool/question 格式化解析，721 行）。跨模組項用 `pub(super)`；`cargo test -p wukong-gateway` 70 passed 不變。
+- **Task 7.5 ✅ 拆分 `web/lib.rs`**（commit `2292861`）：3772 → 2955 行，依既有 `*_api.rs` 慣例抽出 `static_assets.rs`（include_str! 資產 + handler，80 行）與 `chat_api.rs`（chat/attachment/SSE handler，794 行）。`AppState`／`build_router`／`index`／`healthz`／auth 留 lib.rs，共用 helper 提 `pub(crate)`；web 74 passed 不變。
+- **Task 7.6 ⏸ 拆分 `wukong-chat.js`（延後，不做）**：經評估，此檔**整檔為單一 `WukongChat extends HTMLElement` 類別（16–1037 行），無任何模組級函式**——SSE 處理全是與 `this` 緊耦合的實例方法。要「抽出 SSE 群組」需把實例方法重構為 free function／mixin 並手動穿引 `this`，屬**結構性重構而非純搬移**；且唯一的 `wukong-chat.test.mjs` 是**正規表達式比對原始碼字串**（非執行期行為測試），方法一旦搬出反而使該測試失效，等於幾乎無安全網。此項為整份計畫**最低價值、最高風險**的變更，故**不在此輪強行進行**，建議待補上元件執行期測試後另立專門工作處理。
 
-> 這三項皆為**純結構搬移、無行為變更**，但各觸及一個大檔、彼此獨立，混入單一 commit 會嚴重損及可 review 性。建議每個拆分各一 PR、各自跑 `test` 守護後合併。
+> 7.4／7.5 皆為純結構搬移、無行為變更，各自一個 commit、以 `cargo test` + `clippy -D warnings` 全綠守門並各自合併回 main。
