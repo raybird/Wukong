@@ -529,6 +529,14 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// Log a failed Telegram send instead of silently dropping it, so a rejected
+/// message (e.g. a 400 on malformed HTML) is visible rather than lost.
+fn log_send<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) {
+    if let Err(e) = result {
+        eprintln!("🐵 Telegram 傳送失敗（{context}）：{e}");
+    }
+}
+
 const MAX_ATTACHMENT_BYTES: i64 = 25 * 1024 * 1024;
 const MAX_ATTACHMENTS_PER_MESSAGE: usize = 5;
 
@@ -902,7 +910,7 @@ pub async fn handle_message_with_responder<C, B, R>(
                         reply_message_id,
                     )
                     .await;
-                    let _ = client.send_message(chat_id, &reply).await;
+                    log_send(client.send_message(chat_id, &reply).await, "command");
                 }
                 None => {
                     let reply = format!("指令 /{name} 尚未支援");
@@ -919,7 +927,7 @@ pub async fn handle_message_with_responder<C, B, R>(
                         reply_message_id,
                     )
                     .await;
-                    let _ = client.send_message(chat_id, &reply).await;
+                    log_send(client.send_message(chat_id, &reply).await, "command");
                 }
             }
         }
@@ -967,7 +975,7 @@ pub async fn handle_message_with_responder<C, B, R>(
             } else {
                 let Some(history) = history else {
                     let reply = "⚠️ 目前無法保存附件，請稍後再試。";
-                    let _ = client.send_message(chat_id, reply).await;
+                    log_send(client.send_message(chat_id, reply).await, "command");
                     drop(live_tx);
                     if let Some(writer) = live_writer {
                         let _ = writer.await;
@@ -976,7 +984,7 @@ pub async fn handle_message_with_responder<C, B, R>(
                 };
                 let Some(message_id) = user_message_id else {
                     let reply = "⚠️ 目前無法保存附件，請稍後再試。";
-                    let _ = client.send_message(chat_id, reply).await;
+                    log_send(client.send_message(chat_id, reply).await, "command");
                     drop(live_tx);
                     if let Some(writer) = live_writer {
                         let _ = writer.await;
@@ -994,7 +1002,7 @@ pub async fn handle_message_with_responder<C, B, R>(
                 {
                     Ok(attachments) => attachments,
                     Err(reply) => {
-                        let _ = client.send_message(chat_id, &reply).await;
+                        log_send(client.send_message(chat_id, &reply).await, "command");
                         drop(live_tx);
                         if let Some(writer) = live_writer {
                             let _ = writer.await;
@@ -1214,10 +1222,10 @@ pub async fn handle_message_with_responder<C, B, R>(
                     let chunks = wukong_render::to_telegram_html(&out.text);
                     let _ = client.delete_message(chat_id, mid).await;
                     if chunks.is_empty() {
-                        let _ = client.send_message(chat_id, "(無內容)").await;
+                        log_send(client.send_message(chat_id, "(無內容)").await, "answer");
                     } else {
                         for c in &chunks {
-                            let _ = client.send_message_html(chat_id, c).await;
+                            log_send(client.send_message_html(chat_id, c).await, "answer");
                         }
                     }
                 }
@@ -1234,7 +1242,7 @@ pub async fn handle_message_with_responder<C, B, R>(
                     )
                     .await;
                     queue_live_event(&live_tx, "error", None, &err, assistant_message_id);
-                    let _ = client.edit_message_text(chat_id, mid, &err).await;
+                    log_send(client.edit_message_text(chat_id, mid, &err).await, "error");
                 }
             }
             drop(live_tx);

@@ -125,3 +125,39 @@
 
 - Task 3.1 原計畫「移除各 handler 內的手動檢查」；改為「middleware 為主閘門 + 保留 per-handler 檢查為防禦縱深」，避免在 3647 行安全關鍵檔案上大量刪除造成回歸風險。header 支援以 query 回填達成，不動 28 個 handler 簽章。完整移除 per-handler 檢查併入 Phase 7 Task 7.5（web/lib.rs 拆分）時處理較安全。
 - fail-closed 是刻意的破壞性變更（提升安全預設）；已在 compose／docs 標註升級遷移路徑。
+
+---
+
+## Phase 4 — 進入點行為修正 ✅（2026-07-07）
+
+### Summary
+
+修復 CLI backend 丟棄規劃意圖的行為分歧，並補齊 Telegram 傳輸層的錯誤處理、退避與 offset 保留。新增 6 個測試。
+
+### Implemented Changes
+
+**Task 4.1 — CLI backend 傳遞 `agent` 欄位**
+- 確認 `opencode run --agent <name>` 為實際旗標。`assemble_argv` 新增 `agent: Option<&str>` 參數，在 model 之後、attachments 之前推入 `--agent <name>`（trim 後空字串略過）；`run` 與 `run_streaming` 兩路徑皆傳 `req.agent.as_deref()`。
+- 消除兩 backend 分歧：orchestrator 的 `agent: Some("plan")` 現於預設 CLI backend 生效。
+- 以假 agent 驗證整體流程不回歸（`--agent-cmd "printf fixer" "fix the bug"` → 正常輸出）。
+
+**Task 4.2 — Telegram API `ok:false` 錯誤化與退避**
+- `wukong-tg-client` 新增 `check_ok`，`post`／`get_updates` 皆套用：`ok != true` 時回 `Err(TgError::Api("telegram api error <code>: <desc>"))`，不再把 401/400 當成功。
+- 主迴圈既有的 `Err → eprintln + sleep(3s)` 退避因此自動涵蓋失效 token（消除無退避忙迴圈）；401 額外輸出 token 失效提示 log。
+
+**Task 4.3 — 送出錯誤 log 化與 offset 保留**
+- dispatch.rs 新增 `log_send` helper，將答案／錯誤／指令回覆的 `let _ = client.send_*` 改為記 log（不改控制流；typing 等純裝飾送出維持靜默以免刷屏）。
+- token 輪替不再 `offset = 0`，保留 cursor 避免重拉舊 update。
+- schedulerd/notify.rs 本就以 `?` 傳遞錯誤，無需改動。
+
+### Verification
+
+- `cargo fmt --all -- --check` ✓、`cargo clippy --all-targets --locked -- -D warnings` ✓、`cargo test --workspace --locked` ✓（443 passed）
+- 新測試：`assemble_argv` 帶 agent / 略過空白（2）、`check_ok` accept/reject/missing（3）、以及既有測試回歸。以假 agent E2E 驗證 orchestrator 流程。
+
+### Modified Files
+
+- Modify `crates/wukong-gateway/src/backend.rs`（assemble_argv agent 參數 + 2 測試）
+- Modify `crates/wukong-tg-client/src/client.rs`（check_ok + 3 測試）
+- Modify `crates/wukong-telegram/src/main.rs`（callback 已於 Phase 3 傳 allow；本階段：offset 保留、401 log）
+- Modify `crates/wukong-telegram/src/dispatch.rs`（log_send helper + 套用內容送出）

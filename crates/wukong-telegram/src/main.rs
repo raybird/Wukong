@@ -125,7 +125,8 @@ async fn run_bot() {
             allow = Arc::new(parse_allowlist(&latest.allowed));
             tg_settings = latest;
             client = ReqwestTgClient::new(&token);
-            offset = 0;
+            // Keep the current offset across a token refresh: the same bot's
+            // update cursor stays valid, so we don't re-pull already-seen updates.
         }
         match client.get_updates(offset).await {
             Ok(json) => {
@@ -148,7 +149,15 @@ async fn run_bot() {
                 }
             }
             Err(e) => {
-                eprintln!("get_updates error: {e}");
+                let msg = e.to_string();
+                if msg.contains("401") {
+                    eprintln!(
+                        "get_updates error: {msg} — Telegram token 可能已失效，請確認 \
+                         WUKONG_TG_TOKEN 或 Web 設定。"
+                    );
+                } else {
+                    eprintln!("get_updates error: {msg}");
+                }
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             }
         }

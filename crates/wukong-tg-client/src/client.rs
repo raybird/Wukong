@@ -119,8 +119,26 @@ impl ReqwestTgClient {
     ) -> Result<serde_json::Value, TgError> {
         let url = format!("{}/{method}", self.base);
         let resp = self.http.post(&url).json(&body).send().await?;
-        Ok(resp.json::<serde_json::Value>().await?)
+        check_ok(resp.json::<serde_json::Value>().await?)
     }
+}
+
+/// Reject a Telegram response whose `ok` field is not `true`, surfacing the
+/// API's `error_code`/`description` as an error instead of silently treating a
+/// failure (e.g. 401 on an invalid token, 400 on malformed HTML) as success.
+fn check_ok(v: serde_json::Value) -> Result<serde_json::Value, TgError> {
+    if v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false) {
+        return Ok(v);
+    }
+    let code = v.get("error_code").and_then(|c| c.as_i64());
+    let desc = v
+        .get("description")
+        .and_then(|d| d.as_str())
+        .unwrap_or("unknown error");
+    Err(TgError::Api(match code {
+        Some(code) => format!("telegram api error {code}: {desc}"),
+        None => format!("telegram api error: {desc}"),
+    }))
 }
 
 /// Pull `result.message_id` out of a sendMessage response.
@@ -156,7 +174,7 @@ impl TgClient for ReqwestTgClient {
             .query(&[("timeout", "30"), ("offset", &offset.to_string())])
             .send()
             .await?;
-        Ok(resp.json::<serde_json::Value>().await?)
+        check_ok(resp.json::<serde_json::Value>().await?)
     }
 
     async fn send_message(&self, chat_id: i64, text: &str) -> Result<i64, TgError> {
@@ -510,5 +528,30 @@ pub mod mock {
             c.callback_answers.lock().unwrap()[0],
             ("cb_1".to_string(), "已收到".to_string())
         );
+    }
+}
+
+#[cfg(test)]
+mod check_ok_tests {
+    use super::check_ok;
+    use serde_json::json;
+
+    #[test]
+    fn accepts_ok_true() {
+        let v = json!({"ok": true, "result": {"message_id": 5}});
+        assert!(check_ok(v).is_ok());
+    }
+
+    #[test]
+    fn rejects_ok_false_with_code_and_description() {
+        let v = json!({"ok": false, "error_code": 401, "description": "Unauthorized"});
+        let msg = check_ok(v).unwrap_err().to_string();
+        assert!(msg.contains("401"), "missing code: {msg}");
+        assert!(msg.contains("Unauthorized"), "missing description: {msg}");
+    }
+
+    #[test]
+    fn rejects_missing_ok_field() {
+        assert!(check_ok(json!({"result": {}})).is_err());
     }
 }

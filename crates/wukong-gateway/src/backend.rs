@@ -62,12 +62,13 @@ pub trait AiBackend {
 }
 
 /// Build the argv handed to the agent subprocess:
-/// `command + [-s <id>]? + [--thinking]? + [prompt]`.
+/// `command + [-s <id>]? + [--thinking]? + [--model <m>]? + [--agent <a>]? + [--file …]* + prompt`.
 pub fn assemble_argv(
     command: &[String],
     session_id: Option<&str>,
     thinking: bool,
     model: Option<&str>,
+    agent: Option<&str>,
     attachments: &[AgentAttachment],
     prompt: &str,
 ) -> Vec<String> {
@@ -82,6 +83,13 @@ pub fn assemble_argv(
     if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
         argv.push("--model".to_string());
         argv.push(model.to_string());
+    }
+    // Route planning/aux steps to a cheaper, tool-less opencode agent when the
+    // orchestrator asks for one (e.g. `plan`). Without this the CLI backend
+    // silently ran every step with the default agent.
+    if let Some(agent) = agent.map(str::trim).filter(|a| !a.is_empty()) {
+        argv.push("--agent".to_string());
+        argv.push(agent.to_string());
     }
     for attachment in attachments {
         argv.push("--file".to_string());
@@ -190,6 +198,7 @@ impl AiBackend for AgentCliBackend {
             req.session_id.as_deref(),
             req.thinking,
             req.model.as_deref(),
+            req.agent.as_deref(),
             &req.attachments,
             &req.prompt,
         );
@@ -242,6 +251,7 @@ impl AiBackend for AgentCliBackend {
             req.session_id.as_deref(),
             req.thinking,
             req.model.as_deref(),
+            req.agent.as_deref(),
             &req.attachments,
             &req.prompt,
         );
@@ -454,6 +464,7 @@ mod tests {
             None,
             false,
             None,
+            None,
             &[],
             "hi",
         );
@@ -466,6 +477,7 @@ mod tests {
             &["opencode".to_string(), "run".to_string()],
             Some("ses_x"),
             true,
+            None,
             None,
             &[],
             "hi",
@@ -483,6 +495,7 @@ mod tests {
             None,
             false,
             Some("opencode/deepseek-v4-flash-free"),
+            None,
             &[],
             "hi",
         );
@@ -510,6 +523,7 @@ mod tests {
             Some("ses_x"),
             true,
             Some("new/model"),
+            None,
             &[],
             "hi",
         );
@@ -547,6 +561,7 @@ mod tests {
             None,
             false,
             None,
+            None,
             &files,
             "describe",
         );
@@ -562,6 +577,44 @@ mod tests {
                 "describe"
             ]
         );
+    }
+
+    #[test]
+    fn assemble_argv_adds_agent_before_prompt() {
+        let argv = assemble_argv(
+            &["opencode".to_string(), "run".to_string()],
+            None,
+            false,
+            None,
+            Some("plan"),
+            &[],
+            "hi",
+        );
+        assert_eq!(argv, vec!["opencode", "run", "--agent", "plan", "hi"]);
+    }
+
+    #[test]
+    fn assemble_argv_omits_agent_when_none_or_blank() {
+        let none = assemble_argv(
+            &["opencode".to_string(), "run".to_string()],
+            None,
+            false,
+            None,
+            None,
+            &[],
+            "hi",
+        );
+        assert!(!none.contains(&"--agent".to_string()));
+        let blank = assemble_argv(
+            &["opencode".to_string(), "run".to_string()],
+            None,
+            false,
+            None,
+            Some("  "),
+            &[],
+            "hi",
+        );
+        assert!(!blank.contains(&"--agent".to_string()));
     }
 
     #[test]
