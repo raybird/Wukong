@@ -98,7 +98,10 @@ impl Store {
     pub async fn open(db_url: &str) -> Result<Store> {
         let opts = SqliteConnectOptions::from_str(db_url)?
             .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal);
+            .journal_mode(SqliteJournalMode::Wal)
+            // Let a writer wait for an in-flight write instead of failing with
+            // SQLITE_BUSY (background backfill can overlap foreground writes).
+            .busy_timeout(std::time::Duration::from_secs(5));
         let pool = SqlitePoolOptions::new().connect_with(opts).await?;
         sqlx::raw_sql(SCHEMA).execute(&pool).await?;
         migrate(&pool).await?;
@@ -234,17 +237,21 @@ impl Store {
 
     /// Bump recall_count and last_recalled_at for the given ids.
     pub async fn touch_recalled(&self, ids: &[i64], now: i64) -> Result<()> {
-        for id in ids {
-            sqlx::query(
-                "UPDATE memories
-                 SET recall_count = recall_count + 1, last_recalled_at = ?2
-                 WHERE id = ?1",
-            )
-            .bind(id)
-            .bind(now)
-            .execute(&self.pool)
-            .await?;
+        if ids.is_empty() {
+            return Ok(());
         }
+        // Single atomic statement instead of one round-trip per id.
+        let placeholders = sql_placeholders(ids.len());
+        let sql = format!(
+            "UPDATE memories
+             SET recall_count = recall_count + 1, last_recalled_at = ?
+             WHERE id IN ({placeholders})"
+        );
+        let mut q = sqlx::query(&sql).bind(now);
+        for id in ids {
+            q = q.bind(id);
+        }
+        q.execute(&self.pool).await?;
         Ok(())
     }
 
@@ -324,13 +331,16 @@ impl Store {
 
     /// Mark the given rows as folded into `summary_id`.
     pub async fn mark_consolidated(&self, ids: &[i64], summary_id: i64) -> Result<()> {
-        for id in ids {
-            sqlx::query("UPDATE memories SET consolidated_into = ?2 WHERE id = ?1")
-                .bind(id)
-                .bind(summary_id)
-                .execute(&self.pool)
-                .await?;
+        if ids.is_empty() {
+            return Ok(());
         }
+        let placeholders = sql_placeholders(ids.len());
+        let sql = format!("UPDATE memories SET consolidated_into = ? WHERE id IN ({placeholders})");
+        let mut q = sqlx::query(&sql).bind(summary_id);
+        for id in ids {
+            q = q.bind(id);
+        }
+        q.execute(&self.pool).await?;
         Ok(())
     }
 
@@ -397,15 +407,16 @@ impl Store {
     /// Delete the given memory rows. The AFTER DELETE trigger keeps FTS in sync.
     /// Returns the number of rows removed.
     pub async fn delete_memories(&self, ids: &[i64]) -> Result<u64> {
-        let mut affected = 0u64;
-        for id in ids {
-            let r = sqlx::query("DELETE FROM memories WHERE id = ?1")
-                .bind(id)
-                .execute(&self.pool)
-                .await?;
-            affected += r.rows_affected();
+        if ids.is_empty() {
+            return Ok(0);
         }
-        Ok(affected)
+        let placeholders = sql_placeholders(ids.len());
+        let sql = format!("DELETE FROM memories WHERE id IN ({placeholders})");
+        let mut q = sqlx::query(&sql);
+        for id in ids {
+            q = q.bind(id);
+        }
+        Ok(q.execute(&self.pool).await?.rows_affected())
     }
 
     /// Compose a full health snapshot. `scope` filters by-kind/age/coverage and
@@ -698,6 +709,11 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Comma-separated `?` placeholders for an `IN (…)` clause with `n` binds.
+fn sql_placeholders(n: usize) -> String {
+    vec!["?"; n].join(",")
 }
 
 fn row_to_candidate(r: sqlx::sqlite::SqliteRow) -> Candidate {

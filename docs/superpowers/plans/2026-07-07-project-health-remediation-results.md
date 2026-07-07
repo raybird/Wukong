@@ -161,3 +161,43 @@
 - Modify `crates/wukong-tg-client/src/client.rs`（check_ok + 3 測試）
 - Modify `crates/wukong-telegram/src/main.rs`（callback 已於 Phase 3 傳 allow；本階段：offset 保留、401 log）
 - Modify `crates/wukong-telegram/src/dispatch.rs`（log_send helper + 套用內容送出）
+
+---
+
+## Phase 5 — memory 效能、一致性與計分 ⚠️部分（2026-07-07）
+
+### Summary
+
+消除 embedding 對 async executor 的阻塞與向量召回的 recency 截斷，並將批次寫入改為單一原子語句、連線加上 busy_timeout。**Task 5.5（confidence）刻意延後**（見備註）。新增 1 個測試。
+
+### Implemented Changes
+
+**Task 5.1 — embedding 走 `spawn_blocking`**
+- 新增 `embed_blocking(embedder, text)`：clone `Arc<dyn Embedder>` + 文字進 `tokio::task::spawn_blocking`，join 錯誤映射為 `MemoryError::Embed`。
+- `remember`、`recall` 的同步 `emb.embed` 改走 `embed_blocking`；`backfill` 改收 `&Arc<dyn Embedder>` 並把 `embed_batch` 包進 spawn_blocking（兩個呼叫端同步更新）。ONNX 推論不再阻塞 tokio worker。
+
+**Task 5.2 — 向量召回去 recency 截斷**
+- `recall` 改以 `MAX_VECTOR_SCAN = 10_000` 取代 `fetch_limit`（約 50）呼叫 `embedded_candidates`，避免「舊但語意最相關」記憶在排序前被 recency 截斷。`apply_vector_sims` 本就會 append vector-only 候選（`recall/mod.rs:251`），故舊記憶得以浮現。
+- 新增整合測試 `vector_recall_is_not_truncated_by_recency`（1 個舊相關 + 60 個新無關；query 僅經向量源可達）。
+
+**Task 5.3 — N+1 批次化**
+- `touch_recalled`、`mark_consolidated`、`delete_memories` 改為單一 `... WHERE id IN (?,?,…)` 語句（原子、單次 round-trip）；新增 `sql_placeholders(n)` helper；空輸入早退。
+
+**Task 5.4 — 連線池寫入韌性**
+- `Store::open` 的 `SqliteConnectOptions` 加 `busy_timeout(5s)`：背景 backfill 與前景寫入重疊時，寫入者等待而非立即 `SQLITE_BUSY`。（採 busy_timeout 而非 `max_connections(1)`，保留 WAL 的讀並發。）
+
+### Verification
+
+- `cargo fmt --all -- --check` ✓、`cargo clippy --all-targets --locked -- -D warnings` ✓、`cargo test --workspace --locked` ✓（444 passed）
+- 既有 touch/delete/consolidate/semantic 測試守護 N+1 與 spawn_blocking 改動不回歸。
+
+### Modified Files
+
+- Modify `crates/wukong-memory/src/lib.rs`（embed_blocking、MAX_VECTOR_SCAN、remember/recall/backfill）
+- Modify `crates/wukong-memory/src/store/mod.rs`（busy_timeout、IN 批次化、sql_placeholders）
+- Modify `crates/wukong-memory/tests/integration.rs`（recency 截斷測試）
+
+### 備註 / 偏離計畫處
+
+- **Task 5.5（confidence 退化修正）延後**：`docs/superpowers/plans/2026-07-05-memory-optimization-parity.md` 的「Task 4: Recall Telemetry And Confidence Relevance」正在重做 confidence 語意（`recall_confidence_uses_decay_free_relevance`、`confidence == explanation.relevance`）。為避免與該進行中計畫衝突／重工，5.5 待該計畫落地後再依其成果調整。
+- 向量全量掃描設 10_000 上限：超大 store 仍會截斷最舊列，已於程式碼註記；真正的 ANN／sqlite-vec 另立設計（原計畫已載明本任務不做）。

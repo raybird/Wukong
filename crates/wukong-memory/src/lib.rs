@@ -91,7 +91,7 @@ impl Memory {
         self.embedder = Some(embedder.clone());
         let store = self.store.clone();
         tokio::spawn(async move {
-            if let Err(e) = backfill(&store, embedder.as_ref()).await {
+            if let Err(e) = backfill(&store, &embedder).await {
                 eprintln!("wukong-memory: backfill failed: {e}");
             }
         });
@@ -102,7 +102,7 @@ impl Memory {
     /// directly (used by tests and by the spawned background task).
     pub async fn backfill_embeddings(&self) -> Result<()> {
         match &self.embedder {
-            Some(emb) => backfill(&self.store, emb.as_ref()).await,
+            Some(emb) => backfill(&self.store, emb).await,
             None => Ok(()),
         }
     }
@@ -166,7 +166,7 @@ impl Memory {
             ids.push(id);
             if inserted {
                 if let Some(emb) = &self.embedder {
-                    match emb.embed(&item.text) {
+                    match embed_blocking(emb, &item.text).await {
                         Ok(v) => {
                             let _ = self
                                 .store
@@ -267,8 +267,12 @@ impl Memory {
         let merged = if use_vector {
             match &self.embedder {
                 Some(emb) => {
-                    let qvec = emb.embed(&query.query)?;
-                    let embedded = self.store.embedded_candidates(limit).await?;
+                    let qvec = embed_blocking(emb, &query.query).await?;
+                    // Score ALL embedded rows by similarity, not just the most
+                    // recent — otherwise an older but semantically closer memory
+                    // is truncated before ranking. Capped to bound work on very
+                    // large stores (ANN indexing is future work).
+                    let embedded = self.store.embedded_candidates(MAX_VECTOR_SCAN).await?;
                     let vector_cands =
                         build_vector_candidates(&qvec, embedded, query.top_k.max(5) * 4);
                     apply_vector_sims(merged, vector_cands)
@@ -483,14 +487,31 @@ impl Memory {
 }
 
 /// Embed and persist vectors for memories lacking them, in batches.
-async fn backfill(store: &Store, embedder: &dyn Embedder) -> Result<()> {
+/// Upper bound on embedded rows scored per vector recall. Beyond this the oldest
+/// rows are skipped; sized well above a typical personal store so it rarely bites.
+const MAX_VECTOR_SCAN: i64 = 10_000;
+
+/// Run a synchronous, CPU-bound embedding off the async executor so it never
+/// blocks a tokio worker (ONNX inference can take tens of ms).
+async fn embed_blocking(embedder: &Arc<dyn Embedder>, text: &str) -> Result<Vec<f32>> {
+    let embedder = embedder.clone();
+    let text = text.to_string();
+    tokio::task::spawn_blocking(move || embedder.embed(&text))
+        .await
+        .map_err(|e| MemoryError::Embed(format!("embed task failed: {e}")))?
+}
+
+async fn backfill(store: &Store, embedder: &Arc<dyn Embedder>) -> Result<()> {
     loop {
         let batch = store.rows_missing_embedding(32).await?;
         if batch.is_empty() {
             break;
         }
         let texts: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
-        let vecs = embedder.embed_batch(&texts)?;
+        let emb = embedder.clone();
+        let vecs = tokio::task::spawn_blocking(move || emb.embed_batch(&texts))
+            .await
+            .map_err(|e| MemoryError::Embed(format!("backfill embed task failed: {e}")))??;
         for ((id, _), v) in batch.iter().zip(vecs.iter()) {
             store
                 .update_embedding(*id, &embedding_to_blob(v), embedder.model_id())

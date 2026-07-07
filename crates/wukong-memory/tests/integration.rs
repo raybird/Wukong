@@ -419,3 +419,72 @@ async fn semantic_similarity_boosts_ranking() {
         hits.data.iter().map(|h| &h.text).collect::<Vec<_>>()
     );
 }
+
+#[tokio::test]
+async fn vector_recall_is_not_truncated_by_recency() {
+    use std::sync::Arc;
+    use wukong_memory::{Embedder, Result};
+
+    struct StubEmbedder;
+    impl Embedder for StubEmbedder {
+        fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            if text.contains("alpha") {
+                Ok(vec![1.0, 0.0])
+            } else {
+                Ok(vec![0.0, 1.0])
+            }
+        }
+        fn dim(&self) -> usize {
+            2
+        }
+        fn model_id(&self) -> &str {
+            "stub"
+        }
+    }
+
+    let file = NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", file.path().display());
+    std::mem::forget(file);
+    let mem = Memory::open(&url)
+        .await
+        .unwrap()
+        .with_embedder(Arc::new(StubEmbedder));
+
+    // Oldest row: semantically closest to the query, but shares no FTS token with
+    // it ("alpha" is only a substring of the single token "alphabetagamma"), so it
+    // is reachable *only* via the vector source, never keyword/recency.
+    mem.remember(RememberInput {
+        scope: "global".into(),
+        session_id: None,
+        items: vec![item("alphabetagamma old relevant note")],
+    })
+    .await
+    .unwrap();
+    // Many newer, irrelevant rows that would fill any recency-limited window.
+    for i in 0..60 {
+        mem.remember(RememberInput {
+            scope: "global".into(),
+            session_id: None,
+            items: vec![item(&format!("filler row number {i}"))],
+        })
+        .await
+        .unwrap();
+    }
+    mem.backfill_embeddings().await.unwrap();
+
+    let hits = mem
+        .recall(RecallQuery {
+            query: "alpha marker".into(),
+            top_k: 5,
+            scope: Some("global".into()),
+            mode: RecallMode::Hybrid,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        hits.data.iter().any(|h| h.text.contains("alphabetagamma")),
+        "old but semantically-closest memory was truncated by recency: {:?}",
+        hits.data.iter().map(|h| &h.text).collect::<Vec<_>>()
+    );
+}
