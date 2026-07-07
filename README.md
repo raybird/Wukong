@@ -6,7 +6,7 @@
 <p align="center">
   <img alt="lang" src="https://img.shields.io/badge/lang-Rust-orange">
   <img alt="status" src="https://img.shields.io/badge/status-v1%20四柱完成-brightgreen">
-  <img alt="tests" src="https://img.shields.io/badge/tests-242%20passing-blue">
+  <img alt="tests" src="https://img.shields.io/badge/tests-444%20passing-blue">
 </p>
 
 ---

@@ -38,7 +38,7 @@ scripts/sync-superpowers.sh <commit-or-tag> --dry-run
 
 ## 架構
 
-Wukong 是 Rust Workspace，包含 14 個 crate，分為四柱核心與周邊進入點。
+Wukong 是 Rust Workspace，包含 15 個 crate，分為四柱核心與周邊進入點。
 
 ### 四柱核心（依賴方向單向）
 
@@ -69,6 +69,7 @@ wukong-orchestrator → wukong-gateway → wukong-memory
 | `wukong-tg-client` | Telegram 傳輸層（Bot API client + scope 解析）；零內部依賴，`wukong-telegram` 與 `wukong-schedulerd` 共用；`mock` feature 供測試 |
 | `wukong-telegram` | Telegram Long-Polling bot；重用 `run_turn`；transport 來自 `wukong-tg-client` |
 | `wukong-web` | Axum Web Console；SSE 串流；前端以 `include_str!` 內嵌單一 binary |
+| `wukong-chat-history` | 共享聊天歷史與附件儲存（SQLite）；含附件路徑穿越防護（`resolve_under_upload_root`）；Web／Telegram 共用 |
 
 ### 一回合資料流（`run_turn`）
 
