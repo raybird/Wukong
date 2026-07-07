@@ -11,6 +11,32 @@
 
 ## [Unreleased]
 
+## [0.16.38] - 2026-07-07
+
+### Changed
+
+- 純結構重構（無行為變更）：拆分兩個過大檔案，以測試守門。
+  - `wukong-gateway/src/opencode_server.rs`（1401 → 640 行）抽出
+    `opencode_server/sse.rs` 與 `opencode_server/event_map.rs`。
+  - `wukong-web/src/lib.rs`（3772 → 2955 行）抽出 `static_assets.rs` 與 `chat_api.rs`。
+
+## [0.16.37] - 2026-07-07
+
+### Added
+
+- 新增 `CHANGELOG.md`（Keep a Changelog）。
+- `wukong-web` 新增免認證 `/healthz` liveness 端點與 docker-compose healthcheck。
+- `Dockerfile` 新增 `ARG OPENCODE_VERSION`，可於 build 時 pin opencode-ai 版本。
+
+### Changed
+
+- `Dockerfile` 的 `ARG VERSION` 預設更新為 `v0.16.36`。
+
+### Documentation
+
+- 文件化 `opencode serve` backend 刻意不串流回答文字（收尾以 `list_messages`
+  一次取回）之設計，與 CLI backend 的差異。
+
 ## [0.16.36] - 2026-07-07
 
 ### Changed
@@ -50,6 +76,8 @@
   不安全綁定（`0.0.0.0` + 空 token）啟動即拒絕（fail-closed，可用
   `WUKONG_WEB_ALLOW_INSECURE=1` 覆寫）；Telegram callback 加白名單檢查。
 
-[Unreleased]: https://github.com/raybird/Wukong/compare/v0.16.36...HEAD
+[Unreleased]: https://github.com/raybird/Wukong/compare/v0.16.38...HEAD
+[0.16.38]: https://github.com/raybird/Wukong/compare/v0.16.37...v0.16.38
+[0.16.37]: https://github.com/raybird/Wukong/compare/v0.16.36...v0.16.37
 [0.16.36]: https://github.com/raybird/Wukong/compare/v0.16.35...v0.16.36
 [0.16.35]: https://github.com/raybird/Wukong/releases/tag/v0.16.35
