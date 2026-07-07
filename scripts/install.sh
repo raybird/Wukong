@@ -173,7 +173,7 @@ case "$OS" in
   Darwin)
     case "$ARCH" in
       arm64) TARGET="aarch64-apple-darwin" ;;
-      x86_64) TARGET="x86_64-apple-darwin" ;;
+      x86_64) abort "Intel Mac 不再提供預建二進位（v0.16.39 起僅發佈 Apple Silicon）；請改用 Docker 模式（見 docs/docker.md）或從原始碼建置：cargo build --release" ;;
       *) abort "macOS on $ARCH 尚不支援" ;;
     esac
     FLAVOR=""

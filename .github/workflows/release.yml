@@ -8,41 +8,59 @@ permissions:
   contents: write
 
 jobs:
-  build-linux:
+  # Build every target in parallel, but DO NOT upload to the release here.
+  # Each job publishes its artifacts to the workflow run; the single `publish`
+  # job below collects them and uploads once. This avoids the concurrency race
+  # where parallel matrix jobs stepped on each other's release-asset writes
+  # (softprops "Not Found - delete-a-release-asset").
+  build:
     name: Build (${{ matrix.target }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - x86_64-unknown-linux-musl
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          # Apple Silicon only. Intel (x86_64-apple-darwin) was dropped:
+          # Apple shipped arm64 since 2020 and stopped selling Intel Macs in
+          # 2023, and it was already a cross-compile from the arm64 runner.
+          - target: aarch64-apple-darwin
+            runner: macos-latest
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
-      - name: Install musl target
+      - name: Install musl tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: |
-          rustup target add x86_64-unknown-linux-musl
-          sudo apt-get update -y && sudo apt-get install -y musl-tools
+        run: sudo apt-get update -y && sudo apt-get install -y musl-tools
 
       - name: Build release
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package artifacts
+        shell: bash
         run: |
           mkdir -p dist
           cd target/${{ matrix.target }}/release
           for bin in wukong wukong-telegram wukong-web wukong-schedulerd; do
-            cp $bin ../../../dist/
-            tar -czf ../../../dist/$bin-${{ matrix.target }}.tar.gz $bin
+            cp "$bin" ../../../dist/
+            tar -czf "../../../dist/$bin-${{ matrix.target }}.tar.gz" "$bin"
           done
           cd ../../..
-          sha256sum dist/*.tar.gz > dist/checksums-${{ matrix.target }}.txt
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum dist/*.tar.gz > "dist/checksums-${{ matrix.target }}.txt"
+          else
+            shasum -a 256 dist/*.tar.gz > "dist/checksums-${{ matrix.target }}.txt"
+          fi
 
       - name: Package Docker compose bundle
         if: matrix.target == 'x86_64-unknown-linux-musl'
@@ -61,50 +79,36 @@ jobs:
           tar -czf "wukong-docker-${VERSION}.tar.gz" wukong-docker
           rm -rf wukong-docker
 
-      - name: Upload to release
-        uses: softprops/action-gh-release@v2
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
         with:
-          files: dist/*
-          fail_on_unmatched_files: true
-          prerelease: ${{ contains(github.ref_name, '-rc.') }}
-          make_latest: ${{ contains(github.ref_name, '-rc.') && 'false' || 'true' }}
+          name: dist-${{ matrix.target }}
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error
 
-  build-macos:
-    name: Build (${{ matrix.target }})
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            runner: macos-latest
-          # Intel 二進位以 macos-latest（Apple Silicon）交叉編譯產出；
-          # macos-13 Intel runner 已退役，指定它會卡 queue 到 24h 被取消。
-          - target: x86_64-apple-darwin
-            runner: macos-latest
-
+  # Single serialized publish step: collect every target's artifacts and upload
+  # them to the release in one action invocation, so there is no cross-job race.
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
         with:
-          targets: ${{ matrix.target }}
+          path: artifacts
 
-      - name: Build release
-        run: cargo build --release --locked --target ${{ matrix.target }}
-
-      - name: Package artifacts
+      - name: Collect release files
+        shell: bash
         run: |
           mkdir -p dist
-          cd target/${{ matrix.target }}/release
-          for bin in wukong wukong-telegram wukong-web wukong-schedulerd; do
-            cp $bin ../../../dist/
-            tar -czf ../../../dist/$bin-${{ matrix.target }}.tar.gz $bin
-          done
-          cd ../../..
-          shasum -a 256 dist/*.tar.gz > dist/checksums-${{ matrix.target }}.txt
+          # Flatten every target's dist/ into one directory. Target-suffixed
+          # tarballs, checksums, and the docker bundle are uniquely named; the
+          # bare binaries share a name across targets and collapse to one
+          # (unchanged from the previous release layout).
+          find artifacts -type f -exec cp -f {} dist/ \;
+          ls -la dist
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2

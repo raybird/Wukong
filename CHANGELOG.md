@@ -11,6 +11,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Release workflow 改為「並行建置 → 單一 `publish` job 統一上傳」，消除多個 matrix
+  job 並行寫入同一 GitHub Release 造成的資產上傳競態。
+- 停止發佈 Intel Mac（`x86_64-apple-darwin`）預建二進位，改為僅發佈 Apple Silicon
+  （`aarch64-apple-darwin`）。`scripts/install.sh` 於 Intel Mac 改給 Docker／
+  原始碼建置指引，而非下載不存在的資產。
+
 ## [0.16.38] - 2026-07-07
 
 ### Changed
