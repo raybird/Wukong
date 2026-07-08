@@ -54,6 +54,17 @@ If the release touched web assets, also run the relevant `node --check` commands
 
 Stop on failure. Report exact failing command and output summary.
 
+### Breaking env-var sync check
+
+If this release **adds or changes any environment variable that affects startup or default behavior** (e.g. a new fail-closed guard, a changed default bind/port, a required secret), confirm all user-facing touchpoints are in sync before promoting:
+
+- `.env.example` — the variable is documented with its default and failure mode.
+- `docker-compose.yml` — the service `environment`/`ports` reflect the new default.
+- `docs/docker.md` — the env-var table and quick start match the new behavior.
+- `CHANGELOG.md` **and** the GitHub Release notes — include a `⚠️ 升級注意（Breaking）` section with a copy-pasteable fix for affected users.
+
+Case study of skipping this: v0.17.0 added the `WUKONG_WEB_ALLOW_INSECURE` fail-closed guard without syncing the compose default or release notes, so upgraded Docker deployments crash-looped with no visible cause. See `docs/superpowers/plans/2026-07-08-web-allow-insecure-upgrade-fix.md`.
+
 ## Promote RC To Stable
 
 If `main` was fast-forwarded locally from an RC branch, push it first:
