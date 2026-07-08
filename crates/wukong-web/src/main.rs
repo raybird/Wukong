@@ -25,7 +25,12 @@ async fn main() {
             "       Set WUKONG_WEB_TOKEN=<secret> to require auth, or \
              WUKONG_WEB_ALLOW_INSECURE=1 to override."
         );
-        std::process::exit(1);
+        // Don't exit(1): under `restart: unless-stopped` that becomes an
+        // invisible crash loop (users just see connection refused). Bind the
+        // same address and serve a 503 page that explains the fix; /healthz
+        // returns 503 too, so the container healthcheck reports unhealthy.
+        serve_misconfigured(&host, &port).await;
+        return;
     }
 
     let db_url = wukong_runtime::util::db_url_from_env();
@@ -59,6 +64,26 @@ async fn main() {
         }
     };
     eprintln!("🐵 wukong-web 上線 http://{addr}/");
+    if let Err(e) = axum::serve(listener, app).await {
+        eprintln!("server error: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// Bind `host:port` and serve the fail-closed 503 page instead of exiting, so a
+/// misconfigured deployment stays visible (browser shows the fix, healthcheck
+/// reports unhealthy) rather than crash-looping under `restart: unless-stopped`.
+async fn serve_misconfigured(host: &str, port: &str) {
+    let addr = format!("{host}:{port}");
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("error: failed to bind {addr}: {e}");
+            std::process::exit(1);
+        }
+    };
+    eprintln!("🐵 wukong-web 以「設定錯誤」降級模式上線 http://{addr}/（所有請求回 503）");
+    let app = wukong_web::build_misconfigured_router();
     if let Err(e) = axum::serve(listener, app).await {
         eprintln!("server error: {e}");
         std::process::exit(1);

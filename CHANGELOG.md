@@ -11,10 +11,42 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **docker**：修復 v0.17.0 的 Web Console fail-closed 守門在 Compose 預設下造成
+  容器不斷重啟、`localhost:8787` 無法連線的問題。安全邊界改由 host 端 port
+  mapping 控制：`docker-compose.yml` 預設只把 `wukong-web` 綁到 `127.0.0.1`
+  （本機可達、不對區網開放），容器內固定綁 `0.0.0.0:8787` 並預設
+  `WUKONG_WEB_ALLOW_INSECURE=1`。沿用舊 `.env`（無 token）升級後即可直接使用。
+- **docker**：修復 `WUKONG_WEB_PORT` 覆寫時 host 埠與容器埠對不上的問題；此值
+  現在只改 host 端映射埠，容器內固定聽 `8787`，healthcheck 同步固定為容器 `8787`。
+
+### Changed
+
+- **web**：不安全綁定（對外 + 空 token）由「`exit(1)` 崩潰」改為 fail-visible
+  降級模式：照常綁定並對所有請求（含 `/healthz`）回 `503` 與修正說明頁，
+  healthcheck 標記 unhealthy。避免 `restart: unless-stopped` 下的隱形重啟迴圈，
+  使用者可直接在瀏覽器看到原因與解法。正確設定時行為不變。
+- 新增 `WUKONG_WEB_BIND`（host 端綁定位址，預設 `127.0.0.1`）。要對區網開放請設
+  `WUKONG_WEB_BIND=0.0.0.0` 並搭配 `WUKONG_WEB_TOKEN=<secret>`。
+
 ## [0.17.0] - 2026-07-07
 
 > 本版收束 2026-07-07 的專案健康度改進批次（Phases 1–7 累積於 v0.16.35–38），
 > 並含一項使用者可感知的相容性變更（移除 Intel Mac 預建二進位），故進 minor。
+
+### ⚠️ 升級注意（Breaking）
+
+- **Web Console 不安全綁定啟動即拒絕**：`wukong-web` 綁定非 loopback 位址
+  （Docker 部署常見的 `0.0.0.0`）且 `WUKONG_WEB_TOKEN` 為空時會拒絕啟動；搭配
+  `restart: unless-stopped` 會表現為容器不斷重啟、`localhost:8787` 無法連線。
+  - **影響對象**：沿用舊 `.env`（未設 token）升級 Docker 部署者，以及照舊版快速
+    開始操作的新安裝。
+  - **解法（擇一）**：於 `.env` 設 `WUKONG_WEB_TOKEN=<secret>`（建議），或設
+    `WUKONG_WEB_ALLOW_INSECURE=1`（僅限可信內網），再 `docker compose up -d`。
+  - **診斷**：`docker compose logs wukong-web` 可見拒絕啟動的原因。
+  - 註：下一版起 `docker-compose.yml` 已改為預設僅綁 `127.0.0.1`、開箱即用，
+    無需上述設定即可存取（見 Unreleased）。
 
 ### Changed
 

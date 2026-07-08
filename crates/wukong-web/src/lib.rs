@@ -948,6 +948,60 @@ where
     public.merge(protected).with_state(state)
 }
 
+/// Static 503 page served by [`build_misconfigured_router`]. Explains the two
+/// ways to fix an unsafe bind. Self-contained (inline CSS, no external assets)
+/// and theme-aware via `color-scheme`.
+const MISCONFIGURED_HTML: &str = r#"<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wukong Web Console — 設定錯誤</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, "Noto Sans TC", sans-serif;
+         max-width: 40rem; margin: 4rem auto; padding: 0 1.5rem; line-height: 1.7; }
+  h1 { font-size: 1.4rem; }
+  code { background: rgba(127,127,127,.18); padding: .1em .4em; border-radius: .3em; }
+  .fix { border-left: 3px solid #cc3388; padding-left: 1rem; margin: 1.2rem 0; }
+  a { color: #3377aa; }
+</style>
+</head>
+<body>
+<h1>🐵 Wukong Web Console 拒絕啟動</h1>
+<p>偵測到不安全的設定：Console 綁定在非 loopback 位址，但未設定存取密鑰
+   <code>WUKONG_WEB_TOKEN</code>。為避免無認證對外開放，服務暫不提供功能。</p>
+<p>請擇一修正後重啟：</p>
+<div class="fix">
+  <p><strong>方式一（建議）</strong>：設定存取密鑰</p>
+  <p><code>WUKONG_WEB_TOKEN=&lt;你的密鑰&gt;</code></p>
+</div>
+<div class="fix">
+  <p><strong>方式二</strong>：明確允許無認證綁定（僅限可信內網）</p>
+  <p><code>WUKONG_WEB_ALLOW_INSECURE=1</code></p>
+</div>
+<p>Docker 部署請於 <code>.env</code> 設定後執行 <code>docker compose up -d</code>；
+   詳見 <a href="https://github.com/raybird/Wukong/blob/main/docs/docker.md">docs/docker.md</a>。</p>
+</body>
+</html>"#;
+
+/// Router used when [`should_refuse_insecure_start`] would otherwise abort the
+/// process. Rather than exiting — which, under `restart: unless-stopped`,
+/// degrades into an invisible crash loop (users just see connection refused) —
+/// bind the same address and answer every request, including `/healthz`, with
+/// `503` and a page explaining the fix. Fail-closed: it carries no state and
+/// mounts no functional routes, so nothing touches memory/backend/settings.
+pub fn build_misconfigured_router() -> axum::Router {
+    axum::Router::new().fallback(serve_misconfigured_page)
+}
+
+async fn serve_misconfigured_page() -> (StatusCode, axum::response::Html<&'static str>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        axum::response::Html(MISCONFIGURED_HTML),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1215,6 +1269,32 @@ mod tests {
         assert!(!should_refuse_insecure_start(None, "localhost", false));
         assert!(!should_refuse_insecure_start(None, "0.0.0.0", true));
         assert!(!should_refuse_insecure_start(Some("t"), "0.0.0.0", false));
+    }
+
+    #[tokio::test]
+    async fn misconfigured_router_returns_503_with_guidance_on_all_paths() {
+        // Every path — including /healthz, so the container healthcheck reads
+        // unhealthy — must answer 503 with the fix instructions in the body.
+        for path in ["/", "/healthz", "/api/chat/messages", "/whatever"] {
+            let resp = build_misconfigured_router()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "path {path} should return 503"
+            );
+            let text = body_string(resp).await;
+            assert!(
+                text.contains("WUKONG_WEB_TOKEN"),
+                "path {path} body missing token hint"
+            );
+            assert!(
+                text.contains("WUKONG_WEB_ALLOW_INSECURE"),
+                "path {path} body missing allow-insecure hint"
+            );
+        }
     }
 
     #[tokio::test]

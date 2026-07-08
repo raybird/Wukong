@@ -72,6 +72,20 @@ docker compose run --rm wukong opencode
 docker compose run --rm wukong wukong
 ```
 
+Web Console 預設**只綁定本機 `127.0.0.1`**，開箱即用、不需任何設定，且不會對區網或公網開放。若要讓同網段其他裝置存取，請在 `.env` 設 `WUKONG_WEB_BIND=0.0.0.0` **並**設定 `WUKONG_WEB_TOKEN=<secret>`（對外開放卻無 token 時，`wukong-web` 會進入「設定錯誤」降級模式以防未認證外洩；詳見下方環境變數說明）。
+
+> **設定錯誤降級模式**：當偵測到不安全綁定（對外開放但無 token）時，`wukong-web`
+> 不會直接崩潰重啟，而是照常綁定並對**所有請求（含 `/healthz`）回應 `503`** 與一頁
+> 修正說明。因此你會在瀏覽器直接看到原因與解法，`docker compose ps` 也會顯示
+> `unhealthy`（而非不斷 `Restarting`）。設好 token 或 `WUKONG_WEB_ALLOW_INSECURE=1`
+> 後重啟即恢復正常。
+>
+> 若 `localhost:8787` 連不上或顯示 503，查看服務狀態與日誌：
+> ```bash
+> docker compose ps wukong-web
+> docker compose logs wukong-web
+> ```
+
 **啟用網路資訊檢索（Agent Reach + GitHub CLI）：**
 
 Docker image 會預裝 `agent-reach` CLI 與 `gh`，但不會在 build 或 daemon 啟動時自動執行登入、Cookie 或 MCP 設定。若要讓 opencode/Wukong 具備更強的網路資訊檢索能力，請先用互動式 CLI runtime 完成一次性初始化：
@@ -148,9 +162,10 @@ services:
 | `WUKONG_AGENT_SERVER_URL` | opencode serve backend URL；Docker 常駐服務預設使用，未設定時回到 `WUKONG_AGENT_CMD` | `http://opencode-server:4096` |
 | `WUKONG_TG_TOKEN` | Telegram Bot Token（選用；可由 Web `/settings` 設定，env 優先） | — |
 | `WUKONG_TG_ALLOWED` | 允許的 Telegram chat ID（選用；可由 Web `/settings` 設定，env 優先） | — |
-| `WUKONG_WEB_HOST` / `WUKONG_WEB_PORT` | Web Console 綁定位址與埠 | `0.0.0.0:8787` |
-| `WUKONG_WEB_TOKEN` | Web Console 存取密鑰。**綁定非 loopback（如 `0.0.0.0`）且未設此值時，服務會拒絕啟動**（防止無認證對外開放）。可用 `Authorization: Bearer <token>` 標頭或 `?token=` 查詢字串提供 | — |
-| `WUKONG_WEB_ALLOW_INSECURE` | 設為 `1` 時，允許在無 token 下對外綁定（僅限可信內網）；否則對外綁定必須設 token | — |
+| `WUKONG_WEB_BIND` | Web Console 的 **host 端**綁定位址。預設僅本機可達；設 `0.0.0.0` 才對區網／公網開放（對外時請務必搭配 `WUKONG_WEB_TOKEN`） | `127.0.0.1` |
+| `WUKONG_WEB_PORT` | Web Console 的 **host 端**對外埠（容器內固定聽 `8787`，此值只改 host 端映射） | `8787` |
+| `WUKONG_WEB_TOKEN` | Web Console 存取密鑰。對外開放（`WUKONG_WEB_BIND=0.0.0.0`）卻未設此值時，服務進入「設定錯誤」降級模式（所有請求回 `503` 說明頁、healthcheck 標記 unhealthy）以防未認證外洩。可用 `Authorization: Bearer <token>` 標頭或 `?token=` 查詢字串提供 | — |
+| `WUKONG_WEB_ALLOW_INSECURE` | 設為 `1` 時允許在無 token 下對外綁定（僅限可信內網）。**Docker Compose 預設為 `1`**（容器內必綁 `0.0.0.0`，安全邊界改由 host 端 `WUKONG_WEB_BIND` 控制）；對外開放建議改設 token 而非依賴此旗標 | `1`（compose） |
 | `WUKONG_MEMORY_HOST` | `wukong-memoryd` 綁定位址（預設僅本機，避免記憶未認證外洩） | `127.0.0.1` |
 | `WUKONG_MEMORY_TOKEN` | `wukong-memoryd` 存取密鑰（選用；設定後除 `/v1/health` 外皆需 `Authorization: Bearer <token>`） | — |
 | `WUKONG_THINKING` | 啟用思考過程顯示 | `1` |

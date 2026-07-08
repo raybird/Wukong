@@ -94,8 +94,15 @@ services:
       dockerfile: Dockerfile
     image: wukong:latest
     container_name: wukong-web
+    # SECURITY: the console can run agent turns, read memory, and edit settings.
+    # The container ALWAYS binds 0.0.0.0:8787 inside (required for Docker port
+    # mapping); the real exposure is the host-side bind below. The default maps to
+    # 127.0.0.1 only — reachable from this host, NOT the LAN. To expose on the LAN,
+    # set WUKONG_WEB_BIND=0.0.0.0 AND WUKONG_WEB_TOKEN=<secret> (and consider
+    # WUKONG_WEB_ALLOW_INSECURE=0 so a missing token refuses to start).
+    # WUKONG_WEB_PORT changes only the host-side port; the container stays on 8787.
     ports:
-      - "${WUKONG_WEB_PORT:-8787}:8787"
+      - "${WUKONG_WEB_BIND:-127.0.0.1}:${WUKONG_WEB_PORT:-8787}:8787"
     environment:
       - USER_ID=${USER_ID:-1000}
       - GROUP_ID=${GROUP_ID:-1000}
@@ -105,15 +112,13 @@ services:
       - WUKONG_WORKSPACE=/workspace
       - WUKONG_MEMORY_DB=sqlite:///data/memory.db
       - WUKONG_THINKING=${WUKONG_THINKING:-1}
-      # Web-specific
-      # SECURITY: the console can run agent turns, read memory, and edit settings.
-      # Binding to 0.0.0.0 with an empty WUKONG_WEB_TOKEN now REFUSES to start.
-      # Set WUKONG_WEB_TOKEN=<secret> (recommended), or set
-      # WUKONG_WEB_ALLOW_INSECURE=1 to explicitly run without auth (trusted LAN only).
-      - WUKONG_WEB_HOST=${WUKONG_WEB_HOST:-0.0.0.0}
-      - WUKONG_WEB_PORT=${WUKONG_WEB_PORT:-8787}
+      # Web-specific: the container binds 0.0.0.0:8787 internally, so the security
+      # boundary is the host mapping above (WUKONG_WEB_BIND), not an app token.
+      # ALLOW_INSECURE therefore defaults to 1; set WUKONG_WEB_TOKEN when exposing
+      # beyond loopback. WUKONG_WEB_HOST/PORT are fixed here so the mapping holds.
+      - WUKONG_WEB_HOST=0.0.0.0
       - WUKONG_WEB_TOKEN=${WUKONG_WEB_TOKEN:-}
-      - WUKONG_WEB_ALLOW_INSECURE=${WUKONG_WEB_ALLOW_INSECURE:-}
+      - WUKONG_WEB_ALLOW_INSECURE=${WUKONG_WEB_ALLOW_INSECURE:-1}
     volumes:
       - ${WUKONG_HOST_WORKSPACE:-./workspace}:/workspace
       - opencode-config:/home/wukong/.config/opencode
@@ -125,13 +130,14 @@ services:
     depends_on:
       - opencode-server
     restart: unless-stopped
-    # Unauthenticated liveness probe (see wukong-web /healthz). Uses the same
-    # WUKONG_WEB_PORT the app binds, so overriding the port keeps the check valid.
+    # Unauthenticated liveness probe (see wukong-web /healthz). Runs inside the
+    # container, which always listens on the fixed 8787 (WUKONG_WEB_PORT only
+    # remaps the host-side port, so the probe stays valid regardless).
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "curl -fsS http://localhost:${WUKONG_WEB_PORT:-8787}/healthz || exit 1",
+          "curl -fsS http://localhost:8787/healthz || exit 1",
         ]
       interval: 30s
       timeout: 5s
