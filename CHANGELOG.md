@@ -11,6 +11,11 @@
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-07-08
+
+> 修復版：解決 v0.17.0 的 Web Console fail-closed 守門在 Docker Compose 預設下
+> 導致升級後容器不斷重啟、`localhost:8787` 無法連線的問題。
+
 ### Fixed
 
 - **docker**：修復 v0.17.0 的 Web Console fail-closed 守門在 Compose 預設下造成
@@ -121,7 +126,8 @@
   不安全綁定（`0.0.0.0` + 空 token）啟動即拒絕（fail-closed，可用
   `WUKONG_WEB_ALLOW_INSECURE=1` 覆寫）；Telegram callback 加白名單檢查。
 
-[Unreleased]: https://github.com/raybird/Wukong/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/raybird/Wukong/compare/v0.17.1...HEAD
+[0.17.1]: https://github.com/raybird/Wukong/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/raybird/Wukong/compare/v0.16.38...v0.17.0
 [0.16.38]: https://github.com/raybird/Wukong/compare/v0.16.37...v0.16.38
 [0.16.37]: https://github.com/raybird/Wukong/compare/v0.16.36...v0.16.37

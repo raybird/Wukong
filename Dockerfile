@@ -3,7 +3,7 @@
 # VERSION is the wukong release tag to pull binaries from. The release workflow
 # rewrites this default for the packaged docker bundle; for a local `docker
 # build` pass --build-arg VERSION=vX.Y.Z to select a specific release.
-ARG VERSION=v0.17.0
+ARG VERSION=v0.17.1
 ARG TARGET=x86_64-unknown-linux-musl
 ARG REPO=raybird/Wukong
 FROM debian:bookworm-slim AS downloader
