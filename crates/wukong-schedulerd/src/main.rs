@@ -10,7 +10,7 @@ use wukong_gateway::config::{default_scope, GatewayConfig};
 use wukong_gateway::workspace_dir;
 use wukong_memory::Memory;
 use wukong_runtime::util::now_unix;
-use wukong_scheduler::{ClaimedJobOutcome, ExecutionContext, SchedulerStore};
+use wukong_scheduler::{ClaimedJobOutcome, ExecutionContext, Job, SchedulerStore};
 use wukong_tg_client::client::ReqwestTgClient;
 
 #[derive(Debug, Parser)]
@@ -59,6 +59,10 @@ async fn run(cli: Cli) -> Result<(), String> {
     let store = SchedulerStore::open(&cfg.db_url)
         .await
         .map_err(|e| e.to_string())?;
+    let interrupted = recover_interrupted_runs(&store, cli.once, now_unix()).await?;
+    if interrupted > 0 {
+        eprintln!("recovered {interrupted} interrupted scheduler run(s)");
+    }
     let history = match ChatHistoryStore::open(&cfg.db_url).await {
         Ok(store) => Some(store),
         Err(e) => {
@@ -102,6 +106,35 @@ async fn run(cli: Cli) -> Result<(), String> {
     Ok(())
 }
 
+async fn recover_interrupted_runs(
+    store: &SchedulerStore,
+    once: bool,
+    now: i64,
+) -> Result<u64, String> {
+    if once {
+        return Ok(0);
+    }
+    store
+        .interrupt_stale_runs(now)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn claim_ready_jobs(
+    store: &SchedulerStore,
+    backend: &AgentBackend,
+    now: i64,
+    worker_id: &str,
+    lease_secs: i64,
+    limit: i64,
+) -> Result<Vec<Job>, String> {
+    backend.check_ready().await.map_err(|e| e.to_string())?;
+    store
+        .claim_due_jobs(now, worker_id, lease_secs, limit)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_scan(
     store: &SchedulerStore,
@@ -115,10 +148,7 @@ async fn run_scan(
     history: Option<&ChatHistoryStore>,
 ) -> Result<(), String> {
     let now = now_unix();
-    let jobs = store
-        .claim_due_jobs(now, worker_id, lease_secs, limit)
-        .await
-        .map_err(|e| e.to_string())?;
+    let jobs = claim_ready_jobs(store, backend, now, worker_id, lease_secs, limit).await?;
     for job in jobs {
         let ctx = ExecutionContext {
             memory,
@@ -224,6 +254,133 @@ fn split_ws(s: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::NamedTempFile;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use wukong_scheduler::{Job, JobKind, NewJob, RunStatus};
+
+    async fn open_store() -> (NamedTempFile, SchedulerStore) {
+        let file = NamedTempFile::new().unwrap();
+        let url = format!("sqlite://{}", file.path().display());
+        let store = SchedulerStore::open(&url).await.unwrap();
+        (file, store)
+    }
+
+    async fn health_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 1024];
+            let _ = socket.read(&mut buf).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 16\r\nConnection: close\r\n\r\n{\"healthy\":true}",
+                )
+                .await
+                .unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    async fn due_job(store: &SchedulerStore) -> Job {
+        store
+            .add_job(NewJob {
+                name: "due".to_string(),
+                kind: JobKind::Turn {
+                    scope: "project:test".to_string(),
+                    prompt: "run".to_string(),
+                },
+                cron: "* * * * *".to_string(),
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn unavailable_backend_leaves_due_job_unclaimed() {
+        let (_file, store) = open_store().await;
+        let job = due_job(&store).await;
+        let backend = AgentBackend::Server(
+            wukong_gateway::opencode_server::OpencodeServerBackend::from_env(
+                "http://127.0.0.1:1".to_string(),
+                None,
+            ),
+        );
+
+        let err = claim_ready_jobs(&store, &backend, job.next_run_at.unwrap(), "worker", 300, 10)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("health_check"), "{err}");
+        assert!(store.recent_runs(None, 10).await.unwrap().is_empty());
+        assert_eq!(store.get_job(&job.id).await.unwrap().unwrap(), job);
+        assert_eq!(
+            store
+                .claim_due_jobs(job.next_run_at.unwrap(), "other", 300, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_due_job_is_claimed_after_backend_recovers() {
+        let (_file, store) = open_store().await;
+        let job = due_job(&store).await;
+        let unavailable = AgentBackend::Server(
+            wukong_gateway::opencode_server::OpencodeServerBackend::from_env(
+                "http://127.0.0.1:1".to_string(),
+                None,
+            ),
+        );
+        assert!(
+            claim_ready_jobs(&store, &unavailable, job.next_run_at.unwrap(), "worker", 300, 10)
+                .await
+                .is_err()
+        );
+
+        let available = AgentBackend::Server(
+            wukong_gateway::opencode_server::OpencodeServerBackend::from_env(
+                health_server().await,
+                None,
+            ),
+        );
+        let claimed = claim_ready_jobs(
+            &store,
+            &available,
+            job.next_run_at.unwrap(),
+            "worker",
+            300,
+            10,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(claimed, vec![job]);
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_runs_only_for_daemon_mode() {
+        let (_file, store) = open_store().await;
+        let job = due_job(&store).await;
+        let run = store.start_run(&job.id, 10).await.unwrap();
+
+        assert_eq!(recover_interrupted_runs(&store, true, 20).await.unwrap(), 0);
+        assert_eq!(recover_interrupted_runs(&store, false, 20).await.unwrap(), 1);
+        assert_eq!(
+            store
+                .recent_runs(Some(&job.id), 10)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|item| item.id == run)
+                .unwrap()
+                .status,
+            RunStatus::Interrupted
+        );
+    }
 
     #[test]
     fn parses_once_flag_and_tuning() {
