@@ -141,6 +141,15 @@ pub fn build_backend_from_env(command: Vec<String>, workspace: Option<PathBuf>) 
     }
 }
 
+impl AgentBackend {
+    pub async fn check_ready(&self) -> Result<(), GatewayError> {
+        match self {
+            AgentBackend::Cli(_) => Ok(()),
+            AgentBackend::Server(backend) => backend.health_check().await,
+        }
+    }
+}
+
 impl AiBackend for AgentBackend {
     async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
         match self {
@@ -437,8 +446,59 @@ fn suffix_prefix_len(text: &str, prefix: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     static AGENT_TIMEOUT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    async fn health_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 1024];
+            let _ = socket.read(&mut buf).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 16\r\nConnection: close\r\n\r\n{\"healthy\":true}",
+                )
+                .await
+                .unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn cli_backend_is_ready_without_launching_command() {
+        let backend = AgentBackend::Cli(AgentCliBackend {
+            command: vec!["command-that-must-not-run".to_string()],
+            workspace: None,
+        });
+
+        backend.check_ready().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_backend_readiness_delegates_to_health_endpoint() {
+        let backend = AgentBackend::Server(
+            crate::opencode_server::OpencodeServerBackend::from_env(health_server().await, None),
+        );
+
+        backend.check_ready().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_backend_readiness_reports_connection_failure() {
+        let backend = AgentBackend::Server(
+            crate::opencode_server::OpencodeServerBackend::from_env(
+                "http://127.0.0.1:1".to_string(),
+                None,
+            ),
+        );
+
+        let err = backend.check_ready().await.unwrap_err();
+        assert!(err.to_string().contains("health_check"), "{err}");
+    }
 
     #[test]
     fn backend_from_env_uses_cli_when_server_url_missing() {

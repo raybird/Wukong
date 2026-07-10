@@ -90,7 +90,7 @@ impl OpencodeServerBackend {
         })
     }
 
-    async fn health_check(&self) -> Result<(), GatewayError> {
+    pub(crate) async fn health_check(&self) -> Result<(), GatewayError> {
         let url = format!("{}/global/health", self.base_url);
         self.send_json("health_check", self.client.get(url))
             .await
