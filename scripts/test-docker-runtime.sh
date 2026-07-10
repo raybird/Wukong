@@ -18,6 +18,21 @@ require_in_file() {
     fi
 }
 
+require_count_in_file() {
+    local pattern="$1"
+    local expected="$2"
+    local file="$3"
+    local message="$4"
+    local actual
+
+    actual=$(grep -Fc -- "$pattern" "$file" || true)
+    if [[ "$actual" != "$expected" ]]; then
+        echo "FAIL: $message" >&2
+        echo "expected $expected occurrences of '$pattern', found $actual" >&2
+        exit 1
+    fi
+}
+
 require_in_file "opencode-state:/home/wukong/.local/share/opencode" "$compose_file" \
     "docker compose must persist opencode session state"
 require_in_file "opencode-state:" "$compose_file" \
@@ -58,6 +73,10 @@ require_in_file 'cp -a "$IMAGE_SKILLS/." "$tmp_dir/"' "$entrypoint" \
     "entrypoint must copy image skill assets into a temporary directory"
 require_in_file 'mv "$tmp_dir" "$WORKSPACE_SKILLS"' "$entrypoint" \
     "entrypoint must atomically install workspace skill assets"
+require_in_file "curl -fsS http://localhost:4096/global/health || exit 1" "$compose_file" \
+    "opencode server must expose a Compose healthcheck"
+require_count_in_file "condition: service_healthy" 3 "$compose_file" \
+    "web, telegram, and scheduler must wait for a healthy opencode server"
 
 if awk '
     /^  wukong-schedulerd:/ { in_scheduler = 1; next }
