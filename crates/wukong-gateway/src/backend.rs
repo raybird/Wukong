@@ -489,12 +489,11 @@ mod tests {
 
     #[tokio::test]
     async fn server_backend_readiness_reports_connection_failure() {
-        let backend = AgentBackend::Server(
-            crate::opencode_server::OpencodeServerBackend::from_env(
+        let backend =
+            AgentBackend::Server(crate::opencode_server::OpencodeServerBackend::from_env(
                 "http://127.0.0.1:1".to_string(),
                 None,
-            ),
-        );
+            ));
 
         let err = backend.check_ready().await.unwrap_err();
         assert!(err.to_string().contains("health_check"), "{err}");

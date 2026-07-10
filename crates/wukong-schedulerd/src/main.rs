@@ -308,9 +308,16 @@ mod tests {
             ),
         );
 
-        let err = claim_ready_jobs(&store, &backend, job.next_run_at.unwrap(), "worker", 300, 10)
-            .await
-            .unwrap_err();
+        let err = claim_ready_jobs(
+            &store,
+            &backend,
+            job.next_run_at.unwrap(),
+            "worker",
+            300,
+            10,
+        )
+        .await
+        .unwrap_err();
 
         assert!(err.contains("health_check"), "{err}");
         assert!(store.recent_runs(None, 10).await.unwrap().is_empty());
@@ -335,11 +342,16 @@ mod tests {
                 None,
             ),
         );
-        assert!(
-            claim_ready_jobs(&store, &unavailable, job.next_run_at.unwrap(), "worker", 300, 10)
-                .await
-                .is_err()
-        );
+        assert!(claim_ready_jobs(
+            &store,
+            &unavailable,
+            job.next_run_at.unwrap(),
+            "worker",
+            300,
+            10
+        )
+        .await
+        .is_err());
 
         let available = AgentBackend::Server(
             wukong_gateway::opencode_server::OpencodeServerBackend::from_env(
@@ -368,7 +380,10 @@ mod tests {
         let run = store.start_run(&job.id, 10).await.unwrap();
 
         assert_eq!(recover_interrupted_runs(&store, true, 20).await.unwrap(), 0);
-        assert_eq!(recover_interrupted_runs(&store, false, 20).await.unwrap(), 1);
+        assert_eq!(
+            recover_interrupted_runs(&store, false, 20).await.unwrap(),
+            1
+        );
         assert_eq!(
             store
                 .recent_runs(Some(&job.id), 10)
