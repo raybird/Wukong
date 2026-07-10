@@ -6,6 +6,7 @@ pub enum RunStatus {
     Running,
     Success,
     Failure,
+    Interrupted,
 }
 
 impl RunStatus {
@@ -14,6 +15,7 @@ impl RunStatus {
             RunStatus::Running => "running",
             RunStatus::Success => "success",
             RunStatus::Failure => "failure",
+            RunStatus::Interrupted => "interrupted",
         }
     }
 
@@ -22,6 +24,7 @@ impl RunStatus {
             "running" => Ok(RunStatus::Running),
             "success" => Ok(RunStatus::Success),
             "failure" => Ok(RunStatus::Failure),
+            "interrupted" => Ok(RunStatus::Interrupted),
             other => Err(SchedulerError::UnknownRunStatus(other.to_string())),
         }
     }
@@ -313,6 +316,29 @@ impl SchedulerStore {
         Ok(result.rows_affected() > 0)
     }
 
+    pub async fn interrupt_stale_runs(&self, now: i64) -> Result<u64, SchedulerError> {
+        let mut tx = self.pool.begin().await?;
+        let result = sqlx::query(
+            "UPDATE scheduler_runs
+             SET status = ?1, message = ?2, finished_at = ?3
+             WHERE status = ?4
+               AND EXISTS (
+                   SELECT 1 FROM scheduler_jobs
+                   WHERE scheduler_jobs.id = scheduler_runs.job_id
+                     AND (scheduler_jobs.locked_until IS NULL OR scheduler_jobs.locked_until <= ?3)
+               )",
+        )
+        .bind(RunStatus::Interrupted.as_str())
+        .bind("scheduler process ended before the run completed")
+        .bind(now)
+        .bind(RunStatus::Running.as_str())
+        .execute(&mut *tx)
+        .await?;
+        let changed = result.rows_affected();
+        tx.commit().await?;
+        Ok(changed)
+    }
+
     pub async fn recent_runs(
         &self,
         job_id: Option<&str>,
@@ -519,6 +545,85 @@ mod tests {
         assert_eq!(runs[0].status, RunStatus::Failure);
         assert_eq!(runs[0].message, "bad");
         assert_eq!(runs[1].status, RunStatus::Success);
+    }
+
+    #[test]
+    fn interrupted_status_round_trips() {
+        assert_eq!(RunStatus::Interrupted.as_str(), "interrupted");
+        assert_eq!(
+            RunStatus::parse("interrupted").unwrap(),
+            RunStatus::Interrupted
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupt_stale_runs_updates_only_expired_or_missing_leases() {
+        let store = open_store().await;
+        let expired_job = store.add_job(new_turn("* * * * *")).await.unwrap();
+        let active_job = store.add_job(new_turn("* * * * *")).await.unwrap();
+        let unlocked_job = store.add_job(new_turn("* * * * *")).await.unwrap();
+        let now = expired_job.next_run_at.unwrap();
+
+        store
+            .claim_job(&expired_job.id, now, "expired-worker", 10)
+            .await
+            .unwrap();
+        store
+            .claim_job(&active_job.id, now, "active-worker", 100)
+            .await
+            .unwrap();
+
+        let expired_run = store.start_run(&expired_job.id, now).await.unwrap();
+        let active_run = store.start_run(&active_job.id, now).await.unwrap();
+        let unlocked_run = store.start_run(&unlocked_job.id, now).await.unwrap();
+        let before_expired = store.get_job(&expired_job.id).await.unwrap().unwrap();
+
+        let changed = store.interrupt_stale_runs(now + 11).await.unwrap();
+
+        assert_eq!(changed, 2);
+        let runs = store.recent_runs(None, 10).await.unwrap();
+        let expired = runs.iter().find(|run| run.id == expired_run).unwrap();
+        let active = runs.iter().find(|run| run.id == active_run).unwrap();
+        let unlocked = runs.iter().find(|run| run.id == unlocked_run).unwrap();
+        assert_eq!(expired.status, RunStatus::Interrupted);
+        assert_eq!(expired.finished_at, Some(now + 11));
+        assert_eq!(
+            expired.message,
+            "scheduler process ended before the run completed"
+        );
+        assert_eq!(unlocked.status, RunStatus::Interrupted);
+        assert_eq!(active.status, RunStatus::Running);
+        assert_eq!(active.finished_at, None);
+
+        let after_expired = store.get_job(&expired_job.id).await.unwrap().unwrap();
+        assert_eq!(after_expired.next_run_at, before_expired.next_run_at);
+        assert_eq!(after_expired.last_run_at, before_expired.last_run_at);
+    }
+
+    #[tokio::test]
+    async fn interrupt_stale_runs_is_idempotent_and_preserves_terminal_runs() {
+        let store = open_store().await;
+        let job = store.add_job(new_turn("* * * * *")).await.unwrap();
+        let now = job.next_run_at.unwrap();
+        let successful = store.start_run(&job.id, now - 2).await.unwrap();
+        store
+            .finish_run(successful, RunStatus::Success, "ok", now - 1)
+            .await
+            .unwrap();
+        let stale = store.start_run(&job.id, now).await.unwrap();
+
+        assert_eq!(store.interrupt_stale_runs(now + 1).await.unwrap(), 1);
+        assert_eq!(store.interrupt_stale_runs(now + 2).await.unwrap(), 0);
+
+        let runs = store.recent_runs(Some(&job.id), 10).await.unwrap();
+        assert_eq!(
+            runs.iter().find(|run| run.id == stale).unwrap().status,
+            RunStatus::Interrupted
+        );
+        assert_eq!(
+            runs.iter().find(|run| run.id == successful).unwrap().status,
+            RunStatus::Success
+        );
     }
 
     #[tokio::test]
