@@ -37,7 +37,7 @@ jobs:
           [[ "$(git cat-file -t "refs/tags/$tag")" == tag ]]
           annotation="$(git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(contents)')"
           promote_from=""
-          if [[ "$tag" == *-rc.* ]]; then
+          if grep -Fq -- '-rc.' <<<"$tag"; then
             ! grep -Eq '^promote-from:' <<<"$annotation"
             channel=rc
            else
