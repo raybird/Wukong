@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-directory="${1:?usage: generate-sha256sums.sh <directory>}"
+directory="$(cd "${1:?usage: generate-sha256sums.sh <directory>}" && pwd)"
 output="$directory/SHA256SUMS"
 temp="$output.tmp"
 

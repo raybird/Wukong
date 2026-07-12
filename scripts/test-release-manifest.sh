@@ -3,6 +3,7 @@ set -euo pipefail
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+checksum_script="$(pwd)/scripts/generate-sha256sums.sh"
 
 runtime_inputs='{"AGENT_REACH_ARCHIVE_SHA256":"0123456789012345678901234567890123456789012345678901234567890123","AGENT_REACH_REF":"0123456789012345678901234567890123456789","BASE_IMAGE":"debian:bookworm-slim@sha256:0123456789012345678901234567890123456789012345678901234567890123","DEBIAN_SNAPSHOT":"20260712T000000Z","OPENCODE_INTEGRITY":"sha512-example","OPENCODE_VERSION":"1.2.3"}'
 compatibility='{"affectedState":[],"backupRequired":false,"instructionsUrl":null,"irreversibleMigration":false,"rollbackSafeTo":"v0.17.1","schemaVersion":1}'
@@ -20,5 +21,10 @@ scripts/generate-sha256sums.sh "$tmp"
 grep -Fq 'one' "$tmp/SHA256SUMS"
 grep -Fq 'two' "$tmp/SHA256SUMS"
 ! grep -Fq 'SHA256SUMS' "$tmp/SHA256SUMS"
+
+mkdir "$tmp/relative"
+printf 'relative\n' > "$tmp/relative/artifact"
+(cd "$tmp" && "$checksum_script" relative)
+grep -Fq 'artifact' "$tmp/relative/SHA256SUMS"
 
 echo "release manifest checks passed"
