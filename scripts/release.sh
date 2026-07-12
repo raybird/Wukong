@@ -123,7 +123,7 @@ run_required_checks() {
   run_check bash scripts/test-release-workflow.sh
   run_check bash scripts/test-release-manifest.sh
   run_check bash scripts/test-release-image.sh
-  WUKONG_RELEASE_UNDER_TEST=1 run_check bash scripts/test-release-command.sh
+  run_check env WUKONG_RELEASE_UNDER_TEST=1 bash scripts/test-release-command.sh
   run_check bash scripts/test-installer-upgrade.sh
   run_check bash scripts/test-docker-runtime.sh
 }
