@@ -35,6 +35,7 @@ check_pins() {
 }
 
 check_static() {
+  local debian_line security_line
   check_pins
   require_file "$dockerfile"
   require_text 'COPY binaries/wukong' "$dockerfile"
@@ -45,6 +46,9 @@ check_static() {
   require_text 'org.opencontainers.image.source="https://github.com/raybird/Wukong"' "$dockerfile"
   require_text 'COPY scripts/docker-entrypoint.sh' "$dockerfile"
   require_text 'gosu wukong' "$dockerfile"
+  debian_line="$(grep -Fn 's|http://deb.debian.org/debian|' "$dockerfile" | cut -d: -f1)"
+  security_line="$(grep -Fn 's|http://deb.debian.org/debian-security|' "$dockerfile" | cut -d: -f1)"
+  [[ "$security_line" -lt "$debian_line" ]] || fail "security snapshot replacement must precede its Debian URL prefix"
   ! grep -Eqi 'github\.com/.*/releases/download' "$dockerfile" || fail "release image must not download GitHub release binaries"
   for binary in wukong wukong-telegram wukong-web wukong-schedulerd; do
     require_text "$binary --help" "$dockerfile"

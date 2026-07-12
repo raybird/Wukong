@@ -17,8 +17,8 @@ LABEL org.opencontainers.image.source="https://github.com/raybird/Wukong" \
       org.opencontainers.image.created="$CREATED"
 
 RUN sed -i \
-      -e "s|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}|g" \
       -e "s|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}|g" \
+      -e "s|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}|g" \
       /etc/apt/sources.list.d/debian.sources && \
     printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99snapshot && \
     apt-get update && apt-get install -y --no-install-recommends \
