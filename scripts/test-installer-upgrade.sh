@@ -41,8 +41,8 @@ make_release() {
     printf 'MIT\n' > "$docker_stage/LICENSE"
     cp "$INSTALLER" "$docker_stage/scripts/install.sh"
     python3 - "$RELEASES/release-manifest.json" "$tag" <<'PY'
-import json, sys
-json.dump({"schemaVersion": 1, "productTag": sys.argv[2], "image": {"reference": "ghcr.io/raybird/wukong:" + sys.argv[2], "digest": "sha256:" + "a" * 64}}, open(sys.argv[1], "w"), sort_keys=True)
+import json, os, sys
+json.dump({"schemaVersion": 1, "productTag": sys.argv[2], "image": {"reference": "ghcr.io/raybird/wukong:" + sys.argv[2], "digest": "sha256:" + "a" * 64}, "dataCompatibility": {"schemaVersion": 1, "affectedState": [], "backupRequired": False, "instructionsUrl": None, "irreversibleMigration": False, "rollbackSafeTo": os.environ.get("FIXTURE_SAFE_TO", "v0.17.1")}}, open(sys.argv[1], "w"), sort_keys=True)
 PY
     cp "$RELEASES/release-manifest.json" "$docker_stage/release-manifest.json"
     tar -C "$TMP" -czf "$RELEASES/wukong-docker-$tag.tar.gz" wukong-docker
@@ -71,6 +71,7 @@ set -euo pipefail
 printf 'docker %s\n' "$*" >> "$WUKONG_TEST_LOG"
 if [[ "$1" == compose && "$2" == version ]]; then exit 0; fi
 if [[ "$1" == image && "$2" == inspect ]]; then printf 'ghcr.io/raybird/wukong@sha256:%s\n' "${FIXTURE_IMAGE_DIGEST:-$(printf 'a%.0s' {1..64})}"; exit 0; fi
+if [[ "$1" == compose && "$2" == ps && -n "${FIXTURE_DOCKER_PS_EXIT:-}" ]]; then exit "$FIXTURE_DOCKER_PS_EXIT"; fi
 exit "${FIXTURE_DOCKER_EXIT:-0}"
 SH
     cat > "$BIN/systemctl" <<'SH'
@@ -94,7 +95,7 @@ run_installer() {
     (cd "$DEPLOYMENT" && printf '%b' "$input" | WUKONG_TEST_RELEASES="$RELEASES" FIXTURE_TAG="${FIXTURE_TAG:-v9.9.9}" bash "$INSTALLER" "$@")
 }
 
-prepare() { : > "$LOG"; make_release; make_fakes; }
+prepare() { rm -rf "$HOME" "$DEPLOYMENT"; mkdir -p "$HOME" "$DEPLOYMENT"; : > "$LOG"; make_release; make_fakes; }
 
 test_parsing() {
     prepare
@@ -191,7 +192,7 @@ test_binary_upgrade() {
     for name in wukong wukong-web; do printf 'old-%s\n' "$name" > "$HOME/.local/bin/$name"; chmod +x "$HOME/.local/bin/$name"; done
     python3 - "$HOME/.wukong/install.json" <<'PY'
 import json, sys
-json.dump({"schemaVersion": 1, "mode": "binary", "target": "x86_64-unknown-linux-musl", "productTag": "v1", "components": ["wukong", "wukong-web"], "services": [], "installedAt": "old", "updatedAt": "old", "previousBackupPath": None}, open(sys.argv[1], "w"))
+json.dump({"schemaVersion": 1, "mode": "binary", "target": "x86_64-unknown-linux-musl", "productTag": "v1", "previousVersion": None, "components": ["wukong", "wukong-web"], "services": [], "installedAt": "old", "updatedAt": "old", "previousBackupPath": None}, open(sys.argv[1], "w"))
 PY
     run_installer '' --mode binary --upgrade --version v9.9.9 >/dev/null
     assert_contains "$HOME/.local/bin/wukong" 'v9.9.9'
@@ -209,6 +210,87 @@ test_systemd() {
     assert_contains "$LOG" 'systemctl --user enable --now wukong-schedulerd'
 }
 
+test_rollback_metadata() {
+    prepare
+    mkdir -p "$HOME/.local/bin" "$HOME/.wukong"
+    printf 'old\n' > "$HOME/.local/bin/wukong"; chmod +x "$HOME/.local/bin/wukong"
+    python3 - "$HOME/.wukong/install.json" <<'PY'
+import json, sys
+json.dump({"schemaVersion": 1, "mode": "binary", "target": "x86_64-unknown-linux-musl", "productTag": "v1.0.0", "previousVersion": "v0.9.0", "components": ["wukong"], "services": [], "installedAt": "old", "updatedAt": "old", "previousBackupPath": None}, open(sys.argv[1], "w"))
+PY
+    run_installer '' --mode binary --upgrade --version v9.9.9 >/dev/null
+    python3 - "$HOME/.wukong/install.json" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1])); assert d["productTag"] == "v9.9.9"; assert d["previousVersion"] == "v1.0.0"; assert d["previousBackupPath"]
+PY
+}
+
+test_legacy_rollback() {
+    prepare
+    mkdir -p "$HOME/.local/bin" "$HOME/.config/systemd/user"
+    printf 'legacy-cli\n' > "$HOME/.local/bin/wukong"; chmod 755 "$HOME/.local/bin/wukong"
+    printf 'legacy-web\n' > "$HOME/.local/bin/wukong-web"; chmod 755 "$HOME/.local/bin/wukong-web"
+    printf '# Managed by Wukong install.sh\nlegacy unit\n' > "$HOME/.config/systemd/user/wukong-web.service"
+    run_installer '' --mode binary --upgrade --version v9.9.9 >/dev/null
+    legacy_backup="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["previousBackupPath"])' "$HOME/.wukong/install.json")"
+    [[ "$legacy_backup" == *"/legacy-"* ]] || fail "legacy backup was not recorded"
+    assert_file "$legacy_backup/manifest.json"
+    run_installer '' --mode binary --rollback >/dev/null
+    assert_contains "$HOME/.local/bin/wukong" legacy-cli
+    assert_contains "$HOME/.local/bin/wukong-web" legacy-web
+    [[ ! -f "$HOME/.wukong/install.json" ]] || fail "legacy rollback retained modern metadata"
+}
+
+test_rollback_guard() {
+    prepare
+    mkdir -p "$HOME/.local/bin" "$HOME/.wukong/backups/previous"
+    printf 'current\n' > "$HOME/.local/bin/wukong"; printf 'previous\n' > "$HOME/.wukong/backups/previous/wukong"
+    python3 - "$HOME/.wukong/install.json" <<'PY'
+import json,sys
+json.dump({"schemaVersion":1,"mode":"binary","target":"x86_64-unknown-linux-musl","productTag":"v9.9.9","previousVersion":"v1.0.0","previousBackupPath":sys.argv[1].rsplit('/',1)[0]+"/backups/previous","components":["wukong"],"services":[],"installedAt":"old","updatedAt":"old"},open(sys.argv[1],"w"))
+PY
+    cp "$HOME/.local/bin/wukong" "$TMP/current-before"
+    ! run_installer '' --mode binary --rollback >/dev/null 2>&1 || fail "rollback accepted missing compatibility declaration"
+    assert_same "$TMP/current-before" "$HOME/.local/bin/wukong"
+}
+
+test_docker_rollback() {
+    prepare
+    run_installer '' --mode docker --version v9.9.9 >/dev/null
+    FIXTURE_TAG=v9.9.8 FIXTURE_SAFE_TO=v9.9.9 make_release
+    FIXTURE_SAFE_TO=v9.9.9 run_installer '' --mode docker --upgrade --version v9.9.8 >/dev/null
+    run_installer '' --mode docker --rollback >/dev/null
+    python3 - "$DEPLOYMENT/.wukong-release" <<'PY'
+import json,sys
+assert json.load(open(sys.argv[1]))["productTag"] == "v9.9.9"
+PY
+}
+
+test_docker_recovery() {
+    prepare
+    run_installer '' --mode docker --version v9.9.9 >/dev/null
+    cp "$DEPLOYMENT/.wukong-release" "$TMP/docker-metadata-before"
+    cp "$DEPLOYMENT/docker-compose.yml" "$TMP/compose-before"
+    FIXTURE_TAG=v9.9.8 make_release
+    ! FIXTURE_DOCKER_PS_EXIT=1 run_installer '' --mode docker --upgrade --version v9.9.8 >/dev/null 2>&1 || fail "unhealthy Docker upgrade succeeded"
+    assert_same "$TMP/docker-metadata-before" "$DEPLOYMENT/.wukong-release"
+    assert_same "$TMP/compose-before" "$DEPLOYMENT/docker-compose.yml"
+}
+
+test_binary_recovery() {
+    prepare
+    mkdir -p "$HOME/.local/bin" "$HOME/.wukong"
+    printf 'old-cli\n' > "$HOME/.local/bin/wukong"; chmod +x "$HOME/.local/bin/wukong"
+    python3 - "$HOME/.wukong/install.json" <<'PY'
+import json,sys
+json.dump({"schemaVersion":1,"mode":"binary","target":"x86_64-unknown-linux-musl","productTag":"v1.0.0","previousVersion":None,"previousBackupPath":None,"components":["wukong"],"services":[],"installedAt":"old","updatedAt":"old"},open(sys.argv[1],"w"))
+PY
+    cp "$HOME/.local/bin/wukong" "$TMP/binary-before"; cp "$HOME/.wukong/install.json" "$TMP/metadata-before"
+    ! WUKONG_FAIL_BINARY_ACTIVATION=1 run_installer '' --mode binary --upgrade --version v9.9.9 >/dev/null 2>&1 || fail "injected binary activation failure succeeded"
+    assert_same "$TMP/binary-before" "$HOME/.local/bin/wukong"
+    assert_same "$TMP/metadata-before" "$HOME/.wukong/install.json"
+}
+
 case "$CASE" in
     parsing) test_parsing ;;
     verification) test_verification ;;
@@ -217,7 +299,13 @@ case "$CASE" in
     binary-clean) test_binary_clean ;;
     binary-upgrade) test_binary_upgrade ;;
     systemd) test_systemd ;;
-    all) test_parsing; test_verification; test_docker; test_metadata; test_binary_clean; test_binary_upgrade; test_systemd ;;
+    rollback-metadata) test_rollback_metadata ;;
+    legacy-rollback) test_legacy_rollback ;;
+    compatibility) test_rollback_guard ;;
+    docker-rollback) test_docker_rollback ;;
+    docker-recovery) test_docker_recovery ;;
+    binary-recovery) test_binary_recovery ;;
+    all) test_parsing; test_verification; test_docker; test_metadata; test_binary_clean; test_binary_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
     *) fail "unknown test case: $CASE" ;;
 esac
 

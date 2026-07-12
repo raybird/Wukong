@@ -5,6 +5,7 @@ TAG_RE='^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$'
 RC_RE='^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*$'
 TAG=""
 PROMOTE_FROM=""
+REHEARSAL_REPORT=""
 DRY_RUN=false
 
 die() {
@@ -14,7 +15,7 @@ die() {
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/release.sh <vX.Y.Z|vX.Y.Z-rc.N> [--promote-from vX.Y.Z-rc.N] [--dry-run]
+Usage: scripts/release.sh <vX.Y.Z|vX.Y.Z-rc.N> [--promote-from vX.Y.Z-rc.N] [--rehearsal-report path] [--dry-run]
 USAGE
 }
 
@@ -66,6 +67,17 @@ require_promotion_source() {
   git rev-parse --verify --quiet "refs/tags/$PROMOTE_FROM" >/dev/null || die "source RC tag does not exist: $PROMOTE_FROM"
   [[ "$(git cat-file -t "$PROMOTE_FROM")" == tag ]] || die "source RC must be annotated"
   [[ "$(git rev-parse "$PROMOTE_FROM^{commit}")" == "$(git rev-parse HEAD)" ]] || die "source RC must point to HEAD"
+}
+
+require_rehearsal_report() {
+  [[ "$CHANNEL" == stable ]] || return 0
+  [[ -n "$REHEARSAL_REPORT" ]] || die "stable releases require --rehearsal-report"
+  [[ "$REHEARSAL_REPORT" != /* && "$REHEARSAL_REPORT" != *".."* ]] || die "rehearsal report must be a repository-relative path"
+  [[ -f "$REHEARSAL_REPORT" ]] || die "rehearsal report is missing: $REHEARSAL_REPORT"
+  [[ -z "$(git status --porcelain=v1 -- "$REHEARSAL_REPORT")" ]] || die "rehearsal report must be committed at HEAD"
+  local source_digest
+  source_digest="$(git show "$PROMOTE_FROM:release-manifest.json" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["image"]["digest"])')" || die "source RC manifest is unavailable"
+  scripts/validate-rehearsal-report.sh "$REHEARSAL_REPORT" "$PROMOTE_FROM" "$(git rev-parse HEAD)" "$source_digest" || die "rehearsal report does not satisfy stable promotion gate"
 }
 
 require_lockfile() {
@@ -128,6 +140,8 @@ create_and_push_tag() {
   if [[ "$CHANNEL" == stable ]]; then
     annotation+=$'\n'
     annotation+="promote-from: $PROMOTE_FROM"
+    annotation+=$'\n'
+    annotation+="rehearsal-report: $REHEARSAL_REPORT"
   fi
 
   git tag -a "$TAG" -m "$annotation"
@@ -180,6 +194,11 @@ while (($#)); do
       PROMOTE_FROM="$2"
       shift 2
       ;;
+    --rehearsal-report)
+      [[ $# -ge 2 && -z "$REHEARSAL_REPORT" ]] || die "invalid --rehearsal-report"
+      REHEARSAL_REPORT="$2"
+      shift 2
+      ;;
     --dry-run)
       $DRY_RUN && die "duplicate --dry-run"
       DRY_RUN=true
@@ -218,6 +237,7 @@ require_synced_upstream
 require_tag_absent
 require_changelog
 require_promotion_source
+require_rehearsal_report
 require_lockfile
 require_release_compose
 require_gh

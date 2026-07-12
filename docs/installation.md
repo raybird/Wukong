@@ -54,6 +54,9 @@ curl -fsSL ... | bash -s -- --mode binary --upgrade
 
 # 新安裝或升級時明確加入 Linux Scheduler service
 curl -fsSL ... | bash -s -- --mode binary --upgrade --with-schedulerd
+
+# 回復最後一個已驗證的 Binary transaction
+curl -fsSL ... | bash -s -- --mode binary --rollback
 ```
 
 ## 安裝 prerelease / RC 版本
@@ -77,6 +80,10 @@ curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install
 Prerelease 適合驗證新功能或修補，例如 runtime skill assets、Docker entrypoint、binary 安裝行為等。正式部署仍建議使用 latest stable。指定 prerelease tag 時，該 GitHub Release 必須包含完整 assets、全域 `SHA256SUMS`、`release-manifest.json` 與 Docker bundle。Binary 安裝資訊儲於 `~/.wukong/install.json`（權限 `0600`）；設定與 workspace 不會在升級時被覆寫。
 
 `wukong-schedulerd` 的 managed unit 只在 Linux 上可用；macOS Binary mode 會安裝 binary，但不會建立或啟動 systemd service。
+
+## Rollback
+
+Binary rollback 只使用 `~/.wukong/install.json` 指向的已驗證上一個 transaction，成功後會旋轉 current/previous metadata。第一次從 legacy 安裝升級時會建立 hash-checked backup；config、data 與 workspace 永遠不包含在 backup。缺少、損毀或宣告不可逆 migration 的 compatibility metadata 都會在 mutation 前拒絕 rollback；先備份受影響 state，再依 manifest 的 recovery instructions 處理。
 
 ## 從原始碼建置
 

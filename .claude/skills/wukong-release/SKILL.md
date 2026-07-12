@@ -74,10 +74,10 @@ Use the release command after the candidate commit is clean and synchronized:
 ```bash
 ./scripts/release.sh vX.Y.Z-rc.N --dry-run
 ./scripts/release.sh vX.Y.Z-rc.N
-./scripts/release.sh vX.Y.Z --promote-from vX.Y.Z-rc.N
+./scripts/release.sh vX.Y.Z --promote-from vX.Y.Z-rc.N --rehearsal-report docs/release-rehearsals/vX.Y.Z-rc.N.json
 ```
 
-The stable command requires the source RC and stable tag to resolve to the same commit. It creates `promote-from:` annotation metadata. CI verifies the RC manifest/checksum and promotes the existing GHCR digest to the stable tag; it never rebuilds the stable image. Never manually create, move, or reuse public release tags.
+The stable command requires the source RC and stable tag to resolve to the same commit plus a committed PASS rehearsal report. It creates `promote-from:` and `rehearsal-report:` annotation metadata. CI independently verifies the RC manifest/checksum, rehearsal rows, commit, and digest before promoting the existing GHCR digest; it never rebuilds the stable image. Never manually create, move, or reuse public release tags.
 
 ## Watch Release Workflow
 

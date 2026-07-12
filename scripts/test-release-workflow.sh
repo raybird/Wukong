@@ -14,7 +14,7 @@ for contract in \
   'docker buildx build --platform linux/amd64 --push' 'gh release download "$PROMOTE_FROM"' \
   'SHA256SUMS' 'release-manifest.json' 'scripts/generate-sha256sums.sh dist' \
   'name: release-assets' 'files: dist/*' \
-  'cp release/package.json release/package-lock.json release-context/release/'; do
+  'cp release/package.json release/package-lock.json release-context/release/' 'rehearsal-report:' 'scripts/validate-rehearsal-report.sh' '--data-compatibility release/data-compatibility.json'; do
   require_text "$contract"
 done
 

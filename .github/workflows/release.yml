@@ -40,12 +40,19 @@ jobs:
           if [[ "$tag" =~ $rc_re ]]; then
             ! grep -Eq '^promote-from:' <<<"$annotation"
             channel=rc
-          else
-            promote_from="$(grep -E '^promote-from: v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*$' <<<"$annotation" | cut -d' ' -f2)"
-            [[ "$(wc -l <<<"$promote_from" | tr -d ' ')" == 1 ]]
-            [[ "${promote_from%-rc.*}" == "$tag" ]]
-            [[ "$(git rev-parse "$promote_from^{commit}")" == "$(git rev-parse "$tag^{commit}")" ]]
-            channel=stable
+           else
+             promote_from="$(grep -E '^promote-from: v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*$' <<<"$annotation" | cut -d' ' -f2)"
+             rehearsal_report="$(grep -E '^rehearsal-report: docs/release-rehearsals/v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*\.json$' <<<"$annotation" | cut -d' ' -f2)"
+             [[ "$(wc -l <<<"$promote_from" | tr -d ' ')" == 1 ]]
+             [[ "$(wc -l <<<"$rehearsal_report" | tr -d ' ')" == 1 && -f "$rehearsal_report" ]]
+             [[ "${promote_from%-rc.*}" == "$tag" ]]
+             [[ "$(git rev-parse "$promote_from^{commit}")" == "$(git rev-parse "$tag^{commit}")" ]]
+             mkdir source
+             gh release download "$promote_from" --pattern release-manifest.json --pattern SHA256SUMS --dir source
+             (cd source && grep -F ' release-manifest.json' SHA256SUMS | sha256sum -c -)
+             source_digest="$(python3 -c 'import json; print(json.load(open("source/release-manifest.json"))["image"]["digest"])')"
+             scripts/validate-rehearsal-report.sh "$rehearsal_report" "$promote_from" "$(git rev-parse "$tag^{commit}")" "$source_digest"
+             channel=stable
           fi
           printf 'tag=%s\nchannel=%s\ncommit=%s\npromote_from=%s\n' "$tag" "$channel" "$(git rev-parse "$tag^{commit}")" "$promote_from" >> "$GITHUB_OUTPUT"
       - name: Validate locked dependency graph
@@ -212,9 +219,10 @@ jobs:
           mkdir -p dist/wukong-docker/scripts
           cp dist/docker-compose.yml dist/wukong-docker/docker-compose.yml
           cp .env.example LICENSE dist/wukong-docker/
+          cp release/data-compatibility.json dist/wukong-docker/
           cp scripts/install.sh dist/wukong-docker/scripts/install.sh
           runtime_inputs="$(python3 -c 'import json; d={}; [d.__setitem__(*line.strip().split("=", 1)) for line in open("release/runtime-inputs.env") if line.strip() and not line.startswith("#")]; print(json.dumps(d, sort_keys=True))')"
-          scripts/generate-release-manifest.sh --tag "$TAG" --commit "$COMMIT" --channel "$CHANNEL" --promoted-from "$PROMOTE_FROM" --image-reference "ghcr.io/raybird/wukong:$TAG" --image-digest "$IMAGE_DIGEST" --platform linux/amd64 --runtime-inputs "$runtime_inputs" --output dist/wukong-docker/release-manifest.json
+          scripts/generate-release-manifest.sh --tag "$TAG" --commit "$COMMIT" --channel "$CHANNEL" --promoted-from "$PROMOTE_FROM" --image-reference "ghcr.io/raybird/wukong:$TAG" --image-digest "$IMAGE_DIGEST" --platform linux/amd64 --runtime-inputs "$runtime_inputs" --data-compatibility release/data-compatibility.json --output dist/wukong-docker/release-manifest.json
           cp dist/wukong-docker/release-manifest.json dist/release-manifest.json
           tar -C dist -czf "dist/wukong-docker-$TAG.tar.gz" wukong-docker
           rm -rf dist/wukong-docker dist/docker-compose.yml
