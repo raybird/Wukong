@@ -46,6 +46,7 @@ new_fixture() {
   cp "$repo_root/Cargo.lock" "$FIXTURE_WORK/Cargo.lock"
   cp "$repo_root/CHANGELOG.md" "$FIXTURE_WORK/CHANGELOG.md"
   cp "$repo_root/.github/workflows/release.yml" "$FIXTURE_WORK/.github/workflows/release.yml"
+  cp "$repo_root/docker-compose.release.yml" "$FIXTURE_WORK/docker-compose.release.yml"
   cp "$repo_root/scripts/install.sh" "$FIXTURE_WORK/scripts/install.sh"
   cp "$release_script" "$FIXTURE_WORK/scripts/release.sh"
   chmod +x "$FIXTURE_WORK/scripts/release.sh"
@@ -67,7 +68,7 @@ case "$1 $2" in
   "run watch") exit "${FAKE_GH_WATCH_EXIT:-0}" ;;
   "release view")
     if [[ "$*" == *"assets"* ]]; then
-      printf '%s\n' wukong-x86_64-unknown-linux-gnu.tar.gz wukong-telegram-x86_64-unknown-linux-gnu.tar.gz wukong-web-x86_64-unknown-linux-gnu.tar.gz wukong-schedulerd-x86_64-unknown-linux-gnu.tar.gz wukong-x86_64-unknown-linux-musl.tar.gz wukong-telegram-x86_64-unknown-linux-musl.tar.gz wukong-web-x86_64-unknown-linux-musl.tar.gz wukong-schedulerd-x86_64-unknown-linux-musl.tar.gz wukong-aarch64-apple-darwin.tar.gz wukong-telegram-aarch64-apple-darwin.tar.gz wukong-web-aarch64-apple-darwin.tar.gz wukong-schedulerd-aarch64-apple-darwin.tar.gz checksums-x86_64-unknown-linux-gnu.txt checksums-x86_64-unknown-linux-musl.txt checksums-aarch64-apple-darwin.txt wukong-docker-v0.18.0-rc.1.tar.gz
+      printf '%s\n' wukong-x86_64-unknown-linux-gnu.tar.gz wukong-telegram-x86_64-unknown-linux-gnu.tar.gz wukong-web-x86_64-unknown-linux-gnu.tar.gz wukong-schedulerd-x86_64-unknown-linux-gnu.tar.gz wukong-x86_64-unknown-linux-musl.tar.gz wukong-telegram-x86_64-unknown-linux-musl.tar.gz wukong-web-x86_64-unknown-linux-musl.tar.gz wukong-schedulerd-x86_64-unknown-linux-musl.tar.gz wukong-aarch64-apple-darwin.tar.gz wukong-telegram-aarch64-apple-darwin.tar.gz wukong-web-aarch64-apple-darwin.tar.gz wukong-schedulerd-aarch64-apple-darwin.tar.gz checksums-x86_64-unknown-linux-gnu.txt checksums-x86_64-unknown-linux-musl.txt checksums-aarch64-apple-darwin.txt wukong-docker-v0.18.0-rc.1.tar.gz release-manifest.json SHA256SUMS
     else
       printf 'v0.18.0-rc.1\ttrue\n'
     fi
@@ -138,6 +139,18 @@ assert_fixture_quality_gate() {
     scripts/release.sh v0.18.0-rc.1 --dry-run)" || fail "quality gate: expected success"
   [[ "$output" == *"dry run"* ]] || fail "quality gate: expected dry-run plan"
   [[ "$(paste -sd, "$log")" == "first,second" ]] || fail "quality gate: checks did not run in order"
+}
+
+assert_fixture_release_compose_rejected() {
+  local description="$1" expected="$2" mutation="$3" output
+  eval "$mutation"
+  git -C "$FIXTURE_WORK" add -A
+  git -C "$FIXTURE_WORK" commit -m "mutate release compose" >/dev/null
+  git -C "$FIXTURE_WORK" push origin main >/dev/null
+  if output="$(cd "$FIXTURE_WORK" && WUKONG_RELEASE_UNDER_TEST=1 PATH="$FIXTURE_BIN:$PATH" scripts/release.sh v0.18.0-rc.1 --dry-run 2>&1)"; then
+    fail "$description: expected failure"
+  fi
+  [[ "$output" == *"$expected"* ]] || fail "$description: expected $expected, got: $output"
 }
 
 assert_fixture_rc_tag_pushed() {
@@ -278,6 +291,18 @@ assert_fixture_rejected "stable changelog date" "stable changelog entry needs a 
 destroy_fixture
 new_fixture
 assert_fixture_metadata_rejected
+
+destroy_fixture
+new_fixture
+assert_fixture_release_compose_rejected "missing release compose" "missing docker-compose.release.yml" 'rm "$FIXTURE_WORK/docker-compose.release.yml"'
+
+destroy_fixture
+new_fixture
+assert_fixture_release_compose_rejected "release compose build" "must not contain build" 'printf "    build: .\n" >> "$FIXTURE_WORK/docker-compose.release.yml"'
+
+destroy_fixture
+new_fixture
+assert_fixture_release_compose_rejected "release compose placeholder count" "must contain five image placeholders" "sed -i 's/__WUKONG_VERSION__/v0.18.0/g' \"\$FIXTURE_WORK/docker-compose.release.yml\""
 
 destroy_fixture
 new_fixture

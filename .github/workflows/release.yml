@@ -6,17 +6,27 @@ on:
 
 permissions:
   contents: write
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   validate:
     name: Validate release tag
     runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.release.outputs.channel }}
+      tag: ${{ steps.release.outputs.tag }}
+      commit: ${{ steps.release.outputs.commit }}
+      promote_from: ${{ steps.release.outputs.promote_from }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Validate tag and promotion metadata
+      - id: release
+        name: Validate tag and promotion metadata
         shell: bash
         run: |
           set -euo pipefail
@@ -26,28 +36,26 @@ jobs:
           [[ "$tag" =~ $rc_re || "$tag" =~ $stable_re ]]
           [[ "$(git cat-file -t "refs/tags/$tag")" == tag ]]
           annotation="$(git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(contents)')"
+          promote_from=""
           if [[ "$tag" =~ $rc_re ]]; then
             ! grep -Eq '^promote-from:' <<<"$annotation"
+            channel=rc
           else
             promote_from="$(grep -E '^promote-from: v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*$' <<<"$annotation" | cut -d' ' -f2)"
             [[ "$(wc -l <<<"$promote_from" | tr -d ' ')" == 1 ]]
             [[ "${promote_from%-rc.*}" == "$tag" ]]
             [[ "$(git rev-parse "$promote_from^{commit}")" == "$(git rev-parse "$tag^{commit}")" ]]
+            channel=stable
           fi
-
+          printf 'tag=%s\nchannel=%s\ncommit=%s\npromote_from=%s\n' "$tag" "$channel" "$(git rev-parse "$tag^{commit}")" "$promote_from" >> "$GITHUB_OUTPUT"
       - name: Validate locked dependency graph
         run: cargo metadata --locked --format-version 1 >/dev/null
 
-  # Build every target in parallel, but DO NOT upload to the release here.
-  # Each job publishes its artifacts to the workflow run; the single `publish`
-  # job below collects them and uploads once. This avoids the concurrency race
-  # where parallel matrix jobs stepped on each other's release-asset writes
-  # (softprops "Not Found - delete-a-release-asset").
   build-binaries:
     name: Build (${{ matrix.target }})
     needs: validate
+    if: needs.validate.outputs.channel == 'rc'
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -56,93 +64,180 @@ jobs:
             runner: ubuntu-latest
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-latest
-          # Apple Silicon only. Intel (x86_64-apple-darwin) was dropped:
-          # Apple shipped arm64 since 2020 and stopped selling Intel Macs in
-          # 2023, and it was already a cross-compile from the arm64 runner.
           - target: aarch64-apple-darwin
             runner: macos-latest
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
       - name: Install musl tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update -y && sudo apt-get install -y musl-tools
-
-      - name: Build release
+      - name: Build release binaries
         run: cargo build --release --locked --target ${{ matrix.target }}
-
-      - name: Package artifacts
+      - name: Package target archives
         shell: bash
         run: |
-          mkdir -p dist
+          set -euo pipefail
+          mkdir -p dist/public dist/binaries
           cd target/${{ matrix.target }}/release
           for bin in wukong wukong-telegram wukong-web wukong-schedulerd; do
-            cp "$bin" ../../../dist/
-            tar -czf "../../../dist/$bin-${{ matrix.target }}.tar.gz" "$bin"
+            tar -czf "../../../dist/public/$bin-${{ matrix.target }}.tar.gz" "$bin"
+            if [[ "${{ matrix.target }}" == x86_64-unknown-linux-musl ]]; then cp "$bin" "../../../dist/binaries/$bin"; fi
           done
           cd ../../..
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum dist/*.tar.gz > "dist/checksums-${{ matrix.target }}.txt"
-          else
-            shasum -a 256 dist/*.tar.gz > "dist/checksums-${{ matrix.target }}.txt"
-          fi
-
-      - name: Package Docker compose bundle
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: |
-          VERSION="${GITHUB_REF_NAME}"
-          mkdir -p dist/wukong-docker/scripts dist/wukong-docker/workspace dist/wukong-docker/crates/wukong-skills/assets
-          cp .env.example dist/wukong-docker/.env.example
-          cp Dockerfile dist/wukong-docker/Dockerfile
-          sed -i "s/^ARG VERSION=.*/ARG VERSION=${VERSION}/" dist/wukong-docker/Dockerfile
-          cp scripts/docker-entrypoint.sh dist/wukong-docker/scripts/docker-entrypoint.sh
-          cp docker-compose.yml dist/wukong-docker/docker-compose.yml
-          cp -R crates/wukong-skills/assets/superpowers dist/wukong-docker/crates/wukong-skills/assets/superpowers
-          cp workspace/SOUL.md dist/wukong-docker/workspace/SOUL.md
-          cp workspace/AGENTS.md dist/wukong-docker/workspace/AGENTS.md
-          cd dist
-          tar -czf "wukong-docker-${VERSION}.tar.gz" wukong-docker
-          rm -rf wukong-docker
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+          if command -v sha256sum >/dev/null 2>&1; then sha256sum dist/public/*.tar.gz > "dist/public/checksums-${{ matrix.target }}.txt"; else shasum -a 256 dist/public/*.tar.gz > "dist/public/checksums-${{ matrix.target }}.txt"; fi
+      - uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.target }}
-          path: dist/
+          name: release-assets-${{ matrix.target }}
+          path: dist/public/
+          retention-days: 1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        with:
+          name: musl-binaries
+          path: dist/binaries/
           retention-days: 1
           if-no-files-found: error
 
-  # Single serialized publish step: collect every target's artifacts and upload
-  # them to the release in one action invocation, so there is no cross-job race.
-  publish:
-    name: Publish release
-    needs: build-binaries
+  publish-image:
+    name: Publish or promote image
+    needs: [validate, build-binaries]
+    if: always() && needs.validate.result == 'success' && (needs.validate.outputs.channel == 'stable' || needs.build-binaries.result == 'success')
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.image.outputs.digest }}
     steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - name: Install registry client
+        run: |
+          set -euo pipefail
+          REGCTL_VERSION=v0.8.1
+          curl -fsSL "https://github.com/regclient/regclient/releases/download/${REGCTL_VERSION}/regctl-linux-amd64" -o /usr/local/bin/regctl
+          chmod +x /usr/local/bin/regctl
+      - name: Log in to GHCR
+        run: echo "${{ github.token }}" | regctl registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - uses: actions/download-artifact@v4
+        if: needs.validate.outputs.channel == 'rc'
         with:
-          path: artifacts
-
-      - name: Collect release files
+          name: musl-binaries
+          path: release-context/binaries
+      - id: image
+        name: Publish RC image or promote stable digest
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+          CHANNEL: ${{ needs.validate.outputs.channel }}
+          COMMIT: ${{ needs.validate.outputs.commit }}
+          PROMOTE_FROM: ${{ needs.validate.outputs.promote_from }}
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          mkdir -p dist
-          # Flatten every target's dist/ into one directory. Target-suffixed
-          # tarballs, checksums, and the docker bundle are uniquely named; the
-          # bare binaries share a name across targets and collapse to one
-          # (unchanged from the previous release layout).
-          find artifacts -type f -exec cp -f {} dist/ \;
-          ls -la dist
+          set -euo pipefail
+          image=ghcr.io/raybird/wukong
+          digest_of() { regctl image digest "$1" 2>/dev/null || true; }
+          attach_immutable() {
+            local tag="$1" expected="$2" actual
+            actual="$(digest_of "$image:$tag")"
+            if [[ -n "$actual" && "$actual" != "$expected" ]]; then
+              printf 'immutable tag conflict: %s resolves to %s, expected %s\n' "$tag" "$actual" "$expected" >&2
+              exit 1
+            fi
+            if [[ -z "$actual" ]]; then regctl image copy "$image@$expected" "$image:$tag"; fi
+            [[ "$(digest_of "$image:$tag")" == "$expected" ]]
+          }
+          if [[ "$CHANNEL" == rc ]]; then
+            mkdir -p release-context/release release-context/workspace release-context/crates/wukong-skills/assets release-context/scripts
+            cp Dockerfile.release release-context/
+            cp release/package.json release/package-lock.json release-context/release/
+            cp workspace/SOUL.md workspace/AGENTS.md release-context/workspace/
+            cp -R crates/wukong-skills/assets/superpowers release-context/crates/wukong-skills/assets/
+            cp scripts/docker-entrypoint.sh release-context/scripts/
+            set -a; source release/runtime-inputs.env; set +a
+            docker buildx build --platform linux/amd64 --push --metadata-file metadata.json \
+              --file release-context/Dockerfile.release --tag "$image:build-$COMMIT" \
+              --build-arg BASE_IMAGE="$BASE_IMAGE" --build-arg DEBIAN_SNAPSHOT="$DEBIAN_SNAPSHOT" \
+              --build-arg OPENCODE_VERSION="$OPENCODE_VERSION" --build-arg AGENT_REACH_REF="$AGENT_REACH_REF" \
+              --build-arg AGENT_REACH_ARCHIVE_SHA256="$AGENT_REACH_ARCHIVE_SHA256" --build-arg PRODUCT_TAG="$TAG" \
+              --build-arg BUILD_ORIGIN_TAG="$TAG" --build-arg REVISION="$COMMIT" \
+              --build-arg CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" release-context
+            image_digest="$(python3 -c 'import json; print(json.load(open("metadata.json"))["containerimage.digest"])')"
+            attach_immutable "$TAG" "$image_digest"
+            attach_immutable "sha-$COMMIT" "$image_digest"
+            docker buildx imagetools inspect "$image@$image_digest" >/dev/null
+          else
+            mkdir source
+            gh release download "$PROMOTE_FROM" --pattern release-manifest.json --pattern SHA256SUMS --dir source
+            (cd source && grep -F ' release-manifest.json' SHA256SUMS | sha256sum -c -)
+            read -r source_tag source_commit source_digest < <(python3 -c 'import json; d=json.load(open("source/release-manifest.json")); print(d["productTag"], d["commit"], d["image"]["digest"])')
+            [[ "$source_tag" == "$PROMOTE_FROM" && "$source_commit" == "$COMMIT" && "$source_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "$(digest_of "$image:$PROMOTE_FROM")" == "$source_digest" ]]
+            [[ "$(digest_of "$image:sha-$COMMIT")" == "$source_digest" ]]
+            image_digest="$source_digest"
+            attach_immutable "$TAG" "$image_digest"
+          fi
+          printf 'digest=%s\n' "$image_digest" >> "$GITHUB_OUTPUT"
 
-      - name: Upload to release
-        uses: softprops/action-gh-release@v2
+  package-release:
+    name: Package release assets
+    needs: [validate, build-binaries, publish-image]
+    if: always() && needs.publish-image.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        if: needs.validate.outputs.channel == 'rc'
+        with:
+          pattern: release-assets-*
+          path: artifacts
+          merge-multiple: true
+      - name: Assemble public artifacts
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+          CHANNEL: ${{ needs.validate.outputs.channel }}
+          COMMIT: ${{ needs.validate.outputs.commit }}
+          PROMOTE_FROM: ${{ needs.validate.outputs.promote_from }}
+          IMAGE_DIGEST: ${{ needs.publish-image.outputs.digest }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          if [[ "$CHANNEL" == rc ]]; then cp artifacts/* dist/; else gh release download "$PROMOTE_FROM" --pattern 'wukong-*.tar.gz' --pattern 'checksums-*.txt' --dir dist; rm -f dist/wukong-docker-*.tar.gz; fi
+          for target in x86_64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-apple-darwin; do
+            test "$(find dist -maxdepth 1 -name "*-$target.tar.gz" -type f | wc -l | tr -d ' ')" = 4
+            test -f "dist/checksums-$target.txt"
+          done
+          sed "s/__WUKONG_VERSION__/$TAG/g" docker-compose.release.yml > dist/docker-compose.yml
+          ! grep -Eq '__WUKONG_VERSION__|^[[:space:]]*build:' dist/docker-compose.yml
+          mkdir -p dist/wukong-docker/scripts
+          cp dist/docker-compose.yml dist/wukong-docker/docker-compose.yml
+          cp .env.example LICENSE dist/wukong-docker/
+          cp scripts/install.sh dist/wukong-docker/scripts/install.sh
+          runtime_inputs="$(python3 -c 'import json; d={}; [d.__setitem__(*line.strip().split("=", 1)) for line in open("release/runtime-inputs.env") if line.strip() and not line.startswith("#")]; print(json.dumps(d, sort_keys=True))')"
+          scripts/generate-release-manifest.sh --tag "$TAG" --commit "$COMMIT" --channel "$CHANNEL" --promoted-from "$PROMOTE_FROM" --image-reference "ghcr.io/raybird/wukong:$TAG" --image-digest "$IMAGE_DIGEST" --platform linux/amd64 --runtime-inputs "$runtime_inputs" --output dist/wukong-docker/release-manifest.json
+          cp dist/wukong-docker/release-manifest.json dist/release-manifest.json
+          tar -C dist -czf "dist/wukong-docker-$TAG.tar.gz" wukong-docker
+          rm -rf dist/wukong-docker dist/docker-compose.yml
+          scripts/generate-sha256sums.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish release
+    needs: package-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+      - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           fail_on_unmatched_files: true

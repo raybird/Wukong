@@ -1,6 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+release_compose="docker-compose.release.yml"
+if [[ ! -f "$release_compose" ]]; then
+  echo "missing release compose: $release_compose" >&2
+  exit 1
+fi
+
+if grep -Eq '^[[:space:]]*build:' "$release_compose"; then
+  echo "release compose must not contain build directives" >&2
+  exit 1
+fi
+
+image_count=$(grep -Fc 'ghcr.io/raybird/wukong:__WUKONG_VERSION__' "$release_compose" || true)
+if [[ "$image_count" != 5 ]]; then
+  echo "release compose must pin all five services to the product placeholder" >&2
+  exit 1
+fi
+
+if grep -Fq ':latest' "$release_compose"; then
+  echo "release compose must not use latest" >&2
+  exit 1
+fi
+
 compose_file="docker-compose.yml"
 entrypoint="scripts/docker-entrypoint.sh"
 dockerfile="Dockerfile"
@@ -57,10 +79,19 @@ require_in_file "COPY crates/wukong-skills/assets/superpowers /usr/local/share/w
     "Docker image must package Superpowers skill assets"
 require_in_file "/usr/local/share/wukong/skills/superpowers" "$dockerfile" \
     "Dockerfile must use the canonical image skill asset path"
-require_in_file "dist/wukong-docker/crates/wukong-skills/assets" "$release_workflow" \
-    "Docker release bundle must include the skill asset parent directory"
-require_in_file "cp -R crates/wukong-skills/assets/superpowers dist/wukong-docker/crates/wukong-skills/assets/superpowers" "$release_workflow" \
-    "Docker release bundle must include Superpowers skill assets in the Docker build context"
+require_in_file "# Development-only Compose" "$compose_file" \
+    "development Compose must identify its local-build role"
+require_in_file "# Release deployment template" "$release_compose" \
+    "release Compose must identify its pull-only role"
+for service in wukong opencode-server wukong-telegram wukong-web wukong-schedulerd; do
+    require_in_file "  $service:" "$release_compose" "release Compose must include $service"
+done
+require_in_file 'WUKONG_WEB_BIND:-127.0.0.1' "$release_compose" \
+    "release Compose must retain the loopback web default"
+require_in_file 'curl -fsS http://localhost:4096/global/health || exit 1' "$release_compose" \
+    "release Compose must retain the OpenCode healthcheck"
+require_count_in_file "condition: service_healthy" 3 "$release_compose" \
+    "release services must retain server dependencies"
 require_in_file 'IMAGE_SKILLS="/usr/local/share/wukong/skills/superpowers"' "$entrypoint" \
     "entrypoint must define image skill asset source"
 require_in_file 'WORKSPACE_SKILLS="$WUKONG_WORKSPACE/.wukong/skills/superpowers"' "$entrypoint" \

@@ -18,6 +18,9 @@
 - 新增 `scripts/release.sh` 作為唯一維護者 release gate：驗證候選 commit、建立 annotated tag、監看 workflow，並驗證 GitHub Release channel 與 assets。
 - Release workflow 在建置前驗證 annotated RC/stable promotion metadata 與 locked Cargo dependency graph。
 - 新增 deterministic `release-manifest.json` 與 aggregate `SHA256SUMS` generator，供後續 GHCR 與 installer migration 使用。
+- RC 發佈會由 CI 建置的 musl binaries 產生 immutable `linux/amd64` GHCR image；product 與 commit tags 若已指向不同 digest 會拒絕覆寫。
+- Stable promotion 驗證來源 RC manifest、checksums、commit 與 GHCR tags，將 stable tag 指向同一 digest，不重建 image 或 binaries。
+- Docker release bundle 改為 pull-only Compose、`.env.example`、license、installer 與 release manifest 的最小內容，所有公開 release assets 由全域 `SHA256SUMS` 覆蓋。
 
 ## [0.17.1] - 2026-07-08
 

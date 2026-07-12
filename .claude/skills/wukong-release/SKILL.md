@@ -46,6 +46,8 @@ Use the checks relevant to the release. For normal runtime/Docker releases, run:
 ```bash
 scripts/test-docker-runtime.sh
 scripts/test-release-workflow.sh
+scripts/test-release-manifest.sh
+scripts/test-release-image.sh
 cargo test -p wukong-skills -p wukong-runtime
 cargo test
 ```
@@ -75,11 +77,11 @@ Use the release command after the candidate commit is clean and synchronized:
 ./scripts/release.sh vX.Y.Z --promote-from vX.Y.Z-rc.N
 ```
 
-The stable command requires the source RC and stable tag to resolve to the same commit. It creates `promote-from:` annotation metadata. Never manually create, move, or reuse public release tags.
+The stable command requires the source RC and stable tag to resolve to the same commit. It creates `promote-from:` annotation metadata. CI verifies the RC manifest/checksum and promotes the existing GHCR digest to the stable tag; it never rebuilds the stable image. Never manually create, move, or reuse public release tags.
 
 ## Watch Release Workflow
 
-`scripts/release.sh` waits for the tag-filtered workflow run and verifies the prerelease channel plus all expected assets. Do not call the manual watch commands as a substitute for the release gate.
+`scripts/release.sh` waits for the tag-filtered workflow run and verifies the prerelease channel plus all expected assets, including `release-manifest.json` and `SHA256SUMS`. RC publication builds a pinned image from musl artifacts and protects product/commit tags from digest conflicts. The bundle contains only the pull-only Compose deployment inputs; Phase 3 has not yet made the installer pull-only.
 
 ## Write Release Notes
 

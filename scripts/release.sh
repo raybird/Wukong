@@ -73,6 +73,14 @@ require_lockfile() {
   cargo metadata --locked --format-version 1 >/dev/null || die "cargo metadata --locked failed"
 }
 
+require_release_compose() {
+  local compose="docker-compose.release.yml" placeholders
+  [[ -f "$compose" ]] || die "missing docker-compose.release.yml"
+  ! grep -Eq '^[[:space:]]*build:' "$compose" || die "release compose must not contain build"
+  placeholders="$(grep -Fc 'ghcr.io/raybird/wukong:__WUKONG_VERSION__' "$compose" || true)"
+  [[ "$placeholders" == 5 ]] || die "release compose must contain five image placeholders"
+}
+
 require_gh() {
   command -v gh >/dev/null 2>&1 || die "gh is required"
   gh auth status >/dev/null || die "gh authentication failed"
@@ -101,6 +109,8 @@ run_required_checks() {
   run_check cargo clippy --all-targets --locked -- -D warnings
   run_check cargo test --workspace --locked
   run_check bash scripts/test-release-workflow.sh
+  run_check bash scripts/test-release-manifest.sh
+  run_check bash scripts/test-release-image.sh
   WUKONG_RELEASE_UNDER_TEST=1 run_check bash scripts/test-release-command.sh
   run_check bash scripts/test-installer-upgrade.sh
   run_check bash scripts/test-docker-runtime.sh
@@ -156,7 +166,9 @@ verify_release_assets() {
     checksums-x86_64-unknown-linux-gnu.txt \
     checksums-x86_64-unknown-linux-musl.txt \
     checksums-aarch64-apple-darwin.txt \
-    "wukong-docker-$TAG.tar.gz"; do
+    "wukong-docker-$TAG.tar.gz" \
+    release-manifest.json \
+    SHA256SUMS; do
     grep -Fxq "$asset" <<<"$assets" || die "GitHub Release is missing asset: $asset"
   done
 }
@@ -207,6 +219,7 @@ require_tag_absent
 require_changelog
 require_promotion_source
 require_lockfile
+require_release_compose
 require_gh
 run_required_checks
 require_clean_worktree
