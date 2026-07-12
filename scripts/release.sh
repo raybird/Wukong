@@ -104,16 +104,16 @@ run_check() {
 }
 
 run_required_checks() {
-  if [[ "${WUKONG_RELEASE_UNDER_TEST:-0}" == 1 ]]; then
-    return 0
-  fi
-
   if [[ "${WUKONG_RELEASE_TESTING:-0}" == 1 ]]; then
     [[ -n "${WUKONG_RELEASE_TEST_COMMANDS_FILE:-}" ]] || die "test command file is required"
     while read -r command argument; do
       [[ -n "$command" ]] || continue
       run_check "$command" "$argument"
     done < "$WUKONG_RELEASE_TEST_COMMANDS_FILE"
+    return 0
+  fi
+
+  if [[ "${WUKONG_RELEASE_UNDER_TEST:-0}" == 1 ]]; then
     return 0
   fi
 
