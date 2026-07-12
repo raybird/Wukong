@@ -153,9 +153,6 @@ verify_release_assets() {
     wukong-telegram-aarch64-apple-darwin.tar.gz \
     wukong-web-aarch64-apple-darwin.tar.gz \
     wukong-schedulerd-aarch64-apple-darwin.tar.gz \
-    checksums-x86_64-unknown-linux-gnu.txt \
-    checksums-x86_64-unknown-linux-musl.txt \
-    checksums-aarch64-apple-darwin.txt \
     "wukong-docker-$TAG.tar.gz" \
     release-manifest.json \
     SHA256SUMS; do

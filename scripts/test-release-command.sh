@@ -70,7 +70,7 @@ case "$1 $2" in
   "run watch") exit "${FAKE_GH_WATCH_EXIT:-0}" ;;
   "release view")
     if [[ "$*" == *"assets"* ]]; then
-      printf '%s\n' wukong-x86_64-unknown-linux-gnu.tar.gz wukong-telegram-x86_64-unknown-linux-gnu.tar.gz wukong-web-x86_64-unknown-linux-gnu.tar.gz wukong-schedulerd-x86_64-unknown-linux-gnu.tar.gz wukong-x86_64-unknown-linux-musl.tar.gz wukong-telegram-x86_64-unknown-linux-musl.tar.gz wukong-web-x86_64-unknown-linux-musl.tar.gz wukong-schedulerd-x86_64-unknown-linux-musl.tar.gz wukong-aarch64-apple-darwin.tar.gz wukong-telegram-aarch64-apple-darwin.tar.gz wukong-web-aarch64-apple-darwin.tar.gz wukong-schedulerd-aarch64-apple-darwin.tar.gz checksums-x86_64-unknown-linux-gnu.txt checksums-x86_64-unknown-linux-musl.txt checksums-aarch64-apple-darwin.txt wukong-docker-v0.18.0-rc.1.tar.gz release-manifest.json SHA256SUMS
+      printf '%s\n' wukong-x86_64-unknown-linux-gnu.tar.gz wukong-telegram-x86_64-unknown-linux-gnu.tar.gz wukong-web-x86_64-unknown-linux-gnu.tar.gz wukong-schedulerd-x86_64-unknown-linux-gnu.tar.gz wukong-x86_64-unknown-linux-musl.tar.gz wukong-telegram-x86_64-unknown-linux-musl.tar.gz wukong-web-x86_64-unknown-linux-musl.tar.gz wukong-schedulerd-x86_64-unknown-linux-musl.tar.gz wukong-aarch64-apple-darwin.tar.gz wukong-telegram-aarch64-apple-darwin.tar.gz wukong-web-aarch64-apple-darwin.tar.gz wukong-schedulerd-aarch64-apple-darwin.tar.gz wukong-docker-v0.18.0-rc.1.tar.gz release-manifest.json SHA256SUMS
     else
       printf 'v0.18.0-rc.1\ttrue\n'
     fi
