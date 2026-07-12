@@ -8,16 +8,20 @@ require_text() { grep -Fq -- "$1" "$workflow" || { echo "missing workflow contra
 for job in validate build-binaries publish-image package-release publish; do require_text "$job:"; done
 for contract in \
   'contents: write' 'packages: write' 'cancel-in-progress: false' 'needs: validate' \
-  "if: needs.validate.outputs.channel == 'rc'" 'needs: [validate, build-binaries]' \
+  'needs: [validate, build-binaries]' \
   'needs: [validate, build-binaries, publish-image]' 'needs: package-release' \
   'cargo build --release --locked' 'musl-binaries' 'REGCTL_VERSION=v0.8.1' 'regctl image digest' 'regctl image copy' \
-  'docker buildx build --platform linux/amd64 --push' 'gh release download "$PROMOTE_FROM"' \
-  'SHA256SUMS' 'release-manifest.json' 'scripts/generate-sha256sums.sh dist' \
+  'docker buildx build --platform linux/amd64 --push' 'attach_immutable latest' 'git show -s --format=%cI "$COMMIT"' \
+  'release-manifest.json' 'scripts/generate-sha256sums.sh dist' \
    'name: release-assets' 'files: dist/*' \
-   'cp release/package.json release/package-lock.json release-context/release/' 'rehearsal-report:' 'scripts/validate-rehearsal-report.sh' '--data-compatibility release/data-compatibility.json' \
+   'cp release/package.json release/package-lock.json release-context/release/' '--data-compatibility release/data-compatibility.json' \
    "printf 'validate: tag=%q\\n' \"\$tag\"" 'validate: annotation=' 'validate: channel=rc' \
    'refs/tags/release-source/$tag' 'uses: docker/login-action@v3'; do
   require_text "$contract"
+done
+
+for forbidden in 'rehearsal-report:' 'scripts/validate-rehearsal-report.sh' 'promote-from:' 'gh release download "$PROMOTE_FROM"'; do
+  ! grep -Fq -- "$forbidden" "$workflow" || { echo "obsolete workflow contract remains: $forbidden" >&2; exit 1; }
 done
 
 [[ "$(grep -Fc 'uses: softprops/action-gh-release@v2' "$workflow")" == 1 ]] || { echo "expected one release upload" >&2; exit 1; }

@@ -20,7 +20,6 @@ jobs:
       channel: ${{ steps.release.outputs.channel }}
       tag: ${{ steps.release.outputs.tag }}
       commit: ${{ steps.release.outputs.commit }}
-      promote_from: ${{ steps.release.outputs.promote_from }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,34 +41,20 @@ jobs:
           [[ "$tag_type" == tag ]] || { printf 'validate: tag is not annotated\n' >&2; exit 1; }
           annotation="$(git for-each-ref "$source_tag_ref" --format='%(contents)')"
           printf 'validate: annotation=%q\n' "$annotation"
-          promote_from=""
           if [[ "$tag" =~ $rc_re ]]; then
-            ! grep -Eq '^promote-from:' <<<"$annotation" || { printf 'validate: RC tag contains promotion metadata\n' >&2; exit 1; }
             channel=rc
             printf 'validate: channel=rc\n'
-           else
-             promote_from="$(grep -E '^promote-from: v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*$' <<<"$annotation" | cut -d' ' -f2)"
-             rehearsal_report="$(grep -E '^rehearsal-report: docs/release-rehearsals/v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*\.json$' <<<"$annotation" | cut -d' ' -f2)"
-             [[ "$(wc -l <<<"$promote_from" | tr -d ' ')" == 1 ]]
-             [[ "$(wc -l <<<"$rehearsal_report" | tr -d ' ')" == 1 && -f "$rehearsal_report" ]]
-             [[ "${promote_from%-rc.*}" == "$tag" ]]
-             [[ "$(git rev-parse "$promote_from^{commit}")" == "$(git rev-parse "$tag^{commit}")" ]]
-             mkdir source
-             gh release download "$promote_from" --pattern release-manifest.json --pattern SHA256SUMS --dir source
-             (cd source && grep -F ' release-manifest.json' SHA256SUMS | sha256sum -c -)
-             source_digest="$(python3 -c 'import json; print(json.load(open("source/release-manifest.json"))["image"]["digest"])')"
-             scripts/validate-rehearsal-report.sh "$rehearsal_report" "$promote_from" "$(git rev-parse "$tag^{commit}")" "$source_digest"
-             channel=stable
-             printf 'validate: channel=stable\n'
+          else
+            channel=stable
+            printf 'validate: channel=stable\n'
           fi
-          printf 'tag=%s\nchannel=%s\ncommit=%s\npromote_from=%s\n' "$tag" "$channel" "$(git rev-parse "$tag^{commit}")" "$promote_from" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\nchannel=%s\ncommit=%s\n' "$tag" "$channel" "$(git rev-parse "$source_tag_ref^{commit}")" >> "$GITHUB_OUTPUT"
       - name: Validate locked dependency graph
         run: cargo metadata --locked --format-version 1 >/dev/null
 
   build-binaries:
     name: Build (${{ matrix.target }})
     needs: validate
-    if: needs.validate.outputs.channel == 'rc'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -119,7 +104,7 @@ jobs:
   publish-image:
     name: Publish or promote image
     needs: [validate, build-binaries]
-    if: always() && needs.validate.result == 'success' && (needs.validate.outputs.channel == 'stable' || needs.build-binaries.result == 'success')
+    if: needs.validate.result == 'success' && needs.build-binaries.result == 'success'
     runs-on: ubuntu-latest
     outputs:
       digest: ${{ steps.image.outputs.digest }}
@@ -137,18 +122,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
       - uses: actions/download-artifact@v4
-        if: needs.validate.outputs.channel == 'rc'
         with:
           name: musl-binaries
           path: release-context/binaries
       - id: image
-        name: Publish RC image or promote stable digest
+        name: Build and publish image
         env:
           TAG: ${{ needs.validate.outputs.tag }}
           CHANNEL: ${{ needs.validate.outputs.channel }}
           COMMIT: ${{ needs.validate.outputs.commit }}
-          PROMOTE_FROM: ${{ needs.validate.outputs.promote_from }}
-          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -164,36 +146,26 @@ jobs:
             if [[ -z "$actual" ]]; then regctl image copy "$image@$expected" "$image:$tag"; fi
             [[ "$(digest_of "$image:$tag")" == "$expected" ]]
           }
-          if [[ "$CHANNEL" == rc ]]; then
-            mkdir -p release-context/release release-context/workspace release-context/crates/wukong-skills/assets release-context/scripts
-            cp Dockerfile.release release-context/
-            cp release/package.json release/package-lock.json release-context/release/
-            cp workspace/SOUL.md workspace/AGENTS.md release-context/workspace/
-            cp -R crates/wukong-skills/assets/superpowers release-context/crates/wukong-skills/assets/
-            cp scripts/docker-entrypoint.sh release-context/scripts/
-            set -a; source release/runtime-inputs.env; set +a
-            docker buildx build --platform linux/amd64 --push --metadata-file metadata.json \
-              --file release-context/Dockerfile.release --tag "$image:build-$COMMIT" \
-              --build-arg BASE_IMAGE="$BASE_IMAGE" --build-arg DEBIAN_SNAPSHOT="$DEBIAN_SNAPSHOT" \
-              --build-arg OPENCODE_VERSION="$OPENCODE_VERSION" --build-arg AGENT_REACH_REF="$AGENT_REACH_REF" \
-              --build-arg AGENT_REACH_ARCHIVE_SHA256="$AGENT_REACH_ARCHIVE_SHA256" --build-arg PRODUCT_TAG="$TAG" \
-              --build-arg BUILD_ORIGIN_TAG="$TAG" --build-arg REVISION="$COMMIT" \
-              --build-arg CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" release-context
-            image_digest="$(python3 -c 'import json; print(json.load(open("metadata.json"))["containerimage.digest"])')"
-            attach_immutable "$TAG" "$image_digest"
-            attach_immutable "sha-$COMMIT" "$image_digest"
-            docker buildx imagetools inspect "$image@$image_digest" >/dev/null
-          else
-            mkdir source
-            gh release download "$PROMOTE_FROM" --pattern release-manifest.json --pattern SHA256SUMS --dir source
-            (cd source && grep -F ' release-manifest.json' SHA256SUMS | sha256sum -c -)
-            read -r source_tag source_commit source_digest < <(python3 -c 'import json; d=json.load(open("source/release-manifest.json")); print(d["productTag"], d["commit"], d["image"]["digest"])')
-            [[ "$source_tag" == "$PROMOTE_FROM" && "$source_commit" == "$COMMIT" && "$source_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-            [[ "$(digest_of "$image:$PROMOTE_FROM")" == "$source_digest" ]]
-            [[ "$(digest_of "$image:sha-$COMMIT")" == "$source_digest" ]]
-            image_digest="$source_digest"
-            attach_immutable "$TAG" "$image_digest"
-          fi
+          mkdir -p release-context/release release-context/workspace release-context/crates/wukong-skills/assets release-context/scripts
+          cp Dockerfile.release release-context/
+          cp release/package.json release/package-lock.json release-context/release/
+          cp workspace/SOUL.md workspace/AGENTS.md release-context/workspace/
+          cp -R crates/wukong-skills/assets/superpowers release-context/crates/wukong-skills/assets/
+          cp scripts/docker-entrypoint.sh release-context/scripts/
+          set -a; source release/runtime-inputs.env; set +a
+          created="$(git show -s --format=%cI "$COMMIT")"
+          docker buildx build --platform linux/amd64 --push --metadata-file metadata.json \
+            --file release-context/Dockerfile.release --tag "$image:build-$COMMIT" \
+            --build-arg BASE_IMAGE="$BASE_IMAGE" --build-arg DEBIAN_SNAPSHOT="$DEBIAN_SNAPSHOT" \
+            --build-arg OPENCODE_VERSION="$OPENCODE_VERSION" --build-arg AGENT_REACH_REF="$AGENT_REACH_REF" \
+            --build-arg AGENT_REACH_ARCHIVE_SHA256="$AGENT_REACH_ARCHIVE_SHA256" --build-arg PRODUCT_TAG="$TAG" \
+            --build-arg BUILD_ORIGIN_TAG="$TAG" --build-arg REVISION="$COMMIT" \
+            --build-arg CREATED="$created" release-context
+          image_digest="$(python3 -c 'import json; print(json.load(open("metadata.json"))["containerimage.digest"])')"
+          attach_immutable "$TAG" "$image_digest"
+          attach_immutable "sha-$COMMIT" "$image_digest"
+          if [[ "$CHANNEL" == stable ]]; then attach_immutable latest "$image_digest"; fi
+          docker buildx imagetools inspect "$image@$image_digest" >/dev/null
           printf 'digest=%s\n' "$image_digest" >> "$GITHUB_OUTPUT"
 
   package-release:
@@ -204,7 +176,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        if: needs.validate.outputs.channel == 'rc'
         with:
           pattern: release-assets-*
           path: artifacts
@@ -214,14 +185,13 @@ jobs:
           TAG: ${{ needs.validate.outputs.tag }}
           CHANNEL: ${{ needs.validate.outputs.channel }}
           COMMIT: ${{ needs.validate.outputs.commit }}
-          PROMOTE_FROM: ${{ needs.validate.outputs.promote_from }}
           IMAGE_DIGEST: ${{ needs.publish-image.outputs.digest }}
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-           if [[ "$CHANNEL" == rc ]]; then cp artifacts/* dist/; else gh release download "$PROMOTE_FROM" --pattern 'wukong-*.tar.gz' --pattern release-manifest.json --dir dist; rm -f dist/wukong-docker-*.tar.gz; fi
+          cp artifacts/* dist/
           for target in x86_64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-apple-darwin; do
             test "$(find dist -maxdepth 1 -name "*-$target.tar.gz" -type f | wc -l | tr -d ' ')" = 4
           done
@@ -233,7 +203,7 @@ jobs:
           cp release/data-compatibility.json dist/wukong-docker/
           cp scripts/install.sh dist/wukong-docker/scripts/install.sh
           runtime_inputs="$(python3 -c 'import json; d={}; [d.__setitem__(*line.strip().split("=", 1)) for line in open("release/runtime-inputs.env") if line.strip() and not line.startswith("#")]; print(json.dumps(d, sort_keys=True))')"
-          scripts/generate-release-manifest.sh --tag "$TAG" --commit "$COMMIT" --channel "$CHANNEL" --promoted-from "$PROMOTE_FROM" --image-reference "ghcr.io/raybird/wukong:$TAG" --image-digest "$IMAGE_DIGEST" --platform linux/amd64 --runtime-inputs "$runtime_inputs" --data-compatibility release/data-compatibility.json --output dist/wukong-docker/release-manifest.json
+          scripts/generate-release-manifest.sh --tag "$TAG" --commit "$COMMIT" --channel "$CHANNEL" --image-reference "ghcr.io/raybird/wukong:$TAG" --image-digest "$IMAGE_DIGEST" --platform linux/amd64 --runtime-inputs "$runtime_inputs" --data-compatibility release/data-compatibility.json --output dist/wukong-docker/release-manifest.json
           cp dist/wukong-docker/release-manifest.json dist/release-manifest.json
           tar -C dist -czf "dist/wukong-docker-$TAG.tar.gz" wukong-docker
           rm -rf dist/wukong-docker dist/docker-compose.yml

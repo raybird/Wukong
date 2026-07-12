@@ -27,19 +27,14 @@ RUN sed -i \
 
 COPY release/package.json release/package-lock.json /opt/wukong-release/
 RUN cd /opt/wukong-release && npm ci --omit=dev && \
-    ln -s /opt/wukong-release/node_modules/.bin/opencode /usr/local/bin/opencode && \
-    opencode --version
+    ln -s /opt/wukong-release/node_modules/.bin/opencode /usr/local/bin/opencode
 
 COPY binaries/wukong /usr/local/bin/wukong
 COPY binaries/wukong-telegram /usr/local/bin/wukong-telegram
 COPY binaries/wukong-web /usr/local/bin/wukong-web
 COPY binaries/wukong-schedulerd /usr/local/bin/wukong-schedulerd
 RUN chmod +x /usr/local/bin/wukong /usr/local/bin/wukong-telegram \
-      /usr/local/bin/wukong-web /usr/local/bin/wukong-schedulerd && \
-    wukong --help >/dev/null && \
-    wukong-telegram --help >/dev/null && \
-    wukong-web --help >/dev/null && \
-    wukong-schedulerd --help >/dev/null
+      /usr/local/bin/wukong-web /usr/local/bin/wukong-schedulerd
 
 RUN useradd -m -s /bin/bash wukong
 ENV HOME=/home/wukong
@@ -50,8 +45,7 @@ ENV PATH="/home/wukong/.local/bin:/usr/local/bin:${PATH}"
 RUN mkdir -p "$PIPX_HOME" "$PIPX_BIN_DIR" && chown -R wukong:wukong /home/wukong/.local && \
     curl -fsSL "https://github.com/Panniantong/agent-reach/archive/${AGENT_REACH_REF}.tar.gz" -o /tmp/agent-reach.tar.gz && \
     echo "${AGENT_REACH_ARCHIVE_SHA256}  /tmp/agent-reach.tar.gz" | sha256sum -c - && \
-    gosu wukong pipx install /tmp/agent-reach.tar.gz && \
-    gosu wukong agent-reach --help >/dev/null && rm /tmp/agent-reach.tar.gz
+    gosu wukong pipx install /tmp/agent-reach.tar.gz && rm /tmp/agent-reach.tar.gz
 
 COPY workspace/SOUL.md workspace/AGENTS.md /usr/local/share/wukong/
 COPY crates/wukong-skills/assets/superpowers /usr/local/share/wukong/skills/superpowers

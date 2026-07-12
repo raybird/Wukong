@@ -50,9 +50,7 @@ check_static() {
   security_line="$(grep -Fn 's|http://deb.debian.org/debian-security|' "$dockerfile" | cut -d: -f1)"
   [[ "$security_line" -lt "$debian_line" ]] || fail "security snapshot replacement must precede its Debian URL prefix"
   ! grep -Eqi 'github\.com/.*/releases/download' "$dockerfile" || fail "release image must not download GitHub release binaries"
-  for binary in wukong wukong-telegram wukong-web wukong-schedulerd; do
-    require_text "$binary --help" "$dockerfile"
-  done
+  ! grep -Fq -- '--help >/dev/null' "$dockerfile" || fail "release image build must not run smoke tests"
 }
 
 check_registry_contract() {
@@ -63,12 +61,10 @@ check_registry_contract() {
   require_text 'musl-binaries' "$workflow"
 }
 
-check_promotion_contract() {
+check_stable_tag_contract() {
   require_file "$workflow"
-  require_text 'promote-from:' "$workflow"
-  require_text 'SHA256SUMS' "$workflow"
-  require_text '--promoted-from "$PROMOTE_FROM"' "$workflow"
-  require_text 'channel == ' "$workflow"
+  require_text 'scripts/generate-sha256sums.sh dist' "$workflow"
+  require_text 'attach_immutable latest' "$workflow"
 }
 
 check_smoke() {
@@ -83,9 +79,9 @@ case "${1:-all}" in
   pins) check_pins ;;
   static) check_static ;;
   registry) check_registry_contract ;;
-  promotion) check_promotion_contract ;;
+  promotion) check_stable_tag_contract ;;
   smoke) shift; check_smoke "$@" ;;
-  all) check_static; check_registry_contract; check_promotion_contract ;;
+  all) check_static; check_registry_contract; check_stable_tag_contract ;;
   *) fail "unknown check: $1" ;;
 esac
 

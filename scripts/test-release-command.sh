@@ -4,6 +4,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 release_script="$repo_root/scripts/release.sh"
 
+grep -Fq 'for attempt in {1..24}' "$release_script" || { printf 'FAIL: workflow discovery must poll\n' >&2; exit 1; }
+
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
   exit 1
@@ -87,7 +89,7 @@ CHECK
     'scripts/fake-release-check.sh first' \
     'scripts/fake-release-check.sh second' \
     > "$FIXTURE_WORK/release-checks.txt"
-  printf '\n## [0.18.0]\n' >> "$FIXTURE_WORK/CHANGELOG.md"
+  printf '\n## [0.18.0] - 2026-07-12\n' >> "$FIXTURE_WORK/CHANGELOG.md"
   git -C "$FIXTURE_WORK" add .
   git -C "$FIXTURE_WORK" commit -m "fixture" >/dev/null
   git -C "$FIXTURE_WORK" remote add origin "$FIXTURE_REMOTE"
@@ -116,6 +118,8 @@ assert_fixture_parsed() {
 
   output="$(cd "$FIXTURE_WORK" && WUKONG_RELEASE_UNDER_TEST=1 PATH="$FIXTURE_BIN:$PATH" scripts/release.sh v0.18.0-rc.1 --dry-run)" || fail "valid RC: expected success"
   [[ "$output" == *"dry run for v0.18.0-rc.1 (rc)"* ]] || fail "valid RC: unexpected output: $output"
+  output="$(cd "$FIXTURE_WORK" && WUKONG_RELEASE_UNDER_TEST=1 PATH="$FIXTURE_BIN:$PATH" scripts/release.sh v0.18.0 --dry-run)" || fail "valid stable: expected success"
+  [[ "$output" == *"dry run for v0.18.0 (stable)"* ]] || fail "valid stable: unexpected output: $output"
 }
 
 assert_fixture_metadata_rejected() {
@@ -187,10 +191,8 @@ assert_rejected "missing v prefix" "0.18.0"
 assert_rejected "incomplete stable tag" "v0.18"
 assert_rejected "zero RC number" "v0.18.0-rc.0"
 assert_rejected "unsupported prerelease" "v0.18.0-beta.1"
-assert_rejected "RC promotion" "v0.18.0-rc.1" --promote-from "v0.18.0-rc.1"
-assert_rejected "stable without source RC" "v0.18.0"
-assert_rejected "mismatched promotion base" "v0.18.0" --promote-from "v0.19.0-rc.1"
-assert_rejected "duplicate promotion source" "v0.18.0" --promote-from "v0.18.0-rc.1" --promote-from "v0.18.0-rc.2"
+assert_rejected "removed promotion option" "v0.18.0" --promote-from "v0.18.0-rc.1"
+assert_rejected "removed rehearsal option" "v0.18.0" --rehearsal-report report.json
 
 trap destroy_fixture EXIT
 
@@ -277,16 +279,11 @@ assert_fixture_rejected "missing changelog version" "changelog is missing 0.18.0
 
 destroy_fixture
 new_fixture
-printf '# Changelog\n\n## [0.18.0] - 2026-07-11\n' > "$FIXTURE_WORK/CHANGELOG.md"
+printf '# Changelog\n\n## [0.18.0]\n' > "$FIXTURE_WORK/CHANGELOG.md"
 git -C "$FIXTURE_WORK" add CHANGELOG.md
-git -C "$FIXTURE_WORK" commit -m "date stable changelog" >/dev/null
+git -C "$FIXTURE_WORK" commit -m "remove stable changelog date" >/dev/null
 git -C "$FIXTURE_WORK" push origin main >/dev/null
-assert_fixture_rejected "missing promotion source" "source RC tag does not exist" v0.18.0 --promote-from v0.18.0-rc.1
-
-destroy_fixture
-new_fixture
-git -C "$FIXTURE_WORK" tag -a v0.18.0-rc.1 -m "v0.18.0-rc.1"
-assert_fixture_rejected "stable changelog date" "stable changelog entry needs a release date" v0.18.0 --promote-from v0.18.0-rc.1
+assert_fixture_rejected "stable changelog date" "stable changelog entry needs a release date" v0.18.0
 
 destroy_fixture
 new_fixture
