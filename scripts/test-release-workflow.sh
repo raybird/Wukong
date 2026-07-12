@@ -16,7 +16,7 @@ for contract in \
    'name: release-assets' 'files: dist/*' \
    'cp release/package.json release/package-lock.json release-context/release/' 'rehearsal-report:' 'scripts/validate-rehearsal-report.sh' '--data-compatibility release/data-compatibility.json' \
    "printf 'validate: tag=%q\\n' \"\$tag\"" 'validate: annotation=' 'validate: channel=rc' \
-   'refs/tags/release-source/$tag'; do
+   'refs/tags/release-source/$tag' 'uses: docker/login-action@v3'; do
   require_text "$contract"
 done
 

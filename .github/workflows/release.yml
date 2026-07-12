@@ -131,8 +131,11 @@ jobs:
           REGCTL_VERSION=v0.8.1
           curl -fsSL "https://github.com/regclient/regclient/releases/download/${REGCTL_VERSION}/regctl-linux-amd64" -o /usr/local/bin/regctl
           chmod +x /usr/local/bin/regctl
-      - name: Log in to GHCR
-        run: echo "${{ github.token }}" | regctl registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
       - uses: actions/download-artifact@v4
         if: needs.validate.outputs.channel == 'rc'
         with:
