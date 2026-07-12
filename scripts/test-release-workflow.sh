@@ -15,7 +15,8 @@ for contract in \
   'SHA256SUMS' 'release-manifest.json' 'scripts/generate-sha256sums.sh dist' \
    'name: release-assets' 'files: dist/*' \
    'cp release/package.json release/package-lock.json release-context/release/' 'rehearsal-report:' 'scripts/validate-rehearsal-report.sh' '--data-compatibility release/data-compatibility.json' \
-   "printf 'validate: tag=%q\\n' \"\$tag\"" 'validate: annotation=' 'validate: channel=rc'; do
+   "printf 'validate: tag=%q\\n' \"\$tag\"" 'validate: annotation=' 'validate: channel=rc' \
+   'refs/tags/release-source/$tag'; do
   require_text "$contract"
 done
 

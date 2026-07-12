@@ -35,10 +35,12 @@ jobs:
           stable_re='^v[0-9]+\.[0-9]+\.[0-9]+$'
           printf 'validate: tag=%q\n' "$tag"
           [[ "$tag" =~ $rc_re || "$tag" =~ $stable_re ]] || { printf 'validate: invalid tag\n' >&2; exit 1; }
-          tag_type="$(git cat-file -t "refs/tags/$tag")"
+          source_tag_ref="refs/tags/release-source/$tag"
+          git fetch --no-tags origin "refs/tags/$tag:$source_tag_ref"
+          tag_type="$(git cat-file -t "$source_tag_ref")"
           printf 'validate: tag_type=%s\n' "$tag_type"
           [[ "$tag_type" == tag ]] || { printf 'validate: tag is not annotated\n' >&2; exit 1; }
-          annotation="$(git for-each-ref "refs/tags/$tag" --format='%(contents)')"
+          annotation="$(git for-each-ref "$source_tag_ref" --format='%(contents)')"
           printf 'validate: annotation=%q\n' "$annotation"
           promote_from=""
           if [[ "$tag" =~ $rc_re ]]; then
