@@ -13,19 +13,19 @@
 
 ### Changed
 
-- Installer Phase 4：release manifest 現在包含 reviewed data-compatibility declaration；Binary rollback 與 RC rehearsal evidence/stable promotion gate 已加入 release contract。
+- Installer Phase 4：release manifest 現在包含 reviewed data-compatibility declaration，Binary rollback 已加入 release contract。
 - Installer Phase 3：Docker 升級改為驗證 release manifest、全域 `SHA256SUMS` 與 GHCR digest 的 pull-only transaction，不再本機 build 或移除 volumes；只更新 release 擁有的部署檔。
 - Binary 升級改為 staged、可重複執行且保留已選元件、設定與 workspace；`~/.wukong/install.json` 以 `0600` 原子寫入安裝 metadata，Linux 可用 `--with-schedulerd` 明確管理 Scheduler service。
 
-## [0.18.0]
+## [0.18.0] - 2026-07-12
 
 ### Added
 
 - 新增 `scripts/release.sh` 作為唯一維護者 release gate：驗證候選 commit、建立 annotated tag、監看 workflow，並驗證 GitHub Release channel 與 assets。
-- Release workflow 在建置前驗證 annotated RC/stable promotion metadata 與 locked Cargo dependency graph。
+- Release workflow 在建置前驗證 annotated RC/stable tag 與 locked Cargo dependency graph。
 - 新增 deterministic `release-manifest.json` 與 aggregate `SHA256SUMS` generator，供後續 GHCR 與 installer migration 使用。
-- RC 發佈會由 CI 建置的 musl binaries 產生 immutable `linux/amd64` GHCR image；product 與 commit tags 若已指向不同 digest 會拒絕覆寫。
-- Stable promotion 驗證來源 RC manifest、checksums、commit 與 GHCR tags，將 stable tag 指向同一 digest，不重建 image 或 binaries。
+- RC 與 stable 發佈會由 CI 建置的 musl binaries 產生 immutable `linux/amd64` GHCR image；product 與 commit tags 若已指向不同 digest 會拒絕覆寫。
+- Stable tag 直接建置並發布 image、binaries 與 release assets，同時更新 GHCR `latest` tag。
 - Docker release bundle 改為 pull-only Compose、`.env.example`、license、installer 與 release manifest 的最小內容，所有公開 release assets 由全域 `SHA256SUMS` 覆蓋。
 
 ## [0.17.1] - 2026-07-08
