@@ -87,7 +87,6 @@ jobs:
             if [[ "${{ matrix.target }}" == x86_64-unknown-linux-musl ]]; then cp "$bin" "../../../dist/binaries/$bin"; fi
           done
           cd ../../..
-          if command -v sha256sum >/dev/null 2>&1; then sha256sum dist/public/*.tar.gz > "dist/public/checksums-${{ matrix.target }}.txt"; else shasum -a 256 dist/public/*.tar.gz > "dist/public/checksums-${{ matrix.target }}.txt"; fi
       - uses: actions/upload-artifact@v4
         with:
           name: release-assets-${{ matrix.target }}
@@ -204,10 +203,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          if [[ "$CHANNEL" == rc ]]; then cp artifacts/* dist/; else gh release download "$PROMOTE_FROM" --pattern 'wukong-*.tar.gz' --pattern 'checksums-*.txt' --dir dist; rm -f dist/wukong-docker-*.tar.gz; fi
+           if [[ "$CHANNEL" == rc ]]; then cp artifacts/* dist/; else gh release download "$PROMOTE_FROM" --pattern 'wukong-*.tar.gz' --pattern release-manifest.json --dir dist; rm -f dist/wukong-docker-*.tar.gz; fi
           for target in x86_64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-apple-darwin; do
             test "$(find dist -maxdepth 1 -name "*-$target.tar.gz" -type f | wc -l | tr -d ' ')" = 4
-            test -f "dist/checksums-$target.txt"
           done
           sed "s/__WUKONG_VERSION__/$TAG/g" docker-compose.release.yml > dist/docker-compose.yml
           ! grep -Eq '__WUKONG_VERSION__|^[[:space:]]*build:' dist/docker-compose.yml

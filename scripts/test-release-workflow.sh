@@ -22,5 +22,7 @@ done
 [[ "$(grep -Fc 'tar -czf "../../../dist/public/$bin-${{ matrix.target }}.tar.gz"' "$workflow")" == 1 ]] || { echo "expected target-suffixed archives only" >&2; exit 1; }
 ! grep -Fq 'cp "$bin" ../../../dist/' "$workflow" || { echo "bare binaries must not enter public artifacts" >&2; exit 1; }
 ! grep -Fq 'releases/latest/download/regctl' "$workflow" || { echo "registry client must use a pinned release" >&2; exit 1; }
+! grep -Fq 'checksums-${{ matrix.target }}.txt' "$workflow" || { echo "legacy per-target checksum assets must not be published" >&2; exit 1; }
+! grep -Fq "'checksums-*.txt'" "$workflow" || { echo "stable promotion must consume global SHA256SUMS only" >&2; exit 1; }
 
 echo "release workflow checks passed"

@@ -4,6 +4,8 @@
 
 ## 先決條件
 
+Release installer 需要 `curl`、`tar` 與 **Python 3**；Python 用來嚴格驗證 release manifest 與 archive 路徑。Binary mode 在 Linux 另外使用 `systemctl --user` 管理可選服務。
+
 - **Rust**（stable，≥ 1.96）。若未安裝：
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -31,7 +33,7 @@ curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install
 
 腳本會自動偵測版本，並依上表詢問你要使用哪種模式：
 
-- **Docker mode**：在目前目錄下載 release Docker bundle，產生 `docker-compose.yml`、`.env.example`、`.env`、`Dockerfile`、entrypoint 與 workspace templates，並透過 Docker 建立隔離執行環境。Dockerfile 會下載 release binaries，不會在本機編譯 Rust。**適合常駐服務部署。**
+- **Docker mode**：驗證 `SHA256SUMS`、`release-manifest.json` 與 release bundle 後，只寫入 `docker-compose.yml`、`.env.example`、`LICENSE`、`scripts/install.sh`。它從 GHCR pull 已驗證 digest 的 image，不在本機 build。`.env`、workspace、Compose override 與 volume 均由使用者擁有。**適合常駐服務部署。**
 - **Binary mode**：下載最新預編譯 binary 到 `~/.local/bin`，並以互動問答設定 Telegram / Web / 記憶等選項。**適合本機 CLI 互動開發。**
 
 手動選項：
@@ -46,6 +48,12 @@ curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install
 # Linux binary mode 可選 linking flavor：
 curl -fsSL ... | bash -s -- --mode binary --flavor gnu   # glibc (動態)
 curl -fsSL ... | bash -s -- --mode binary --flavor musl  # musl  (靜態，預設，跨 distro)
+
+# 保留已選元件與設定的 Binary 升級；不會重新提問
+curl -fsSL ... | bash -s -- --mode binary --upgrade
+
+# 新安裝或升級時明確加入 Linux Scheduler service
+curl -fsSL ... | bash -s -- --mode binary --upgrade --with-schedulerd
 ```
 
 ## 安裝 prerelease / RC 版本
@@ -66,7 +74,9 @@ curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install
   | bash -s -- --mode binary --version v0.16.15-rc.1
 ```
 
-Prerelease 適合驗證新功能或修補，例如 runtime skill assets、Docker entrypoint、binary 安裝行為等。正式部署仍建議使用 latest stable。指定 prerelease tag 時，該 GitHub Release 必須已包含完整 assets：各平台 binary tarball、對應 `checksums-<target>.txt`，以及 Docker mode 所需的 `wukong-docker-<version>.tar.gz`。
+Prerelease 適合驗證新功能或修補，例如 runtime skill assets、Docker entrypoint、binary 安裝行為等。正式部署仍建議使用 latest stable。指定 prerelease tag 時，該 GitHub Release 必須包含完整 assets、全域 `SHA256SUMS`、`release-manifest.json` 與 Docker bundle。Binary 安裝資訊儲於 `~/.wukong/install.json`（權限 `0600`）；設定與 workspace 不會在升級時被覆寫。
+
+`wukong-schedulerd` 的 managed unit 只在 Linux 上可用；macOS Binary mode 會安裝 binary，但不會建立或啟動 systemd service。
 
 ## 從原始碼建置
 

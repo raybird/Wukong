@@ -11,6 +11,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Installer Phase 3：Docker 升級改為驗證 release manifest、全域 `SHA256SUMS` 與 GHCR digest 的 pull-only transaction，不再本機 build 或移除 volumes；只更新 release 擁有的部署檔。
+- Binary 升級改為 staged、可重複執行且保留已選元件、設定與 workspace；`~/.wukong/install.json` 以 `0600` 原子寫入安裝 metadata，Linux 可用 `--with-schedulerd` 明確管理 Scheduler service。
+
 ## [0.18.0]
 
 ### Added

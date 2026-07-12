@@ -30,11 +30,11 @@ mkdir wukong-docker && cd wukong-docker
 curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash -s -- --mode docker
 ```
 
-installer 會從 GitHub Release 下載 Docker bundle；bundle 內的 Dockerfile 會再下載同版本 Wukong binaries，因此不需要 Rust 或原始碼。
+installer 會從 GitHub Release 下載並驗證 `SHA256SUMS`、`release-manifest.json` 與 Docker bundle，再從 GHCR pull manifest 指定的 immutable image digest，因此不需要 Rust、原始碼或本機 Docker build。
 
 **升級既有 installer Docker 部署：**
 
-若你當初是用 `install.sh --mode docker` 在空目錄產生部署檔案，請在同一個部署目錄重新下載新版 Docker bundle。`.env` 會保留；`--upgrade` 會覆蓋 bundle 內的 `docker-compose.yml`、`Dockerfile`、entrypoint 與 workspace templates。
+若你當初是用 `install.sh --mode docker` 在空目錄產生部署檔案，請在同一個部署目錄重新下載新版 Docker bundle。`.env`、workspace、Compose override 與其他自訂檔會保留；`--upgrade` 只會覆蓋 bundle 擁有的 `docker-compose.yml`、`.env.example`、`LICENSE`、`scripts/install.sh`，然後 pull 並重建服務。
 
 ```bash
 cd /path/to/wukong-docker
@@ -42,11 +42,9 @@ cd /path/to/wukong-docker
 curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh \
   | bash -s -- --upgrade
 
-docker compose build --no-cache
-docker compose up -d --force-recreate
 ```
 
-升級時請不要使用 `docker compose down -v`，避免刪除 `wukong-data`、`opencode-config`、`opencode-state` 等持久化 volume。若你是從舊版升級且容器還在，想盡量保留尚未持久化的 opencode session，可先備份：
+installer 不會呼叫 `docker compose build`、`down` 或 `down -v`；升級時也請不要手動使用 `docker compose down -v`，避免刪除 `wukong-data`、`opencode-config`、`opencode-state` 等持久化 volume。若你是從舊版升級且容器還在，想盡量保留尚未持久化的 opencode session，可先備份：
 
 ```bash
 docker cp wukong-telegram:/home/wukong/.local/share/opencode ./opencode-session-backup

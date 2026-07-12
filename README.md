@@ -109,6 +109,8 @@ sequenceDiagram
 curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash
 ```
 
+Binary 安裝可用 `--mode binary --upgrade` 保留既有元件、設定與 workspace 升級；加上 `--with-schedulerd` 可在 Linux 明確安裝 Scheduler user service。Docker installer 驗證 release checksum、manifest 與 GHCR image digest，且不會移除 volumes。
+
 基本使用：
 
 ```bash

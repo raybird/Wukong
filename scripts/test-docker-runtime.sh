@@ -108,6 +108,12 @@ require_in_file "curl -fsS http://localhost:4096/global/health || exit 1" "$comp
     "opencode server must expose a Compose healthcheck"
 require_count_in_file "condition: service_healthy" 3 "$compose_file" \
     "web, telegram, and scheduler must wait for a healthy opencode server"
+require_in_file 'DOCKER_RELEASE_OWNED=(docker-compose.yml .env.example LICENSE scripts/install.sh)' scripts/install.sh \
+    "installer must replace only Docker release-owned files"
+if grep -Eq 'docker compose (build|down)' scripts/install.sh; then
+    echo "FAIL: release installer must pull and recreate without local builds or volume removal" >&2
+    exit 1
+fi
 
 if awk '
     /^  wukong-schedulerd:/ { in_scheduler = 1; next }

@@ -1,484 +1,379 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ---------------------------------------------------------------------------
-# Wukong one-liner installer
-#   curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash
-# ---------------------------------------------------------------------------
-
 REPO="raybird/Wukong"
 GITHUB="https://github.com"
 API="https://api.github.com/repos"
 INSTALL_DIR="${HOME}/.local/bin"
 CONFIG_DIR="${HOME}/.wukong"
 CONFIG_FILE="${CONFIG_DIR}/config.env"
-
-# --- helpers ----------------------------------------------------------------
-
-bold()  { printf '\033[1m%s\033[0m' "$*"; }
-green() { printf '\033[32m%s\033[0m' "$*"; }
-red()   { printf '\033[31m%s\033[0m' "$*"; }
-dim()   { printf '\033[2m%s\033[0m' "$*"; }
-
-abort() { printf '%s\n' "$(red "✗") $*" >&2; exit 1; }
-info()  { printf '  %s %s\n' "$(green "✓")" "$*"; }
-step()  { printf '\n%s\n' "$(bold "→ $*")"; }
-
-has_docker_compose() {
-  docker compose version >/dev/null 2>&1
-}
-
-copy_env_if_needed() {
-  if [[ -f ".env" ]]; then
-    info ".env 已存在，保留現有設定"
-    return 0
-  fi
-  if $DRY_RUN; then
-    info "dry-run: 會由 .env.example 建立 .env"
-    return 0
-  fi
-  cp .env.example .env
-  info "已建立 .env，請依需求編輯"
-}
-
-ensure_no_conflicts() {
-  local conflicts=()
-  local path
-  for path in docker-compose.yml Dockerfile .env.example scripts/docker-entrypoint.sh workspace/SOUL.md workspace/AGENTS.md; do
-    if [[ -e "$path" && "$path" != ".env" ]]; then
-      conflicts+=("$path")
-    fi
-  done
-  if (( ${#conflicts[@]} > 0 )) && ! $FORCE; then
-    printf '%s\n' "$(red "✗") 目前目錄已有 Docker 部署檔案，避免覆蓋：" >&2
-    printf '  - %s\n' "${conflicts[@]}" >&2
-    abort "若要覆蓋，請加 --force"
-  fi
-}
-
-install_docker_bundle() {
-  local bundle="wukong-docker-${VERSION}.tar.gz"
-  local url="${BASE_URL}/${bundle}"
-
-  step "準備 Docker 模式部署..."
-  command -v docker >/dev/null 2>&1 || abort "需要 Docker，請先安裝 Docker"
-  has_docker_compose || abort "需要 Docker Compose v2（docker compose）"
-
-  if $DRY_RUN; then
-    info "dry-run: 會下載 ${url}"
-    info "dry-run: 會解壓到目前目錄 $(pwd)"
-    copy_env_if_needed
-    return 0
-  fi
-
-  ensure_no_conflicts
-
-  step "下載 ${bundle} ..."
-  curl -fsSL "$url" -o "/tmp/${bundle}" || abort "無法下載 Docker bundle: ${bundle}"
-
-  step "解壓 Docker 部署檔案..."
-  tar -xzf "/tmp/${bundle}" --strip-components=1
-  rm -f "/tmp/${bundle}"
-
-  copy_env_if_needed
-
-  info "Docker 部署檔案已建立於 $(pwd)"
-  echo ""
-  echo "下一步："
-  echo "  1. 視需求編輯 .env"
-  echo "  2. 執行 docker compose build --no-cache"
-  echo "  3. 執行 docker compose up -d --force-recreate"
-  echo "  4. 開啟 http://localhost:8787/"
-  echo ""
-
-  read -r -p "是否現在重建並啟動 Docker 服務？(y/N): " START_DOCKER
-  case "$(printf '%s' "${START_DOCKER:-n}" | tr '[:upper:]' '[:lower:]')" in
-    y|yes)
-      # 升級時 release binary 下載層可能被 Docker cache 保留；先無快取重建，
-      # 再強制換掉既有容器，確保新的 bundle 與版本實際上線。
-      docker compose build --no-cache
-      docker compose up -d --force-recreate
-      ;;
-    *)
-      info "略過啟動，可稍後執行 docker compose build --no-cache && docker compose up -d --force-recreate"
-      ;;
-  esac
-}
-
-# --- argument parsing -------------------------------------------------------
-
-VERSION=""
-FLAVOR="musl"    # Linux default: static musl
+METADATA_FILE="${CONFIG_DIR}/install.json"
+ACTION=install
 MODE=""
+EXPLICIT_MODE=false
+WITH_SCHEDULERD=false
 FORCE=false
 DRY_RUN=false
-UPGRADE=false
+VERSION=""
+FLAVOR=musl
+TEMP_DIRS=()
+DOCKER_RELEASE_OWNED=(docker-compose.yml .env.example LICENSE scripts/install.sh)
+
+abort() { printf 'installer: %s\n' "$*" >&2; exit 1; }
+info() { printf '  %s\n' "$*"; }
+cleanup() { local dir; for dir in "${TEMP_DIRS[@]:-}"; do rm -rf "$dir"; done; }
+trap cleanup EXIT
+
+make_temp_dir() { local dir; dir="$(mktemp -d "${TMPDIR:-/tmp}/wukong-install.XXXXXX")"; TEMP_DIRS+=("$dir"); printf '%s\n' "$dir"; }
+sha256_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+lowercase() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 usage() {
-  cat <<'USAGE'
-Usage: install.sh [--mode docker|binary] [--version v0.14.1] [--flavor gnu|musl] [--force] [--upgrade] [--dry-run]
+    cat <<'USAGE'
+Usage: install.sh [--mode docker|binary] [--version TAG] [--flavor gnu|musl]
+                  [--upgrade] [--with-schedulerd] [--force] [--dry-run]
 
-Options:
-  --mode <name>    docker: deploy Docker bundle into current directory; binary: install host binaries
-  --version <tag>  Install a specific version (default: latest)
-  --flavor <name>  Binary mode Linux only: gnu (glibc) or musl (static, default)
-  --force          Docker mode only: overwrite generated bundle files except .env
-  --upgrade        Shortcut for Docker upgrades: same as --mode docker --force
-  --dry-run        Print planned actions without writing files or starting services
-  --help           Show this help
+--upgrade defaults to Docker for compatibility; use --mode binary --upgrade for host binaries.
+--with-schedulerd selects the Binary scheduler explicitly (Linux systemd only).
 USAGE
-  exit 0
 }
 
-while (($#)); do
-  case "$1" in
-    --mode)    MODE="${2:?missing mode}"; shift 2 ;;
-    --version) VERSION="${2:?missing version}"; shift 2 ;;
-    --flavor)  FLAVOR="${2:?missing flavor}"; shift 2 ;;
-    --force)   FORCE=true; shift ;;
-    --upgrade) UPGRADE=true; shift ;;
-    --dry-run) DRY_RUN=true; shift ;;
-    --help)    usage ;;
-    *)         abort "未知選項: $1" ;;
-  esac
-done
+parse_args() {
+    while (($#)); do
+        case "$1" in
+            --mode) (($# >= 2)) || abort "--mode needs a value"; MODE="$2"; EXPLICIT_MODE=true; shift 2 ;;
+            --version) (($# >= 2)) || abort "--version needs a value"; VERSION="$2"; shift 2 ;;
+            --flavor) (($# >= 2)) || abort "--flavor needs a value"; FLAVOR="$2"; shift 2 ;;
+            --upgrade) ACTION=upgrade; shift ;;
+            --rollback) abort "rollback is reserved for Phase 4 and is not available yet" ;;
+            --with-schedulerd) WITH_SCHEDULERD=true; shift ;;
+            --force) FORCE=true; shift ;;
+            --dry-run) DRY_RUN=true; shift ;;
+            --help) usage; exit 0 ;;
+            *) abort "unknown option: $1" ;;
+        esac
+    done
+}
 
-if $UPGRADE; then
-  if [[ -n "$MODE" && "$MODE" != "docker" ]]; then
-    abort "--upgrade 只能用於 Docker mode"
-  fi
-  MODE="docker"
-  FORCE=true
-fi
+resolve_mode_and_action() {
+    if [[ "$ACTION" == upgrade && "$EXPLICIT_MODE" == false ]]; then MODE=docker; fi
+    [[ -z "$MODE" || "$MODE" == docker || "$MODE" == binary ]] || abort "--mode must be docker or binary"
+}
 
-case "$MODE" in
-  ""|docker|binary) ;;
-  *) abort "--mode 必須是 docker 或 binary，收到: $MODE" ;;
-esac
+validate_args() {
+    if [[ "$MODE" == docker && "$WITH_SCHEDULERD" == true ]]; then abort "--with-schedulerd is only available in Binary mode"; fi
+    [[ "$FLAVOR" == gnu || "$FLAVOR" == musl ]] || abort "--flavor must be gnu or musl"
+    for cmd in curl tar python3; do command -v "$cmd" >/dev/null 2>&1 || abort "requires $cmd"; done
+}
 
-# --- detect platform --------------------------------------------------------
-
-OS="$(uname -s)"
-ARCH="$(uname -m)"
-
-case "$OS" in
-  Linux)
-    case "$FLAVOR" in
-      gnu)  TARGET="x86_64-unknown-linux-gnu" ;;
-      musl) TARGET="x86_64-unknown-linux-musl" ;;
-      *)    abort "Linux flavor 必須是 gnu 或 musl，收到: $FLAVOR" ;;
+detect_platform() {
+    OS="$(uname -s)"; ARCH="$(uname -m)"
+    case "$OS" in
+        Linux) TARGET="x86_64-unknown-linux-${FLAVOR}"; HAS_SYSTEMD=true ;;
+        Darwin)
+            [[ "$ARCH" == arm64 ]] || abort "Intel Mac binaries are unavailable; use Docker or build from source"
+            TARGET=aarch64-apple-darwin; HAS_SYSTEMD=false ;;
+        *) abort "unsupported platform: $OS" ;;
     esac
-    HAS_SYSTEMD=true
-    ;;
-  Darwin)
-    case "$ARCH" in
-      arm64) TARGET="aarch64-apple-darwin" ;;
-      x86_64) abort "Intel Mac 不再提供預建二進位（v0.17.0 起僅發佈 Apple Silicon）；請改用 Docker 模式（見 docs/docker.md）或從原始碼建置：cargo build --release" ;;
-      *) abort "macOS on $ARCH 尚不支援" ;;
+}
+
+download_release_file() {
+    local name="$1" destination="$2"
+    curl -fsSL "${BASE_URL}/${name}" -o "$destination" || abort "could not download $name"
+}
+
+verify_sha256sums_entry() {
+    local sums="$1" file="$2" name="$3" expected actual
+    expected="$(awk -v name="$name" '$2 == name { print $1 }' "$sums")"
+    [[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]] || abort "SHA256SUMS has no valid entry for $name"
+    actual="$(sha256_file "$file")"
+    [[ "$(lowercase "$expected")" == "$(lowercase "$actual")" ]] || abort "checksum mismatch for $name"
+}
+
+read_manifest_field() {
+    python3 - "$1" "$2" <<'PY'
+import json, sys
+document = json.load(open(sys.argv[1], encoding="utf-8"))
+value = document
+for key in sys.argv[2].split("."):
+    if not isinstance(value, dict) or key not in value: raise SystemExit(1)
+    value = value[key]
+if not isinstance(value, str): raise SystemExit(1)
+print(value)
+PY
+}
+
+validate_manifest_version() {
+    local manifest="$1"
+    python3 - "$manifest" "$VERSION" <<'PY'
+import json, re, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+    assert d["schemaVersion"] == 1
+    assert d["productTag"] == sys.argv[2]
+    image = d["image"]
+    assert image["reference"] == "ghcr.io/raybird/wukong:" + sys.argv[2]
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", image["digest"])
+except (AssertionError, KeyError, TypeError, json.JSONDecodeError):
+    raise SystemExit("invalid release-manifest.json")
+PY
+}
+
+safe_list_archive() {
+    local archive="$1"; shift
+    python3 - "$archive" "$@" <<'PY'
+import sys, tarfile
+archive, allowed = sys.argv[1], set(sys.argv[2:])
+try:
+    with tarfile.open(archive, "r:gz") as tar:
+        names = []
+        for member in tar.getmembers():
+            name = member.name.rstrip("/")
+            if name.startswith("/") or ".." in name.split("/") or member.issym() or member.islnk():
+                raise ValueError("unsafe archive entry: " + member.name)
+            if member.isdir(): continue
+            if not member.isfile() or name not in allowed: raise ValueError("unexpected archive entry: " + member.name)
+            names.append(name)
+        if len(names) != len(set(names)) or set(names) != allowed: raise ValueError("archive entries do not match allowlist")
+except (tarfile.TarError, ValueError) as error:
+    raise SystemExit(str(error))
+PY
+}
+
+validate_archive_entries() { safe_list_archive "$@" || abort "unsafe or unexpected archive contents"; }
+extract_archive_to() { tar -xzf "$1" -C "$2"; }
+
+prepare_release_metadata() {
+    RELEASE_DIR="$(make_temp_dir)"
+    download_release_file SHA256SUMS "$RELEASE_DIR/SHA256SUMS"
+    download_release_file release-manifest.json "$RELEASE_DIR/release-manifest.json"
+    verify_sha256sums_entry "$RELEASE_DIR/SHA256SUMS" "$RELEASE_DIR/release-manifest.json" release-manifest.json
+    validate_manifest_version "$RELEASE_DIR/release-manifest.json"
+}
+
+write_json_atomically() {
+    local destination="$1" payload="$2" dir temp
+    dir="$(dirname "$destination")"; mkdir -p "$dir"; temp="$(mktemp "$dir/.install.json.XXXXXX")"
+    chmod 600 "$temp"
+    printf '%s\n' "$payload" > "$temp"
+    mv -f "$temp" "$destination"
+}
+
+write_binary_metadata() {
+    local components="$1" services="$2" previous="$3" installed_at="${4:-}"
+    local payload
+    payload="$(python3 - "$VERSION" "$TARGET" "$components" "$services" "$previous" "$installed_at" <<'PY'
+import datetime, json, sys
+version, target, components, services, previous, installed_at = sys.argv[1:]
+now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+print(json.dumps({"schemaVersion": 1, "mode": "binary", "target": target, "productTag": version,
+                  "components": sorted(set(json.loads(components))), "services": sorted(set(json.loads(services))),
+                  "installedAt": installed_at or now, "updatedAt": now,
+                  "previousBackupPath": previous or None}, sort_keys=True))
+PY
+)"
+    write_json_atomically "$METADATA_FILE" "$payload"
+}
+
+read_metadata_components() {
+    python3 - "$METADATA_FILE" <<'PY'
+import json, sys
+try:
+    d=json.load(open(sys.argv[1])); assert d["schemaVersion"] == 1 and d["mode"] == "binary"
+    assert all(x in {"wukong", "wukong-telegram", "wukong-web", "wukong-schedulerd"} for x in d["components"])
+    print(" ".join(d["components"]))
+except Exception: raise SystemExit("unknown or invalid install metadata schema")
+PY
+}
+
+metadata_installed_at() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["installedAt"])' "$METADATA_FILE"; }
+
+initialize_workspace_templates_if_missing() {
+    local workspace="$1"; mkdir -p "$workspace"
+    [[ -f "$workspace/SOUL.md" ]] || curl -fsSL "${GITHUB}/${REPO}/raw/${VERSION}/workspace/SOUL.md" -o "$workspace/SOUL.md" || abort "could not initialize SOUL.md"
+    [[ -f "$workspace/AGENTS.md" ]] || curl -fsSL "${GITHUB}/${REPO}/raw/${VERSION}/workspace/AGENTS.md" -o "$workspace/AGENTS.md" || abort "could not initialize AGENTS.md"
+}
+
+initialize_config_if_missing() {
+    [[ -f "$CONFIG_FILE" ]] && return 0
+    mkdir -p "$CONFIG_DIR"
+    local mem_db workspace embed md_dir web_host web_port web_token tg_token tg_allowed
+    if [[ "${1:-interactive}" == noninteractive ]]; then
+        printf 'WUKONG_MEMORY_DB="%s"\nWUKONG_WORKSPACE="%s"\nWUKONG_EMBED=0\nWUKONG_THINKING=1\n' \
+            "${HOME}/.wukong/memory.db" "${HOME}/.wukong/workspace" > "$CONFIG_FILE"
+        initialize_workspace_templates_if_missing "${HOME}/.wukong/workspace"
+        return 0
+    fi
+    read -r -p "Memory database [${HOME}/.wukong/memory.db]: " mem_db
+    read -r -p "Workspace [${HOME}/.wukong/workspace]: " workspace
+    read -r -p "Enable embeddings? (y/N): " embed
+    read -r -p "Markdown mirror (optional): " md_dir
+    if [[ " ${COMPONENTS[*]} " == *' wukong-telegram '* ]]; then
+        read -r -p "Telegram Bot token: " tg_token
+        read -r -p "Telegram allowed user IDs: " tg_allowed
+    fi
+    if [[ " ${COMPONENTS[*]} " == *' wukong-web '* ]]; then
+        read -r -p "Web host [127.0.0.1]: " web_host
+        read -r -p "Web port [8787]: " web_port
+        read -r -p "Web token (optional): " web_token
+    fi
+    workspace="${workspace:-${HOME}/.wukong/workspace}"
+    {
+        printf 'WUKONG_MEMORY_DB="%s"\n' "${mem_db:-${HOME}/.wukong/memory.db}"
+        printf 'WUKONG_WORKSPACE="%s"\n' "$workspace"
+        printf 'WUKONG_EMBED=%s\n' "$( [[ "$(lowercase "$embed")" =~ ^(y|yes|1)$ ]] && echo 1 || echo 0 )"
+        printf 'WUKONG_THINKING=1\n'
+        [[ -z "$md_dir" ]] || printf 'WUKONG_MD_DIR="%s"\n' "$md_dir"
+        [[ " ${COMPONENTS[*]} " != *' wukong-telegram '* ]] || { printf 'WUKONG_TG_TOKEN="%s"\n' "$tg_token"; printf 'WUKONG_TG_ALLOWED="%s"\n' "$tg_allowed"; }
+        if [[ " ${COMPONENTS[*]} " == *' wukong-web '* ]]; then
+            printf 'WUKONG_WEB_HOST="%s"\n' "${web_host:-127.0.0.1}"
+            printf 'WUKONG_WEB_PORT="%s"\n' "${web_port:-8787}"
+            printf 'WUKONG_WEB_TOKEN="%s"\n' "$web_token"
+        fi
+    } > "$CONFIG_FILE"
+    initialize_workspace_templates_if_missing "$workspace"
+}
+
+select_components_interactively() {
+    local choice scheduler
+    printf 'Components: 1) CLI 2) CLI+Telegram 3) CLI+Web 4) all\n'
+    read -r -p "Select [1-4] (default 1): " choice
+    case "${choice:-1}" in
+        1) COMPONENTS=(wukong) ;;
+        2) COMPONENTS=(wukong wukong-telegram) ;;
+        3) COMPONENTS=(wukong wukong-web) ;;
+        4) COMPONENTS=(wukong wukong-telegram wukong-web) ;;
+        *) abort "invalid component selection" ;;
     esac
-    FLAVOR=""
-    HAS_SYSTEMD=false
-    ;;
-  *) abort "$OS 尚不支援" ;;
-esac
+    if [[ "$WITH_SCHEDULERD" == false ]]; then
+        read -r -p "Enable Scheduler? (y/N): " scheduler
+        if [[ "$(lowercase "$scheduler")" =~ ^(y|yes)$ ]]; then COMPONENTS+=(wukong-schedulerd); fi
+    else
+        COMPONENTS+=(wukong-schedulerd)
+    fi
+}
 
-info "平台: ${OS} / ${ARCH}  →  ${TARGET}"
+unit_name_for() { printf '%s.service\n' "$1"; }
+render_unit() {
+    local component="$1" unit="$2"
+    cat > "$unit" <<UNIT
+# Managed by Wukong install.sh
+[Unit]
+Description=Wukong ${component}
+After=network-online.target
+[Service]
+Type=simple
+EnvironmentFile=%h/.wukong/config.env
+ExecStart=%h/.local/bin/${component}
+Restart=always
+RestartSec=10
+[Install]
+WantedBy=default.target
+UNIT
+}
 
-# --- prerequisites -----------------------------------------------------------
+manage_services() {
+    [[ "$HAS_SYSTEMD" == true ]] || return 0
+    local component unit enabled service_list=() enabled_components=()
+    mkdir -p "$HOME/.config/systemd/user"
+    for component in "${COMPONENTS[@]}"; do
+        [[ "$component" == wukong ]] && continue
+        unit="$(unit_name_for "$component")"
+        enabled=false
+        systemctl --user is-enabled "$unit" >/dev/null 2>&1 && enabled=true
+        if [[ -f "$HOME/.config/systemd/user/$unit" ]] && ! grep -Fq 'Managed by Wukong install.sh' "$HOME/.config/systemd/user/$unit"; then abort "refusing to overwrite unmanaged unit: $unit"; fi
+        render_unit "$component" "$HOME/.config/systemd/user/$unit"
+        [[ "$enabled" == false ]] || enabled_components+=("$component")
+    done
+    systemctl --user daemon-reload
+    for component in "${COMPONENTS[@]}"; do
+        [[ "$component" == wukong ]] && continue
+        unit="$(unit_name_for "$component")"
+        if [[ "$ACTION" == install || "$component" == wukong-schedulerd && "$WITH_SCHEDULERD" == true ]]; then
+            systemctl --user enable --now "$unit"
+            service_list+=("$unit")
+        elif [[ " ${enabled_components[*]} " == *" $component "* ]]; then
+            systemctl --user restart "$unit"
+            service_list+=("$unit")
+        fi
+    done
+    SERVICES_JSON="$(printf '%s\n' "${service_list[@]}" | python3 -c 'import json,sys; print(json.dumps(sorted(x.strip() for x in sys.stdin if x.strip())))')"
+}
 
-for cmd in curl tar grep; do
-  command -v "$cmd" >/dev/null 2>&1 || abort "需要 $cmd，請先安裝"
-done
+install_binary() {
+    mkdir -p "$INSTALL_DIR" "$CONFIG_DIR"
+    if [[ "$ACTION" == upgrade ]]; then
+        if [[ -f "$METADATA_FILE" ]]; then read -r -a COMPONENTS <<< "$(read_metadata_components)"; INSTALLED_AT="$(metadata_installed_at)"; else
+            COMPONENTS=(wukong); for c in wukong-telegram wukong-web wukong-schedulerd; do [[ -x "$INSTALL_DIR/$c" ]] && COMPONENTS+=("$c"); done; INSTALLED_AT=""
+        fi
+        [[ "$WITH_SCHEDULERD" == false || " ${COMPONENTS[*]} " == *' wukong-schedulerd '* ]] || COMPONENTS+=(wukong-schedulerd)
+    else
+        if [[ -f "$CONFIG_FILE" ]]; then
+            # Existing configuration is user-owned: never re-prompt or rewrite it.
+            COMPONENTS=(wukong)
+            [[ "$WITH_SCHEDULERD" == false ]] || COMPONENTS+=(wukong-schedulerd)
+        else
+            select_components_interactively
+        fi
+        INSTALLED_AT=""
+    fi
+    prepare_release_metadata
+    local stage archive name backup_dir previous components_json
+    stage="$(make_temp_dir)"; backup_dir="${CONFIG_DIR}/backups/${VERSION}-$(date +%s)"; previous=""
+    for name in "${COMPONENTS[@]}"; do
+        archive="$RELEASE_DIR/${name}-${TARGET}.tar.gz"
+        download_release_file "${name}-${TARGET}.tar.gz" "$archive"
+        verify_sha256sums_entry "$RELEASE_DIR/SHA256SUMS" "$archive" "${name}-${TARGET}.tar.gz"
+        validate_archive_entries "$archive" "$name"
+        extract_archive_to "$archive" "$stage"
+        [[ -f "$stage/$name" ]] || abort "archive did not contain $name"
+        chmod +x "$stage/$name"
+    done
+    mkdir -p "$backup_dir"; previous="$backup_dir"
+    for name in "${COMPONENTS[@]}"; do [[ ! -e "$INSTALL_DIR/$name" ]] || cp -p "$INSTALL_DIR/$name" "$backup_dir/$name"; done
+    if ! for name in "${COMPONENTS[@]}"; do mv -f "$stage/$name" "$INSTALL_DIR/$name"; done; then
+        for name in "${COMPONENTS[@]}"; do [[ ! -f "$backup_dir/$name" ]] || mv -f "$backup_dir/$name" "$INSTALL_DIR/$name"; done
+        abort "binary activation failed; restored backups"
+    fi
+    if [[ "$ACTION" == upgrade ]]; then initialize_config_if_missing noninteractive; else initialize_config_if_missing; fi
+    SERVICES_JSON='[]'; manage_services
+    components_json="$(printf '%s\n' "${COMPONENTS[@]}" | python3 -c 'import json,sys; print(json.dumps(sorted(x.strip() for x in sys.stdin if x.strip())))')"
+    write_binary_metadata "$components_json" "$SERVICES_JSON" "$previous" "$INSTALLED_AT"
+}
 
-if ! command -v uname >/dev/null 2>&1; then
-  abort "需要 uname"
-fi
+install_docker() {
+    command -v docker >/dev/null 2>&1 || abort "Docker is required"
+    docker compose version >/dev/null 2>&1 || abort "Docker Compose v2 is required"
+    prepare_release_metadata
+    local archive stage expected actual file
+    archive="$RELEASE_DIR/wukong-docker-${VERSION}.tar.gz"
+    download_release_file "wukong-docker-${VERSION}.tar.gz" "$archive"
+    verify_sha256sums_entry "$RELEASE_DIR/SHA256SUMS" "$archive" "wukong-docker-${VERSION}.tar.gz"
+    validate_archive_entries "$archive" wukong-docker/docker-compose.yml wukong-docker/.env.example wukong-docker/LICENSE wukong-docker/scripts/install.sh wukong-docker/release-manifest.json
+    stage="$(mktemp -d "${PWD}/.wukong-stage.XXXXXX")"; TEMP_DIRS+=("$stage")
+    extract_archive_to "$archive" "$stage"
+    expected="$(read_manifest_field "$RELEASE_DIR/release-manifest.json" image.digest)"
+    COMPOSE_PROJECT_NAME=wukong docker compose pull
+    actual="$(docker image inspect "ghcr.io/raybird/wukong:${VERSION}" --format '{{index .RepoDigests 0}}' | sed -n 's/.*@\(sha256:[0-9a-f]*\).*/\1/p')"
+    [[ "$actual" == "$expected" ]] || abort "pulled image digest does not match release manifest"
+    for file in "${DOCKER_RELEASE_OWNED[@]}"; do mkdir -p "$(dirname "$file")"; cp "$stage/wukong-docker/$file" "$file"; done
+    [[ -f .env ]] || cp .env.example .env
+    COMPOSE_PROJECT_NAME=wukong docker compose up -d --force-recreate
+    docker compose ps >/dev/null
+    write_json_atomically .wukong-release "$(python3 - "$VERSION" "$expected" <<'PY'
+import json,sys
+print(json.dumps({"schemaVersion":1,"productTag":sys.argv[1],"imageDigest":sys.argv[2]},sort_keys=True))
+PY
+)"
+}
 
-# --- resolve version --------------------------------------------------------
-
-if [[ -z "$VERSION" ]]; then
-  step "查詢最新版本..."
-  VERSION="$(curl -fsSL "${API}/${REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')"
-  if [[ -z "$VERSION" ]]; then
-    abort "無法取得最新版本，請用 --version 指定"
-  fi
-fi
-info "版本: ${VERSION}"
-
-if [[ -z "$MODE" ]]; then
-  echo ""
-  echo "$(bold '安裝模式')"
-  echo "  [1] Docker mode（常駐服務 Telegram/Web，部署到目前目錄）"
-  echo "  [2] Binary mode（本機 CLI 互動開發，安裝到 ~/.local/bin）"
-  read -r -p "選擇 [1-2] (預設 1): " MODE_CHOICE
-  case "${MODE_CHOICE:-1}" in
-    1) MODE="docker" ;;
-    2) MODE="binary" ;;
-    *) abort "請輸入 1 或 2" ;;
-  esac
-fi
-
-# --- download & verify -------------------------------------------------------
-
+parse_args "$@"
+resolve_mode_and_action
+validate_args
+detect_platform
+if [[ -z "$VERSION" ]]; then VERSION="$(curl -fsSL "${API}/${REPO}/releases/latest" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')" || abort "could not resolve latest release"; fi
 BASE_URL="${GITHUB}/${REPO}/releases/download/${VERSION}"
-
-if [[ "$MODE" == "docker" ]]; then
-  install_docker_bundle
-  exit 0
-fi
-
-if $DRY_RUN; then
-  info "dry-run: 會確認/建立 ${INSTALL_DIR}"
-  if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-    info "dry-run: 會將 ${INSTALL_DIR} 加到 ~/.bashrc"
-  fi
-else
-  mkdir -p "$INSTALL_DIR"
-
-  if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-    info "${INSTALL_DIR} 不在 PATH，正在加到 ~/.bashrc"
-    printf '\n# Wukong\nexport PATH="%s:$PATH"\n' "$INSTALL_DIR" >> "${HOME}/.bashrc"
-    export PATH="$INSTALL_DIR:$PATH"
-  fi
-fi
-
-download_and_verify() {
-  local name="$1"
-  local tarball="${name}-${TARGET}.tar.gz"
-
-  if $DRY_RUN; then
-    info "dry-run: 會下載並驗證 ${BASE_URL}/${tarball}"
-    return 0
-  fi
-
-  step "下載 ${tarball} ..."
-  curl -fsSL "${BASE_URL}/${tarball}" -o "/tmp/${tarball}"
-  curl -fsSL "${BASE_URL}/checksums-${TARGET}.txt" -o "/tmp/checksums-${TARGET}.txt"
-
-  info "驗證 checksum ..."
-  local expected
-  expected=$(grep "${tarball}" "/tmp/checksums-${TARGET}.txt" | awk '{print $1}')
-  if [[ -z "$expected" ]]; then
-    abort "在 checksums 找不到 ${tarball}"
-  fi
-  local actual
-  if [[ "$OS" == "Darwin" ]]; then
-    actual=$(shasum -a 256 "/tmp/${tarball}" | awk '{print $1}')
-  else
-    actual=$(sha256sum "/tmp/${tarball}" | awk '{print $1}')
-  fi
-  if [[ "$expected" != "$actual" ]]; then
-    abort "checksum 不符！\n  預期: ${expected}\n  實際: ${actual}"
-  fi
-  info "checksum 正確"
-
-  tar -xzf "/tmp/${tarball}" -C "$INSTALL_DIR" "$name"
-  chmod +x "${INSTALL_DIR}/${name}"
-
-  if [[ "$OS" == "Darwin" ]]; then
-    xattr -d com.apple.quarantine "${INSTALL_DIR}/${name}" 2>/dev/null || true
-  fi
-
-  info "$(green "$name") 已安裝至 ${INSTALL_DIR}/${name}"
-  rm -f "/tmp/${tarball}" "/tmp/checksums-${TARGET}.txt"
-}
-
-download_and_verify "wukong"
-
-# --- interactive config ------------------------------------------------------
-
-echo ""
-echo "$(bold '🐵 Wukong 安裝設定')"
-echo "$(dim '================================')"
-echo ""
-
-# component selection
-echo "你需要安裝哪些元件？"
-echo "  [1] CLI only（單機 wukong 指令）"
-echo "  [2] CLI + Telegram Bot（後台自動回覆）"
-echo "  [3] CLI + Web Console（瀏覽器介面）"
-echo "  [4] 全裝（CLI + Telegram + Web）"
-read -r -p "選擇 [1-4] (預設 1): " COMPONENT
-COMPONENT="${COMPONENT:-1}"
-
-if [[ ! "$COMPONENT" =~ ^[1-4]$ ]]; then
-  abort "請輸入 1–4"
-fi
-
-NEED_TELEGRAM=false
-NEED_WEB=false
-case "$COMPONENT" in
-  2) NEED_TELEGRAM=true ;;
-  3) NEED_WEB=true ;;
-  4) NEED_TELEGRAM=true; NEED_WEB=true ;;
-esac
-
-mkdir -p "$CONFIG_DIR"
-echo "# Wukong 設定 — 由 install.sh 產生 @ $(date +%F)" > "$CONFIG_FILE"
-
-# telegram
-if $NEED_TELEGRAM; then
-  download_and_verify "wukong-telegram"
-  echo ""
-  echo "$(bold 'Telegram Bot 設定')"
-  read -r -p "  Bot Token（@BotFather 取得）: " TG_TOKEN
-  read -r -p "  允許的 User ID（逗號分隔）: " TG_ALLOWED
-  {
-    echo "WUKONG_TG_TOKEN=\"${TG_TOKEN}\""
-    echo "WUKONG_TG_ALLOWED=\"${TG_ALLOWED}\""
-  } >> "$CONFIG_FILE"
-fi
-
-# web
-if $NEED_WEB; then
-  download_and_verify "wukong-web"
-  echo ""
-  echo "$(bold 'Web Console 設定')"
-  read -r -p "  監聽 Host [127.0.0.1]: " WEB_HOST
-  read -r -p "  監聽 Port [8787]: " WEB_PORT
-  read -r -p "  存取 Token（選填，留空不啟用）: " WEB_TOKEN
-  WEB_HOST="${WEB_HOST:-127.0.0.1}"
-  WEB_PORT="${WEB_PORT:-8787}"
-  {
-    echo "WUKONG_WEB_HOST=\"${WEB_HOST}\""
-    echo "WUKONG_WEB_PORT=\"${WEB_PORT}\""
-    echo "WUKONG_WEB_TOKEN=\"${WEB_TOKEN}\""
-  } >> "$CONFIG_FILE"
-fi
-
-# memory
-echo ""
-echo "$(bold '記憶設定')"
-read -r -p "  記憶資料庫位置 [${HOME}/.wukong/memory.db]: " MEM_DB
-read -r -p "  Agent 工作目錄 [${HOME}/.wukong/workspace]: " WS_DIR
-read -r -p "  啟用語意搜尋？(y/N): " EMBED
-read -r -p "  Markdown 鏡像目錄（選填，留空停用）: " MD_DIR
-
-if [[ -n "$MEM_DB" ]]; then
-  echo "WUKONG_MEMORY_DB=\"${MEM_DB}\"" >> "$CONFIG_FILE"
-fi
-WS_DIR="${WS_DIR:-${HOME}/.wukong/workspace}"
-echo "WUKONG_WORKSPACE=\"${WS_DIR}\"" >> "$CONFIG_FILE"
-
-# ── Initialize local workspace templates ──
-mkdir -p "${WS_DIR}"
-if [[ ! -f "${WS_DIR}/SOUL.md" ]]; then
-  info "初始化本地 SOUL.md..."
-  curl -fsSL "${GITHUB}/${REPO}/raw/${VERSION}/workspace/SOUL.md" -o "${WS_DIR}/SOUL.md" 2>/dev/null || true
-fi
-if [[ ! -f "${WS_DIR}/AGENTS.md" ]]; then
-  info "初始化本地 AGENTS.md..."
-  curl -fsSL "${GITHUB}/${REPO}/raw/${VERSION}/workspace/AGENTS.md" -o "${WS_DIR}/AGENTS.md" 2>/dev/null || true
-fi
-EMBED_LOWER="$(echo "${EMBED:-n}" | tr '[:upper:]' '[:lower:]')"
-case "$EMBED_LOWER" in
-  y|yes|1) echo "WUKONG_EMBED=1" >> "$CONFIG_FILE" ;;
-  *)       echo "WUKONG_EMBED=0" >> "$CONFIG_FILE" ;;
-esac
-if [[ -n "$MD_DIR" ]]; then
-  echo "WUKONG_MD_DIR=\"${MD_DIR}\"" >> "$CONFIG_FILE"
-fi
-
-# common defaults
-{
-  echo "WUKONG_THINKING=1"
-} >> "$CONFIG_FILE"
-
-info "設定已寫入 $(green "$CONFIG_FILE")"
-
-# --- systemd services (linux only) -------------------------------------------
-
-if $HAS_SYSTEMD && ($NEED_TELEGRAM || $NEED_WEB); then
-  step "安裝 systemd user service..."
-
-  SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
-  mkdir -p "$SYSTEMD_USER_DIR"
-
-  if $NEED_TELEGRAM; then
-    cat > "${SYSTEMD_USER_DIR}/wukong-telegram.service" <<UNIT
-[Unit]
-Description=Wukong Telegram Bot
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-EnvironmentFile=%h/.wukong/config.env
-ExecStart=%h/.local/bin/wukong-telegram
-Restart=always
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=default.target
-UNIT
-    info "已建立 wukong-telegram.service"
-  fi
-
-  if $NEED_WEB; then
-    cat > "${SYSTEMD_USER_DIR}/wukong-web.service" <<UNIT
-[Unit]
-Description=Wukong Web Console
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-EnvironmentFile=%h/.wukong/config.env
-ExecStart=%h/.local/bin/wukong-web
-Restart=always
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=default.target
-UNIT
-    info "已建立 wukong-web.service"
-  fi
-
-  systemctl --user daemon-reload
-
-  if $NEED_TELEGRAM; then
-    systemctl --user enable --now wukong-telegram
-    info "wukong-telegram 已啟動並設為開機自啟"
-  fi
-  if $NEED_WEB; then
-    systemctl --user enable --now wukong-web
-    info "wukong-web 已啟動並設為開機自啟"
-  fi
-
-  echo ""
-  LINGER="$(loginctl show-user "$(whoami)" --property=Linger 2>/dev/null | cut -d= -f2)"
-  if [[ "$LINGER" != "yes" ]]; then
-    echo "$(red '⚠')  user service 在登出後會停止。執行以下指令讓服務常駐："
-    echo ""
-    echo "    $(bold "loginctl enable-linger")"
-    echo ""
-  fi
-fi
-
-# --- done --------------------------------------------------------------------
-
-cat <<DONE
-
-$(bold '═══════════════════════════════════════')
-$(bold '  🐵 Wukong 安裝完成！')
-$(bold '═══════════════════════════════════════')
-
-  執行檔位置: $(green "${INSTALL_DIR}/wukong")
-  設定檔位置: $(green "${CONFIG_FILE}")
-
-  立即試用:
-    $(bold "wukong") "你好，我是孫悟空"
-
-  管理服務:
-    $(dim "systemctl --user status wukong-telegram")
-    $(dim "systemctl --user status wukong-web")
-    $(dim "journalctl --user -u wukong-telegram -f")
-
-  若你是 CLI 使用者，請在 ~/.bashrc 加入:
-    $(dim '[ -f ~/.wukong/config.env ] && source ~/.wukong/config.env')
-
-DONE
+if [[ -z "$MODE" ]]; then read -r -p "Mode [docker/binary] (default docker): " MODE; MODE="${MODE:-docker}"; fi
+if [[ "$DRY_RUN" == true ]]; then info "dry-run: mode=$MODE action=$ACTION version=$VERSION"; exit 0; fi
+if [[ "$MODE" == docker ]]; then install_docker; else install_binary; fi
+info "Wukong ${ACTION} completed: ${VERSION}"
