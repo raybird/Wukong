@@ -7,7 +7,7 @@ description: Use when preparing, promoting, tagging, or publishing Wukong releas
 
 ## Overview
 
-Release Wukong by promoting a verified RC commit to a stable `vX.Y.Z` tag, letting the GitHub Actions release workflow build assets, then using `gh` to make the release notes match existing project style.
+Release Wukong with `scripts/release.sh`: it validates the candidate, creates the annotated tag, watches the GitHub Actions workflow, and verifies GitHub Release assets before optional release-note editing.
 
 Core principle: verify first, tag the exact commit, preserve release-note style, and never mix unrelated dirty work into the release.
 
@@ -67,37 +67,19 @@ Case study of skipping this: v0.17.0 added the `WUKONG_WEB_ALLOW_INSECURE` fail-
 
 ## Promote RC To Stable
 
-If `main` was fast-forwarded locally from an RC branch, push it first:
+Use the release command after the candidate commit is clean and synchronized:
 
 ```bash
-git push origin main
+./scripts/release.sh vX.Y.Z-rc.N --dry-run
+./scripts/release.sh vX.Y.Z-rc.N
+./scripts/release.sh vX.Y.Z --promote-from vX.Y.Z-rc.N
 ```
 
-Create the stable tag on the exact commit that should ship:
-
-```bash
-git tag -a vX.Y.Z -m "vX.Y.Z"
-git push origin vX.Y.Z
-```
-
-The release workflow triggers on tags matching `v*`. RC tags containing `-rc.` should be prereleases and should not become latest. Stable tags such as `v0.16.15` should become normal latest releases.
+The stable command requires the source RC and stable tag to resolve to the same commit. It creates `promote-from:` annotation metadata. Never manually create, move, or reuse public release tags.
 
 ## Watch Release Workflow
 
-Run:
-
-```bash
-gh run list --workflow Release --limit 5
-gh run watch <run-id>
-```
-
-After the workflow finishes, inspect the release:
-
-```bash
-gh release view vX.Y.Z --json tagName,name,isPrerelease,body,url,assets
-```
-
-Confirm assets exist for the release. If GitHub CLI supports latest status in the current environment, also inspect latest metadata; otherwise use `gh release list --limit 5`.
+`scripts/release.sh` waits for the tag-filtered workflow run and verifies the prerelease channel plus all expected assets. Do not call the manual watch commands as a substitute for the release gate.
 
 ## Write Release Notes
 

@@ -8,13 +8,44 @@ permissions:
   contents: write
 
 jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag and promotion metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          rc_re='^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*$'
+          stable_re='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          [[ "$tag" =~ $rc_re || "$tag" =~ $stable_re ]]
+          [[ "$(git cat-file -t "refs/tags/$tag")" == tag ]]
+          annotation="$(git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(contents)')"
+          if [[ "$tag" =~ $rc_re ]]; then
+            ! grep -Eq '^promote-from:' <<<"$annotation"
+          else
+            promote_from="$(grep -E '^promote-from: v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*$' <<<"$annotation" | cut -d' ' -f2)"
+            [[ "$(wc -l <<<"$promote_from" | tr -d ' ')" == 1 ]]
+            [[ "${promote_from%-rc.*}" == "$tag" ]]
+            [[ "$(git rev-parse "$promote_from^{commit}")" == "$(git rev-parse "$tag^{commit}")" ]]
+          fi
+
+      - name: Validate locked dependency graph
+        run: cargo metadata --locked --format-version 1 >/dev/null
+
   # Build every target in parallel, but DO NOT upload to the release here.
   # Each job publishes its artifacts to the workflow run; the single `publish`
   # job below collects them and uploads once. This avoids the concurrency race
   # where parallel matrix jobs stepped on each other's release-asset writes
   # (softprops "Not Found - delete-a-release-asset").
-  build:
+  build-binaries:
     name: Build (${{ matrix.target }})
+    needs: validate
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -91,7 +122,7 @@ jobs:
   # them to the release in one action invocation, so there is no cross-job race.
   publish:
     name: Publish release
-    needs: build
+    needs: build-binaries
     runs-on: ubuntu-latest
     steps:
       - name: Download build artifacts

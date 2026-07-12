@@ -11,6 +11,14 @@
 
 ## [Unreleased]
 
+## [0.18.0]
+
+### Added
+
+- 新增 `scripts/release.sh` 作為唯一維護者 release gate：驗證候選 commit、建立 annotated tag、監看 workflow，並驗證 GitHub Release channel 與 assets。
+- Release workflow 在建置前驗證 annotated RC/stable promotion metadata 與 locked Cargo dependency graph。
+- 新增 deterministic `release-manifest.json` 與 aggregate `SHA256SUMS` generator，供後續 GHCR 與 installer migration 使用。
+
 ## [0.17.1] - 2026-07-08
 
 > 修復版：解決 v0.17.0 的 Web Console fail-closed 守門在 Docker Compose 預設下
