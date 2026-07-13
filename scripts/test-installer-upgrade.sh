@@ -75,6 +75,19 @@ if [[ "${WUKONG_REQUIRE_STAGED_PULL:-}" == 1 && "$1" == compose && "${*: -1}" ==
     printf "pull used deployment compose\n" >> "$WUKONG_TEST_LOG"
     exit 42
 fi
+if [[ "$1" == inspect ]]; then
+    name="${ -1}"
+    case "$name" in
+        wukong-opencode-server) project="${FIXTURE_OPENCODE_PROJECT:-${FIXTURE_DOCKER_PROJECT:-}}" ;;
+        wukong-web) project="${FIXTURE_WEB_PROJECT:-${FIXTURE_DOCKER_PROJECT:-}}" ;;
+        wukong-cli|wukong-telegram|wukong-schedulerd) project="${FIXTURE_DOCKER_PROJECT:-}" ;;
+        *) exit 1 ;;
+    esac
+    [[ "$project" != __unlabeled__ ]] || exit 0
+    [[ -n "$project" ]] || exit 1
+    printf '%s\n' "$project"
+    exit 0
+fi
 if [[ "$1" == image && "$2" == inspect ]]; then printf 'ghcr.io/raybird/wukong@sha256:%s\n' "${FIXTURE_IMAGE_DIGEST:-$(printf 'a%.0s' {1..64})}"; exit 0; fi
 if [[ "$1" == compose && "$2" == ps && -n "${FIXTURE_DOCKER_PS_EXIT:-}" ]]; then exit "$FIXTURE_DOCKER_PS_EXIT"; fi
 exit "${FIXTURE_DOCKER_EXIT:-0}"
@@ -235,6 +248,64 @@ test_docker_compose_repair() {
     assert_contains "$DEPLOYMENT/docker-compose.yml" "ghcr.io/raybird/wukong:v9.9.9"
 }
 
+test_docker_project_resolution() {
+    prepare
+    run_installer '' --mode docker --version v9.9.9 >/dev/null
+    assert_contains "$LOG" 'docker compose -p wukong '
+    python3 - "$DEPLOYMENT/.wukong-release" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1]))["composeProject"] == "wukong"
+PY
+
+    prepare
+    COMPOSE_PROJECT_NAME=custom run_installer '' --mode docker --version v9.9.9 >/dev/null
+    assert_contains "$LOG" 'docker compose -p custom '
+
+    prepare
+    printf '%s\n' '{"schemaVersion":1,"productTag":"v9.9.8","imageDigest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}' > "$DEPLOYMENT/.wukong-release"
+    FIXTURE_DOCKER_PROJECT=runwukong run_installer '' --mode docker --upgrade --version v9.9.9 >/dev/null
+    assert_contains "$LOG" 'docker compose -p runwukong '
+    python3 - "$DEPLOYMENT/.wukong-release" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1]))["composeProject"] == "runwukong"
+PY
+}
+
+test_docker_project_conflicts() {
+    prepare
+    printf '%s\n' '{"schemaVersion":1,"productTag":"v9.9.8","imageDigest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","composeProject":"runwukong"}' > "$DEPLOYMENT/.wukong-release"
+    ! FIXTURE_DOCKER_PROJECT=other run_installer '' --mode docker --upgrade --version v9.9.9 >/dev/null 2>&1 || fail "metadata/label project conflict accepted"
+    assert_not_contains "$LOG" ' pull'
+
+    prepare
+    ! FIXTURE_OPENCODE_PROJECT=runwukong FIXTURE_WEB_PROJECT=other run_installer '' --mode docker --upgrade --version v9.9.9 >/dev/null 2>&1 || fail "multiple labeled projects accepted"
+    assert_not_contains "$LOG" ' pull'
+
+    prepare
+    ! COMPOSE_PROJECT_NAME=other FIXTURE_DOCKER_PROJECT=runwukong run_installer '' --mode docker --upgrade --version v9.9.9 >/dev/null 2>&1 || fail "explicit project replaced existing ownership"
+    assert_not_contains "$LOG" ' pull'
+
+    prepare
+    ! COMPOSE_PROJECT_NAME=Bad.Name run_installer '' --mode docker --version v9.9.9 >/dev/null 2>&1 || fail "invalid explicit project accepted"
+    assert_not_contains "$LOG" ' pull'
+
+    prepare
+    ! FIXTURE_DOCKER_PROJECT=__unlabeled__ run_installer '' --mode docker --upgrade --version v9.9.9 >/dev/null 2>&1 || fail "unlabeled existing container accepted"
+    assert_not_contains "$LOG" ' pull'
+}
+
+test_docker_project_persistence() {
+    prepare
+    COMPOSE_PROJECT_NAME=custom run_installer '' --mode docker --version v9.9.9 >/dev/null
+    FIXTURE_TAG=v9.9.8 FIXTURE_SAFE_TO=v9.9.9 make_release
+    : > "$LOG"
+    run_installer '' --mode docker --upgrade --version v9.9.8 >/dev/null
+    assert_contains "$LOG" 'docker compose -p custom '
+    : > "$LOG"
+    run_installer '' --mode docker --rollback >/dev/null
+    assert_contains "$LOG" 'docker compose -p custom '
+}
+
 test_forced_upgrade() {
     prepare
     run_installer '' --mode docker --version v9.9.9 >/dev/null
@@ -351,7 +422,10 @@ case "$CASE" in
     docker-rollback) test_docker_rollback ;;
     docker-recovery) test_docker_recovery ;;
     binary-recovery) test_binary_recovery ;;
-    all) test_parsing; test_verification; test_docker; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_docker_compose_repair; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
+    docker-project) test_docker_project_resolution ;;
+    docker-project-conflicts) test_docker_project_conflicts ;;
+    docker-project-persistence) test_docker_project_persistence ;;
+    all) test_parsing; test_verification; test_docker; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_docker_compose_repair; test_docker_project_resolution; test_docker_project_conflicts; test_docker_project_persistence; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
     *) fail "unknown test case: $CASE" ;;
 esac
 
