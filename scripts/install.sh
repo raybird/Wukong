@@ -19,6 +19,8 @@ VERSION_EXPLICIT=false
 FLAVOR=musl
 TEMP_DIRS=()
 DOCKER_RELEASE_OWNED=(docker-compose.yml .env.example LICENSE scripts/install.sh)
+DOCKER_PROJECT_NAME=""
+DOCKER_CONTAINER_NAMES=(wukong-cli wukong-opencode-server wukong-telegram wukong-web wukong-schedulerd)
 
 abort() { printf 'installer: %s\n' "$*" >&2; exit 1; }
 info() { printf '  %s\n' "$*"; }
@@ -148,6 +150,41 @@ PY
 
 validate_archive_entries() { safe_list_archive "$@" || abort "unsafe or unexpected archive contents"; }
 extract_archive_to() { tar -xzf "$1" -C "$2"; }
+
+valid_compose_project() { [[ "$1" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; }
+
+resolve_docker_project() {
+    local metadata_project="" labeled_project="" explicit="${COMPOSE_PROJECT_NAME:-}" name discovered=""
+    if [[ -f .wukong-release ]]; then
+        metadata_project="$(python3 - .wukong-release <<'PY'
+import json, sys
+try:
+    value=json.load(open(sys.argv[1], encoding="utf-8")).get("composeProject", "")
+    if not isinstance(value, str): raise ValueError
+    print(value)
+except (OSError, ValueError, TypeError, json.JSONDecodeError):
+    raise SystemExit(1)
+PY
+)" || abort "invalid Docker release metadata"
+    fi
+    [[ -z "$metadata_project" ]] || valid_compose_project "$metadata_project" || abort "invalid Compose project in Docker release metadata"
+
+    for name in "${DOCKER_CONTAINER_NAMES[@]}"; do
+        if discovered="$(docker inspect --format '{{ with index .Config.Labels "com.docker.compose.project" }}{{ . }}{{ end }}' "$name" 2>/dev/null)"; then
+            [[ -n "$discovered" ]] || abort "existing container $name has no Compose project label"
+            valid_compose_project "$discovered" || abort "existing container $name has an invalid Compose project label"
+            [[ -z "$labeled_project" || "$labeled_project" == "$discovered" ]] || abort "Wukong containers belong to multiple Compose projects"
+            labeled_project="$discovered"
+        fi
+    done
+
+    [[ -z "$metadata_project" || -z "$labeled_project" || "$metadata_project" == "$labeled_project" ]] || abort "Docker metadata and containers disagree on Compose project"
+    [[ -z "$explicit" ]] || valid_compose_project "$explicit" || abort "invalid COMPOSE_PROJECT_NAME"
+    if [[ -n "$explicit" && -n "${metadata_project:-$labeled_project}" && "$explicit" != "${metadata_project:-$labeled_project}" ]]; then
+        abort "COMPOSE_PROJECT_NAME cannot replace an existing Compose project"
+    fi
+    DOCKER_PROJECT_NAME="${metadata_project:-${labeled_project:-${explicit:-wukong}}}"
+}
 
 skip_current_upgrade() {
     [[ "$ACTION" == upgrade && "$FORCE" == false ]] || return 0
@@ -371,6 +408,7 @@ manage_services() {
 }
 
 install_binary() {
+    skip_current_upgrade
     mkdir -p "$INSTALL_DIR" "$CONFIG_DIR"
     if [[ "$ACTION" == rollback ]]; then
         rollback_binary
@@ -462,8 +500,10 @@ PY
 }
 
 install_docker() {
+    skip_current_upgrade
     command -v docker >/dev/null 2>&1 || abort "Docker is required"
     docker compose version >/dev/null 2>&1 || abort "Docker Compose v2 is required"
+    resolve_docker_project
     if [[ "$ACTION" == rollback ]]; then
         rollback_docker
         return
@@ -482,24 +522,24 @@ install_docker() {
     stage="$(mktemp -d "${PWD}/.wukong-stage.XXXXXX")"; TEMP_DIRS+=("$stage")
     extract_archive_to "$archive" "$stage"
     expected="$(read_manifest_field "$RELEASE_DIR/release-manifest.json" image.digest)"
-    COMPOSE_PROJECT_NAME=wukong docker compose --project-directory "$PWD" -f "$stage/wukong-docker/docker-compose.yml" pull
+    docker compose -p "$DOCKER_PROJECT_NAME" --project-directory "$PWD" -f "$stage/wukong-docker/docker-compose.yml" pull
     actual="$(docker image inspect "ghcr.io/raybird/wukong:${VERSION}" --format '{{index .RepoDigests 0}}' | sed -n 's/.*@\(sha256:[0-9a-f]*\).*/\1/p')"
     [[ "$actual" == "$expected" ]] || abort "pulled image digest does not match release manifest"
     for file in "${DOCKER_RELEASE_OWNED[@]}"; do mkdir -p "$(dirname "$file")"; cp "$stage/wukong-docker/$file" "$file"; done
     [[ -f .env ]] || cp .env.example .env
-    if ! COMPOSE_PROJECT_NAME=wukong docker compose up -d --force-recreate || ! docker compose ps >/dev/null; then
+    if ! docker compose -p "$DOCKER_PROJECT_NAME" up -d --force-recreate || ! docker compose -p "$DOCKER_PROJECT_NAME" ps >/dev/null; then
         # A failed recreation must not leave release-owned files or metadata advanced.
         if [[ -n "$backup" ]]; then
             for file in "${DOCKER_RELEASE_OWNED[@]}"; do [[ ! -f "$backup/$file" ]] || cp -p "$backup/$file" "$file"; done
-            COMPOSE_PROJECT_NAME=wukong docker compose up -d --force-recreate || true
+            docker compose -p "$DOCKER_PROJECT_NAME" up -d --force-recreate || true
         else
             for file in "${DOCKER_RELEASE_OWNED[@]}"; do rm -f "$file"; done
         fi
         abort "Docker activation or health check failed; restored previous release files"
     fi
-    write_json_atomically .wukong-release "$(python3 - "$VERSION" "$expected" "$previous_version" "$previous_digest" "$backup" "$RELEASE_DIR/release-manifest.json" <<'PY'
+    write_json_atomically .wukong-release "$(python3 - "$VERSION" "$expected" "$previous_version" "$previous_digest" "$backup" "$DOCKER_PROJECT_NAME" "$RELEASE_DIR/release-manifest.json" <<'PY'
 import json,sys
-print(json.dumps({"schemaVersion":1,"productTag":sys.argv[1],"imageDigest":sys.argv[2],"previousVersion":sys.argv[3] or None,"previousImageDigest":sys.argv[4] or None,"previousBackupPath":sys.argv[5] or None,"dataCompatibility":json.load(open(sys.argv[6]))["dataCompatibility"]},sort_keys=True))
+print(json.dumps({"schemaVersion":1,"productTag":sys.argv[1],"imageDigest":sys.argv[2],"previousVersion":sys.argv[3] or None,"previousImageDigest":sys.argv[4] or None,"previousBackupPath":sys.argv[5] or None,"composeProject":sys.argv[6],"dataCompatibility":json.load(open(sys.argv[7]))["dataCompatibility"]},sort_keys=True))
 PY
 )"
 }
@@ -520,12 +560,12 @@ PY
     [[ -d "$backup" ]] || abort "Docker rollback backup is unavailable"
     current_backup=".wukong-backups/${version}-rollback-$(date +%s)"; mkdir -p "$current_backup"
     for file in "${DOCKER_RELEASE_OWNED[@]}"; do [[ ! -f "$file" ]] || { mkdir -p "$current_backup/$(dirname "$file")"; cp -p "$file" "$current_backup/$file"; }; [[ ! -f "$backup/$file" ]] || cp -p "$backup/$file" "$file"; done
-    COMPOSE_PROJECT_NAME=wukong docker compose pull
-    COMPOSE_PROJECT_NAME=wukong docker compose up -d --force-recreate
-    docker compose ps >/dev/null
-    write_json_atomically .wukong-release "$(python3 - "$version" "$digest" "$current_backup" "$current_version" "$current_digest" <<'PY'
+    docker compose -p "$DOCKER_PROJECT_NAME" pull
+    docker compose -p "$DOCKER_PROJECT_NAME" up -d --force-recreate
+    docker compose -p "$DOCKER_PROJECT_NAME" ps >/dev/null
+    write_json_atomically .wukong-release "$(python3 - "$version" "$digest" "$current_backup" "$current_version" "$current_digest" "$DOCKER_PROJECT_NAME" <<'PY'
 import json,sys
-print(json.dumps({"schemaVersion":1,"productTag":sys.argv[1],"imageDigest":sys.argv[2],"previousVersion":sys.argv[4],"previousImageDigest":sys.argv[5],"previousBackupPath":sys.argv[3]},sort_keys=True))
+print(json.dumps({"schemaVersion":1,"productTag":sys.argv[1],"imageDigest":sys.argv[2],"previousVersion":sys.argv[4],"previousImageDigest":sys.argv[5],"previousBackupPath":sys.argv[3],"composeProject":sys.argv[6]},sort_keys=True))
 PY
 )"
 }
@@ -538,6 +578,5 @@ if [[ -z "$VERSION" ]]; then VERSION="$(curl -fsSL "${API}/${REPO}/releases/late
 BASE_URL="${GITHUB}/${REPO}/releases/download/${VERSION}"
 if [[ -z "$MODE" ]]; then read -r -p "Mode [docker/binary] (default docker): " MODE; MODE="${MODE:-docker}"; fi
 if [[ "$DRY_RUN" == true ]]; then info "dry-run: mode=$MODE action=$ACTION version=$VERSION"; exit 0; fi
-skip_current_upgrade
 if [[ "$MODE" == docker ]]; then install_docker; else install_binary; fi
 info "Wukong ${ACTION} completed: ${VERSION}"

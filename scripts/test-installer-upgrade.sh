@@ -76,7 +76,7 @@ if [[ "${WUKONG_REQUIRE_STAGED_PULL:-}" == 1 && "$1" == compose && "${*: -1}" ==
     exit 42
 fi
 if [[ "$1" == inspect ]]; then
-    name="${ -1}"
+    name="${@: -1}"
     case "$name" in
         wukong-opencode-server) project="${FIXTURE_OPENCODE_PROJECT:-${FIXTURE_DOCKER_PROJECT:-}}" ;;
         wukong-web) project="${FIXTURE_WEB_PROJECT:-${FIXTURE_DOCKER_PROJECT:-}}" ;;
@@ -89,7 +89,7 @@ if [[ "$1" == inspect ]]; then
     exit 0
 fi
 if [[ "$1" == image && "$2" == inspect ]]; then printf 'ghcr.io/raybird/wukong@sha256:%s\n' "${FIXTURE_IMAGE_DIGEST:-$(printf 'a%.0s' {1..64})}"; exit 0; fi
-if [[ "$1" == compose && "$2" == ps && -n "${FIXTURE_DOCKER_PS_EXIT:-}" ]]; then exit "$FIXTURE_DOCKER_PS_EXIT"; fi
+if [[ "$1" == compose && "${*: -1}" == ps && -n "${FIXTURE_DOCKER_PS_EXIT:-}" ]]; then exit "$FIXTURE_DOCKER_PS_EXIT"; fi
 exit "${FIXTURE_DOCKER_EXIT:-0}"
 SH
     cat > "$BIN/systemctl" <<'SH'
@@ -173,7 +173,7 @@ test_docker() {
     run_installer '' --mode docker --version v9.9.9 >/dev/null
     assert_file "$DEPLOYMENT/.wukong-release"
     assert_contains "$LOG" ' pull'
-    assert_contains "$LOG" 'docker compose up -d --force-recreate'
+    assert_contains "$LOG" 'docker compose -p wukong up -d --force-recreate'
     assert_not_contains "$LOG" 'build'
     assert_not_contains "$LOG" ' down'
     assert_contains "$DEPLOYMENT/.env" 'USER_SECRET=preserve'
@@ -312,7 +312,7 @@ test_forced_upgrade() {
     : > "$LOG"
     run_installer '' --mode docker --upgrade --force --version v9.9.9 >/dev/null
     assert_contains "$LOG" ' pull'
-    assert_contains "$LOG" 'docker compose up -d --force-recreate'
+    assert_contains "$LOG" 'docker compose -p wukong up -d --force-recreate'
 }
 
 test_systemd() {
