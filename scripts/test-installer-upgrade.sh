@@ -221,6 +221,16 @@ test_upgrade_noop() {
     assert_same "$TMP/binary-before" "$HOME/.local/bin/wukong"
 }
 
+test_docker_compose_repair() {
+    prepare
+    run_installer "" --mode docker --version v9.9.9 >/dev/null
+    printf "services:\n  wukong-telegram:\n    build: .\n    image: wukong:latest\n" > "$DEPLOYMENT/docker-compose.yml"
+    : > "$LOG"
+    run_installer "" --mode docker --upgrade --version v9.9.9 >/dev/null
+    assert_contains "$LOG" "docker compose pull"
+    assert_contains "$DEPLOYMENT/docker-compose.yml" "ghcr.io/raybird/wukong:v9.9.9"
+}
+
 test_forced_upgrade() {
     prepare
     run_installer '' --mode docker --version v9.9.9 >/dev/null
@@ -337,7 +347,7 @@ case "$CASE" in
     docker-rollback) test_docker_rollback ;;
     docker-recovery) test_docker_recovery ;;
     binary-recovery) test_binary_recovery ;;
-    all) test_parsing; test_verification; test_docker; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
+    all) test_parsing; test_verification; test_docker; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_docker_compose_repair; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
     *) fail "unknown test case: $CASE" ;;
 esac
 

@@ -152,7 +152,14 @@ extract_archive_to() { tar -xzf "$1" -C "$2"; }
 skip_current_upgrade() {
     [[ "$ACTION" == upgrade && "$FORCE" == false ]] || return 0
     local metadata current
-    if [[ "$MODE" == docker ]]; then metadata=.wukong-release; else metadata="$METADATA_FILE"; fi
+    if [[ "$MODE" == docker ]]; then
+        metadata=.wukong-release
+        [[ -f docker-compose.yml ]] || return 0
+        grep -Fq "image: ghcr.io/raybird/wukong:$VERSION" docker-compose.yml || return 0
+        ! grep -Eq "^[[:space:]]*build:" docker-compose.yml || return 0
+    else
+        metadata="$METADATA_FILE"
+    fi
     [[ -f "$metadata" ]] || return 0
     current="$(python3 - "$metadata" <<'PY'
 import json, sys
