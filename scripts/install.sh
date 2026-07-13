@@ -149,6 +149,25 @@ PY
 validate_archive_entries() { safe_list_archive "$@" || abort "unsafe or unexpected archive contents"; }
 extract_archive_to() { tar -xzf "$1" -C "$2"; }
 
+skip_current_upgrade() {
+    [[ "$ACTION" == upgrade && "$FORCE" == false ]] || return 0
+    local metadata current
+    if [[ "$MODE" == docker ]]; then metadata=.wukong-release; else metadata="$METADATA_FILE"; fi
+    [[ -f "$metadata" ]] || return 0
+    current="$(python3 - "$metadata" <<'PY'
+import json, sys
+try:
+    print(json.load(open(sys.argv[1], encoding="utf-8"))["productTag"])
+except (OSError, KeyError, TypeError, json.JSONDecodeError):
+    pass
+PY
+)"
+    if [[ -n "$current" && "$current" == "$VERSION" ]]; then
+        info "Wukong is already up to date: $VERSION"
+        exit 0
+    fi
+}
+
 prepare_release_metadata() {
     RELEASE_DIR="$(make_temp_dir)"
     download_release_file SHA256SUMS "$RELEASE_DIR/SHA256SUMS"
@@ -452,7 +471,7 @@ install_docker() {
     archive="$RELEASE_DIR/wukong-docker-${VERSION}.tar.gz"
     download_release_file "wukong-docker-${VERSION}.tar.gz" "$archive"
     verify_sha256sums_entry "$RELEASE_DIR/SHA256SUMS" "$archive" "wukong-docker-${VERSION}.tar.gz"
-    validate_archive_entries "$archive" wukong-docker/docker-compose.yml wukong-docker/.env.example wukong-docker/LICENSE wukong-docker/scripts/install.sh wukong-docker/release-manifest.json
+    validate_archive_entries "$archive" wukong-docker/docker-compose.yml wukong-docker/.env.example wukong-docker/LICENSE wukong-docker/data-compatibility.json wukong-docker/scripts/install.sh wukong-docker/release-manifest.json
     stage="$(mktemp -d "${PWD}/.wukong-stage.XXXXXX")"; TEMP_DIRS+=("$stage")
     extract_archive_to "$archive" "$stage"
     expected="$(read_manifest_field "$RELEASE_DIR/release-manifest.json" image.digest)"
@@ -512,5 +531,6 @@ if [[ -z "$VERSION" ]]; then VERSION="$(curl -fsSL "${API}/${REPO}/releases/late
 BASE_URL="${GITHUB}/${REPO}/releases/download/${VERSION}"
 if [[ -z "$MODE" ]]; then read -r -p "Mode [docker/binary] (default docker): " MODE; MODE="${MODE:-docker}"; fi
 if [[ "$DRY_RUN" == true ]]; then info "dry-run: mode=$MODE action=$ACTION version=$VERSION"; exit 0; fi
+skip_current_upgrade
 if [[ "$MODE" == docker ]]; then install_docker; else install_binary; fi
 info "Wukong ${ACTION} completed: ${VERSION}"

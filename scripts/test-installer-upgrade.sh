@@ -39,6 +39,7 @@ make_release() {
     printf 'services:\n  wukong:\n    image: ghcr.io/raybird/wukong:%s\n' "$tag" > "$docker_stage/docker-compose.yml"
     printf 'EXAMPLE=1\n' > "$docker_stage/.env.example"
     printf 'MIT\n' > "$docker_stage/LICENSE"
+    printf '%s\n' '{"affectedState":[],"backupRequired":false,"instructionsUrl":null,"irreversibleMigration":false,"rollbackSafeTo":"v0.17.1","schemaVersion":1}' > "$docker_stage/data-compatibility.json"
     cp "$INSTALLER" "$docker_stage/scripts/install.sh"
     python3 - "$RELEASES/release-manifest.json" "$tag" <<'PY'
 import json, os, sys
@@ -200,6 +201,35 @@ PY
     [[ ! -e "$HOME/.local/bin/wukong-telegram" ]] || fail "unselected component downloaded"
 }
 
+test_upgrade_noop() {
+    prepare
+    run_installer '' --mode docker --version v9.9.9 >/dev/null
+    cp "$DEPLOYMENT/.wukong-release" "$TMP/docker-metadata-before"
+    : > "$LOG"
+    output="$(run_installer '' --mode docker --upgrade --version v9.9.9)"
+    [[ "$output" == *'Wukong is already up to date: v9.9.9'* ]] || fail "Docker no-op upgrade did not report current version"
+    assert_same "$TMP/docker-metadata-before" "$DEPLOYMENT/.wukong-release"
+    [[ ! -s "$LOG" ]] || fail "Docker no-op upgrade invoked Docker"
+
+    prepare
+    run_installer '1\nn\n\n\n\n\n' --mode binary --version v9.9.9 >/dev/null
+    cp "$HOME/.wukong/install.json" "$TMP/binary-metadata-before"
+    cp "$HOME/.local/bin/wukong" "$TMP/binary-before"
+    output="$(run_installer '' --mode binary --upgrade --version v9.9.9)"
+    [[ "$output" == *'Wukong is already up to date: v9.9.9'* ]] || fail "Binary no-op upgrade did not report current version"
+    assert_same "$TMP/binary-metadata-before" "$HOME/.wukong/install.json"
+    assert_same "$TMP/binary-before" "$HOME/.local/bin/wukong"
+}
+
+test_forced_upgrade() {
+    prepare
+    run_installer '' --mode docker --version v9.9.9 >/dev/null
+    : > "$LOG"
+    run_installer '' --mode docker --upgrade --force --version v9.9.9 >/dev/null
+    assert_contains "$LOG" 'docker compose pull'
+    assert_contains "$LOG" 'docker compose up -d --force-recreate'
+}
+
 test_systemd() {
     prepare
     run_installer '1\nn\n\n\n\n\n' --mode binary --with-schedulerd --version v9.9.9 >/dev/null
@@ -298,6 +328,8 @@ case "$CASE" in
     metadata) test_metadata ;;
     binary-clean) test_binary_clean ;;
     binary-upgrade) test_binary_upgrade ;;
+    upgrade-noop) test_upgrade_noop ;;
+    forced-upgrade) test_forced_upgrade ;;
     systemd) test_systemd ;;
     rollback-metadata) test_rollback_metadata ;;
     legacy-rollback) test_legacy_rollback ;;
@@ -305,7 +337,7 @@ case "$CASE" in
     docker-rollback) test_docker_rollback ;;
     docker-recovery) test_docker_recovery ;;
     binary-recovery) test_binary_recovery ;;
-    all) test_parsing; test_verification; test_docker; test_metadata; test_binary_clean; test_binary_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
+    all) test_parsing; test_verification; test_docker; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
     *) fail "unknown test case: $CASE" ;;
 esac
 
