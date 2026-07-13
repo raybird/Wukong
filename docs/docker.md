@@ -44,6 +44,10 @@ curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install
 
 ```
 
+`--upgrade` 會先比對目標 release、`.wukong-release` 與目前的 Compose image 設定；已是相同版本時會直接結束，不呼叫 Docker。需要重新部署相同版本時可加上 `--force`。
+
+installer 會把 Docker Compose project 記錄在 `.wukong-release`。既有部署若尚未記錄，會從現有 Wukong container 的 `com.docker.compose.project` label 判斷並沿用，避免升級時切換到另一組 volumes。只有全新安裝可用 `COMPOSE_PROJECT_NAME=<name>` 選擇 project；既有 metadata、container labels 與手動指定值不一致，或現有 containers 的 ownership 不明確時，installer 會在覆寫檔案或重建服務前中止。這個選項不會遷移或複製 volumes。
+
 installer 不會呼叫 `docker compose build`、`down` 或 `down -v`；升級時也請不要手動使用 `docker compose down -v`，避免刪除 `wukong-data`、`opencode-config`、`opencode-state` 等持久化 volume。若你是從舊版升級且容器還在，想盡量保留尚未持久化的 opencode session，可先備份：
 
 在同一部署目錄執行 `install.sh --mode docker --rollback` 可回復最近一個已驗證 release；`.env`、Compose override、workspace 和 volumes 保持使用者擁有。compatibility metadata 缺少或拒絕目標版本時，installer 不會變更部署。

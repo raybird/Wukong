@@ -36,6 +36,8 @@ curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install
 - **Docker mode**：驗證 `SHA256SUMS`、`release-manifest.json` 與 release bundle 後，只寫入 `docker-compose.yml`、`.env.example`、`LICENSE`、`scripts/install.sh`。它從 GHCR pull 已驗證 digest 的 image，不在本機 build。`.env`、workspace、Compose override 與 volume 均由使用者擁有。**適合常駐服務部署。**
 - **Binary mode**：下載最新預編譯 binary 到 `~/.local/bin`，並以互動問答設定 Telegram / Web / 記憶等選項。**適合本機 CLI 互動開發。**
 
+Docker `--upgrade` 會先檢查本機 release metadata 與 Compose image；版本相同時直接結束，`--force` 可要求重新部署。installer 會將 Compose project 寫入 `.wukong-release`，並在 legacy metadata 缺少此欄位時從既有 container labels 判斷。全新安裝可用 `COMPOSE_PROJECT_NAME=<name>` 指定 project；既有部署不得用它切換 ownership，任何 metadata、labels 或手動值衝突都會在 mutation 前中止，且 installer 不會自動遷移 volumes。
+
 手動選項：
 
 ```bash
