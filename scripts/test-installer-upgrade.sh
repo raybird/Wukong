@@ -71,6 +71,10 @@ SH
 set -euo pipefail
 printf 'docker %s\n' "$*" >> "$WUKONG_TEST_LOG"
 if [[ "$1" == compose && "$2" == version ]]; then exit 0; fi
+if [[ "${WUKONG_REQUIRE_STAGED_PULL:-}" == 1 && "$1" == compose && "${*: -1}" == pull && " $* " != *" -f "* ]]; then
+    printf "pull used deployment compose\n" >> "$WUKONG_TEST_LOG"
+    exit 42
+fi
 if [[ "$1" == image && "$2" == inspect ]]; then printf 'ghcr.io/raybird/wukong@sha256:%s\n' "${FIXTURE_IMAGE_DIGEST:-$(printf 'a%.0s' {1..64})}"; exit 0; fi
 if [[ "$1" == compose && "$2" == ps && -n "${FIXTURE_DOCKER_PS_EXIT:-}" ]]; then exit "$FIXTURE_DOCKER_PS_EXIT"; fi
 exit "${FIXTURE_DOCKER_EXIT:-0}"
@@ -155,7 +159,7 @@ test_docker() {
     mkdir -p "$DEPLOYMENT/workspace"; printf 'state\n' > "$DEPLOYMENT/workspace/custom"
     run_installer '' --mode docker --version v9.9.9 >/dev/null
     assert_file "$DEPLOYMENT/.wukong-release"
-    assert_contains "$LOG" 'docker compose pull'
+    assert_contains "$LOG" ' pull'
     assert_contains "$LOG" 'docker compose up -d --force-recreate'
     assert_not_contains "$LOG" 'build'
     assert_not_contains "$LOG" ' down'
@@ -226,8 +230,8 @@ test_docker_compose_repair() {
     run_installer "" --mode docker --version v9.9.9 >/dev/null
     printf "services:\n  wukong-telegram:\n    build: .\n    image: wukong:latest\n" > "$DEPLOYMENT/docker-compose.yml"
     : > "$LOG"
-    run_installer "" --mode docker --upgrade --version v9.9.9 >/dev/null
-    assert_contains "$LOG" "docker compose pull"
+    WUKONG_REQUIRE_STAGED_PULL=1 run_installer "" --mode docker --upgrade --version v9.9.9 >/dev/null
+    assert_contains "$LOG" " pull"
     assert_contains "$DEPLOYMENT/docker-compose.yml" "ghcr.io/raybird/wukong:v9.9.9"
 }
 
@@ -236,7 +240,7 @@ test_forced_upgrade() {
     run_installer '' --mode docker --version v9.9.9 >/dev/null
     : > "$LOG"
     run_installer '' --mode docker --upgrade --force --version v9.9.9 >/dev/null
-    assert_contains "$LOG" 'docker compose pull'
+    assert_contains "$LOG" ' pull'
     assert_contains "$LOG" 'docker compose up -d --force-recreate'
 }
 

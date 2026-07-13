@@ -482,7 +482,7 @@ install_docker() {
     stage="$(mktemp -d "${PWD}/.wukong-stage.XXXXXX")"; TEMP_DIRS+=("$stage")
     extract_archive_to "$archive" "$stage"
     expected="$(read_manifest_field "$RELEASE_DIR/release-manifest.json" image.digest)"
-    COMPOSE_PROJECT_NAME=wukong docker compose pull
+    COMPOSE_PROJECT_NAME=wukong docker compose --project-directory "$PWD" -f "$stage/wukong-docker/docker-compose.yml" pull
     actual="$(docker image inspect "ghcr.io/raybird/wukong:${VERSION}" --format '{{index .RepoDigests 0}}' | sed -n 's/.*@\(sha256:[0-9a-f]*\).*/\1/p')"
     [[ "$actual" == "$expected" ]] || abort "pulled image digest does not match release manifest"
     for file in "${DOCKER_RELEASE_OWNED[@]}"; do mkdir -p "$(dirname "$file")"; cp "$stage/wukong-docker/$file" "$file"; done
