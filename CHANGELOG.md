@@ -11,6 +11,15 @@
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-07-13
+
+### Fixed
+
+- Docker installer 在升級與 rollback 時會沿用既有 Compose project，從 release metadata 或現有 container labels 判斷 ownership，避免切換到空白 volumes 或因固定 container name 衝突而失敗。
+- Docker upgrade 使用 staged release Compose 設定 pull images，並修復舊部署殘留 `build:` 設定時誤走 source build 或 pull failure 的問題。
+- 同版本 `--upgrade` 會直接 no-op；release bundle 的 compatibility metadata 納入嚴格 archive allowlist。
+- Stable release manifest 直接由 stable tag 產生，不再依賴 RC promotion metadata。
+
 ### Changed
 
 - Installer Phase 4：release manifest 現在包含 reviewed data-compatibility declaration，Binary rollback 已加入 release contract。
