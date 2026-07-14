@@ -11,7 +11,7 @@ for contract in \
   'needs: [validate, build-binaries]' \
   'needs: [validate, build-binaries, publish-image]' 'needs: package-release' \
   'cargo build --release --locked' 'musl-binaries' 'REGCTL_VERSION=v0.8.1' 'regctl image digest' 'regctl image copy' \
-  'docker buildx build --platform linux/amd64 --push' 'attach_immutable latest' 'git show -s --format=%cI "$COMMIT"' \
+  'docker buildx build --platform linux/amd64 --push' 'regctl image copy "$image@$image_digest" "$image:latest"' 'git show -s --format=%cI "$COMMIT"' \
   'release-manifest.json' 'scripts/generate-sha256sums.sh dist' \
    'name: release-assets' 'files: dist/*' \
    'cp release/package.json release/package-lock.json release-context/release/' '--data-compatibility release/data-compatibility.json' \
@@ -30,5 +30,6 @@ done
 ! grep -Fq 'releases/latest/download/regctl' "$workflow" || { echo "registry client must use a pinned release" >&2; exit 1; }
 ! grep -Fq 'checksums-${{ matrix.target }}.txt' "$workflow" || { echo "legacy per-target checksum assets must not be published" >&2; exit 1; }
 ! grep -Fq "'checksums-*.txt'" "$workflow" || { echo "stable promotion must consume global SHA256SUMS only" >&2; exit 1; }
+! grep -Fq 'attach_immutable latest' "$workflow" || { echo "latest must remain a mutable stable pointer" >&2; exit 1; }
 
 echo "release workflow checks passed"

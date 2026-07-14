@@ -11,7 +11,7 @@
 
 ## [Unreleased]
 
-## [0.18.1] - 2026-07-13
+## [0.18.2] - 2026-07-13
 
 ### Fixed
 
@@ -19,6 +19,7 @@
 - Docker upgrade 使用 staged release Compose 設定 pull images，並修復舊部署殘留 `build:` 設定時誤走 source build 或 pull failure 的問題。
 - 同版本 `--upgrade` 會直接 no-op；release bundle 的 compatibility metadata 納入嚴格 archive allowlist。
 - Stable release manifest 直接由 stable tag 產生，不再依賴 RC promotion metadata。
+- Stable release 只對版本與 commit image tags 執行 immutable guard；`latest` 會更新到新 stable digest，避免 patch release 因既有 `latest` 而失敗。
 
 ### Changed
 

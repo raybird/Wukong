@@ -64,7 +64,8 @@ check_registry_contract() {
 check_stable_tag_contract() {
   require_file "$workflow"
   require_text 'scripts/generate-sha256sums.sh dist' "$workflow"
-  require_text 'attach_immutable latest' "$workflow"
+  require_text 'regctl image copy "$image@$image_digest" "$image:latest"' "$workflow"
+  ! grep -Fq 'attach_immutable latest' "$workflow" || fail "latest must remain a mutable stable pointer"
 }
 
 check_smoke() {
