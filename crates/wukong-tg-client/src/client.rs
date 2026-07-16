@@ -45,6 +45,13 @@ pub trait TgClient {
         text: &str,
         keyboard: InlineKeyboard,
     ) -> impl std::future::Future<Output = Result<i64, TgError>> + Send;
+    /// Stream an ephemeral plain-text draft in a private chat.
+    fn send_message_draft(
+        &self,
+        chat_id: i64,
+        draft_id: i64,
+        text: &str,
+    ) -> impl std::future::Future<Output = Result<(), TgError>> + Send;
     /// Edit an existing message's text (plain).
     fn edit_message_text(
         &self,
@@ -216,6 +223,20 @@ impl TgClient for ReqwestTgClient {
         message_id_of(&v)
     }
 
+    async fn send_message_draft(
+        &self,
+        chat_id: i64,
+        draft_id: i64,
+        text: &str,
+    ) -> Result<(), TgError> {
+        self.post(
+            "sendMessageDraft",
+            serde_json::json!({ "chat_id": chat_id, "draft_id": draft_id, "text": text }),
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn edit_message_text(
         &self,
         chat_id: i64,
@@ -344,8 +365,10 @@ pub mod mock {
         pub callback_answers: Arc<Mutex<Vec<(String, String)>>>,
         pub deletes: Arc<Mutex<Vec<(i64, i64)>>>,
         pub actions: Arc<Mutex<Vec<(i64, String)>>>,
+        pub drafts: Arc<Mutex<Vec<(i64, i64, String)>>>,
         files: MockFiles,
         next_id: Arc<Mutex<i64>>,
+        drafts_enabled: Arc<Mutex<bool>>,
     }
 
     impl MockTgClient {
@@ -368,6 +391,11 @@ pub mod mock {
                     bytes,
                 ),
             );
+            self
+        }
+
+        pub fn with_message_drafts(self) -> Self {
+            *self.drafts_enabled.lock().unwrap() = true;
             self
         }
     }
@@ -403,6 +431,24 @@ pub mod mock {
                 .unwrap()
                 .push((chat_id, text.to_string(), keyboard));
             Ok(self.alloc_id())
+        }
+        async fn send_message_draft(
+            &self,
+            chat_id: i64,
+            draft_id: i64,
+            text: &str,
+        ) -> Result<(), TgError> {
+            self.drafts
+                .lock()
+                .unwrap()
+                .push((chat_id, draft_id, text.to_string()));
+            if *self.drafts_enabled.lock().unwrap() {
+                Ok(())
+            } else {
+                Err(TgError::Api(
+                    "sendMessageDraft is disabled in this mock".to_string(),
+                ))
+            }
         }
         async fn edit_message_text(
             &self,
@@ -496,6 +542,17 @@ pub mod mock {
         assert_eq!(info.file_path, "docs/report.pdf");
         let bytes = c.download_file(&info.file_path).await.unwrap();
         assert_eq!(bytes, b"hello");
+    }
+
+    #[cfg(test)]
+    #[tokio::test]
+    async fn mock_records_enabled_message_drafts() {
+        let c = MockTgClient::default().with_message_drafts();
+
+        c.send_message_draft(7, 42, "thinking").await.unwrap();
+
+        assert_eq!(c.drafts.lock().unwrap()[0], (7, 42, "thinking".to_string()));
+        assert!(c.sent.lock().unwrap().is_empty());
     }
 
     #[cfg(test)]

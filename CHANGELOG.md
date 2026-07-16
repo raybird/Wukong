@@ -11,6 +11,14 @@
 
 ## [Unreleased]
 
+## [0.18.3] - 2026-07-16
+
+### Changed
+
+- Telegram 私人聊天的 reasoning 與 tool use 改用原生 `sendMessageDraft`，以相同 draft
+  漸進更新單一暫時區塊；問題、答案或錯誤送出時結束暫時進度。
+- 群組或不支援 message draft 的環境會自動退回單一狀態訊息，並在問題或回合結束時清除。
+
 ## [0.18.2] - 2026-07-13
 
 ### Fixed
@@ -153,7 +161,10 @@
   不安全綁定（`0.0.0.0` + 空 token）啟動即拒絕（fail-closed，可用
   `WUKONG_WEB_ALLOW_INSECURE=1` 覆寫）；Telegram callback 加白名單檢查。
 
-[Unreleased]: https://github.com/raybird/Wukong/compare/v0.17.1...HEAD
+[Unreleased]: https://github.com/raybird/Wukong/compare/v0.18.3...HEAD
+[0.18.3]: https://github.com/raybird/Wukong/compare/v0.18.2...v0.18.3
+[0.18.2]: https://github.com/raybird/Wukong/compare/v0.18.0...v0.18.2
+[0.18.0]: https://github.com/raybird/Wukong/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/raybird/Wukong/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/raybird/Wukong/compare/v0.16.38...v0.17.0
 [0.16.38]: https://github.com/raybird/Wukong/compare/v0.16.37...v0.16.38

@@ -23,6 +23,76 @@ enum Progress {
     QuestionRequest(QuestionRequest),
 }
 
+enum ProgressDisplay {
+    Draft { draft_id: i64 },
+    Message { message_id: Option<i64> },
+}
+
+async fn start_progress_display<C: TgClient>(
+    client: &C,
+    chat_id: i64,
+    draft_id: i64,
+    text: &str,
+) -> Option<ProgressDisplay> {
+    if client
+        .send_message_draft(chat_id, draft_id, text)
+        .await
+        .is_ok()
+    {
+        return Some(ProgressDisplay::Draft { draft_id });
+    }
+
+    client
+        .send_message(chat_id, text)
+        .await
+        .ok()
+        .map(|message_id| ProgressDisplay::Message {
+            message_id: Some(message_id),
+        })
+}
+
+async fn update_progress_display<C: TgClient>(
+    client: &C,
+    chat_id: i64,
+    display: &mut ProgressDisplay,
+    text: &str,
+) {
+    match display {
+        ProgressDisplay::Draft { draft_id } => {
+            if client
+                .send_message_draft(chat_id, *draft_id, text)
+                .await
+                .is_err()
+            {
+                if let Ok(message_id) = client.send_message(chat_id, text).await {
+                    *display = ProgressDisplay::Message {
+                        message_id: Some(message_id),
+                    };
+                }
+            }
+        }
+        ProgressDisplay::Message { message_id } => {
+            if let Some(message_id) = *message_id {
+                let _ = client.edit_message_text(chat_id, message_id, text).await;
+            } else if let Ok(new_message_id) = client.send_message(chat_id, text).await {
+                *message_id = Some(new_message_id);
+            }
+        }
+    }
+}
+
+async fn clear_progress_display<C: TgClient>(
+    client: &C,
+    chat_id: i64,
+    display: &mut ProgressDisplay,
+) {
+    if let ProgressDisplay::Message { message_id } = display {
+        if let Some(message_id) = message_id.take() {
+            let _ = client.delete_message(chat_id, message_id).await;
+        }
+    }
+}
+
 const QUESTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -996,11 +1066,15 @@ pub async fn handle_message_with_responder<C, B, R>(
                 }
             };
 
-            // Single status bubble, edited in place as the turn progresses.
-            let mid = match client.send_message(chat_id, "🐵 收到，思考中…").await {
-                Ok(id) => id,
-                Err(_) => return, // can't even post a status bubble; give up quietly
-            };
+            // Prefer Telegram's native ephemeral draft. Chats that don't support
+            // drafts (for example groups) fall back to one edited status message.
+            let draft_id = if msg.update_id == 0 { 1 } else { msg.update_id };
+            let progress_display =
+                match start_progress_display(client, chat_id, draft_id, "🐵 收到，思考中…").await
+                {
+                    Some(display) => display,
+                    None => return, // can't post either a draft or fallback status
+                };
 
             // Sustained "typing…": opencode runs for tens of seconds with no
             // token streaming; Telegram's typing indicator lasts only ~5s.
@@ -1020,6 +1094,7 @@ pub async fn handle_message_with_responder<C, B, R>(
                 let c = client.clone();
                 let pending_questions = pending_questions.clone();
                 tokio::spawn(async move {
+                    let mut progress_display = progress_display;
                     let mut role: Option<String> = None;
                     let mut reasoning = String::new();
                     let mut last_reasoning_edit: Option<std::time::Instant> = None;
@@ -1027,13 +1102,13 @@ pub async fn handle_message_with_responder<C, B, R>(
                         match msg {
                             Progress::Role(r) => {
                                 role = Some(r.name().to_string());
-                                let _ = c
-                                    .edit_message_text(
-                                        chat_id,
-                                        mid,
-                                        &bubble_text(role.as_deref(), &reasoning),
-                                    )
-                                    .await;
+                                update_progress_display(
+                                    &c,
+                                    chat_id,
+                                    &mut progress_display,
+                                    &bubble_text(role.as_deref(), &reasoning),
+                                )
+                                .await;
                             }
                             Progress::Reasoning(t) => {
                                 reasoning.push_str(&t);
@@ -1043,13 +1118,13 @@ pub async fn handle_message_with_responder<C, B, R>(
                                     i.elapsed() >= std::time::Duration::from_millis(1500)
                                 });
                                 if due {
-                                    let _ = c
-                                        .edit_message_text(
-                                            chat_id,
-                                            mid,
-                                            &bubble_text(role.as_deref(), &reasoning),
-                                        )
-                                        .await;
+                                    update_progress_display(
+                                        &c,
+                                        chat_id,
+                                        &mut progress_display,
+                                        &bubble_text(role.as_deref(), &reasoning),
+                                    )
+                                    .await;
                                     last_reasoning_edit = Some(std::time::Instant::now());
                                 }
                             }
@@ -1057,15 +1132,16 @@ pub async fn handle_message_with_responder<C, B, R>(
                                 reasoning.push_str("\n▸ 使用工具 ");
                                 reasoning.push_str(&name);
                                 reasoning.push('\n');
-                                let _ = c
-                                    .edit_message_text(
-                                        chat_id,
-                                        mid,
-                                        &bubble_text(role.as_deref(), &reasoning),
-                                    )
-                                    .await;
+                                update_progress_display(
+                                    &c,
+                                    chat_id,
+                                    &mut progress_display,
+                                    &bubble_text(role.as_deref(), &reasoning),
+                                )
+                                .await;
                             }
                             Progress::QuestionRequest(request) => {
+                                clear_progress_display(&c, chat_id, &mut progress_display).await;
                                 let pending = PendingQuestion {
                                     chat_id,
                                     session_id: request.session_id.clone(),
@@ -1089,6 +1165,7 @@ pub async fn handle_message_with_responder<C, B, R>(
                             }
                         }
                     }
+                    clear_progress_display(&c, chat_id, &mut progress_display).await;
                 })
             };
 
@@ -1204,7 +1281,6 @@ pub async fn handle_message_with_responder<C, B, R>(
                     .await;
                     queue_live_event(&live_tx, "answer", None, &html, assistant_message_id);
                     let chunks = wukong_render::to_telegram_html(&out.text);
-                    let _ = client.delete_message(chat_id, mid).await;
                     if chunks.is_empty() {
                         log_send(client.send_message(chat_id, "(無內容)").await, "answer");
                     } else {
@@ -1226,7 +1302,7 @@ pub async fn handle_message_with_responder<C, B, R>(
                     )
                     .await;
                     queue_live_event(&live_tx, "error", None, &err, assistant_message_id);
-                    log_send(client.edit_message_text(chat_id, mid, &err).await, "error");
+                    log_send(client.send_message(chat_id, &err).await, "error");
                 }
             }
             drop(live_tx);
@@ -1925,6 +2001,39 @@ mod tests {
                 .any(|(_, _, t)| t.contains("💭") && t.contains("想一下")),
             "no reasoning edit: {edits:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn native_draft_streams_progress_without_persistent_status_message() {
+        let client = MockTgClient::default().with_message_drafts();
+        let mem = open_memory().await;
+        let backend = ReasoningBackend;
+        let msg = TgMessage {
+            update_id: 42,
+            chat_id: 12,
+            text: "hi".to_string(),
+            attachments: Vec::new(),
+        };
+
+        handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
+
+        let drafts = client.drafts.lock().unwrap();
+        assert!(
+            drafts.len() >= 2,
+            "expected progressive draft updates: {drafts:?}"
+        );
+        assert!(drafts.iter().all(|(_, draft_id, _)| *draft_id == 42));
+        assert!(
+            drafts.iter().any(|(_, _, text)| text.contains("想一下")),
+            "reasoning missing from drafts: {drafts:?}"
+        );
+        drop(drafts);
+
+        assert!(client.edits.lock().unwrap().is_empty());
+        assert!(client.deletes.lock().unwrap().is_empty());
+        let sent = client.sent.lock().unwrap();
+        assert!(sent.iter().all(|message| !message.text.contains("思考中")));
+        assert!(sent.iter().any(|message| message.text.contains("答案")));
     }
 
     struct ToolBackend;
