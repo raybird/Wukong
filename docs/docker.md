@@ -17,6 +17,10 @@ Docker 常駐服務預設會啟動 `opencode-server`，並讓 `wukong-web`、`wu
 
 這個模式保留 Wukong 的 scope-level session 管理，但避免每次回合都重新啟動 `opencode run`，可降低 Web、Telegram、Scheduler 等常駐入口的延遲感。
 
+Compose 中各服務與 `opencode-server` 共用 `/workspace`，所以附件預設以 OpenCode file part 的 `file:///workspace/...` 傳送。`WUKONG_AGENT_SERVER_FILE_MODE=shared` 會先確認附件 canonical path 仍位於 `WUKONG_WORKSPACE`，再依 `WUKONG_AGENT_SERVER_WORKSPACE` 映射 server 路徑。真正連到沒有共享目錄的遠端 server 時可改為 `inline`，以 Base64 data URL 傳送（單檔上限 10 MiB）；`disabled` 則明確停用 server 附件輸入。
+
+Server backend 也會把 OpenCode 權限要求送到 Telegram inline keyboard。Docker 預設 seed 的權限規則多數為 allow，因此只有自訂 `opencode.json` 將操作設為 `ask` 時才會看到確認按鈕。
+
 Binary 模式第一版不自動啟動或管理 `opencode serve`。在一般本機 CLI 使用情境，Wukong 仍預設透過 `opencode run` 執行，以避免背景 daemon、port、跨專案工作目錄與清理策略帶來額外複雜度。進階使用者若自行啟動 `opencode serve`，可手動設定 `WUKONG_AGENT_SERVER_URL` 使用同一 backend。
 
 若要回到舊的 Docker CLI subprocess 模式，移除服務環境中的 `WUKONG_AGENT_SERVER_URL`，Wukong 會使用 `WUKONG_AGENT_CMD`，預設為 `opencode run --dangerously-skip-permissions`。
@@ -164,6 +168,8 @@ services:
 | `WUKONG_HOST_WORKSPACE` | Host 工作目錄路徑（opencode workspace） | `./workspace` |
 | `WUKONG_AGENT_CMD` | AI agent 指令（容器內預設帶 `--dangerously-skip-permissions`，見上方說明） | `opencode run --dangerously-skip-permissions` |
 | `WUKONG_AGENT_SERVER_URL` | opencode serve backend URL；Docker 常駐服務預設使用，未設定時回到 `WUKONG_AGENT_CMD` | `http://opencode-server:4096` |
+| `WUKONG_AGENT_SERVER_FILE_MODE` | server backend 附件模式：共享工作區 `shared`、Base64 `inline`、停用 `disabled` | `shared` |
+| `WUKONG_AGENT_SERVER_WORKSPACE` | `shared` 模式中 OpenCode server 看見的 workspace 絕對路徑 | `/workspace` |
 | `WUKONG_TG_TOKEN` | Telegram Bot Token（選用；可由 Web `/settings` 設定，env 優先） | — |
 | `WUKONG_TG_ALLOWED` | 允許的 Telegram chat ID（選用；可由 Web `/settings` 設定，env 優先） | — |
 | `WUKONG_WEB_BIND` | Web Console 的 **host 端**綁定位址。預設僅本機可達；設 `0.0.0.0` 才對區網／公網開放（對外時請務必搭配 `WUKONG_WEB_TOKEN`） | `127.0.0.1` |

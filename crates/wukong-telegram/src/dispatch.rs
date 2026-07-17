@@ -4,12 +4,16 @@ use crate::client::{InlineKeyboard, InlineKeyboardButton, TgClient};
 use crate::command::{classify_message, MessageAction};
 use crate::parse::{is_allowed, scope_for_chat, TgAttachment, TgCallbackQuery, TgMessage};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use wukong_chat_history::{ChatHistoryStore, NewChatAttachment};
 use wukong_cli::run_turn_observed_with_attachments;
 use wukong_gateway::backend::{AgentAttachment, AgentBackend, AiBackend};
 use wukong_gateway::config::GatewayConfig;
-use wukong_gateway::stream::{QuestionInfo, QuestionRequest};
+use wukong_gateway::stream::{
+    QuestionInfo, QuestionRequest, PERMISSION_ALLOW_ALWAYS_LABEL, PERMISSION_ALLOW_ONCE_LABEL,
+    PERMISSION_REJECT_LABEL, PERMISSION_REQUEST_PREFIX,
+};
 use wukong_gateway::{GatewayError, StreamEvent};
 use wukong_memory::Memory;
 use wukong_orchestrator::Role;
@@ -140,6 +144,19 @@ pub trait QuestionResponder {
     ) -> impl std::future::Future<Output = Result<(), GatewayError>> + Send;
 }
 
+fn permission_id(request_id: &str) -> Option<&str> {
+    request_id.strip_prefix(PERMISSION_REQUEST_PREFIX)
+}
+
+fn permission_reply_from_answers(answers: &[Vec<String>]) -> Option<&'static str> {
+    match answers.first()?.first()?.as_str() {
+        PERMISSION_ALLOW_ONCE_LABEL => Some("once"),
+        PERMISSION_ALLOW_ALWAYS_LABEL => Some("always"),
+        PERMISSION_REJECT_LABEL => Some("reject"),
+        _ => None,
+    }
+}
+
 impl QuestionResponder for AgentBackend {
     async fn reply_question(
         &self,
@@ -148,11 +165,22 @@ impl QuestionResponder for AgentBackend {
         answers: Vec<Vec<String>>,
     ) -> Result<(), GatewayError> {
         match self {
-            AgentBackend::Server(backend) => {
-                backend
-                    .reply_question(session_id, request_id, answers)
-                    .await
-            }
+            AgentBackend::Server(backend) => match permission_id(request_id) {
+                Some(permission_id) => {
+                    let reply = permission_reply_from_answers(&answers).ok_or_else(|| {
+                        GatewayError::AgentFailed {
+                            code: None,
+                            stderr: "無法辨識 Telegram permission 回覆。".to_string(),
+                        }
+                    })?;
+                    backend.reply_permission(permission_id, reply).await
+                }
+                None => {
+                    backend
+                        .reply_question(session_id, request_id, answers)
+                        .await
+                }
+            },
             AgentBackend::Cli(_) => Err(GatewayError::AgentFailed {
                 code: None,
                 stderr: "目前只有 opencode server backend 支援 question 回答。".to_string(),
@@ -166,7 +194,10 @@ impl QuestionResponder for AgentBackend {
         request_id: &str,
     ) -> Result<(), GatewayError> {
         match self {
-            AgentBackend::Server(backend) => backend.reject_question(session_id, request_id).await,
+            AgentBackend::Server(backend) => match permission_id(request_id) {
+                Some(permission_id) => backend.reply_permission(permission_id, "reject").await,
+                None => backend.reject_question(session_id, request_id).await,
+            },
             AgentBackend::Cli(_) => Err(GatewayError::AgentFailed {
                 code: None,
                 stderr: "目前只有 opencode server backend 支援 question 取消。".to_string(),
@@ -669,6 +700,197 @@ async fn store_telegram_attachments<C: TgClient>(
     Ok(out)
 }
 
+fn turn_state_dir(kind: &str, scope: &str, turn_id: i64) -> PathBuf {
+    upload_root()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(upload_root)
+        .join(kind)
+        .join(wukong_chat_history::sanitize_scope(scope))
+        .join(turn_id.to_string())
+}
+
+async fn prepare_working_attachments(
+    scope: &str,
+    turn_id: i64,
+    attachments: Vec<AgentAttachment>,
+) -> Result<Vec<AgentAttachment>, String> {
+    if attachments.is_empty() {
+        return Ok(attachments);
+    }
+    let upload_root = upload_root()
+        .canonicalize()
+        .map_err(|err| format!("無法解析附件目錄：{err}"))?;
+    let work_dir = turn_state_dir("workfiles", scope, turn_id);
+    tokio::fs::create_dir_all(&work_dir)
+        .await
+        .map_err(|err| format!("無法建立附件工作目錄：{err}"))?;
+
+    let mut prepared = Vec::with_capacity(attachments.len());
+    for (index, attachment) in attachments.into_iter().enumerate() {
+        let metadata = tokio::fs::symlink_metadata(&attachment.path)
+            .await
+            .map_err(|err| format!("無法讀取附件資訊：{err}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("附件必須是一般檔案，不能是連結或目錄。".to_string());
+        }
+        let source = attachment
+            .path
+            .canonicalize()
+            .map_err(|err| format!("無法解析附件路徑：{err}"))?;
+        if !source.starts_with(&upload_root) {
+            return Err("附件不在受控上傳目錄內。".to_string());
+        }
+        let filename = format!(
+            "{:02}-{}",
+            index + 1,
+            wukong_chat_history::sanitize_filename(&attachment.original_name)
+        );
+        let destination = work_dir.join(filename);
+        tokio::fs::copy(&source, &destination)
+            .await
+            .map_err(|err| format!("無法建立附件工作副本：{err}"))?;
+        prepared.push(AgentAttachment {
+            path: destination,
+            original_name: attachment.original_name,
+            mime_type: attachment.mime_type,
+        });
+    }
+    Ok(prepared)
+}
+
+fn artifact_return_enabled() -> bool {
+    if cfg!(test) {
+        return false;
+    }
+    let server_enabled = std::env::var("WUKONG_AGENT_SERVER_URL")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty());
+    if !server_enabled {
+        return true;
+    }
+    !matches!(
+        std::env::var("WUKONG_AGENT_SERVER_FILE_MODE")
+            .unwrap_or_else(|_| "shared".to_string())
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "inline" | "disabled"
+    )
+}
+
+async fn prepare_artifact_dir(scope: &str, turn_id: i64) -> Result<PathBuf, String> {
+    let dir = turn_state_dir("artifacts", scope, turn_id);
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|err| format!("無法建立產出目錄：{err}"))?;
+    Ok(dir)
+}
+
+fn agent_visible_path(path: &Path) -> Result<PathBuf, String> {
+    let server_enabled = std::env::var("WUKONG_AGENT_SERVER_URL")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty());
+    if !server_enabled {
+        return Ok(path.to_path_buf());
+    }
+    let local_workspace = std::env::var("WUKONG_WORKSPACE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .canonicalize()
+        .map_err(|err| format!("無法解析 WUKONG_WORKSPACE：{err}"))?;
+    let local_path = path
+        .canonicalize()
+        .map_err(|err| format!("無法解析產出目錄：{err}"))?;
+    let relative = local_path
+        .strip_prefix(&local_workspace)
+        .map_err(|_| "產出目錄不在 WUKONG_WORKSPACE 內。".to_string())?;
+    let server_workspace = std::env::var("WUKONG_AGENT_SERVER_WORKSPACE")
+        .map(PathBuf::from)
+        .unwrap_or(local_workspace);
+    if !server_workspace.is_absolute() {
+        return Err("WUKONG_AGENT_SERVER_WORKSPACE 必須是絕對路徑。".to_string());
+    }
+    Ok(server_workspace.join(relative))
+}
+
+fn prompt_with_artifact_instruction(input: &str, artifact_dir: &Path) -> Result<String, String> {
+    let visible_dir = agent_visible_path(artifact_dir)?;
+    Ok(format!(
+        "{input}\n\n[Wukong 檔案互動規則]\n上傳附件已是可修改的工作副本，不要修改 .wukong/uploads 內的原始檔。若使用者要求建立、轉換、修改或回傳檔案，請將每個最終成品直接寫入此目錄：{}。只把要回傳給使用者的成品放入該目錄。",
+        visible_dir.display()
+    ))
+}
+
+async fn collect_artifacts(dir: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let root = dir
+        .canonicalize()
+        .map_err(|err| format!("無法解析產出目錄：{err}"))?;
+    let mut entries = tokio::fs::read_dir(&root)
+        .await
+        .map_err(|err| format!("無法讀取產出目錄：{err}"))?;
+    let mut paths = Vec::new();
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|err| format!("無法列出產出檔案：{err}"))?
+    {
+        let metadata = tokio::fs::symlink_metadata(entry.path())
+            .await
+            .map_err(|err| format!("無法讀取產出檔案資訊：{err}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            continue;
+        }
+        if metadata.len() > MAX_ATTACHMENT_BYTES as u64 {
+            return Err(format!(
+                "產出檔案 {} 超過 25 MiB，未回傳 Telegram。",
+                entry.file_name().to_string_lossy()
+            ));
+        }
+        let path = entry
+            .path()
+            .canonicalize()
+            .map_err(|err| format!("無法解析產出檔案：{err}"))?;
+        if !path.starts_with(&root) {
+            return Err("產出檔案逃離受控目錄，已拒絕回傳。".to_string());
+        }
+        paths.push(path);
+    }
+    paths.sort();
+    if paths.len() > MAX_ATTACHMENTS_PER_MESSAGE {
+        return Err("產出檔案超過 5 份，請要求 OpenCode 減少回傳檔案。".to_string());
+    }
+    let mut artifacts = Vec::with_capacity(paths.len());
+    for path in paths {
+        let filename = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(wukong_chat_history::sanitize_filename)
+            .unwrap_or_else(|| "artifact".to_string());
+        let bytes = tokio::fs::read(&path)
+            .await
+            .map_err(|err| format!("無法讀取產出檔案：{err}"))?;
+        artifacts.push((filename, bytes));
+    }
+    Ok(artifacts)
+}
+
+async fn return_artifacts<C: TgClient>(
+    client: &C,
+    chat_id: i64,
+    dir: &Path,
+) -> Result<usize, String> {
+    let artifacts = collect_artifacts(dir).await?;
+    let count = artifacts.len();
+    for (filename, bytes) in artifacts {
+        client
+            .send_document(chat_id, &filename, bytes, Some("OpenCode 產出"))
+            .await
+            .map_err(|err| format!("Telegram 回傳 {filename} 失敗：{err}"))?;
+    }
+    Ok(count)
+}
+
 async fn record_chat(
     history: Option<&ChatHistoryStore>,
     scope: &str,
@@ -1066,6 +1288,54 @@ pub async fn handle_message_with_responder<C, B, R>(
                 }
             };
 
+            let turn_id = user_message_id.unwrap_or_else(|| {
+                if msg.update_id == 0 {
+                    now_unix()
+                } else {
+                    msg.update_id
+                }
+            });
+            let agent_attachments =
+                match prepare_working_attachments(&cfg.scope, turn_id, agent_attachments).await {
+                    Ok(attachments) => attachments,
+                    Err(error) => {
+                        let reply = format!("⚠️ 無法準備附件工作副本：{error}");
+                        log_send(client.send_message(chat_id, &reply).await, "attachment");
+                        drop(live_tx);
+                        if let Some(writer) = live_writer {
+                            let _ = writer.await;
+                        }
+                        return;
+                    }
+                };
+            let (input, artifact_dir) = if artifact_return_enabled() {
+                match prepare_artifact_dir(&cfg.scope, turn_id).await {
+                    Ok(dir) => match prompt_with_artifact_instruction(&input, &dir) {
+                        Ok(prompt) => (prompt, Some(dir)),
+                        Err(error) => {
+                            let reply = format!("⚠️ 無法準備檔案回傳：{error}");
+                            log_send(client.send_message(chat_id, &reply).await, "artifact");
+                            drop(live_tx);
+                            if let Some(writer) = live_writer {
+                                let _ = writer.await;
+                            }
+                            return;
+                        }
+                    },
+                    Err(error) => {
+                        let reply = format!("⚠️ 無法準備檔案回傳：{error}");
+                        log_send(client.send_message(chat_id, &reply).await, "artifact");
+                        drop(live_tx);
+                        if let Some(writer) = live_writer {
+                            let _ = writer.await;
+                        }
+                        return;
+                    }
+                }
+            } else {
+                (input, None)
+            };
+
             // Prefer Telegram's native ephemeral draft. Chats that don't support
             // drafts (for example groups) fall back to one edited status message.
             let draft_id = if msg.update_id == 0 { 1 } else { msg.update_id };
@@ -1288,6 +1558,12 @@ pub async fn handle_message_with_responder<C, B, R>(
                             log_send(client.send_message_html(chat_id, c).await, "answer");
                         }
                     }
+                    if let Some(dir) = artifact_dir.as_deref() {
+                        if let Err(error) = return_artifacts(client, chat_id, dir).await {
+                            let warning = format!("⚠️ 檔案產出完成，但回傳失敗：{error}");
+                            log_send(client.send_message(chat_id, &warning).await, "artifact");
+                        }
+                    }
                 }
                 Err(e) => {
                     let err = format!("⚠️ 處理失敗：{e}");
@@ -1431,6 +1707,23 @@ mod tests {
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(600),
             message_id: Some(10),
         }
+    }
+
+    #[test]
+    fn permission_answers_map_to_opencode_reply_values() {
+        assert_eq!(permission_id("permission-per_1"), Some("per_1"));
+        assert_eq!(
+            permission_reply_from_answers(&[vec![PERMISSION_ALLOW_ONCE_LABEL.to_string()]]),
+            Some("once")
+        );
+        assert_eq!(
+            permission_reply_from_answers(&[vec![PERMISSION_ALLOW_ALWAYS_LABEL.to_string()]]),
+            Some("always")
+        );
+        assert_eq!(
+            permission_reply_from_answers(&[vec![PERMISSION_REJECT_LABEL.to_string()]]),
+            Some("reject")
+        );
     }
 
     #[test]
@@ -1894,9 +2187,33 @@ mod tests {
 
         let requests = backend.requests.lock().unwrap();
         assert_eq!(requests.last().unwrap().attachments.len(), 1);
-        assert!(requests.last().unwrap().attachments[0]
-            .path
-            .ends_with("report.pdf"));
+        let working_path = &requests.last().unwrap().attachments[0].path;
+        assert!(working_path.ends_with("01-report.pdf"));
+        assert!(working_path.to_string_lossy().contains(".wukong/workfiles"));
+        let original_path = upload_dir
+            .path()
+            .join(".wukong/uploads")
+            .join(&attachments[0].relative_path);
+        assert_eq!(std::fs::read(original_path).unwrap(), b"pdf");
+    }
+
+    #[tokio::test]
+    async fn controlled_artifacts_are_returned_as_telegram_documents() {
+        let artifact_dir = tempfile::tempdir().unwrap();
+        std::fs::write(artifact_dir.path().join("fixed.csv"), b"a,b\n1,2\n").unwrap();
+        std::fs::create_dir(artifact_dir.path().join("ignored-dir")).unwrap();
+        let client = MockTgClient::default();
+
+        let count = return_artifacts(&client, 7, artifact_dir.path())
+            .await
+            .unwrap();
+
+        assert_eq!(count, 1);
+        let documents = client.documents.lock().unwrap();
+        assert_eq!(documents[0].chat_id, 7);
+        assert_eq!(documents[0].filename, "fixed.csv");
+        assert_eq!(documents[0].bytes, b"a,b\n1,2\n");
+        assert_eq!(documents[0].caption.as_deref(), Some("OpenCode 產出"));
     }
 
     #[tokio::test]

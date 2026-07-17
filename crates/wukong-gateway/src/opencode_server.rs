@@ -4,20 +4,35 @@ mod sse;
 use crate::backend::{agent_timeout, AgentRequest, AgentResponse, AiBackend};
 use crate::error::GatewayError;
 use crate::stream::StreamEvent;
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use event_map::{map_server_event, ServerEventAction};
-use reqwest::StatusCode;
+use reqwest::{StatusCode, Url};
 use serde::Serialize;
 use serde_json::Value;
 use sse::SseParser;
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+const INLINE_ATTACHMENT_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
 pub struct OpencodeServerBackend {
     pub base_url: String,
     pub workspace: Option<PathBuf>,
+    file_mode: FileTransportMode,
+    server_workspace: Option<PathBuf>,
     client: reqwest::Client,
     username: Option<String>,
     password: Option<String>,
+    session_attachments: Mutex<HashMap<String, Vec<crate::backend::AgentAttachment>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FileTransportMode {
+    Shared,
+    Inline,
+    Disabled,
+    Invalid(String),
 }
 
 #[derive(Debug, Serialize)]
@@ -44,11 +59,17 @@ struct ModelOverride {
     model_id: String,
 }
 
-#[derive(Debug, Serialize)]
-struct MessagePart {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    text: String,
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum MessagePart {
+    Text {
+        text: String,
+    },
+    File {
+        mime: String,
+        url: String,
+        filename: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -56,11 +77,24 @@ struct QuestionReplyBody {
     answers: Vec<Vec<String>>,
 }
 
+#[derive(Debug, Serialize)]
+struct PermissionReplyBody<'a> {
+    reply: &'a str,
+}
+
 impl OpencodeServerBackend {
     pub fn from_env(base_url: String, workspace: Option<PathBuf>) -> Self {
+        let file_mode = FileTransportMode::from_env();
+        let server_workspace = std::env::var("WUKONG_AGENT_SERVER_WORKSPACE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+            .or_else(|| workspace.clone());
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             workspace,
+            file_mode,
+            server_workspace,
             client: reqwest::Client::builder()
                 .timeout(agent_timeout())
                 .build()
@@ -71,6 +105,7 @@ impl OpencodeServerBackend {
             password: std::env::var("WUKONG_AGENT_SERVER_PASSWORD")
                 .ok()
                 .filter(|s| !s.is_empty()),
+            session_attachments: Mutex::new(HashMap::new()),
         }
     }
 
@@ -97,6 +132,139 @@ impl OpencodeServerBackend {
             .map(|_| ())
     }
 
+    async fn build_message_parts(
+        &self,
+        req: &AgentRequest,
+    ) -> Result<Vec<MessagePart>, GatewayError> {
+        let mut parts = vec![MessagePart::Text {
+            text: req.prompt.clone(),
+        }];
+        for attachment in &req.attachments {
+            let mime = supported_attachment_mime(attachment)?;
+            let filename = safe_display_filename(&attachment.original_name, &attachment.path);
+            let path = self.validated_attachment_path(&attachment.path)?;
+            let url = match &self.file_mode {
+                FileTransportMode::Shared => self.shared_file_url(&path)?,
+                FileTransportMode::Inline => {
+                    let metadata = tokio::fs::metadata(&path).await.map_err(|err| {
+                        attachment_error(format!("無法讀取附件 {} 的資訊：{err}", path.display()))
+                    })?;
+                    if metadata.len() > INLINE_ATTACHMENT_MAX_BYTES {
+                        return Err(attachment_error(format!(
+                            "遠端附件模式限制單檔 10 MiB；{} 為 {} bytes",
+                            filename,
+                            metadata.len()
+                        )));
+                    }
+                    let bytes = tokio::fs::read(&path).await.map_err(|err| {
+                        attachment_error(format!("無法讀取附件 {}：{err}", path.display()))
+                    })?;
+                    format!("data:{mime};base64,{}", BASE64_STANDARD.encode(bytes))
+                }
+                FileTransportMode::Disabled => {
+                    return Err(attachment_error(
+                        "opencode server 附件功能已由 WUKONG_AGENT_SERVER_FILE_MODE=disabled 停用",
+                    ));
+                }
+                FileTransportMode::Invalid(value) => {
+                    return Err(attachment_error(format!(
+                        "無效的 WUKONG_AGENT_SERVER_FILE_MODE={value:?}；可用值為 shared、inline、disabled"
+                    )));
+                }
+            };
+            parts.push(MessagePart::File {
+                mime,
+                url,
+                filename,
+            });
+        }
+        Ok(parts)
+    }
+
+    fn validated_attachment_path(&self, attachment: &Path) -> Result<PathBuf, GatewayError> {
+        let path = attachment.canonicalize().map_err(|err| {
+            attachment_error(format!("無法解析附件路徑 {}：{err}", attachment.display()))
+        })?;
+        let workspace = self.workspace.as_ref().ok_or_else(|| {
+            attachment_error("server backend 傳送附件時必須設定 WUKONG_WORKSPACE")
+        })?;
+        let workspace = workspace.canonicalize().map_err(|err| {
+            attachment_error(format!(
+                "無法解析 WUKONG_WORKSPACE {}：{err}",
+                workspace.display()
+            ))
+        })?;
+        if !path.starts_with(&workspace) {
+            return Err(attachment_error(format!(
+                "拒絕傳送工作區外的附件：{}",
+                path.display()
+            )));
+        }
+        Ok(path)
+    }
+
+    fn shared_file_url(&self, attachment: &Path) -> Result<String, GatewayError> {
+        let local_workspace = self
+            .workspace
+            .as_ref()
+            .ok_or_else(|| attachment_error("shared 附件模式需要設定 WUKONG_WORKSPACE"))?;
+        let local_workspace = local_workspace.canonicalize().map_err(|err| {
+            attachment_error(format!(
+                "無法解析 WUKONG_WORKSPACE {}：{err}",
+                local_workspace.display()
+            ))
+        })?;
+        let relative = attachment.strip_prefix(&local_workspace).map_err(|_| {
+            attachment_error(format!("附件不在共享工作區內：{}", attachment.display()))
+        })?;
+        let server_workspace = self.server_workspace.as_ref().ok_or_else(|| {
+            attachment_error(
+                "shared 附件模式需要設定 WUKONG_AGENT_SERVER_WORKSPACE 或 WUKONG_WORKSPACE",
+            )
+        })?;
+        if !server_workspace.is_absolute() {
+            return Err(attachment_error(format!(
+                "OpenCode server 工作區必須是絕對路徑：{}",
+                server_workspace.display()
+            )));
+        }
+        let server_path = server_workspace.join(relative);
+        Url::from_file_path(&server_path)
+            .map(|url| url.to_string())
+            .map_err(|_| {
+                attachment_error(format!(
+                    "無法將附件轉成 file URL：{}",
+                    server_path.display()
+                ))
+            })
+    }
+
+    fn remember_attachments(&self, session_id: &str, req: &AgentRequest) {
+        if req.attachments.is_empty() {
+            return;
+        }
+        self.session_attachments
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(session_id.to_string(), req.attachments.clone());
+    }
+
+    fn rehydrate_request(&self, session_id: &str, req: &AgentRequest) -> AgentRequest {
+        if !req.attachments.is_empty() {
+            return req.clone();
+        }
+        let remembered = self
+            .session_attachments
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default();
+        let mut retry = req.clone();
+        retry.attachments = remembered;
+        retry
+    }
+
     async fn send_message(
         &self,
         session_id: &str,
@@ -107,10 +275,7 @@ impl OpencodeServerBackend {
             model: req.model.as_deref().and_then(parse_model_override),
             agent: req.agent.clone(),
             tools: req.tool_overrides.clone(),
-            parts: vec![MessagePart {
-                kind: "text",
-                text: req.prompt.clone(),
-            }],
+            parts: self.build_message_parts(req).await?,
         };
         self.send_json("send_message", self.client.post(url).json(&body))
             .await
@@ -126,10 +291,7 @@ impl OpencodeServerBackend {
             model: req.model.as_deref().and_then(parse_model_override),
             agent: req.agent.clone(),
             tools: req.tool_overrides.clone(),
-            parts: vec![MessagePart {
-                kind: "text",
-                text: req.prompt.clone(),
-            }],
+            parts: self.build_message_parts(req).await?,
         };
         self.send_empty("prompt_async", self.client.post(url).json(&body))
             .await
@@ -162,6 +324,25 @@ impl OpencodeServerBackend {
         let url = question_reject_url(&self.base_url, session_id, request_id);
         self.send_empty("question_reject", self.client.post(url))
             .await
+    }
+
+    pub async fn reply_permission(
+        &self,
+        request_id: &str,
+        reply: &str,
+    ) -> Result<(), GatewayError> {
+        if !matches!(reply, "once" | "always" | "reject") {
+            return Err(GatewayError::AgentFailed {
+                code: None,
+                stderr: format!("無效的 OpenCode permission reply：{reply}"),
+            });
+        }
+        let url = permission_reply_url(&self.base_url, request_id);
+        self.send_empty(
+            "permission_reply",
+            self.client.post(url).json(&PermissionReplyBody { reply }),
+        )
+        .await
     }
 
     async fn open_event_stream(&self) -> Result<reqwest::Response, GatewayError> {
@@ -294,9 +475,6 @@ impl OpencodeServerBackend {
 
 impl AiBackend for OpencodeServerBackend {
     async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
-        if !req.attachments.is_empty() {
-            return Err(attachments_unsupported());
-        }
         self.health_check().await?;
 
         let mut session_id = match req.session_id.clone() {
@@ -305,12 +483,18 @@ impl AiBackend for OpencodeServerBackend {
         };
 
         let value = match self.send_message(&session_id, &req).await {
-            Ok(value) => value,
+            Ok(value) => {
+                self.remember_attachments(&session_id, &req);
+                value
+            }
             Err(GatewayError::AgentFailed {
                 code: Some(code), ..
             }) if code == StatusCode::NOT_FOUND.as_u16() as i32 => {
+                let retry = self.rehydrate_request(&session_id, &req);
                 session_id = self.create_session().await?;
-                self.send_message(&session_id, &req).await?
+                let value = self.send_message(&session_id, &retry).await?;
+                self.remember_attachments(&session_id, &retry);
+                value
             }
             Err(err) => return Err(err),
         };
@@ -326,9 +510,6 @@ impl AiBackend for OpencodeServerBackend {
         req: AgentRequest,
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> Result<AgentResponse, GatewayError> {
-        if !req.attachments.is_empty() {
-            return Err(attachments_unsupported());
-        }
         self.health_check().await?;
 
         let mut session_id = match req.session_id.clone() {
@@ -338,12 +519,14 @@ impl AiBackend for OpencodeServerBackend {
 
         let response = self.open_event_stream().await?;
         match self.send_message_async(&session_id, &req).await {
-            Ok(()) => {}
+            Ok(()) => self.remember_attachments(&session_id, &req),
             Err(GatewayError::AgentFailed {
                 code: Some(code), ..
             }) if code == StatusCode::NOT_FOUND.as_u16() as i32 => {
+                let retry = self.rehydrate_request(&session_id, &req);
                 session_id = self.create_session().await?;
-                self.send_message_async(&session_id, &req).await?;
+                self.send_message_async(&session_id, &retry).await?;
+                self.remember_attachments(&session_id, &retry);
             }
             Err(err) => return Err(err),
         }
@@ -358,12 +541,95 @@ impl AiBackend for OpencodeServerBackend {
     }
 }
 
-fn attachments_unsupported() -> GatewayError {
+impl FileTransportMode {
+    fn from_env() -> Self {
+        match std::env::var("WUKONG_AGENT_SERVER_FILE_MODE") {
+            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "" | "shared" => Self::Shared,
+                "inline" => Self::Inline,
+                "disabled" => Self::Disabled,
+                _ => Self::Invalid(value),
+            },
+            Err(_) => Self::Shared,
+        }
+    }
+}
+
+fn attachment_error(message: impl Into<String>) -> GatewayError {
     GatewayError::AgentFailed {
         code: None,
-        stderr: "目前的 opencode server backend 不支援附件輸入；請改用 CLI backend 或等待 server file parts 支援。"
-            .to_string(),
+        stderr: message.into(),
     }
+}
+
+fn safe_display_filename(original_name: &str, path: &Path) -> String {
+    Path::new(original_name)
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .or_else(|| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "attachment".to_string())
+}
+
+fn supported_attachment_mime(
+    attachment: &crate::backend::AgentAttachment,
+) -> Result<String, GatewayError> {
+    let declared = attachment
+        .mime_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    match declared.to_ascii_lowercase().as_str() {
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "application/pdf" => {
+            return Ok(declared.to_ascii_lowercase());
+        }
+        value
+            if value.starts_with("text/")
+                || matches!(
+                    value,
+                    "application/json"
+                        | "application/ld+json"
+                        | "application/toml"
+                        | "application/yaml"
+                        | "application/x-yaml"
+                        | "application/xml"
+                ) =>
+        {
+            return Ok("text/plain".to_string());
+        }
+        _ => {}
+    }
+
+    let extension = attachment
+        .path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let inferred = match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "pdf" => "application/pdf",
+        "txt" | "md" | "markdown" | "csv" | "tsv" | "json" | "jsonl" | "toml" | "yaml" | "yml"
+        | "xml" | "html" | "css" | "js" | "jsx" | "ts" | "tsx" | "rs" | "py" | "rb" | "go"
+        | "java" | "kt" | "kts" | "c" | "h" | "cc" | "cpp" | "hpp" | "sh" | "bash" | "zsh"
+        | "fish" | "sql" | "r" => "text/plain",
+        _ => {
+            return Err(attachment_error(format!(
+                "不支援的附件格式：{}（MIME: {}）",
+                attachment.original_name,
+                if declared.is_empty() {
+                    "unknown"
+                } else {
+                    declared
+                }
+            )));
+        }
+    };
+    Ok(inferred.to_string())
 }
 
 fn extract_session_id(value: &Value) -> Option<String> {
@@ -460,6 +726,10 @@ fn question_reject_url(base_url: &str, session_id: &str, request_id: &str) -> St
     )
 }
 
+fn permission_reply_url(base_url: &str, request_id: &str) -> String {
+    format!("{}/permission/{}/reply", base_url, request_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,29 +760,136 @@ mod tests {
         }
     }
 
+    fn request_with_attachment(path: PathBuf, name: &str, mime: &str) -> AgentRequest {
+        AgentRequest {
+            prompt: "describe".to_string(),
+            session_id: None,
+            thinking: false,
+            model: None,
+            agent: None,
+            tool_overrides: BTreeMap::new(),
+            attachments: vec![AgentAttachment {
+                path,
+                original_name: name.to_string(),
+                mime_type: Some(mime.to_string()),
+            }],
+        }
+    }
+
     #[tokio::test]
-    async fn server_backend_rejects_attachments_explicitly() {
-        let backend = OpencodeServerBackend::from_env("http://127.0.0.1:1".to_string(), None);
+    async fn server_backend_builds_shared_file_parts() {
+        let workspace = tempfile::tempdir().unwrap();
+        let upload_dir = workspace.path().join(".wukong/uploads/user/42");
+        std::fs::create_dir_all(&upload_dir).unwrap();
+        let path = upload_dir.join("quarter report.pdf");
+        std::fs::write(&path, b"%PDF-test").unwrap();
+        let mut backend = OpencodeServerBackend::from_env(
+            "http://127.0.0.1:1".to_string(),
+            Some(workspace.path().to_path_buf()),
+        );
+        backend.file_mode = FileTransportMode::Shared;
+        backend.server_workspace = Some(PathBuf::from("/workspace"));
+
+        let parts = backend
+            .build_message_parts(&request_with_attachment(
+                path,
+                "../quarter report.pdf",
+                "application/pdf",
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(parts).unwrap(),
+            json!([
+                { "type": "text", "text": "describe" },
+                {
+                    "type": "file",
+                    "mime": "application/pdf",
+                    "url": "file:///workspace/.wukong/uploads/user/42/quarter%20report.pdf",
+                    "filename": "quarter report.pdf"
+                }
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn server_backend_builds_inline_file_parts() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("data.csv");
+        std::fs::write(&path, b"a,b\n1,2\n").unwrap();
+        let mut backend = OpencodeServerBackend::from_env(
+            "http://127.0.0.1:1".to_string(),
+            Some(workspace.path().to_path_buf()),
+        );
+        backend.file_mode = FileTransportMode::Inline;
+
+        let parts = backend
+            .build_message_parts(&request_with_attachment(path, "data.csv", "text/csv"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(parts).unwrap(),
+            json!([
+                { "type": "text", "text": "describe" },
+                {
+                    "type": "file",
+                    "mime": "text/plain",
+                    "url": "data:text/plain;base64,YSxiCjEsMgo=",
+                    "filename": "data.csv"
+                }
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn server_backend_rejects_attachment_outside_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        let backend = OpencodeServerBackend::from_env(
+            "http://127.0.0.1:1".to_string(),
+            Some(workspace.path().to_path_buf()),
+        );
+
         let err = backend
-            .run_streaming(
-                AgentRequest {
-                    prompt: "describe".to_string(),
-                    session_id: None,
-                    thinking: false,
-                    model: None,
-                    agent: None,
-                    tool_overrides: BTreeMap::new(),
-                    attachments: vec![AgentAttachment {
-                        path: std::path::PathBuf::from("/tmp/report.pdf"),
-                        original_name: "report.pdf".to_string(),
-                        mime_type: Some("application/pdf".to_string()),
-                    }],
-                },
-                &mut |_| {},
-            )
+            .build_message_parts(&request_with_attachment(
+                outside.path().to_path_buf(),
+                "outside.txt",
+                "text/plain",
+            ))
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("不支援附件輸入"), "{err}");
+
+        assert!(err.to_string().contains("工作區外"), "{err}");
+    }
+
+    #[test]
+    fn server_backend_rehydrates_attachments_when_session_disappears() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("report.csv");
+        std::fs::write(&path, b"a,b\n1,2\n").unwrap();
+        let backend = OpencodeServerBackend::from_env(
+            "http://127.0.0.1:1".to_string(),
+            Some(workspace.path().to_path_buf()),
+        );
+        let uploaded = request_with_attachment(path.clone(), "report.csv", "text/csv");
+        backend.remember_attachments("ses_old", &uploaded);
+        let follow_up = AgentRequest {
+            prompt: "第 20 列呢？".to_string(),
+            session_id: Some("ses_old".to_string()),
+            thinking: false,
+            model: None,
+            agent: None,
+            tool_overrides: BTreeMap::new(),
+            attachments: Vec::new(),
+        };
+
+        let retry = backend.rehydrate_request("ses_old", &follow_up);
+
+        assert_eq!(retry.prompt, "第 20 列呢？");
+        assert_eq!(retry.attachments.len(), 1);
+        assert_eq!(retry.attachments[0].path, path);
     }
 
     #[tokio::test]
@@ -563,6 +940,19 @@ mod tests {
         assert_eq!(
             question_reject_url("http://server", "ses_1", "que_1"),
             "http://server/api/session/ses_1/question/que_1/reject"
+        );
+    }
+
+    #[test]
+    fn permission_api_uses_current_reply_contract() {
+        assert_eq!(
+            permission_reply_url("http://server", "per_1"),
+            "http://server/permission/per_1/reply"
+        );
+        let body = PermissionReplyBody { reply: "always" };
+        assert_eq!(
+            serde_json::to_value(body).unwrap(),
+            json!({ "reply": "always" })
         );
     }
 

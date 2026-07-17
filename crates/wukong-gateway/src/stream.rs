@@ -1,6 +1,11 @@
 //! Parsing of opencode `--format json` NDJSON events into render-relevant
 //! StreamEvents. opencode emits one JSON object per line.
 
+pub const PERMISSION_REQUEST_PREFIX: &str = "permission-";
+pub const PERMISSION_ALLOW_ONCE_LABEL: &str = "允許一次";
+pub const PERMISSION_ALLOW_ALWAYS_LABEL: &str = "本次工作階段總是允許";
+pub const PERMISSION_REJECT_LABEL: &str = "拒絕";
+
 /// One option in an OpenCode question prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuestionOption {

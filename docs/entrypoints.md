@@ -29,7 +29,12 @@ Wukong 有兩條底層 agent 路徑，回答文字的串流方式**刻意不同*
 - **基本流程**：透過 Long-Polling 接收訊息 $\rightarrow$ 白名單過濾過後 $\rightarrow$ 依據對話群組指派獨立 Scope（`user:tg-<id>`） $\rightarrow$ 重用核心的 `run_turn` $\rightarrow$ 回覆答案。
 - **即時狀態回饋**：執行期間會建立一個**單一狀態泡泡**（原地隨調度角色即時更新狀態並保持 Typing 狀態），任務完成後該狀態泡泡會自動刪除並送出最終回答。
 - **格式渲染**：最終答案會經由 `wukong-render` 渲染為 Telegram 支援的 HTML 格式（支援粗體、程式碼區塊、表格自動降級呈現）。
+- **上傳與接續操作**：支援 Telegram `document`／`photo`（單檔 25 MiB、每則最多 5 份）。第一次上傳會把文字與 file part 一起送入目前 OpenCode session；後續可直接文字追問。回覆先前的檔案訊息會重新帶入該附件；上傳新檔並回覆舊檔可比較兩份。
+- **原檔、工作副本、回傳產物分離**：原始檔保存於 `.wukong/uploads`，OpenCode 實際操作 `.wukong/workfiles` 的副本；要求「修改後傳回」時，成品寫入該回合專屬 `.wukong/artifacts`，Wukong 再以 Telegram document 回傳。
+- **權限互動**：server backend 收到 OpenCode `permission.asked` 時會顯示「允許一次／本次工作階段總是允許／拒絕」按鈕；取消或逾時會拒絕該請求。
 - **建立並回送排程**：可直接用自然語言請助手建立定時任務（見 [CLI 參考 — 用自然語言建立排程](cli-reference.md#用自然語言建立排程telegram--對話)）；之後 `wukong-schedulerd` 觸發時，會把該回合結果主動推回原聊天室。傳輸層由共用的 `wukong-tg-client` crate 提供，daemon 與 bot 共用同一個 `WUKONG_TG_TOKEN`。
+
+沒有共享檔案系統的遠端 `opencode serve` 可設 `WUKONG_AGENT_SERVER_FILE_MODE=inline`，附件會以 data URL 傳送且單檔限制 10 MiB；遠端 inline 模式無法由 OpenCode 寫回本機 artifact 目錄，因此不提供自動檔案回傳。
 
 ```bash
 export WUKONG_TG_TOKEN="<BotFather token>"

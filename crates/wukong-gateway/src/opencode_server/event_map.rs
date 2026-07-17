@@ -1,4 +1,7 @@
-use crate::stream::{QuestionInfo, QuestionOption, QuestionRequest, StreamEvent};
+use crate::stream::{
+    QuestionInfo, QuestionOption, QuestionRequest, StreamEvent, PERMISSION_ALLOW_ALWAYS_LABEL,
+    PERMISSION_ALLOW_ONCE_LABEL, PERMISSION_REJECT_LABEL, PERMISSION_REQUEST_PREFIX,
+};
 use serde_json::Value;
 
 fn format_tool_use_name(part: &Value, name: &str) -> String {
@@ -148,6 +151,59 @@ fn parse_question_info(value: &Value) -> Option<QuestionInfo> {
     })
 }
 
+fn parse_permission_request(properties: &Value) -> Option<QuestionRequest> {
+    let permission_id = properties
+        .get("id")
+        .or_else(|| properties.get("requestID"))?
+        .as_str()?;
+    let session_id = properties.get("sessionID")?.as_str()?.to_string();
+    let permission = properties
+        .get("permission")
+        .and_then(Value::as_str)
+        .unwrap_or("tool");
+    let patterns = properties
+        .get("patterns")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .take(5)
+                .map(truncate_tool_value)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut question = format!("OpenCode 要求執行權限：{permission}");
+    if !patterns.is_empty() {
+        question.push_str("\n\n範圍：\n• ");
+        question.push_str(&patterns.join("\n• "));
+    }
+    Some(QuestionRequest {
+        request_id: format!("{PERMISSION_REQUEST_PREFIX}{permission_id}"),
+        session_id,
+        questions: vec![QuestionInfo {
+            question,
+            header: "🔐 權限確認".to_string(),
+            options: vec![
+                QuestionOption {
+                    label: PERMISSION_ALLOW_ONCE_LABEL.to_string(),
+                    description: "只允許這次請求".to_string(),
+                },
+                QuestionOption {
+                    label: PERMISSION_ALLOW_ALWAYS_LABEL.to_string(),
+                    description: "在目前 OpenCode session 記住相同規則".to_string(),
+                },
+                QuestionOption {
+                    label: PERMISSION_REJECT_LABEL.to_string(),
+                    description: "拒絕執行".to_string(),
+                },
+            ],
+            multiple: false,
+            custom: false,
+        }],
+    })
+}
+
 fn truncate_tool_value(value: &str) -> String {
     const MAX_CHARS: usize = 120;
     let mut chars = value.chars();
@@ -204,6 +260,14 @@ pub(super) fn map_server_event(
     }
     if event_type == "question.asked" {
         return match parse_question_request(properties) {
+            Some(request) if request.session_id == session_id => {
+                ServerEventAction::Emit(StreamEvent::QuestionRequest(request))
+            }
+            _ => ServerEventAction::Ignore,
+        };
+    }
+    if event_type == "permission.asked" {
+        return match parse_permission_request(properties) {
             Some(request) if request.session_id == session_id => {
                 ServerEventAction::Emit(StreamEvent::QuestionRequest(request))
             }
@@ -458,6 +522,50 @@ mod tests {
                         QuestionOption {
                             label: "查文件".to_string(),
                             description: "先確認是否有官方格式可轉換".to_string(),
+                        },
+                    ],
+                }],
+            }))
+        );
+    }
+
+    #[test]
+    fn maps_permission_asked_to_interactive_question() {
+        let value = json!({
+            "payload": {
+                "type": "permission.asked",
+                "properties": {
+                    "id": "per_1",
+                    "sessionID": "ses_1",
+                    "permission": "bash",
+                    "patterns": ["python clean_report.py", "python clean_report.py *"]
+                }
+            }
+        });
+        let mut seen_tools = std::collections::HashSet::new();
+
+        assert_eq!(
+            map_server_event(&value, "ses_1", &mut seen_tools),
+            ServerEventAction::Emit(StreamEvent::QuestionRequest(QuestionRequest {
+                request_id: "permission-per_1".to_string(),
+                session_id: "ses_1".to_string(),
+                questions: vec![QuestionInfo {
+                    question: "OpenCode 要求執行權限：bash\n\n範圍：\n• python clean_report.py\n• python clean_report.py *".to_string(),
+                    header: "🔐 權限確認".to_string(),
+                    multiple: false,
+                    custom: false,
+                    options: vec![
+                        QuestionOption {
+                            label: "允許一次".to_string(),
+                            description: "只允許這次請求".to_string(),
+                        },
+                        QuestionOption {
+                            label: "本次工作階段總是允許".to_string(),
+                            description: "在目前 OpenCode session 記住相同規則".to_string(),
+                        },
+                        QuestionOption {
+                            label: "拒絕".to_string(),
+                            description: "拒絕執行".to_string(),
                         },
                     ],
                 }],

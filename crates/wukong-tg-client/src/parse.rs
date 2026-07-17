@@ -69,7 +69,19 @@ fn parse_message_update(u: &serde_json::Value) -> Option<TgMessage> {
     let update_id = u.get("update_id")?.as_i64()?;
     let msg = u.get("message")?;
     let chat_id = msg.get("chat")?.get("id")?.as_i64()?;
-    let attachments = parse_attachments(msg);
+    let mut attachments = parse_attachments(msg);
+    if let Some(replied_message) = msg.get("reply_to_message") {
+        for attachment in parse_attachments(replied_message) {
+            let duplicate = attachments.iter().any(|existing| {
+                existing.file_id == attachment.file_id
+                    || existing.unique_file_id.is_some()
+                        && existing.unique_file_id == attachment.unique_file_id
+            });
+            if !duplicate {
+                attachments.push(attachment);
+            }
+        }
+    }
     let text = msg
         .get("text")
         .or_else(|| msg.get("caption"))
@@ -342,6 +354,61 @@ mod tests {
             msgs[0].attachments[0].mime_type.as_deref(),
             Some("image/jpeg")
         );
+    }
+
+    #[test]
+    fn parse_updates_includes_attachment_from_replied_message() {
+        let json = serde_json::json!({
+            "result": [{
+                "update_id": 12,
+                "message": {
+                    "chat": {"id": 12},
+                    "text": "再檢查第 20 列",
+                    "reply_to_message": {
+                        "message_id": 88,
+                        "chat": {"id": 12},
+                        "document": {
+                            "file_id": "old_doc",
+                            "file_unique_id": "old_unique",
+                            "file_name": "report.csv",
+                            "mime_type": "text/csv",
+                            "file_size": 321
+                        }
+                    }
+                }
+            }]
+        });
+
+        let messages = parse_updates(&json);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text, "再檢查第 20 列");
+        assert_eq!(messages[0].attachments.len(), 1);
+        assert_eq!(messages[0].attachments[0].file_id, "old_doc");
+        assert_eq!(messages[0].attachments[0].original_name, "report.csv");
+    }
+
+    #[test]
+    fn parse_updates_combines_new_and_replied_attachments() {
+        let json = serde_json::json!({
+            "result": [{
+                "update_id": 13,
+                "message": {
+                    "chat": {"id": 12},
+                    "caption": "比較兩份",
+                    "document": {"file_id": "new", "file_name": "new.csv", "mime_type": "text/csv"},
+                    "reply_to_message": {
+                        "document": {"file_id": "old", "file_name": "old.csv", "mime_type": "text/csv"}
+                    }
+                }
+            }]
+        });
+
+        let messages = parse_updates(&json);
+
+        assert_eq!(messages[0].attachments.len(), 2);
+        assert_eq!(messages[0].attachments[0].file_id, "new");
+        assert_eq!(messages[0].attachments[1].file_id, "old");
     }
 
     #[test]

@@ -45,6 +45,14 @@ pub trait TgClient {
         text: &str,
         keyboard: InlineKeyboard,
     ) -> impl std::future::Future<Output = Result<i64, TgError>> + Send;
+    /// Upload a document and return the new message_id.
+    fn send_document(
+        &self,
+        chat_id: i64,
+        filename: &str,
+        bytes: Vec<u8>,
+        caption: Option<&str>,
+    ) -> impl std::future::Future<Output = Result<i64, TgError>> + Send;
     /// Stream an ephemeral plain-text draft in a private chat.
     fn send_message_draft(
         &self,
@@ -223,6 +231,26 @@ impl TgClient for ReqwestTgClient {
         message_id_of(&v)
     }
 
+    async fn send_document(
+        &self,
+        chat_id: i64,
+        filename: &str,
+        bytes: Vec<u8>,
+        caption: Option<&str>,
+    ) -> Result<i64, TgError> {
+        let url = format!("{}/sendDocument", self.base);
+        let document = reqwest::multipart::Part::bytes(bytes).file_name(filename.to_string());
+        let mut form = reqwest::multipart::Form::new()
+            .text("chat_id", chat_id.to_string())
+            .part("document", document);
+        if let Some(caption) = caption.filter(|caption| !caption.is_empty()) {
+            form = form.text("caption", caption.to_string());
+        }
+        let response = self.http.post(url).multipart(form).send().await?;
+        let value = check_ok(response.json::<serde_json::Value>().await?)?;
+        message_id_of(&value)
+    }
+
     async fn send_message_draft(
         &self,
         chat_id: i64,
@@ -351,6 +379,14 @@ pub mod mock {
         pub html: bool,
     }
 
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct SentDocument {
+        pub chat_id: i64,
+        pub filename: String,
+        pub bytes: Vec<u8>,
+        pub caption: Option<String>,
+    }
+
     type MockFiles = Arc<Mutex<HashMap<String, (TgFileInfo, Vec<u8>)>>>;
     type InlineEditLog = Arc<Mutex<Vec<(i64, i64, String, InlineKeyboard)>>>;
 
@@ -366,6 +402,7 @@ pub mod mock {
         pub deletes: Arc<Mutex<Vec<(i64, i64)>>>,
         pub actions: Arc<Mutex<Vec<(i64, String)>>>,
         pub drafts: Arc<Mutex<Vec<(i64, i64, String)>>>,
+        pub documents: Arc<Mutex<Vec<SentDocument>>>,
         files: MockFiles,
         next_id: Arc<Mutex<i64>>,
         drafts_enabled: Arc<Mutex<bool>>,
@@ -430,6 +467,21 @@ pub mod mock {
                 .lock()
                 .unwrap()
                 .push((chat_id, text.to_string(), keyboard));
+            Ok(self.alloc_id())
+        }
+        async fn send_document(
+            &self,
+            chat_id: i64,
+            filename: &str,
+            bytes: Vec<u8>,
+            caption: Option<&str>,
+        ) -> Result<i64, TgError> {
+            self.documents.lock().unwrap().push(SentDocument {
+                chat_id,
+                filename: filename.to_string(),
+                bytes,
+                caption: caption.map(str::to_string),
+            });
             Ok(self.alloc_id())
         }
         async fn send_message_draft(
@@ -542,6 +594,23 @@ pub mod mock {
         assert_eq!(info.file_path, "docs/report.pdf");
         let bytes = c.download_file(&info.file_path).await.unwrap();
         assert_eq!(bytes, b"hello");
+    }
+
+    #[cfg(test)]
+    #[tokio::test]
+    async fn mock_records_documents() {
+        let client = MockTgClient::default();
+
+        let message_id = client
+            .send_document(7, "report.csv", b"a,b\n1,2\n".to_vec(), Some("完成"))
+            .await
+            .unwrap();
+
+        assert_eq!(message_id, 1);
+        let documents = client.documents.lock().unwrap();
+        assert_eq!(documents[0].filename, "report.csv");
+        assert_eq!(documents[0].bytes, b"a,b\n1,2\n");
+        assert_eq!(documents[0].caption.as_deref(), Some("完成"));
     }
 
     #[cfg(test)]
