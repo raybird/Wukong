@@ -11,6 +11,34 @@
 
 ## [Unreleased]
 
+## [0.18.4] - 2026-07-17
+
+### Added
+
+- Telegram 現在可將 `document` 與 `photo` 作為 OpenCode file part 傳入，並在同一
+  session 內繼續追問；回覆先前的檔案訊息可重新帶入附件，上傳新檔並回覆舊檔可
+  直接比較兩份內容。
+- OpenCode 產出的檔案會從每回合專屬 artifact 目錄透過 Telegram `sendDocument`
+  回傳；原始上傳、可操作工作副本與回傳成品分開保存。
+- OpenCode server 的 `permission.asked` 事件會在 Telegram 顯示「允許一次」、
+  「本次工作階段總是允許」與「拒絕」按鈕。
+
+### Changed
+
+- Docker 共用 workspace 時預設用 `file:///workspace/...` 傳送附件；沒有共享
+  filesystem 的遠端 OpenCode server 可設定
+  `WUKONG_AGENT_SERVER_FILE_MODE=inline`，以 Base64 data URL 傳送單檔不超過
+  10 MiB 的附件。
+- Telegram 上傳檔案限制為單檔 25 MiB、每則最多 5 份，並在傳給 OpenCode 前驗證
+  canonical path、拒絕 symlink 及工作區外路徑。
+
+### 升級注意
+
+- Compose 部署不需額外操作，預設使用共享 `/workspace`。若
+  `WUKONG_AGENT_SERVER_URL` 指向沒有掛載相同 workspace 的遠端服務，請在 `.env`
+  設定 `WUKONG_AGENT_SERVER_FILE_MODE=inline`；否則只有附件請求會被拒絕，既有
+  純文字對話不受影響。
+
 ## [0.18.3] - 2026-07-16
 
 ### Changed
@@ -161,7 +189,8 @@
   不安全綁定（`0.0.0.0` + 空 token）啟動即拒絕（fail-closed，可用
   `WUKONG_WEB_ALLOW_INSECURE=1` 覆寫）；Telegram callback 加白名單檢查。
 
-[Unreleased]: https://github.com/raybird/Wukong/compare/v0.18.3...HEAD
+[Unreleased]: https://github.com/raybird/Wukong/compare/v0.18.4...HEAD
+[0.18.4]: https://github.com/raybird/Wukong/compare/v0.18.3...v0.18.4
 [0.18.3]: https://github.com/raybird/Wukong/compare/v0.18.2...v0.18.3
 [0.18.2]: https://github.com/raybird/Wukong/compare/v0.18.0...v0.18.2
 [0.18.0]: https://github.com/raybird/Wukong/compare/v0.17.1...v0.18.0
