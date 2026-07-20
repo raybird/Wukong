@@ -354,6 +354,12 @@ async fn read_pipe(mut pipe: impl tokio::io::AsyncRead + Unpin) -> String {
     buf
 }
 
+/// 序列化所有讀寫 `WUKONG_AGENT_TIMEOUT_SECS` 的測試（backend 與 opencode_server
+/// 兩個模組共用），避免 process-global env var 在平行測試間互相干擾。
+#[cfg(test)]
+pub(crate) static AGENT_TIMEOUT_ENV_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
 pub(crate) fn agent_timeout() -> Duration {
     std::env::var("WUKONG_AGENT_TIMEOUT_SECS")
         .ok()
@@ -448,8 +454,6 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
-
-    static AGENT_TIMEOUT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     async fn health_server() -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

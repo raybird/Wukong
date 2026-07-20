@@ -22,6 +22,7 @@ pub struct OpencodeServerBackend {
     file_mode: FileTransportMode,
     server_workspace: Option<PathBuf>,
     client: reqwest::Client,
+    stream_client: reqwest::Client,
     username: Option<String>,
     password: Option<String>,
     session_attachments: Mutex<HashMap<String, Vec<crate::backend::AgentAttachment>>>,
@@ -97,6 +98,13 @@ impl OpencodeServerBackend {
             server_workspace,
             client: reqwest::Client::builder()
                 .timeout(agent_timeout())
+                .build()
+                .expect("reqwest client builder should not fail"),
+            // reqwest 的 client timeout 涵蓋整個 body 讀取；`/event` SSE 要陪整
+            // 回合跑，掛總 timeout 會在回合中途被切斷，所以串流專用 client 只設
+            // 連線逾時，回合時限交給 consume_event_stream 的 deadline。
+            stream_client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
                 .build()
                 .expect("reqwest client builder should not fail"),
             username: std::env::var("WUKONG_AGENT_SERVER_USERNAME")
@@ -345,10 +353,20 @@ impl OpencodeServerBackend {
         .await
     }
 
+    /// Best-effort：事件串流中斷後，server 端的 prompt 仍會繼續執行並佔住
+    /// session，讓後續回合永遠等不到 `session.idle`；這裡主動要求 opencode
+    /// 中止，失敗也不影響原本要回傳的錯誤。
+    async fn abort_session(&self, session_id: &str) {
+        let url = format!("{}/session/{}/abort", self.base_url, session_id);
+        let _ = self
+            .send_empty("abort_session", self.client.post(url))
+            .await;
+    }
+
     async fn open_event_stream(&self) -> Result<reqwest::Response, GatewayError> {
         let url = format!("{}/event", self.base_url);
         let response = self
-            .authorize(self.client.get(url))
+            .authorize(self.stream_client.get(url))
             .send()
             .await
             .map_err(|err| http_error("event_stream open", err))?;
@@ -428,7 +446,9 @@ impl OpencodeServerBackend {
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> Result<(), GatewayError> {
         let mut parser = SseParser::default();
-        let mut buffer = String::new();
+        // 以 bytes 緩衝、只在整行（不會切在多位元組字元中間）時才解碼，
+        // 避免 chunk 邊界落在 UTF-8 字元中間時產生 U+FFFD 亂碼。
+        let mut buffer: Vec<u8> = Vec::new();
         let mut seen_tools = std::collections::HashSet::new();
         let deadline = tokio::time::sleep(agent_timeout());
         tokio::pin!(deadline);
@@ -451,9 +471,10 @@ impl OpencodeServerBackend {
                         .to_string(),
                 });
             };
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(newline) = buffer.find('\n') {
-                let mut line = buffer.drain(..=newline).collect::<String>();
+            buffer.extend_from_slice(&chunk);
+            while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
+                let line_bytes: Vec<u8> = buffer.drain(..=newline).collect();
+                let mut line = String::from_utf8_lossy(&line_bytes).into_owned();
                 if line.ends_with('\n') {
                     line.pop();
                 }
@@ -531,8 +552,13 @@ impl AiBackend for OpencodeServerBackend {
             Err(err) => return Err(err),
         }
 
-        self.consume_event_stream(response, &session_id, on_event)
-            .await?;
+        if let Err(err) = self
+            .consume_event_stream(response, &session_id, on_event)
+            .await
+        {
+            self.abort_session(&session_id).await;
+            return Err(err);
+        }
         let messages = self.list_messages(&session_id).await?;
         Ok(AgentResponse {
             text: extract_latest_assistant_text(&messages),
@@ -702,10 +728,16 @@ fn parse_model_override(model: &str) -> Option<ModelOverride> {
 }
 
 fn http_error(phase: &'static str, err: reqwest::Error) -> GatewayError {
-    GatewayError::AgentFailed {
-        code: None,
-        stderr: format!("opencode server {phase} failed: {err}"),
+    // reqwest 0.12 的 Display 只有「error decoding response body」這類頂層訊息，
+    // 逾時、連線被 reset 等真正原因都藏在 source 鏈裡，須自行展開。
+    let mut stderr = format!("opencode server {phase} failed: {err}");
+    let mut source = std::error::Error::source(&err);
+    while let Some(cause) = source {
+        stderr.push_str(": ");
+        stderr.push_str(&cause.to_string());
+        source = cause.source();
     }
+    GatewayError::AgentFailed { code: None, stderr }
 }
 
 fn question_reply_body(answers: Vec<Vec<String>>) -> QuestionReplyBody {
@@ -758,6 +790,200 @@ mod tests {
             GatewayError::AgentFailed { stderr, .. } => stderr,
             other => panic!("expected AgentFailed, got {other:?}"),
         }
+    }
+
+    /// SSE server 送出 headers 後保持連線開啟但不再送任何事件。
+    async fn silent_sse_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 1024];
+            let _ = socket.read(&mut buf).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n: keep-alive\n\n",
+                )
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// SSE server 把一個含中文 reasoning 的事件拆在多位元組字元中間分兩段送出，
+    /// 之後送 session.idle 正常收尾。
+    async fn utf8_splitting_sse_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 1024];
+            let _ = socket.read(&mut buf).await.unwrap();
+            let reasoning = concat!(
+                "data: {\"type\":\"message.part.updated\",\"properties\":{",
+                "\"delta\":\"悟空登場\",\"part\":{\"id\":\"part_1\",\"sessionID\":\"ses_1\",",
+                "\"messageID\":\"msg_1\",\"type\":\"reasoning\",\"text\":\"悟空登場\"}}}\n\n"
+            );
+            let idle =
+                "data: {\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"ses_1\"}}\n\n";
+            let bytes = reasoning.as_bytes();
+            let split = reasoning.find('悟').unwrap() + 1;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            socket.write_all(&bytes[..split]).await.unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            socket.write_all(&bytes[split..]).await.unwrap();
+            socket.write_all(idle.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    /// 模擬完整 opencode server：記錄收到的 request path；`/event` 回完 headers
+    /// 立刻關閉連線，重現 stream 早夭。
+    async fn scripted_opencode_server(hits: std::sync::Arc<Mutex<Vec<String>>>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let hits = hits.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 1024];
+                    let header_end = loop {
+                        let n = match socket.read(&mut tmp).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => n,
+                        };
+                        buf.extend_from_slice(&tmp[..n]);
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break pos + 4;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+                    let content_length = head
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            if name.eq_ignore_ascii_case("content-length") {
+                                value.trim().parse::<usize>().ok()
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(0);
+                    while buf.len() < header_end + content_length {
+                        let n = match socket.read(&mut tmp).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    let path = head
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or_default()
+                        .to_string();
+                    hits.lock().unwrap().push(path.clone());
+                    fn json_response(body: &str) -> String {
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                    }
+                    let response = match path.as_str() {
+                        "/global/health" => json_response("{\"healthy\":true}"),
+                        "/session" => json_response("{\"id\":\"ses_ab\"}"),
+                        "/session/ses_ab/prompt_async" => json_response("{}"),
+                        "/session/ses_ab/abort" => json_response("true"),
+                        "/event" => {
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+                                .to_string()
+                        }
+                        _ => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_string(),
+                    };
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn event_stream_outlives_client_timeout_and_reports_friendly_deadline() {
+        let _guard = crate::backend::AGENT_TIMEOUT_ENV_LOCK.lock().await;
+        std::env::set_var("WUKONG_AGENT_TIMEOUT_SECS", "1");
+        let backend = OpencodeServerBackend::from_env(silent_sse_server().await, None);
+
+        let response = backend.open_event_stream().await.unwrap();
+        let result = backend
+            .consume_event_stream(response, "ses_1", &mut |_| {})
+            .await;
+        std::env::remove_var("WUKONG_AGENT_TIMEOUT_SECS");
+
+        let stderr = agent_failed_stderr(result.unwrap_err());
+        assert!(
+            stderr.contains("stream timed out before session became idle"),
+            "{stderr}"
+        );
+    }
+
+    #[tokio::test]
+    async fn event_stream_preserves_utf8_split_across_chunks() {
+        let backend = OpencodeServerBackend::from_env(utf8_splitting_sse_server().await, None);
+        let response = backend.open_event_stream().await.unwrap();
+
+        let mut reasoning = String::new();
+        backend
+            .consume_event_stream(response, "ses_1", &mut |event| {
+                if let StreamEvent::Reasoning(text) = event {
+                    reasoning.push_str(&text);
+                }
+            })
+            .await
+            .unwrap();
+
+        assert!(reasoning.contains("悟空登場"), "{reasoning:?}");
+        assert!(!reasoning.contains('\u{FFFD}'), "{reasoning:?}");
+    }
+
+    #[tokio::test]
+    async fn run_streaming_aborts_session_when_event_stream_dies() {
+        let hits = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let backend =
+            OpencodeServerBackend::from_env(scripted_opencode_server(hits.clone()).await, None);
+        let req = AgentRequest {
+            prompt: "hi".to_string(),
+            session_id: None,
+            thinking: false,
+            model: None,
+            agent: None,
+            tool_overrides: BTreeMap::new(),
+            attachments: Vec::new(),
+        };
+
+        let err = backend.run_streaming(req, &mut |_| {}).await.unwrap_err();
+
+        let stderr = agent_failed_stderr(err);
+        assert!(
+            stderr.contains("event stream ended before session became idle"),
+            "{stderr}"
+        );
+        let seen = hits.lock().unwrap().clone();
+        assert!(
+            seen.iter().any(|path| path == "/session/ses_ab/abort"),
+            "expected abort call, saw {seen:?}"
+        );
     }
 
     fn request_with_attachment(path: PathBuf, name: &str, mime: &str) -> AgentRequest {
@@ -915,7 +1141,12 @@ mod tests {
         let stderr = agent_failed_stderr(err);
 
         assert!(stderr.contains("opencode server event_stream failed while reading chunk"));
-        assert!(stderr.contains("error decoding response body"));
+        // reqwest 0.12 的 Display 不含原因鏈；http_error 需自行附加，否則只剩
+        // 「error decoding response body」無從診斷。
+        assert!(
+            stderr.contains("error decoding response body: "),
+            "{stderr}"
+        );
     }
 
     #[test]
