@@ -11,6 +11,21 @@
 
 ## [Unreleased]
 
+## [0.18.5] - 2026-07-20
+
+### Fixed
+
+- OpenCode server 事件串流不再套用 20 分鐘的 reqwest 全域 timeout；長回合不會
+  再於串流中途被切斷並回報難以診斷的「error decoding response body」。回合時限
+  改由既有的 stream deadline 把關，逾時會回報明確訊息。
+- 事件串流中斷後會主動呼叫 `POST /session/{id}/abort`，停止 server 端仍在執行
+  的 prompt；避免殭屍 prompt 佔住 session 造成後續每一回合都逾時、必須重啟
+  `opencode-server` 才能恢復。
+- OpenCode server 的 HTTP 錯誤訊息現在會附上完整原因鏈（逾時、連線被 reset
+  等），方便直接定位失敗原因。
+- SSE 事件改以位元組緩衝、整行解碼，修正中文等多位元組字元跨 chunk 邊界時變成
+  亂碼的問題。
+
 ## [0.18.4] - 2026-07-17
 
 ### Added
