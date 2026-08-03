@@ -11,6 +11,8 @@
 
 ## [Unreleased]
 
+## [0.18.6] - 2026-08-04
+
 ### Added
 
 - OpenCode server backend 現在使用原生 `POST /session/{id}/summarize` 與
