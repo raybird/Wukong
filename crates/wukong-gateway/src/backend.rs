@@ -59,6 +59,60 @@ pub trait AiBackend {
         on_event(StreamEvent::Text(resp.text.clone()));
         Ok(resp)
     }
+
+    async fn delete_session(&self, _session_id: &str) -> Result<(), GatewayError> {
+        Ok(())
+    }
+
+    async fn compact_session(
+        &self,
+        session_id: &str,
+        model: Option<&str>,
+    ) -> Result<AgentResponse, GatewayError> {
+        self.run_streaming(
+            AgentRequest {
+                prompt: "/compact".to_string(),
+                session_id: Some(session_id.to_string()),
+                thinking: false,
+                model: model.map(str::to_string),
+                agent: None,
+                tool_overrides: BTreeMap::new(),
+                attachments: Vec::new(),
+            },
+            &mut |_| {},
+        )
+        .await
+    }
+
+    async fn run_ephemeral(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+        let response = self.run(req).await?;
+        if let Some(session_id) = response.session_id.as_deref() {
+            match self.delete_session(session_id).await {
+                Ok(()) => eprintln!("helper_session_deleted session_id={session_id}"),
+                Err(error) => {
+                    eprintln!("helper_session_delete_failed session_id={session_id}: {error}")
+                }
+            }
+        }
+        Ok(response)
+    }
+
+    async fn run_streaming_ephemeral(
+        &self,
+        req: AgentRequest,
+        on_event: &mut dyn FnMut(StreamEvent),
+    ) -> Result<AgentResponse, GatewayError> {
+        let response = self.run_streaming(req, on_event).await?;
+        if let Some(session_id) = response.session_id.as_deref() {
+            match self.delete_session(session_id).await {
+                Ok(()) => eprintln!("helper_session_deleted session_id={session_id}"),
+                Err(error) => {
+                    eprintln!("helper_session_delete_failed session_id={session_id}: {error}")
+                }
+            }
+        }
+        Ok(response)
+    }
 }
 
 /// Build the argv handed to the agent subprocess:
@@ -166,6 +220,42 @@ impl AiBackend for AgentBackend {
         match self {
             AgentBackend::Cli(backend) => backend.run_streaming(req, on_event).await,
             AgentBackend::Server(backend) => backend.run_streaming(req, on_event).await,
+        }
+    }
+
+    async fn delete_session(&self, session_id: &str) -> Result<(), GatewayError> {
+        match self {
+            AgentBackend::Cli(backend) => backend.delete_session(session_id).await,
+            AgentBackend::Server(backend) => backend.delete_session(session_id).await,
+        }
+    }
+
+    async fn compact_session(
+        &self,
+        session_id: &str,
+        model: Option<&str>,
+    ) -> Result<AgentResponse, GatewayError> {
+        match self {
+            AgentBackend::Cli(backend) => backend.compact_session(session_id, model).await,
+            AgentBackend::Server(backend) => backend.compact_session(session_id, model).await,
+        }
+    }
+
+    async fn run_ephemeral(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+        match self {
+            AgentBackend::Cli(backend) => backend.run_ephemeral(req).await,
+            AgentBackend::Server(backend) => backend.run_ephemeral(req).await,
+        }
+    }
+
+    async fn run_streaming_ephemeral(
+        &self,
+        req: AgentRequest,
+        on_event: &mut dyn FnMut(StreamEvent),
+    ) -> Result<AgentResponse, GatewayError> {
+        match self {
+            AgentBackend::Cli(backend) => backend.run_streaming_ephemeral(req, on_event).await,
+            AgentBackend::Server(backend) => backend.run_streaming_ephemeral(req, on_event).await,
         }
     }
 }
@@ -807,6 +897,61 @@ mod tests {
             .unwrap();
         assert_eq!(resp.text, "whole answer");
         assert_eq!(events, vec![StreamEvent::Text("whole answer".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn default_session_controls_compact_and_cleanup() {
+        struct RecordingBackend {
+            requests: std::sync::Mutex<Vec<AgentRequest>>,
+            deleted: std::sync::Mutex<Vec<String>>,
+        }
+
+        impl AiBackend for RecordingBackend {
+            async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+                self.requests.lock().unwrap().push(req);
+                Ok(AgentResponse {
+                    text: "helper".to_string(),
+                    session_id: Some("ses_helper".to_string()),
+                })
+            }
+
+            async fn delete_session(&self, session_id: &str) -> Result<(), GatewayError> {
+                self.deleted.lock().unwrap().push(session_id.to_string());
+                Ok(())
+            }
+        }
+
+        let backend = RecordingBackend {
+            requests: std::sync::Mutex::new(Vec::new()),
+            deleted: std::sync::Mutex::new(Vec::new()),
+        };
+        let response = backend
+            .run_ephemeral(AgentRequest {
+                prompt: "route".to_string(),
+                session_id: None,
+                thinking: false,
+                model: None,
+                agent: None,
+                tool_overrides: BTreeMap::new(),
+                attachments: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.text, "helper");
+        assert_eq!(backend.deleted.lock().unwrap().as_slice(), &["ses_helper"]);
+
+        let response = backend
+            .compact_session("ses_42", Some("opencode/deepseek-v4-flash-free"))
+            .await
+            .unwrap();
+        assert_eq!(response.text, "helper");
+        let request = backend.requests.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(request.prompt, "/compact");
+        assert_eq!(request.session_id.as_deref(), Some("ses_42"));
+        assert_eq!(
+            request.model.as_deref(),
+            Some("opencode/deepseek-v4-flash-free")
+        );
     }
 
     #[tokio::test]

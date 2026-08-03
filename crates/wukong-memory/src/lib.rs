@@ -20,9 +20,10 @@ pub use embed::{cosine_similarity, Embedder, MockEmbedder};
 pub use error::{MemoryError, Result};
 pub use markdown::MarkdownSink;
 pub use model::{
-    AgeBuckets, EmbeddingCoverage, Evidence, KindCount, MemoryItem, MemoryKind, MemoryRecord,
-    MemoryRecordsPage, RecallExplanation, RecallHit, RecallMode, RecallQuery, RecallTelemetryInput,
-    RecallTelemetrySummary, RememberInput, ScopeCount, Snapshot, Stats, WukongResult,
+    AgeBuckets, AgentSessionState, EmbeddingCoverage, Evidence, KindCount, MemoryItem, MemoryKind,
+    MemoryRecord, MemoryRecordsPage, RecallExplanation, RecallHit, RecallMode, RecallQuery,
+    RecallTelemetryInput, RecallTelemetrySummary, RememberInput, ScopeCount, Snapshot, Stats,
+    WukongResult,
 };
 pub use prune::PrunePolicy;
 pub use scope::Scope;
@@ -112,10 +113,65 @@ impl Memory {
         self.store.agent_session(scope).await
     }
 
+    /// Complete OpenCode session lifecycle state for a scope.
+    pub async fn agent_session_state(&self, scope: &str) -> Result<Option<AgentSessionState>> {
+        self.store.agent_session_state(scope).await
+    }
+
     /// Set/overwrite the opencode session id for a scope.
     pub async fn set_agent_session(&self, scope: &str, session_id: &str) -> Result<()> {
         self.store
             .set_agent_session(scope, session_id, now_unix())
+            .await
+    }
+
+    pub async fn acquire_agent_session_lease(
+        &self,
+        scope: &str,
+        owner: &str,
+        lease_secs: i64,
+    ) -> Result<Option<AgentSessionState>> {
+        self.store
+            .acquire_agent_session_lease(scope, owner, now_unix(), lease_secs)
+            .await
+    }
+
+    pub async fn renew_agent_session_lease(
+        &self,
+        scope: &str,
+        owner: &str,
+        lease_secs: i64,
+    ) -> Result<bool> {
+        self.store
+            .renew_agent_session_lease(scope, owner, now_unix(), lease_secs)
+            .await
+    }
+
+    pub async fn finish_agent_session_turn(
+        &self,
+        scope: &str,
+        owner: &str,
+        session_id: Option<&str>,
+    ) -> Result<Option<AgentSessionState>> {
+        self.store
+            .finish_agent_session_turn(scope, owner, session_id, now_unix())
+            .await
+    }
+
+    pub async fn release_agent_session_lease(&self, scope: &str, owner: &str) -> Result<bool> {
+        self.store
+            .release_agent_session_lease(scope, owner, now_unix())
+            .await
+    }
+
+    pub async fn mark_agent_session_compacted(
+        &self,
+        scope: &str,
+        owner: &str,
+        session_id: &str,
+    ) -> Result<bool> {
+        self.store
+            .mark_agent_session_compacted(scope, owner, session_id, now_unix())
             .await
     }
 
@@ -412,6 +468,16 @@ impl Memory {
         Ok(summary_ids)
     }
 
+    /// List distinct scopes containing memory rows.
+    pub async fn scopes(&self) -> Result<Vec<String>> {
+        self.store.list_scopes().await
+    }
+
+    /// Delete only consolidated event/note source rows.
+    pub async fn prune_consolidated(&self, scope: Option<&str>) -> Result<u64> {
+        self.store.delete_consolidated(scope).await
+    }
+
     /// Ids that `prune` would delete (dry-run).
     pub async fn plan_prune(
         &self,
@@ -555,6 +621,55 @@ mod tests {
         mem.clear_agent_session("global").await.unwrap();
         assert_eq!(mem.agent_session("global").await.unwrap(), None);
         mem.clear_agent_session("nope").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn agent_session_state_tracks_turns_and_provenance() {
+        let mem = open_mem().await;
+        mem.set_agent_session("global", "ses_1").await.unwrap();
+        let lease = mem
+            .acquire_agent_session_lease("global", "owner-1", 300)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.session_id.as_deref(), Some("ses_1"));
+        assert_eq!(lease.turn_count, 0);
+
+        let finished = mem
+            .finish_agent_session_turn("global", "owner-1", Some("ses_1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(finished.turn_count, 1);
+        assert!(finished.lease_owner.is_none());
+
+        let state = mem.agent_session_state("global").await.unwrap().unwrap();
+        assert_eq!(state.session_id.as_deref(), Some("ses_1"));
+        assert_eq!(state.turn_count, 1);
+    }
+
+    #[tokio::test]
+    async fn memory_records_expose_session_provenance() {
+        let mem = open_mem().await;
+        mem.remember(RememberInput {
+            scope: "project:X".to_string(),
+            session_id: Some("ses_1".to_string()),
+            items: vec![MemoryItem {
+                kind: MemoryKind::Event,
+                text: "session event".to_string(),
+                importance: None,
+                dedupe_key: None,
+            }],
+        })
+        .await
+        .unwrap();
+
+        let records = mem
+            .store
+            .list_records(Some("project:X"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(records[0].session_id.as_deref(), Some("ses_1"));
     }
 
     async fn remember_event(mem: &Memory, scope: &str, text: &str) {

@@ -231,7 +231,7 @@ pub async fn plan_skill_chain_with_preferences(
 ) -> Result<Vec<PlannedStep>, OrchestratorError> {
     let tool_overrides = std::collections::BTreeMap::from([("question".to_string(), false)]);
     let resp = backend
-        .run(AgentRequest {
+        .run_ephemeral(AgentRequest {
             prompt: skill_planning_prompt_with_preferences(task, skills, preferences),
             session_id: None,
             thinking: false,
@@ -248,7 +248,7 @@ pub async fn plan_skill_chain_with_preferences(
 pub async fn route(backend: &impl AiBackend, task: &str) -> Result<Role, OrchestratorError> {
     let tool_overrides = std::collections::BTreeMap::from([("question".to_string(), false)]);
     let resp = backend
-        .run(AgentRequest {
+        .run_ephemeral(AgentRequest {
             prompt: routing_prompt(task),
             session_id: None,
             thinking: false,
@@ -268,7 +268,7 @@ pub async fn plan_chain(
 ) -> Result<Vec<Role>, OrchestratorError> {
     let tool_overrides = std::collections::BTreeMap::from([("question".to_string(), false)]);
     let resp = backend
-        .run(AgentRequest {
+        .run_ephemeral(AgentRequest {
             prompt: planning_prompt(task),
             session_id: None,
             thinking: false,

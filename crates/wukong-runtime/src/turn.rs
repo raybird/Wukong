@@ -178,7 +178,12 @@ pub async fn run_turn_traced_with_attachments(
     )
     .await?;
 
-    let stored = memory.agent_session(&cfg.scope).await?;
+    let preparation = crate::session::prepare_final_session(memory, backend, cfg).await?;
+    let stored = preparation.session_id.clone();
+    let rotated_from = preparation.rotated_from.clone();
+    let session_owner = preparation.owner.clone();
+    let session_lease_secs = preparation.lease_secs;
+    let result = async {
     let n_steps = steps.len();
     let mut prior: Vec<wukong_orchestrator::Outcome> = Vec::new();
     let mut captured_session: Option<String> = None;
@@ -212,24 +217,37 @@ pub async fn run_turn_traced_with_attachments(
         if is_final {
             final_repair = Some((role, session_id.clone(), prompt.clone()));
         }
-        let resp = backend
-            .run_streaming(
-                AgentRequest {
-                    prompt,
-                    session_id,
-                    thinking: cfg.thinking,
-                    model: if is_final {
-                        cfg.default_model.clone()
-                    } else {
-                        None
+        let resp = if is_final {
+            backend
+                .run_streaming(
+                    AgentRequest {
+                        prompt,
+                        session_id,
+                        thinking: cfg.thinking,
+                        model: cfg.default_model.clone(),
+                        agent: None,
+                        tool_overrides: std::collections::BTreeMap::new(),
+                        attachments: attachments.clone(),
                     },
-                    agent: None,
-                    tool_overrides: std::collections::BTreeMap::new(),
-                    attachments: attachments.clone(),
-                },
-                on_event,
-            )
-            .await?;
+                    on_event,
+                )
+                .await?
+        } else {
+            backend
+                .run_streaming_ephemeral(
+                    AgentRequest {
+                        prompt,
+                        session_id: None,
+                        thinking: cfg.thinking,
+                        model: None,
+                        agent: None,
+                        tool_overrides: std::collections::BTreeMap::new(),
+                        attachments: attachments.clone(),
+                    },
+                    on_event,
+                )
+                .await?
+        };
         if is_final {
             captured_session = resp.session_id.clone();
         }
@@ -244,10 +262,6 @@ pub async fn run_turn_traced_with_attachments(
             });
         }
         prior.push(wukong_orchestrator::Outcome { role, output: text });
-    }
-
-    if let Some(id) = captured_session.as_deref() {
-        memory.set_agent_session(&cfg.scope, id).await?;
     }
 
     let last = prior
@@ -284,6 +298,9 @@ pub async fn run_turn_traced_with_attachments(
                     on_event,
                 )
                 .await?;
+            if let Some(id) = repair.session_id.as_deref() {
+                captured_session = Some(id.to_string());
+            }
             if !repair.text.trim().is_empty() {
                 wukong_orchestrator::Outcome {
                     role,
@@ -313,7 +330,7 @@ pub async fn run_turn_traced_with_attachments(
     memory
         .remember(RememberInput {
             scope: cfg.scope.clone(),
-            session_id: None,
+            session_id: captured_session.clone().or_else(|| stored.clone()),
             items: vec![
                 MemoryItem {
                     kind: MemoryKind::Event,
@@ -331,10 +348,54 @@ pub async fn run_turn_traced_with_attachments(
         })
         .await?;
 
+    memory
+        .acquire_agent_session_lease(&cfg.scope, &session_owner, session_lease_secs)
+        .await?
+        .ok_or_else(|| {
+            WukongError::Backend(wukong_gateway::GatewayError::AgentFailed {
+                code: None,
+                stderr: format!("session lease unavailable for scope {}", cfg.scope),
+            })
+        })?;
+    let turn_session_id = captured_session.clone().or(stored.clone());
+    memory
+        .finish_agent_session_turn(&cfg.scope, &session_owner, turn_session_id.as_deref())
+        .await?
+        .ok_or_else(|| {
+            WukongError::Backend(wukong_gateway::GatewayError::AgentFailed {
+                code: None,
+                stderr: format!("session lease lost for scope {}", cfg.scope),
+            })
+        })?;
+    if let Some(old_id) = rotated_from.as_deref() {
+        if captured_session.as_deref() != Some(old_id) {
+            let new_id = captured_session.as_deref().unwrap_or("<none>");
+            eprintln!(
+                "session_rotated scope={} old_session_id={} new_session_id={}",
+                cfg.scope, old_id, new_id
+            );
+            if let Err(error) = backend.delete_session(old_id).await {
+                eprintln!(
+                    "session_rotation_cleanup_failed scope={} old_session_id={} new_session_id={}: {error}",
+                    cfg.scope, old_id, new_id
+                );
+            }
+        }
+    }
+
     Ok(TurnOutput {
         role: answer.role,
         text: answer.output,
     })
+    }
+    .await;
+
+    if result.is_err() {
+        let _ = memory
+            .release_agent_session_lease(&cfg.scope, &session_owner)
+            .await;
+    }
+    result
 }
 
 fn append_empty_output_repair_directive(mut prompt: String) -> String {
@@ -385,20 +446,24 @@ pub async fn run_turn_session_passthrough(
     session_id: &str,
     command: &str,
 ) -> Result<String, WukongError> {
-    let resp = backend
-        .run_streaming(
-            AgentRequest {
-                prompt: command.to_string(),
-                session_id: Some(session_id.to_string()),
-                thinking: false,
-                model: None,
-                agent: None,
-                tool_overrides: std::collections::BTreeMap::new(),
-                attachments: Vec::new(),
-            },
-            &mut |_| {},
-        )
-        .await?;
+    let resp = if command == "/compact" {
+        backend.compact_session(session_id, None).await?
+    } else {
+        backend
+            .run_streaming(
+                AgentRequest {
+                    prompt: command.to_string(),
+                    session_id: Some(session_id.to_string()),
+                    thinking: false,
+                    model: None,
+                    agent: None,
+                    tool_overrides: std::collections::BTreeMap::new(),
+                    attachments: Vec::new(),
+                },
+                &mut |_| {},
+            )
+            .await?
+    };
     Ok(resp.text)
 }
 
@@ -417,6 +482,10 @@ mod tests {
         session_ids: Mutex<Vec<Option<String>>>,
         models: Mutex<Vec<Option<String>>>,
         attachments: Mutex<Vec<Vec<AgentAttachment>>>,
+        compact_error: Mutex<Option<i32>>,
+        persistent_error: Mutex<bool>,
+        deleted_sessions: Mutex<Vec<String>>,
+        response_session_ids: Mutex<VecDeque<String>>,
     }
 
     impl MockBackend {
@@ -427,21 +496,72 @@ mod tests {
                 session_ids: Mutex::new(Vec::new()),
                 models: Mutex::new(Vec::new()),
                 attachments: Mutex::new(Vec::new()),
+                compact_error: Mutex::new(None),
+                persistent_error: Mutex::new(false),
+                deleted_sessions: Mutex::new(Vec::new()),
+                response_session_ids: Mutex::new(VecDeque::new()),
             }
+        }
+
+        fn with_compact_error(replies: &[&str], code: i32) -> MockBackend {
+            let backend = Self::new(replies);
+            *backend.compact_error.lock().unwrap() = Some(code);
+            backend
+        }
+
+        fn with_response_session_ids(self, ids: &[&str]) -> MockBackend {
+            *self.response_session_ids.lock().unwrap() =
+                ids.iter().map(|id| id.to_string()).collect();
+            self
+        }
+
+        fn with_persistent_error(self) -> MockBackend {
+            *self.persistent_error.lock().unwrap() = true;
+            self
         }
     }
 
     impl AiBackend for MockBackend {
         async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+            let is_compact = req.prompt == "/compact";
+            let has_session = req.session_id.is_some();
             self.prompts.lock().unwrap().push(req.prompt);
             self.session_ids.lock().unwrap().push(req.session_id);
             self.models.lock().unwrap().push(req.model);
             self.attachments.lock().unwrap().push(req.attachments);
+            if has_session && *self.persistent_error.lock().unwrap() {
+                return Err(GatewayError::AgentFailed {
+                    code: Some(500),
+                    stderr: "persistent session failed".to_string(),
+                });
+            }
+            if is_compact {
+                if let Some(code) = self.compact_error.lock().unwrap().take() {
+                    return Err(GatewayError::AgentFailed {
+                        code: Some(code),
+                        stderr: "compact failed".to_string(),
+                    });
+                }
+            }
             let text = self.replies.lock().unwrap().pop_front().unwrap_or_default();
+            let session_id = self
+                .response_session_ids
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| "ses_new".to_string());
             Ok(AgentResponse {
                 text,
-                session_id: Some("ses_new".to_string()),
+                session_id: Some(session_id),
             })
+        }
+
+        async fn delete_session(&self, session_id: &str) -> Result<(), GatewayError> {
+            self.deleted_sessions
+                .lock()
+                .unwrap()
+                .push(session_id.to_string());
+            Ok(())
         }
     }
 
@@ -466,6 +586,110 @@ mod tests {
             backend.session_ids.lock().unwrap()[0],
             Some("ses_42".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn compact_passthrough_uses_backend_session_control() {
+        struct NativeCompactBackend {
+            called: Mutex<bool>,
+        }
+
+        impl AiBackend for NativeCompactBackend {
+            async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+                panic!("compact should not use ordinary run")
+            }
+
+            async fn compact_session(
+                &self,
+                session_id: &str,
+                _model: Option<&str>,
+            ) -> Result<AgentResponse, GatewayError> {
+                assert_eq!(session_id, "ses_42");
+                *self.called.lock().unwrap() = true;
+                Ok(AgentResponse {
+                    text: "native compact".to_string(),
+                    session_id: Some(session_id.to_string()),
+                })
+            }
+        }
+
+        let backend = NativeCompactBackend {
+            called: Mutex::new(false),
+        };
+        let text = run_turn_session_passthrough(&backend, "ses_42", "/compact")
+            .await
+            .unwrap();
+        assert_eq!(text, "native compact");
+        assert!(*backend.called.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn pre_final_compaction_resets_turn_count_before_reuse() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["compacted"]);
+        let cfg = test_cfg("project:T");
+        mem.set_agent_session("project:T", "ses_1").await.unwrap();
+        mem.acquire_agent_session_lease("project:T", "seed", 300)
+            .await
+            .unwrap();
+        mem.finish_agent_session_turn("project:T", "seed", Some("ses_1"))
+            .await
+            .unwrap();
+
+        let prepared = crate::session::prepare_final_session_with_policy(
+            &mem,
+            &backend,
+            &cfg,
+            crate::session::SessionPolicy {
+                compact_every_turns: 1,
+                lease_secs: 300,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(prepared.session_id.as_deref(), Some("ses_1"));
+        assert!(prepared.rotated_from.is_none());
+        assert_eq!(
+            mem.agent_session_state("project:T")
+                .await
+                .unwrap()
+                .unwrap()
+                .turn_count,
+            0
+        );
+        assert!(backend
+            .prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|prompt| prompt == "/compact"));
+    }
+
+    #[tokio::test]
+    async fn failed_turn_releases_session_lease() {
+        let mem = open_memory().await;
+        mem.set_agent_session("project:T", "ses_existing")
+            .await
+            .unwrap();
+        let backend = MockBackend::new(&["oracle", "answer"]).with_persistent_error();
+
+        let error = run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "hello",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("persistent session failed"));
+        let retry = mem
+            .acquire_agent_session_lease("project:T", "retry", 300)
+            .await
+            .unwrap();
+        assert!(retry.is_some());
     }
 
     #[tokio::test]
@@ -719,6 +943,14 @@ mod tests {
             mem.agent_session("project:T").await.unwrap(),
             Some("ses_new".to_string())
         );
+        let state = mem.agent_session_state("project:T").await.unwrap().unwrap();
+        assert_eq!(state.turn_count, 1);
+        let records = mem.records(Some("project:T"), None, 10).await.unwrap();
+        assert_eq!(records.records.len(), 2);
+        assert!(records
+            .records
+            .iter()
+            .all(|record| record.session_id.as_deref() == Some("ses_new")));
     }
 
     #[tokio::test]
@@ -738,6 +970,90 @@ mod tests {
         .unwrap();
         let ids = backend.session_ids.lock().unwrap();
         assert_eq!(ids.clone(), vec![None, None, Some("ses_old".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn unsupported_compaction_rotates_after_new_session_succeeds() {
+        let mem = open_memory().await;
+        mem.set_agent_session("project:T", "ses_old").await.unwrap();
+        for _ in 0..20 {
+            mem.acquire_agent_session_lease("project:T", "seed", 300)
+                .await
+                .unwrap();
+            mem.finish_agent_session_turn("project:T", "seed", Some("ses_old"))
+                .await
+                .unwrap();
+        }
+        let backend = MockBackend::with_compact_error(&["oracle", "answer"], 404)
+            .with_response_session_ids(&["ses_helper", "ses_new"]);
+
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "rotate",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            mem.agent_session("project:T").await.unwrap(),
+            Some("ses_new".to_string())
+        );
+        assert!(backend
+            .deleted_sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|id| id == "ses_old"));
+    }
+
+    #[tokio::test]
+    async fn transient_compaction_failure_keeps_existing_session() {
+        let mem = open_memory().await;
+        mem.set_agent_session("project:T", "ses_old").await.unwrap();
+        for _ in 0..20 {
+            mem.acquire_agent_session_lease("project:T", "seed", 300)
+                .await
+                .unwrap();
+            mem.finish_agent_session_turn("project:T", "seed", Some("ses_old"))
+                .await
+                .unwrap();
+        }
+        let backend = MockBackend::with_compact_error(&["oracle", "answer"], 500)
+            .with_response_session_ids(&["ses_helper", "ses_old"]);
+
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "retain",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            mem.agent_session("project:T").await.unwrap(),
+            Some("ses_old".to_string())
+        );
+        assert!(!backend
+            .deleted_sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|id| id == "ses_old"));
+        assert_eq!(
+            mem.agent_session_state("project:T")
+                .await
+                .unwrap()
+                .unwrap()
+                .turn_count,
+            21
+        );
     }
 
     #[tokio::test]

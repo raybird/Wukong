@@ -60,6 +60,15 @@ struct ModelOverride {
     model_id: String,
 }
 
+#[derive(Debug, Serialize)]
+struct SummarizeBody {
+    #[serde(rename = "providerID")]
+    provider_id: String,
+    #[serde(rename = "modelID")]
+    model_id: String,
+    auto: bool,
+}
+
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum MessagePart {
@@ -131,6 +140,14 @@ impl OpencodeServerBackend {
             code: None,
             stderr: format!("opencode server did not return a session id: {value}"),
         })
+    }
+
+    async fn cleanup_session_if_owned(&self, should_cleanup: bool, session_id: &str) {
+        if should_cleanup {
+            if let Err(error) = self.delete_session(session_id).await {
+                eprintln!("session_cleanup_failed session_id={session_id}: {error}");
+            }
+        }
     }
 
     pub(crate) async fn health_check(&self) -> Result<(), GatewayError> {
@@ -305,9 +322,30 @@ impl OpencodeServerBackend {
             .await
     }
 
-    async fn list_messages(&self, session_id: &str) -> Result<Value, GatewayError> {
+    async fn list_messages(&self, session_id: &str, limit: u32) -> Result<Value, GatewayError> {
         let url = format!("{}/session/{}/message", self.base_url, session_id);
-        self.send_json("list_messages", self.client.get(url)).await
+        self.send_json(
+            "list_messages",
+            self.client.get(url).query(&[("limit", limit)]),
+        )
+        .await
+    }
+
+    async fn resolve_compact_model(
+        &self,
+        session_id: &str,
+        configured_model: Option<&str>,
+    ) -> Result<ModelOverride, GatewayError> {
+        if let Some(model) = configured_model.and_then(parse_model_override) {
+            return Ok(model);
+        }
+        let messages = self.list_messages(session_id, 1).await?;
+        extract_message_model(&messages).ok_or_else(|| GatewayError::AgentFailed {
+            code: None,
+            stderr: format!(
+                "opencode server summarize could not resolve provider/model for session {session_id}"
+            ),
+        })
     }
 
     pub async fn reply_question(
@@ -498,6 +536,7 @@ impl AiBackend for OpencodeServerBackend {
     async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
         self.health_check().await?;
 
+        let cleanup_on_error = req.session_id.is_none();
         let mut session_id = match req.session_id.clone() {
             Some(id) => id,
             None => self.create_session().await?,
@@ -512,12 +551,24 @@ impl AiBackend for OpencodeServerBackend {
                 code: Some(code), ..
             }) if code == StatusCode::NOT_FOUND.as_u16() as i32 => {
                 let retry = self.rehydrate_request(&session_id, &req);
+                self.cleanup_session_if_owned(cleanup_on_error, &session_id)
+                    .await;
                 session_id = self.create_session().await?;
-                let value = self.send_message(&session_id, &retry).await?;
+                let value = match self.send_message(&session_id, &retry).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        self.cleanup_session_if_owned(true, &session_id).await;
+                        return Err(error);
+                    }
+                };
                 self.remember_attachments(&session_id, &retry);
                 value
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                self.cleanup_session_if_owned(cleanup_on_error, &session_id)
+                    .await;
+                return Err(err);
+            }
         };
 
         Ok(AgentResponse {
@@ -533,23 +584,41 @@ impl AiBackend for OpencodeServerBackend {
     ) -> Result<AgentResponse, GatewayError> {
         self.health_check().await?;
 
+        let mut cleanup_on_error = req.session_id.is_none();
         let mut session_id = match req.session_id.clone() {
             Some(id) => id,
             None => self.create_session().await?,
         };
 
-        let response = self.open_event_stream().await?;
+        let response = match self.open_event_stream().await {
+            Ok(response) => response,
+            Err(error) => {
+                self.cleanup_session_if_owned(cleanup_on_error, &session_id)
+                    .await;
+                return Err(error);
+            }
+        };
         match self.send_message_async(&session_id, &req).await {
             Ok(()) => self.remember_attachments(&session_id, &req),
             Err(GatewayError::AgentFailed {
                 code: Some(code), ..
             }) if code == StatusCode::NOT_FOUND.as_u16() as i32 => {
                 let retry = self.rehydrate_request(&session_id, &req);
+                self.cleanup_session_if_owned(cleanup_on_error, &session_id)
+                    .await;
                 session_id = self.create_session().await?;
-                self.send_message_async(&session_id, &retry).await?;
+                cleanup_on_error = true;
+                if let Err(error) = self.send_message_async(&session_id, &retry).await {
+                    self.cleanup_session_if_owned(true, &session_id).await;
+                    return Err(error);
+                }
                 self.remember_attachments(&session_id, &retry);
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                self.cleanup_session_if_owned(cleanup_on_error, &session_id)
+                    .await;
+                return Err(err);
+            }
         }
 
         if let Err(err) = self
@@ -557,12 +626,117 @@ impl AiBackend for OpencodeServerBackend {
             .await
         {
             self.abort_session(&session_id).await;
+            self.cleanup_session_if_owned(cleanup_on_error, &session_id)
+                .await;
             return Err(err);
         }
-        let messages = self.list_messages(&session_id).await?;
+        let messages = match self.list_messages(&session_id, 8).await {
+            Ok(messages) => messages,
+            Err(error) => {
+                self.cleanup_session_if_owned(cleanup_on_error, &session_id)
+                    .await;
+                return Err(error);
+            }
+        };
         Ok(AgentResponse {
             text: extract_latest_assistant_text(&messages),
             session_id: Some(session_id),
+        })
+    }
+
+    async fn compact_session(
+        &self,
+        session_id: &str,
+        model: Option<&str>,
+    ) -> Result<AgentResponse, GatewayError> {
+        self.health_check().await?;
+        let model = self.resolve_compact_model(session_id, model).await?;
+        let url = format!("{}/session/{session_id}/summarize", self.base_url);
+        let value = self
+            .send_json(
+                "summarize",
+                self.client.post(url).json(&SummarizeBody {
+                    provider_id: model.provider_id,
+                    model_id: model.model_id,
+                    auto: false,
+                }),
+            )
+            .await?;
+        if value.as_bool() != Some(true) {
+            return Err(GatewayError::AgentFailed {
+                code: None,
+                stderr: format!("opencode server summarize returned unexpected response: {value}"),
+            });
+        }
+        eprintln!("session_compacted session_id={session_id}");
+        Ok(AgentResponse {
+            text: String::new(),
+            session_id: Some(session_id.to_string()),
+        })
+    }
+
+    async fn delete_session(&self, session_id: &str) -> Result<(), GatewayError> {
+        let url = format!("{}/session/{session_id}", self.base_url);
+        let result = self
+            .send_empty("delete_session", self.client.delete(url))
+            .await;
+        match result {
+            Ok(()) => {}
+            Err(GatewayError::AgentFailed {
+                code: Some(code), ..
+            }) if code == StatusCode::NOT_FOUND.as_u16() as i32 => {}
+            Err(error) => return Err(error),
+        }
+        self.session_attachments
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(session_id);
+        eprintln!("session_deleted session_id={session_id}");
+        Ok(())
+    }
+
+    async fn run_ephemeral(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+        self.health_check().await?;
+        let session_id = self.create_session().await?;
+        let result = self.send_message(&session_id, &req).await;
+        match result {
+            Ok(value) => {
+                self.remember_attachments(&session_id, &req);
+                let response = AgentResponse {
+                    text: extract_text(&value).trim().to_string(),
+                    session_id: None,
+                };
+                if let Err(error) = self.delete_session(&session_id).await {
+                    eprintln!("helper_session_delete_failed session_id={session_id}: {error}");
+                } else {
+                    eprintln!("helper_session_deleted session_id={session_id}");
+                }
+                Ok(response)
+            }
+            Err(error) => {
+                let _ = self.delete_session(&session_id).await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn run_streaming_ephemeral(
+        &self,
+        req: AgentRequest,
+        on_event: &mut dyn FnMut(StreamEvent),
+    ) -> Result<AgentResponse, GatewayError> {
+        let response = self.run_streaming(req, on_event).await?;
+        if let Some(session_id) = response.session_id.as_deref() {
+            match self.delete_session(session_id).await {
+                Ok(()) => eprintln!("helper_session_deleted session_id={session_id}"),
+                Err(error) => {
+                    eprintln!("helper_session_delete_failed session_id={session_id}: {error}")
+                }
+            }
+        }
+        Ok(AgentResponse {
+            session_id: None,
+            ..response
         })
     }
 }
@@ -686,6 +860,26 @@ fn extract_latest_assistant_text(value: &Value) -> String {
         .unwrap_or_default()
         .trim()
         .to_string()
+}
+
+fn extract_message_model(value: &Value) -> Option<ModelOverride> {
+    value.as_array()?.iter().rev().find_map(|message| {
+        let info = message.get("info")?;
+        let provider_id = info
+            .get("providerID")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        let model_id = info
+            .get("modelID")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        Some(ModelOverride {
+            provider_id: provider_id.to_string(),
+            model_id: model_id.to_string(),
+        })
+    })
 }
 
 fn collect_text(value: &Value, out: &mut Vec<String>) {
@@ -919,6 +1113,63 @@ mod tests {
         format!("http://{addr}")
     }
 
+    async fn session_control_server(hits: std::sync::Arc<Mutex<Vec<String>>>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let hits = hits.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 1024];
+                    let header_end = loop {
+                        let n = match socket.read(&mut tmp).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => n,
+                        };
+                        buf.extend_from_slice(&tmp[..n]);
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break pos + 4;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..header_end]);
+                    let method = head.split_whitespace().next().unwrap_or_default();
+                    let path = head.split_whitespace().nth(1).unwrap_or_default();
+                    let request = format!("{method} {path}");
+                    hits.lock().unwrap().push(request.clone());
+                    let body = match request.as_str() {
+                        "GET /global/health" => "{\"healthy\":true}".to_string(),
+                        "POST /session" => "{\"id\":\"ses_ephemeral\"}".to_string(),
+                        "POST /session/ses_ephemeral/message" => {
+                            "{\"parts\":[{\"type\":\"text\",\"text\":\"helper\"}]}".to_string()
+                        }
+                        "DELETE /session/ses_ephemeral" => "true".to_string(),
+                        "GET /session/ses_1/message?limit=1" => {
+                            "[{\"info\":{\"role\":\"assistant\",\"providerID\":\"opencode\",\"modelID\":\"deepseek\"},\"parts\":[{\"type\":\"text\",\"text\":\"latest\"}]}]".to_string()
+                        }
+                        "POST /session/ses_1/summarize" => "true".to_string(),
+                        "DELETE /session/ses_1" => "true".to_string(),
+                        _ => {
+                            let response =
+                                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                            let _ = socket.write_all(response.as_bytes()).await;
+                            return;
+                        }
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
     #[tokio::test]
     async fn event_stream_outlives_client_timeout_and_reports_friendly_deadline() {
         let _guard = crate::backend::AGENT_TIMEOUT_ENV_LOCK.lock().await;
@@ -984,6 +1235,79 @@ mod tests {
             seen.iter().any(|path| path == "/session/ses_ab/abort"),
             "expected abort call, saw {seen:?}"
         );
+        assert!(
+            seen.iter().any(|path| path == "/session/ses_ab"),
+            "expected ephemeral session cleanup, saw {seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_session_controls_use_summarize_and_delete_endpoints() {
+        let hits = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let backend =
+            OpencodeServerBackend::from_env(session_control_server(hits.clone()).await, None);
+
+        let compacted = backend
+            .compact_session("ses_1", Some("opencode/deepseek"))
+            .await
+            .unwrap();
+        assert_eq!(compacted.text, "");
+        assert_eq!(compacted.session_id.as_deref(), Some("ses_1"));
+        backend.delete_session("ses_1").await.unwrap();
+
+        let seen = hits.lock().unwrap().clone();
+        assert!(seen.iter().any(|request| request == "GET /global/health"));
+        assert!(seen
+            .iter()
+            .any(|request| request == "POST /session/ses_1/summarize"));
+        assert!(seen
+            .iter()
+            .any(|request| request == "DELETE /session/ses_1"));
+    }
+
+    #[tokio::test]
+    async fn list_messages_requests_a_bounded_latest_page() {
+        let hits = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let backend =
+            OpencodeServerBackend::from_env(session_control_server(hits.clone()).await, None);
+
+        let messages = backend.list_messages("ses_1", 1).await.unwrap();
+        assert_eq!(extract_latest_assistant_text(&messages), "latest");
+        assert!(hits
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request == "GET /session/ses_1/message?limit=1"));
+    }
+
+    #[tokio::test]
+    async fn ephemeral_server_request_deletes_created_session() {
+        let hits = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let backend =
+            OpencodeServerBackend::from_env(session_control_server(hits.clone()).await, None);
+        let response = backend
+            .run_ephemeral(AgentRequest {
+                prompt: "route".to_string(),
+                session_id: None,
+                thinking: false,
+                model: None,
+                agent: None,
+                tool_overrides: BTreeMap::new(),
+                attachments: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(response.text, "helper");
+        assert_eq!(response.session_id, None);
+        let seen = hits.lock().unwrap().clone();
+        assert!(seen.iter().any(|request| request == "POST /session"));
+        assert!(seen
+            .iter()
+            .any(|request| request == "POST /session/ses_ephemeral/message"));
+        assert!(seen
+            .iter()
+            .any(|request| request == "DELETE /session/ses_ephemeral"));
     }
 
     fn request_with_attachment(path: PathBuf, name: &str, mime: &str) -> AgentRequest {
@@ -1257,5 +1581,26 @@ mod tests {
 
         assert_eq!(model.provider_id, "opencode");
         assert_eq!(model.model_id, "deepseek-v4-flash-free");
+    }
+
+    #[test]
+    fn extracts_provider_and_model_from_latest_message() {
+        let value = json!([
+            {
+                "info": {
+                    "providerID": "opencode",
+                    "modelID": "deepseek-v4-flash-free"
+                },
+                "parts": []
+            }
+        ]);
+        let model = extract_message_model(&value).unwrap();
+        assert_eq!(model.provider_id, "opencode");
+        assert_eq!(model.model_id, "deepseek-v4-flash-free");
+    }
+
+    #[test]
+    fn missing_message_model_returns_none() {
+        assert!(extract_message_model(&json!([])).is_none());
     }
 }

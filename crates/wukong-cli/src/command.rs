@@ -1,6 +1,6 @@
 //! Session control commands shared by every surface (REPL, Telegram, Web, CLI).
 
-use crate::{run_turn_session_passthrough, WukongError};
+use crate::WukongError;
 use std::path::Path;
 use wukong_gateway::backend::{AiBackend, OpencodeUtility};
 use wukong_gateway::config::GatewayConfig;
@@ -44,14 +44,63 @@ pub async fn run_session_command(
 ) -> Result<String, WukongError> {
     match cmd {
         SessionCommand::New => {
+            if let Some(session_id) = memory.agent_session(&cfg.scope).await? {
+                backend.delete_session(&session_id).await?;
+            }
             memory.clear_agent_session(&cfg.scope).await?;
             Ok("🐵 已開新 context".to_string())
         }
         SessionCommand::Compact => match memory.agent_session(&cfg.scope).await? {
             None => Ok("🐵 尚無對話可壓縮".to_string()),
             Some(id) => {
-                let text = run_turn_session_passthrough(backend, &id, "/compact").await?;
-                Ok(format!("🐵 已送出壓縮指令：\n{text}"))
+                let owner = wukong_runtime::session::new_owner("command-compact");
+                let lease_secs = wukong_runtime::session::SessionPolicy::from_env().lease_secs;
+                let acquired = match memory
+                    .acquire_agent_session_lease(&cfg.scope, &owner, lease_secs)
+                    .await
+                {
+                    Ok(acquired) => acquired,
+                    Err(error) => {
+                        let _ = memory.release_agent_session_lease(&cfg.scope, &owner).await;
+                        return Err(error.into());
+                    }
+                };
+                if acquired.is_none() {
+                    return Err(WukongError::Backend(GatewayError::AgentFailed {
+                        code: None,
+                        stderr: format!("session lease unavailable for scope {}", cfg.scope),
+                    }));
+                }
+                match backend
+                    .compact_session(&id, cfg.default_model.as_deref())
+                    .await
+                {
+                    Ok(response) => {
+                        let marked = match memory
+                            .mark_agent_session_compacted(&cfg.scope, &owner, &id)
+                            .await
+                        {
+                            Ok(marked) => marked,
+                            Err(error) => {
+                                let _ =
+                                    memory.release_agent_session_lease(&cfg.scope, &owner).await;
+                                return Err(error.into());
+                            }
+                        };
+                        if !marked {
+                            let _ = memory.release_agent_session_lease(&cfg.scope, &owner).await;
+                            return Err(WukongError::Backend(GatewayError::AgentFailed {
+                                code: None,
+                                stderr: format!("session lease lost for scope {}", cfg.scope),
+                            }));
+                        }
+                        Ok(format!("🐵 已送出壓縮指令：\n{}", response.text))
+                    }
+                    Err(error) => {
+                        let _ = memory.release_agent_session_lease(&cfg.scope, &owner).await;
+                        Err(error.into())
+                    }
+                }
             }
         },
         SessionCommand::Providers => {
@@ -102,6 +151,7 @@ mod tests {
         replies: Mutex<VecDeque<String>>,
         prompts: Mutex<Vec<String>>,
         sessions: Mutex<Vec<Option<String>>>,
+        deleted_sessions: Mutex<Vec<String>>,
     }
     impl MockBackend {
         fn new(r: &[&str]) -> Self {
@@ -109,6 +159,7 @@ mod tests {
                 replies: Mutex::new(r.iter().map(|s| s.to_string()).collect()),
                 prompts: Mutex::new(Vec::new()),
                 sessions: Mutex::new(Vec::new()),
+                deleted_sessions: Mutex::new(Vec::new()),
             }
         }
     }
@@ -121,6 +172,14 @@ mod tests {
                 text,
                 session_id: None,
             })
+        }
+
+        async fn delete_session(&self, session_id: &str) -> Result<(), GatewayError> {
+            self.deleted_sessions
+                .lock()
+                .unwrap()
+                .push(session_id.to_string());
+            Ok(())
         }
     }
 
@@ -236,6 +295,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_deletes_backend_session_before_clearing_mapping() {
+        let mem = open_memory().await;
+        mem.set_agent_session("global", "ses_1").await.unwrap();
+        let backend = MockBackend::new(&[]);
+        let settings_path = tempfile::NamedTempFile::new().unwrap().path().to_path_buf();
+
+        run_session_command(&mem, &backend, &cfg(), &settings_path, SessionCommand::New)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            backend.deleted_sessions.lock().unwrap().as_slice(),
+            &["ses_1".to_string()]
+        );
+    }
+
+    #[tokio::test]
     async fn compact_without_session_does_not_call_backend() {
         let mem = open_memory().await;
         let backend = MockBackend::new(&["ignored"]);
@@ -276,5 +352,38 @@ mod tests {
         }
         let sessions = backend.sessions.lock().unwrap();
         assert_eq!(sessions[0], Some("ses_42".to_string()));
+    }
+
+    #[tokio::test]
+    async fn compact_resets_session_turn_count_after_success() {
+        let mem = open_memory().await;
+        mem.set_agent_session("global", "ses_42").await.unwrap();
+        mem.acquire_agent_session_lease("global", "seed", 300)
+            .await
+            .unwrap();
+        mem.finish_agent_session_turn("global", "seed", Some("ses_42"))
+            .await
+            .unwrap();
+        let backend = MockBackend::new(&["compacted ok"]);
+        let settings_path = tempfile::NamedTempFile::new().unwrap().path().to_path_buf();
+
+        run_session_command(
+            &mem,
+            &backend,
+            &cfg(),
+            &settings_path,
+            SessionCommand::Compact,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            mem.agent_session_state("global")
+                .await
+                .unwrap()
+                .unwrap()
+                .turn_count,
+            0
+        );
     }
 }

@@ -1,3 +1,4 @@
+mod auto_maintenance;
 mod notify;
 
 use clap::Parser;
@@ -37,6 +38,9 @@ struct Cli {
     /// Run one scan and exit.
     #[arg(long)]
     once: bool,
+    /// Seconds between automatic memory maintenance passes.
+    #[arg(long)]
+    maintenance_interval_secs: Option<u64>,
 }
 
 #[tokio::main]
@@ -86,10 +90,17 @@ async fn run(cli: Cli) -> Result<(), String> {
             history.as_ref(),
         )
         .await?;
+        run_memory_maintenance(&memory, &backend).await?;
         return Ok(());
     }
 
     let mut ticks = interval(Duration::from_secs(cli.tick_secs));
+    let maintenance_config = auto_maintenance::AutoMaintenanceConfig::from_env();
+    let mut maintenance_ticks = interval(Duration::from_secs(
+        cli.maintenance_interval_secs
+            .unwrap_or(maintenance_config.interval_secs)
+            .max(1),
+    ));
     loop {
         tokio::select! {
             _ = ticks.tick() => {
@@ -97,11 +108,28 @@ async fn run(cli: Cli) -> Result<(), String> {
                     eprintln!("warning: scheduler scan failed: {e}");
                 }
             }
+            _ = maintenance_ticks.tick() => {
+                if let Err(e) = run_memory_maintenance(&memory, &backend).await {
+                    eprintln!("warning: memory maintenance failed: {e}");
+                }
+            }
             _ = shutdown_signal() => {
                 eprintln!("wukong-schedulerd stopping");
                 break;
             }
         }
+    }
+    Ok(())
+}
+
+async fn run_memory_maintenance(memory: &Memory, backend: &AgentBackend) -> Result<(), String> {
+    let policy = auto_maintenance::AutoMaintenanceConfig::from_env();
+    let report = auto_maintenance::run_once(memory, backend, policy).await?;
+    if report.summaries_created > 0 || report.memories_pruned > 0 {
+        eprintln!(
+            "memory maintenance completed scopes={} summaries={} pruned={}",
+            report.scopes_checked, report.summaries_created, report.memories_pruned
+        );
     }
     Ok(())
 }
@@ -414,6 +442,13 @@ mod tests {
         assert_eq!(cli.tick_secs, 5);
         assert_eq!(cli.lease_secs, 30);
         assert_eq!(cli.limit, 2);
+    }
+
+    #[test]
+    fn parses_maintenance_interval_override() {
+        let cli = Cli::try_parse_from(["wukong-schedulerd", "--maintenance-interval-secs", "30"])
+            .unwrap();
+        assert_eq!(cli.maintenance_interval_secs, Some(30));
     }
 
     #[test]

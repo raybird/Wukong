@@ -62,7 +62,7 @@ pub async fn orchestrate(
     let role = route(backend, task).await?;
     let prompt = execution_prompt(role, task);
     let resp = backend
-        .run(AgentRequest {
+        .run_ephemeral(AgentRequest {
             prompt,
             session_id: None,
             thinking: false,
@@ -94,7 +94,7 @@ pub async fn orchestrate_chain(
             chain_context(&steps)
         );
         let resp = backend
-            .run(AgentRequest {
+            .run_ephemeral(AgentRequest {
                 prompt,
                 session_id: None,
                 thinking: false,
@@ -200,6 +200,42 @@ mod tests {
 
         let prompts = backend.prompts.lock().unwrap();
         assert!(prompts[0].contains("test-driven-development"));
+    }
+
+    #[tokio::test]
+    async fn plan_skill_chain_cleans_up_planner_session() {
+        struct CleanupBackend {
+            deleted: Mutex<Vec<String>>,
+        }
+
+        impl AiBackend for CleanupBackend {
+            async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+                Ok(AgentResponse {
+                    text: "fixer|none".to_string(),
+                    session_id: Some("ses_planner".to_string()),
+                })
+            }
+
+            async fn delete_session(&self, session_id: &str) -> Result<(), GatewayError> {
+                self.deleted.lock().unwrap().push(session_id.to_string());
+                Ok(())
+            }
+        }
+
+        let backend = CleanupBackend {
+            deleted: Mutex::new(Vec::new()),
+        };
+        let skills = vec![SkillRouteOption {
+            skill_name: "none",
+            description: "no skill",
+            primary_role: Role::Fixer,
+            collaborator_role: None,
+        }];
+        plan_skill_chain(&backend, "fix it", &skills).await.unwrap();
+        assert_eq!(
+            backend.deleted.lock().unwrap().as_slice(),
+            &["ses_planner".to_string()]
+        );
     }
 
     #[tokio::test]

@@ -1,8 +1,8 @@
 use crate::embed::blob_to_embedding;
 use crate::error::Result;
 use crate::model::{
-    AgeBuckets, EmbeddingCoverage, KindCount, MemoryKind, MemoryRecord, RecallTelemetryInput,
-    RecallTelemetrySummary, ScopeCount, Snapshot, Stats,
+    AgeBuckets, AgentSessionState, EmbeddingCoverage, KindCount, MemoryKind, MemoryRecord,
+    RecallTelemetryInput, RecallTelemetrySummary, ScopeCount, Snapshot, Stats,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -44,6 +44,15 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     scope       TEXT PRIMARY KEY,
     session_id  TEXT NOT NULL,
     updated_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS agent_session_state (
+    scope              TEXT PRIMARY KEY,
+    session_id         TEXT,
+    turn_count         INTEGER NOT NULL DEFAULT 0,
+    lease_owner        TEXT,
+    lease_until        INTEGER,
+    last_compacted_at  INTEGER,
+    updated_at         INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS recall_telemetry (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -344,6 +353,33 @@ impl Store {
         Ok(())
     }
 
+    /// Return distinct memory scopes in stable lexical order.
+    pub async fn list_scopes(&self) -> Result<Vec<String>> {
+        let rows = sqlx::query("SELECT DISTINCT scope FROM memories ORDER BY scope ASC")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| row.get::<String, _>("scope"))
+            .collect())
+    }
+
+    /// Delete only consolidated event/note source rows.
+    pub async fn delete_consolidated(&self, scope: Option<&str>) -> Result<u64> {
+        let mut sql = String::from(
+            "DELETE FROM memories
+             WHERE kind IN ('event','note') AND consolidated_into IS NOT NULL",
+        );
+        if scope.is_some() {
+            sql.push_str(" AND scope = ?1");
+        }
+        let mut query = sqlx::query(&sql);
+        if let Some(scope) = scope {
+            query = query.bind(scope);
+        }
+        Ok(query.execute(&self.pool).await?.rows_affected())
+    }
+
     /// Ids eligible for pruning: consolidated rows, OR old + never-recalled +
     /// low-importance event/note rows. Never decision/skill/summary.
     pub async fn prune_candidates(
@@ -374,15 +410,29 @@ impl Store {
 
     /// Read the stored opencode session id for a scope.
     pub async fn agent_session(&self, scope: &str) -> Result<Option<String>> {
-        let row = sqlx::query("SELECT session_id FROM agent_sessions WHERE scope = ?1")
+        let row = sqlx::query("SELECT session_id FROM agent_session_state WHERE scope = ?1")
             .bind(scope)
             .fetch_optional(&self.pool)
             .await?;
-        Ok(row.map(|r| r.get::<String, _>("session_id")))
+        Ok(row.and_then(|r| r.get::<Option<String>, _>("session_id")))
+    }
+
+    /// Read complete lifecycle state for a scope.
+    pub async fn agent_session_state(&self, scope: &str) -> Result<Option<AgentSessionState>> {
+        let row = sqlx::query(
+            "SELECT scope, session_id, turn_count, lease_owner, lease_until,
+                    last_compacted_at, updated_at
+             FROM agent_session_state WHERE scope = ?1",
+        )
+        .bind(scope)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(row_to_agent_session_state))
     }
 
     /// Upsert the opencode session id for a scope.
     pub async fn set_agent_session(&self, scope: &str, session_id: &str, now: i64) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO agent_sessions(scope, session_id, updated_at) VALUES (?1, ?2, ?3) \
              ON CONFLICT(scope) DO UPDATE SET session_id = ?2, updated_at = ?3",
@@ -390,17 +440,197 @@ impl Store {
         .bind(scope)
         .bind(session_id)
         .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO agent_session_state(scope, session_id, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(scope) DO UPDATE SET
+                 session_id = excluded.session_id,
+                 turn_count = CASE
+                     WHEN agent_session_state.session_id = excluded.session_id
+                     THEN agent_session_state.turn_count ELSE 0 END,
+                 last_compacted_at = CASE
+                     WHEN agent_session_state.session_id = excluded.session_id
+                     THEN agent_session_state.last_compacted_at ELSE NULL END,
+                 lease_owner = NULL,
+                 lease_until = NULL,
+                 updated_at = excluded.updated_at",
+        )
+        .bind(scope)
+        .bind(session_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Acquire an exclusive per-scope session lease.
+    pub async fn acquire_agent_session_lease(
+        &self,
+        scope: &str,
+        owner: &str,
+        now: i64,
+        lease_secs: i64,
+    ) -> Result<Option<AgentSessionState>> {
+        sqlx::query(
+            "INSERT OR IGNORE INTO agent_session_state(scope, session_id, updated_at)
+             SELECT scope, session_id, updated_at FROM agent_sessions WHERE scope = ?1",
+        )
+        .bind(scope)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        sqlx::query(
+            "INSERT INTO agent_session_state(scope, updated_at) VALUES (?1, ?2)
+             ON CONFLICT(scope) DO NOTHING",
+        )
+        .bind(scope)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+
+        let lease_until = now + lease_secs.max(1);
+        let row = sqlx::query(
+            "UPDATE agent_session_state
+             SET lease_owner = ?2, lease_until = ?3, updated_at = ?4
+             WHERE scope = ?1
+               AND (lease_until IS NULL OR lease_until <= ?4 OR lease_owner = ?2)
+             RETURNING scope, session_id, turn_count, lease_owner, lease_until,
+                       last_compacted_at, updated_at",
+        )
+        .bind(scope)
+        .bind(owner)
+        .bind(lease_until)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(row_to_agent_session_state))
+    }
+
+    /// Renew an active session lease owned by `owner`.
+    pub async fn renew_agent_session_lease(
+        &self,
+        scope: &str,
+        owner: &str,
+        now: i64,
+        lease_secs: i64,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE agent_session_state
+             SET lease_until = ?3, updated_at = ?4
+             WHERE scope = ?1 AND lease_owner = ?2 AND lease_until > ?4",
+        )
+        .bind(scope)
+        .bind(owner)
+        .bind(now + lease_secs.max(1))
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Finish one successful logical turn and release its lease.
+    pub async fn finish_agent_session_turn(
+        &self,
+        scope: &str,
+        owner: &str,
+        session_id: Option<&str>,
+        now: i64,
+    ) -> Result<Option<AgentSessionState>> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            "UPDATE agent_session_state
+             SET session_id = COALESCE(?3, session_id),
+                 turn_count = turn_count + 1,
+                 lease_owner = NULL,
+                 lease_until = NULL,
+                 updated_at = ?4
+             WHERE scope = ?1 AND lease_owner = ?2 AND lease_until > ?4
+             RETURNING scope, session_id, turn_count, lease_owner, lease_until,
+                       last_compacted_at, updated_at",
+        )
+        .bind(scope)
+        .bind(owner)
+        .bind(session_id)
+        .bind(now)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        let state = row_to_agent_session_state(row);
+        if let Some(session_id) = state.session_id.as_deref() {
+            sqlx::query(
+                "INSERT INTO agent_sessions(scope, session_id, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(scope) DO UPDATE SET session_id = ?2, updated_at = ?3",
+            )
+            .bind(scope)
+            .bind(session_id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(Some(state))
+    }
+
+    /// Release an active session lease owned by `owner`.
+    pub async fn release_agent_session_lease(
+        &self,
+        scope: &str,
+        owner: &str,
+        now: i64,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE agent_session_state
+             SET lease_owner = NULL, lease_until = NULL, updated_at = ?3
+             WHERE scope = ?1 AND lease_owner = ?2",
+        )
+        .bind(scope)
+        .bind(owner)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Mark a successful compaction and reset the session turn count.
+    pub async fn mark_agent_session_compacted(
+        &self,
+        scope: &str,
+        owner: &str,
+        session_id: &str,
+        now: i64,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE agent_session_state
+             SET turn_count = 0, last_compacted_at = ?4,
+                 lease_owner = NULL, lease_until = NULL, updated_at = ?4
+             WHERE scope = ?1 AND lease_owner = ?2 AND session_id = ?3 AND lease_until > ?4",
+        )
+        .bind(scope)
+        .bind(owner)
+        .bind(session_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     /// Remove any stored session id for a scope (no-op if absent).
     pub async fn clear_agent_session(&self, scope: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
         sqlx::query("DELETE FROM agent_sessions WHERE scope = ?1")
             .bind(scope)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        sqlx::query("DELETE FROM agent_session_state WHERE scope = ?1")
+            .bind(scope)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -537,7 +767,7 @@ impl Store {
             (Some(scope), Some(kind)) => {
                 sqlx::query(
                     "SELECT id, scope, kind, text, importance, created_at, last_recalled_at,
-                            recall_count, embedding, consolidated_into
+                            session_id, recall_count, embedding, consolidated_into
                      FROM memories
                      WHERE scope = ?1 AND kind = ?2
                      ORDER BY created_at DESC, id DESC
@@ -552,7 +782,7 @@ impl Store {
             (Some(scope), None) => {
                 sqlx::query(
                     "SELECT id, scope, kind, text, importance, created_at, last_recalled_at,
-                            recall_count, embedding, consolidated_into
+                            session_id, recall_count, embedding, consolidated_into
                      FROM memories
                      WHERE scope = ?1
                      ORDER BY created_at DESC, id DESC
@@ -566,7 +796,7 @@ impl Store {
             (None, Some(kind)) => {
                 sqlx::query(
                     "SELECT id, scope, kind, text, importance, created_at, last_recalled_at,
-                            recall_count, embedding, consolidated_into
+                            session_id, recall_count, embedding, consolidated_into
                      FROM memories
                      WHERE kind = ?1
                      ORDER BY created_at DESC, id DESC
@@ -580,7 +810,7 @@ impl Store {
             (None, None) => {
                 sqlx::query(
                     "SELECT id, scope, kind, text, importance, created_at, last_recalled_at,
-                            recall_count, embedding, consolidated_into
+                            session_id, recall_count, embedding, consolidated_into
                      FROM memories
                      ORDER BY created_at DESC, id DESC
                      LIMIT ?1",
@@ -708,7 +938,25 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO agent_session_state(scope, session_id, updated_at)
+         SELECT scope, session_id, updated_at FROM agent_sessions",
+    )
+    .execute(pool)
+    .await?;
     Ok(())
+}
+
+fn row_to_agent_session_state(r: sqlx::sqlite::SqliteRow) -> AgentSessionState {
+    AgentSessionState {
+        scope: r.get::<String, _>("scope"),
+        session_id: r.get::<Option<String>, _>("session_id"),
+        turn_count: r.get::<i64, _>("turn_count"),
+        lease_owner: r.get::<Option<String>, _>("lease_owner"),
+        lease_until: r.get::<Option<i64>, _>("lease_until"),
+        last_compacted_at: r.get::<Option<i64>, _>("last_compacted_at"),
+        updated_at: r.get::<i64, _>("updated_at"),
+    }
 }
 
 /// Comma-separated `?` placeholders for an `IN (…)` clause with `n` binds.
@@ -735,6 +983,7 @@ fn row_to_memory_record(r: sqlx::sqlite::SqliteRow) -> MemoryRecord {
     MemoryRecord {
         id: r.get::<i64, _>("id"),
         scope: r.get::<String, _>("scope"),
+        session_id: r.get::<Option<String>, _>("session_id"),
         kind: MemoryKind::from_db_str(&r.get::<String, _>("kind")),
         text: r.get::<String, _>("text"),
         importance: r.get::<f64, _>("importance"),
@@ -899,6 +1148,44 @@ mod tests {
         // Open twice: second open re-runs migrate over already-migrated table.
         let _first = Store::open(&url).await.unwrap();
         let _second = Store::open(&url).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_lease_is_exclusive_and_expiry_is_reclaimable() {
+        let store = test_store().await;
+        store
+            .set_agent_session("global", "ses_1", 100)
+            .await
+            .unwrap();
+
+        assert!(store
+            .acquire_agent_session_lease("global", "owner-1", 100, 10)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store
+            .acquire_agent_session_lease("global", "owner-2", 105, 10)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!store
+            .renew_agent_session_lease("global", "owner-2", 106, 10)
+            .await
+            .unwrap());
+        assert!(store
+            .renew_agent_session_lease("global", "owner-1", 106, 10)
+            .await
+            .unwrap());
+        assert!(store
+            .finish_agent_session_turn("global", "owner-2", Some("ses_2"), 107)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .acquire_agent_session_lease("global", "owner-2", 117, 10)
+            .await
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]

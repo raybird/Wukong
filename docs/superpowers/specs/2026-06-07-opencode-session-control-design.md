@@ -4,6 +4,11 @@
 **狀態:** 已核可
 **前置:** v0.8.0(四柱 + REPL + Telegram + Web Console、`run_turn`、`wukong-render`)。
 
+> 後續 OpenCode server backend 已提供原生 session control；本文件中「headless
+> `/compact` 僅能原樣 passthrough」只適用 CLI backend。Server backend 現在使用
+> `POST /session/{id}/summarize`，並由 runtime lifecycle policy 管理 compact、lease
+> 與 replacement session。
+
 ## 目標
 
 讓 Wukong 以**每 scope 持久、開啟 thinking 的 opencode session** 驅動對話,並在 REPL / Telegram / Web 三個介面提供 session 控制指令 `/new`(開新 context)與 `/compact`(壓縮)。因為 opencode `-c`(continue last session)在「每回合多次呼叫」的架構下不可靠(planner 也會建 session),連續性改以**顯式 session id**(從 opencode JSON 擷取、每 scope 存一份)實現。
@@ -13,7 +18,9 @@
 - `opencode run` 旗標:`-c/--continue`、`-s/--session <id>`、`--thinking`(顯示 thinking 區塊)、`--format json`。
 - `--format json` 每個事件都帶 `"sessionID":"ses_…"` → 可擷取並用 `-s <id>` 接續。
 - `--thinking` 在 json 下產生獨立的 `{"type":"reasoning"}` 事件(與 `{"type":"text"}` 分開)→ 不會污染答案文字。
-- **opencode `run` 無 headless 壓縮**:訊息 `/compact` 只被當一般文字送給模型(實測 token 不減、session id 不變、模型仍記得全部歷史)。`/compact` 僅存在於 TUI。本設計仍依使用者決定以**原樣 passthrough** 實作(送 `/compact` 給目前 session),不保證縮減,但無害且未來相容。
+- **opencode `run` 無 headless 壓縮**:訊息 `/compact` 只被當一般文字送給模型；CLI backend
+  仍保留此相容 fallback。OpenCode server backend 則使用 `/summarize`，由 server
+  完成真正的歷史壓縮。
 
 ## 設計原則
 
@@ -185,8 +192,8 @@ pub async fn run_session_command(
 
 ## 非目標(YAGNI)
 
-- 清理 planner 與中間棒留下的暫時 opencode session(會累積,同今日狀況;之後可加 `opencode session delete` 掃除)。
+- 清理 planner 與中間棒留下的暫時 opencode session（server backend 已在 helper 完成後清理）。
 - 讓每一棒鏈角色都接續同一 session(只接最後一棒)。
 - Telegram / Web 顯示 thinking。
-- `/model` 切換模型、`/compact` 真壓縮(待 opencode 開放 headless API)。
+- `/model` 切換模型；CLI backend 的 `/compact` 仍是 raw passthrough。
 - `/compact` 訊息可設定化(本版固定送 `/compact`)。

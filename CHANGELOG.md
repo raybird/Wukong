@@ -11,6 +11,30 @@
 
 ## [Unreleased]
 
+### Added
+
+- OpenCode server backend 現在使用原生 `POST /session/{id}/summarize` 與
+  `DELETE /session/{id}`，並以 bounded message reads 取代無上限的 session history 讀取。
+- 每 scope 新增持久 session lifecycle state、turn count、lease 與 memory session provenance；
+  server-side planner、summarizer 與 helper session 會在完成後清理。
+- schedulerd 新增 all-scope automatic memory maintenance，只會 consolidation event/note
+  來源，不會自動刪除未折疊的低價值記憶。
+
+### Changed
+
+- 成功回合達到 `WUKONG_SESSION_COMPACT_EVERY_TURNS` 後，會在下一個 final turn 前嘗試
+  compact；summarize 不支援時才建立 replacement session，暫時性錯誤保留原 session。
+
+### 升級注意
+
+- 新版預設會啟用 session compact 與 scheduler memory maintenance。如需保留舊行為，可在
+  `.env` 加入：
+
+  ```env
+  WUKONG_SESSION_COMPACT_EVERY_TURNS=0
+  WUKONG_MEMORY_AUTO_MAINTENANCE=0
+  ```
+
 ## [0.18.5] - 2026-07-20
 
 ### Fixed

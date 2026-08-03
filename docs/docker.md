@@ -180,6 +180,11 @@ services:
 | `WUKONG_MEMORY_TOKEN` | `wukong-memoryd` 存取密鑰（選用；設定後除 `/v1/health` 外皆需 `Authorization: Bearer <token>`） | — |
 | `WUKONG_THINKING` | 啟用思考過程顯示 | `1` |
 | `WUKONG_EMBED` | 啟用語意向量召回 | `0` |
+| `WUKONG_SESSION_COMPACT_EVERY_TURNS` | 每 scope 成功回合數達門檻後，在下一個 final turn 前執行 session compact；設 `0` 停用 | `20` |
+| `WUKONG_SESSION_LEASE_SECS` | session lifecycle lease 秒數，避免同一 scope 的回合互相覆寫 | `900` |
+| `WUKONG_MEMORY_AUTO_MAINTENANCE` | schedulerd 是否啟用安全的 all-scope consolidation（只刪除已折疊來源） | `1` |
+| `WUKONG_MEMORY_MAINTENANCE_INTERVAL_SECS` | schedulerd 自動 memory maintenance 間隔秒數 | `900` |
+| `WUKONG_MEMORY_CONSOLIDATE_THRESHOLD` | 單一 scope 觸發自動 consolidation 的候選數 | `40` |
 | `WUKONG_BIN` | 注入排程能力提示詞時使用的 `wukong` 指令路徑（agent 自行建排程時用） | `wukong` |
 | `WUKONG_SCHED_NOTIFY` | schedulerd 是否把排程結果回送 Telegram（`0` 關閉） | `1` |
 

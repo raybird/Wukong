@@ -173,6 +173,18 @@ pub struct Stats {
     pub by_scope: Vec<ScopeCount>,
 }
 
+/// Persistent OpenCode session lifecycle state for one Wukong scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSessionState {
+    pub scope: String,
+    pub session_id: Option<String>,
+    pub turn_count: i64,
+    pub lease_owner: Option<String>,
+    pub lease_until: Option<i64>,
+    pub last_compacted_at: Option<i64>,
+    pub updated_at: i64,
+}
+
 /// Count of memories of one kind.
 #[derive(Debug, Clone, Serialize)]
 pub struct KindCount {
@@ -213,6 +225,7 @@ pub struct Snapshot {
 pub struct MemoryRecord {
     pub id: i64,
     pub scope: String,
+    pub session_id: Option<String>,
     pub kind: MemoryKind,
     pub text: String,
     pub importance: f64,

@@ -4,6 +4,7 @@
 pub mod bootstrap;
 pub mod maintenance;
 pub mod persona;
+pub mod session;
 pub mod skill_assets;
 pub mod turn;
 pub mod util;
