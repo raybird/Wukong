@@ -666,6 +666,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_compaction_consumes_budget_instead_of_retrying_every_turn() {
+        let mem = open_memory().await;
+        // 500 is not in the "unsupported" set (404/405), so this takes the
+        // generic failure branch.
+        let backend = MockBackend::with_compact_error(&["answer"], 500);
+        let cfg = test_cfg("project:T");
+        mem.set_agent_session("project:T", "ses_1").await.unwrap();
+        mem.acquire_agent_session_lease("project:T", "seed", 300)
+            .await
+            .unwrap();
+        mem.finish_agent_session_turn("project:T", "seed", Some("ses_1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            mem.agent_session_state("project:T")
+                .await
+                .unwrap()
+                .unwrap()
+                .turn_count,
+            1
+        );
+
+        let prepared = crate::session::prepare_final_session_with_policy(
+            &mem,
+            &backend,
+            &cfg,
+            crate::session::SessionPolicy {
+                compact_every_turns: 1,
+                lease_secs: 300,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Session survives a transient compaction failure...
+        assert_eq!(prepared.session_id.as_deref(), Some("ses_1"));
+        assert!(prepared.rotated_from.is_none());
+        // ...but the budget is spent, so the next attempt is a full threshold
+        // away rather than on the very next turn.
+        assert_eq!(
+            mem.agent_session_state("project:T")
+                .await
+                .unwrap()
+                .unwrap()
+                .turn_count,
+            0
+        );
+    }
+
+    #[tokio::test]
     async fn failed_turn_releases_session_lease() {
         let mem = open_memory().await;
         mem.set_agent_session("project:T", "ses_existing")
@@ -1046,13 +1096,17 @@ mod tests {
             .unwrap()
             .iter()
             .any(|id| id == "ses_old"));
+        // The failed attempt spends the compaction budget (20 -> 0), then this
+        // turn's own increment lands on 1. Leaving it at 21 would re-fire
+        // summarize on every following turn — see
+        // `failed_compaction_consumes_budget_instead_of_retrying_every_turn`.
         assert_eq!(
             mem.agent_session_state("project:T")
                 .await
                 .unwrap()
                 .unwrap()
                 .turn_count,
-            21
+            1
         );
     }
 

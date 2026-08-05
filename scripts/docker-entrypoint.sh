@@ -116,12 +116,50 @@ mkdir -p "$OPENCODE_CONFIG"
 # recursive deletes of absolute paths while still allowing deletes inside
 # /workspace. Only written when missing; drop your own opencode.json into the
 # `opencode-config` volume to override.
+#
+# The seed also carries CPU guardrails for long conversations. opencode 1.18
+# persists every streaming update as a FULL snapshot of the part into its
+# durable event log (`opencode.db`), so one long answer costs O(text x updates)
+# in JSON serialisation plus SQLite writes — measured at ~430x write
+# amplification on a single session (38 MB written for a 91 KB final part).
+# These keys cut the base cost of that amplification:
+#   snapshot    - opencode keeps a bare git repo per project and commits the
+#                 whole workspace on every edit; on a bind-mounted /workspace
+#                 that is expensive per tool call, and the store grows without
+#                 bound (>1 GB for a single project is normal). Wukong's
+#                 workspace is the user's own git repo, so this is redundant.
+#                 Disabling it also disables opencode's own revert/undo.
+#   tool_output - tool results are the bulk of part payloads; capping them caps
+#                 what gets re-serialised on every subsequent update.
+#   compaction  - lets opencode trim its own context. Complements (does not
+#                 replace) Wukong's WUKONG_SESSION_COMPACT_EVERY_TURNS, which
+#                 compacts on turn count rather than on context pressure.
+#   watcher     - keeps the in-container file watcher off build output.
 OPENCODE_CONFIG_FILE="$OPENCODE_CONFIG/opencode.json"
 if [[ ! -f "$OPENCODE_CONFIG_FILE" ]]; then
-    echo "[wukong] Seeding default opencode.json (destructive-rm guard)..."
+    echo "[wukong] Seeding default opencode.json (destructive-rm guard + CPU guardrails)..."
     cat > "$OPENCODE_CONFIG_FILE" <<'OPENCODE_JSON'
 {
   "$schema": "https://opencode.ai/config.json",
+  "snapshot": false,
+  "compaction": {
+    "auto": true,
+    "prune": true,
+    "tail_turns": 8
+  },
+  "tool_output": {
+    "max_lines": 500,
+    "max_bytes": 65536
+  },
+  "watcher": {
+    "ignore": [
+      "**/node_modules/**",
+      "**/target/**",
+      "**/.git/**",
+      "**/dist/**",
+      "**/build/**"
+    ]
+  },
   "permission": {
     "bash": {
       "*": "allow",

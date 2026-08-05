@@ -141,6 +141,21 @@ pub async fn prepare_final_session_with_policy(
                 "session_compaction_failed scope={} session_id={}: {error}",
                 cfg.scope, session_id
             );
+            // Consume the compaction budget even though the attempt failed.
+            // Without this the turn count stays above the threshold, so a
+            // persistently failing summarize retries on *every* subsequent turn
+            // — each retry being a full-session LLM call on the agent backend.
+            // Spacing retries by `compact_every_turns` keeps the session usable
+            // while bounding the cost of a backend that cannot compact.
+            if let Err(reset_error) = memory
+                .defer_agent_session_compaction(&cfg.scope, &owner)
+                .await
+            {
+                eprintln!(
+                    "session_compaction_backoff_failed scope={}: {reset_error}",
+                    cfg.scope
+                );
+            }
             Ok(SessionPreparation {
                 owner,
                 lease_secs: policy.lease_secs,

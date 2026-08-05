@@ -175,6 +175,14 @@ impl Memory {
             .await
     }
 
+    /// Consume the compaction budget after a failed compaction attempt, so the
+    /// next retry is a full threshold away rather than on the very next turn.
+    pub async fn defer_agent_session_compaction(&self, scope: &str, owner: &str) -> Result<bool> {
+        self.store
+            .defer_agent_session_compaction(scope, owner, now_unix())
+            .await
+    }
+
     /// Clear the stored opencode session id for a scope.
     pub async fn clear_agent_session(&self, scope: &str) -> Result<()> {
         self.store.clear_agent_session(scope).await
