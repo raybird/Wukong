@@ -11,6 +11,45 @@
 
 ## [Unreleased]
 
+## [0.18.7] - 2026-08-05
+
+### Fixed
+
+- session compact 失敗後會消耗本次 compaction 額度，下次重試間隔一個完整的
+  `WUKONG_SESSION_COMPACT_EVERY_TURNS`。先前失敗不會重置 turn count，導致
+  summarize 一旦持續失敗就會在**每一個**後續回合重試，而每次重試都是一次完整
+  session 的 LLM 摘要呼叫，長對話下會讓 agent 端 CPU 居高不下。session 本身仍
+  保留，暫時性錯誤不影響對話連續性。
+
+### Changed
+
+- 容器內 seed 的 `opencode.json` 新增長對話 CPU 護欄：關閉 opencode 的 workspace
+  git snapshot（`snapshot: false`）、限制工具輸出大小（`tool_output`）、開啟
+  opencode 自身的 context 修剪（`compaction`），並讓檔案監看略過建置產物
+  （`watcher.ignore`）。opencode 會把每次串流更新以「完整快照」寫入 durable
+  event log，回覆越長寫入放大越嚴重；這些設定用來壓低該放大效應的基數。
+
+### 升級注意
+
+- seed 只在 `opencode.json` 不存在時寫入。既有部署的 `opencode-config` volume
+  已有該檔，需自行合併設定後重啟 `opencode-server`：
+
+  ```bash
+  docker exec wukong-opencode-server python3 - /home/wukong/.config/opencode/opencode.json <<'PY'
+  import json,sys,os
+  p=sys.argv[1]; c=json.load(open(p))
+  c["snapshot"]=False
+  c["compaction"]={"auto":True,"prune":True,"tail_turns":8}
+  c["tool_output"]={"max_lines":500,"max_bytes":65536}
+  c["watcher"]={"ignore":["**/node_modules/**","**/target/**","**/.git/**","**/dist/**","**/build/**"]}
+  tmp=p+".tmp"; json.dump(c,open(tmp,"w"),indent=2,ensure_ascii=False); os.replace(tmp,p)
+  PY
+  docker compose restart opencode-server
+  ```
+
+- 關閉 `snapshot` 會同時停用 opencode 自身的 revert/undo；workspace 本身的 git
+  歷史不受影響。
+
 ## [0.18.6] - 2026-08-04
 
 ### Added
