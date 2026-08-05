@@ -619,6 +619,32 @@ impl Store {
         Ok(result.rows_affected() == 1)
     }
 
+    /// Consume the compaction budget after a *failed* compaction attempt.
+    ///
+    /// Resets the turn count so the next attempt is a full `compact_every_turns`
+    /// away instead of firing on every subsequent turn. Unlike
+    /// `mark_agent_session_compacted` this leaves `last_compacted_at` untouched
+    /// (no compaction actually happened) and keeps the caller's lease held,
+    /// because the turn continues under the same owner.
+    pub async fn defer_agent_session_compaction(
+        &self,
+        scope: &str,
+        owner: &str,
+        now: i64,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE agent_session_state
+             SET turn_count = 0, updated_at = ?3
+             WHERE scope = ?1 AND lease_owner = ?2 AND lease_until > ?3",
+        )
+        .bind(scope)
+        .bind(owner)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     /// Remove any stored session id for a scope (no-op if absent).
     pub async fn clear_agent_session(&self, scope: &str) -> Result<()> {
         let mut tx = self.pool.begin().await?;
