@@ -6,6 +6,8 @@
 
 部署版本：`ghcr.io/raybird/wukong:v0.18.7`
 
+關聯規劃：`docs/superpowers/specs/2026-08-06-opencode-permission-hang-remediation-design.md`
+
 ## 摘要
 
 最近幾次 scheduler 任務失敗的主要原因不是 Docker container crash，而是
