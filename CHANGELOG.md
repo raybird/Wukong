@@ -11,6 +11,57 @@
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-08-06
+
+排程任務會停在沒人回答的權限詢問上，直到 20 分鐘 agent timeout 才失敗。本版修掉
+造成這個結果的四個環節，並讓容器內的 opencode 設定能隨映像檔升級更新。事故分析見
+`docs/2026-08-06-docker-runtime-handover.md`，修復規劃見
+`docs/superpowers/specs/2026-08-06-opencode-permission-hang-remediation-design.md`。
+
+### ⚠️ 升級注意（Breaking）
+
+- **容器內的 `opencode.json` 改由 Wukong 管理，每次啟動覆寫。** 自訂設定請改寫在
+  同目錄的 `user.json`（opencode 會深度合併兩者，`user.json` 的鍵勝出）。升級時若
+  偵測到舊版 seed 出來的設定檔，會自動備份成 `opencode.json.pre-baseline.bak` 並把
+  內容複製到 `user.json`，手改過的規則不會消失；想回到純預設就刪掉 `user.json`
+  再重啟。這是為了讓新版預設能真的送達既有部署——舊的 seed-if-missing 邏輯導致
+  v0.18.7 的 CPU 護欄從未套用到執行中的主機。
+- **無人值守排程預設拒絕權限詢問。** 先前是既不允許也不拒絕（等到逾時）。若你的
+  排程工作需要存取 `/tmp` 以外的外部目錄，請在 `user.json` 的
+  `permission.external_directory` 逐項放行；或在信任 container 隔離的前提下設
+  `WUKONG_SCHED_PERMISSION=allow`。
+
+### Added
+
+- 排程新增權限處置策略（`WUKONG_SCHED_PERMISSION`，預設 `reject`）。無人值守回合
+  收到權限詢問時當場處置，結果寫入該次 run 訊息的 `[無人值守權限]` 區塊與 log；
+  回覆失敗會重試 3 次後中止回合，而不是繼續等到 agent timeout。
+- 容器內 opencode 設定改為 baseline（`opencode.json`，隨映像檔升級）+ 使用者層
+  （`user.json`，由 `OPENCODE_CONFIG` 指向）兩層。
+- 發版映像檔的 opencode 版本改由 CI 在發版當下解析成 npm 最新版並重新釘版（版本、
+  integrity、lockfile 同步改寫）。需要卡版時設 repository variable
+  `OPENCODE_VERSION_PIN`。
+
+### Fixed
+
+- Web Console 無法回覆 opencode 的權限詢問：帶 `permission-` 前綴的 request id 被
+  當成一般 question id 送到 `/api/session/{id}/question/{id}/reply`，正確端點是
+  `/permission/{id}/reply`，因此按下允許或拒絕都不會送達，該回合仍會等到逾時。
+  端點分派邏輯上收到 `wukong-gateway`，Web、Telegram、CLI 共用同一條路徑。
+- CLI 收到權限詢問時完全不顯示，畫面只會停住；改為顯示詢問內容並提示需改用
+  Web Console 或 Telegram 回覆。
+- 容器內 seed 的 `opencode.json` 補上 `external_directory` 放行 `/tmp`。該項 opencode
+  預設為 `ask`，而 compose 走的是 `opencode serve`——`serve` 沒有
+  `--dangerously-skip-permissions`，設定檔是 Web／Telegram／Scheduler 唯一的權限控制。
+- 串流逾時與中斷的錯誤訊息附上卡住的原因（事件數、最後事件型別與距今秒數、出現過
+  的待決 request id）。先前不論卡在哪裡都只回報 `before session became idle`，
+  讀起來像模型逾時。
+
+### Changed
+
+- `wukong-scheduler` 的 `ExecutionContext` 新增 `permission_policy` 欄位，泛型參數
+  多了 `QuestionResponder` bound（repo 內的使用端已同步；外部使用者需一併調整）。
+
 ## [0.18.7] - 2026-08-05
 
 ### Fixed
