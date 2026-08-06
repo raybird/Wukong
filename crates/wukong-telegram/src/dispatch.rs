@@ -10,10 +10,7 @@ use wukong_chat_history::{ChatHistoryStore, NewChatAttachment};
 use wukong_cli::run_turn_observed_with_attachments;
 use wukong_gateway::backend::{AgentAttachment, AgentBackend, AiBackend};
 use wukong_gateway::config::GatewayConfig;
-use wukong_gateway::stream::{
-    QuestionInfo, QuestionRequest, PERMISSION_ALLOW_ALWAYS_LABEL, PERMISSION_ALLOW_ONCE_LABEL,
-    PERMISSION_REJECT_LABEL, PERMISSION_REQUEST_PREFIX,
-};
+use wukong_gateway::stream::{QuestionInfo, QuestionRequest};
 use wukong_gateway::{GatewayError, StreamEvent};
 use wukong_memory::Memory;
 use wukong_orchestrator::Role;
@@ -144,19 +141,6 @@ pub trait QuestionResponder {
     ) -> impl std::future::Future<Output = Result<(), GatewayError>> + Send;
 }
 
-fn permission_id(request_id: &str) -> Option<&str> {
-    request_id.strip_prefix(PERMISSION_REQUEST_PREFIX)
-}
-
-fn permission_reply_from_answers(answers: &[Vec<String>]) -> Option<&'static str> {
-    match answers.first()?.first()?.as_str() {
-        PERMISSION_ALLOW_ONCE_LABEL => Some("once"),
-        PERMISSION_ALLOW_ALWAYS_LABEL => Some("always"),
-        PERMISSION_REJECT_LABEL => Some("reject"),
-        _ => None,
-    }
-}
-
 impl QuestionResponder for AgentBackend {
     async fn reply_question(
         &self,
@@ -164,28 +148,7 @@ impl QuestionResponder for AgentBackend {
         request_id: &str,
         answers: Vec<Vec<String>>,
     ) -> Result<(), GatewayError> {
-        match self {
-            AgentBackend::Server(backend) => match permission_id(request_id) {
-                Some(permission_id) => {
-                    let reply = permission_reply_from_answers(&answers).ok_or_else(|| {
-                        GatewayError::AgentFailed {
-                            code: None,
-                            stderr: "無法辨識 Telegram permission 回覆。".to_string(),
-                        }
-                    })?;
-                    backend.reply_permission(permission_id, reply).await
-                }
-                None => {
-                    backend
-                        .reply_question(session_id, request_id, answers)
-                        .await
-                }
-            },
-            AgentBackend::Cli(_) => Err(GatewayError::AgentFailed {
-                code: None,
-                stderr: "目前只有 opencode server backend 支援 question 回答。".to_string(),
-            }),
-        }
+        self.answer_question(session_id, request_id, answers).await
     }
 
     async fn reject_question(
@@ -193,16 +156,7 @@ impl QuestionResponder for AgentBackend {
         session_id: &str,
         request_id: &str,
     ) -> Result<(), GatewayError> {
-        match self {
-            AgentBackend::Server(backend) => match permission_id(request_id) {
-                Some(permission_id) => backend.reply_permission(permission_id, "reject").await,
-                None => backend.reject_question(session_id, request_id).await,
-            },
-            AgentBackend::Cli(_) => Err(GatewayError::AgentFailed {
-                code: None,
-                stderr: "目前只有 opencode server backend 支援 question 取消。".to_string(),
-            }),
-        }
+        self.cancel_question(session_id, request_id).await
     }
 }
 
@@ -1707,23 +1661,6 @@ mod tests {
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(600),
             message_id: Some(10),
         }
-    }
-
-    #[test]
-    fn permission_answers_map_to_opencode_reply_values() {
-        assert_eq!(permission_id("permission-per_1"), Some("per_1"));
-        assert_eq!(
-            permission_reply_from_answers(&[vec![PERMISSION_ALLOW_ONCE_LABEL.to_string()]]),
-            Some("once")
-        );
-        assert_eq!(
-            permission_reply_from_answers(&[vec![PERMISSION_ALLOW_ALWAYS_LABEL.to_string()]]),
-            Some("always")
-        );
-        assert_eq!(
-            permission_reply_from_answers(&[vec![PERMISSION_REJECT_LABEL.to_string()]]),
-            Some("reject")
-        );
     }
 
     #[test]

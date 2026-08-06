@@ -6,6 +6,23 @@ pub const PERMISSION_ALLOW_ONCE_LABEL: &str = "允許一次";
 pub const PERMISSION_ALLOW_ALWAYS_LABEL: &str = "本次工作階段總是允許";
 pub const PERMISSION_REJECT_LABEL: &str = "拒絕";
 
+/// opencode 的 permission 詢問是以 question 的形式送出的，request id 帶
+/// `permission-` 前綴；回覆時要走 `/permission/{id}/reply` 而不是 question
+/// 端點，所以先在這裡把真正的 permission id 取回來。
+pub fn permission_id(request_id: &str) -> Option<&str> {
+    request_id.strip_prefix(PERMISSION_REQUEST_PREFIX)
+}
+
+/// 把使用者選到的權限選項標籤換成 opencode 的 reply 動詞。
+pub fn permission_reply_from_answers(answers: &[Vec<String>]) -> Option<&'static str> {
+    match answers.first()?.first()?.as_str() {
+        PERMISSION_ALLOW_ONCE_LABEL => Some("once"),
+        PERMISSION_ALLOW_ALWAYS_LABEL => Some("always"),
+        PERMISSION_REJECT_LABEL => Some("reject"),
+        _ => None,
+    }
+}
+
 /// One option in an OpenCode question prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuestionOption {
@@ -95,6 +112,29 @@ pub fn parse_session_id(line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_answers_map_to_opencode_reply_values() {
+        assert_eq!(permission_id("permission-per_1"), Some("per_1"));
+        assert_eq!(permission_id("que_1"), None);
+        assert_eq!(
+            permission_reply_from_answers(&[vec![PERMISSION_ALLOW_ONCE_LABEL.to_string()]]),
+            Some("once")
+        );
+        assert_eq!(
+            permission_reply_from_answers(&[vec![PERMISSION_ALLOW_ALWAYS_LABEL.to_string()]]),
+            Some("always")
+        );
+        assert_eq!(
+            permission_reply_from_answers(&[vec![PERMISSION_REJECT_LABEL.to_string()]]),
+            Some("reject")
+        );
+        assert_eq!(permission_reply_from_answers(&[]), None);
+        assert_eq!(
+            permission_reply_from_answers(&[vec!["亂填".to_string()]]),
+            None
+        );
+    }
 
     #[test]
     fn parses_text_event() {

@@ -98,19 +98,7 @@ impl WebQuestionResponder for wukong_gateway::backend::AgentBackend {
         request_id: &'a str,
         answers: Vec<Vec<String>>,
     ) -> WebQuestionFuture<'a> {
-        Box::pin(async move {
-            match self {
-                wukong_gateway::backend::AgentBackend::Server(server) => {
-                    server.reply_question(session_id, request_id, answers).await
-                }
-                wukong_gateway::backend::AgentBackend::Cli(_) => {
-                    Err(wukong_gateway::GatewayError::AgentFailed {
-                        code: None,
-                        stderr: "目前只有 opencode server backend 支援 question 回答。".to_string(),
-                    })
-                }
-            }
-        })
+        Box::pin(async move { self.answer_question(session_id, request_id, answers).await })
     }
 
     fn reject_web_question<'a>(
@@ -118,19 +106,7 @@ impl WebQuestionResponder for wukong_gateway::backend::AgentBackend {
         session_id: &'a str,
         request_id: &'a str,
     ) -> WebQuestionFuture<'a> {
-        Box::pin(async move {
-            match self {
-                wukong_gateway::backend::AgentBackend::Server(server) => {
-                    server.reject_question(session_id, request_id).await
-                }
-                wukong_gateway::backend::AgentBackend::Cli(_) => {
-                    Err(wukong_gateway::GatewayError::AgentFailed {
-                        code: None,
-                        stderr: "目前只有 opencode server backend 支援 question 取消。".to_string(),
-                    })
-                }
-            }
-        })
+        Box::pin(async move { self.cancel_question(session_id, request_id).await })
     }
 }
 

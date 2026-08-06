@@ -195,11 +195,98 @@ pub fn build_backend_from_env(command: Vec<String>, workspace: Option<PathBuf>) 
     }
 }
 
+/// 一則待回覆的 question 該送到哪個 opencode 端點。permission 詢問是以
+/// question 的形式浮出來的，但必須回到 `/permission/{id}/reply`；送錯端點
+/// opencode 不會有反應，該回合會一路等到 stream deadline 才失敗。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuestionReplyRoute<'a> {
+    Permission { id: &'a str, reply: &'static str },
+    Question,
+}
+
+/// 回答一則 question 時的端點選擇。無法辨識的權限選項視為錯誤，避免把不明
+/// 的答案當成允許送出去。
+pub fn question_reply_route<'a>(
+    request_id: &'a str,
+    answers: &[Vec<String>],
+) -> Result<QuestionReplyRoute<'a>, GatewayError> {
+    let Some(id) = crate::stream::permission_id(request_id) else {
+        return Ok(QuestionReplyRoute::Question);
+    };
+    let reply = crate::stream::permission_reply_from_answers(answers).ok_or_else(|| {
+        GatewayError::AgentFailed {
+            code: None,
+            stderr: "無法辨識 permission 回覆選項。".to_string(),
+        }
+    })?;
+    Ok(QuestionReplyRoute::Permission { id, reply })
+}
+
+/// 取消一則 question 時的端點選擇；permission 一律以 reject 回覆。
+pub fn question_reject_route(request_id: &str) -> QuestionReplyRoute<'_> {
+    match crate::stream::permission_id(request_id) {
+        Some(id) => QuestionReplyRoute::Permission {
+            id,
+            reply: "reject",
+        },
+        None => QuestionReplyRoute::Question,
+    }
+}
+
 impl AgentBackend {
     pub async fn check_ready(&self) -> Result<(), GatewayError> {
         match self {
             AgentBackend::Cli(_) => Ok(()),
             AgentBackend::Server(backend) => backend.health_check().await,
+        }
+    }
+
+    /// 回答一則待回覆的 question。所有進入點（Web、Telegram、CLI）共用這裡的
+    /// 端點分派，permission 詢問才不會因為送錯端點而懸著。
+    pub async fn answer_question(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        answers: Vec<Vec<String>>,
+    ) -> Result<(), GatewayError> {
+        let backend = self.question_backend("回答")?;
+        match question_reply_route(request_id, &answers)? {
+            QuestionReplyRoute::Permission { id, reply } => {
+                backend.reply_permission(id, reply).await
+            }
+            QuestionReplyRoute::Question => {
+                backend
+                    .reply_question(session_id, request_id, answers)
+                    .await
+            }
+        }
+    }
+
+    /// 取消一則待回覆的 question。
+    pub async fn cancel_question(
+        &self,
+        session_id: &str,
+        request_id: &str,
+    ) -> Result<(), GatewayError> {
+        let backend = self.question_backend("取消")?;
+        match question_reject_route(request_id) {
+            QuestionReplyRoute::Permission { id, reply } => {
+                backend.reply_permission(id, reply).await
+            }
+            QuestionReplyRoute::Question => backend.reject_question(session_id, request_id).await,
+        }
+    }
+
+    fn question_backend(
+        &self,
+        action: &str,
+    ) -> Result<&crate::opencode_server::OpencodeServerBackend, GatewayError> {
+        match self {
+            AgentBackend::Server(backend) => Ok(backend),
+            AgentBackend::Cli(_) => Err(GatewayError::AgentFailed {
+                code: None,
+                stderr: format!("目前只有 opencode server backend 支援 question {action}。"),
+            }),
         }
     }
 }
@@ -560,6 +647,152 @@ mod tests {
                 .unwrap();
         });
         format!("http://{addr}")
+    }
+
+    /// 錄下 server 收到的第一個 request，用來確認 question 回覆真的送到了
+    /// 對應的端點；permission 送錯端點時 opencode 不會有任何反應。
+    async fn recording_server() -> (String, tokio::sync::oneshot::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 2048];
+            let read = socket.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..read]).to_string();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                )
+                .await
+                .unwrap();
+            let _ = tx.send(request);
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    #[test]
+    fn permission_request_id_routes_to_permission_endpoint() {
+        let route = question_reply_route(
+            "permission-per_1",
+            &[vec![
+                crate::stream::PERMISSION_ALLOW_ALWAYS_LABEL.to_string()
+            ]],
+        )
+        .unwrap();
+
+        assert_eq!(
+            route,
+            QuestionReplyRoute::Permission {
+                id: "per_1",
+                reply: "always",
+            }
+        );
+    }
+
+    #[test]
+    fn plain_request_id_routes_to_question_endpoint() {
+        let route = question_reply_route("que_1", &[vec!["yes".to_string()]]).unwrap();
+
+        assert_eq!(route, QuestionReplyRoute::Question);
+    }
+
+    #[test]
+    fn unrecognized_permission_answer_is_an_error() {
+        let err =
+            question_reply_route("permission-per_1", &[vec!["亂填".to_string()]]).unwrap_err();
+
+        assert!(err.to_string().contains("permission"), "{err}");
+    }
+
+    #[test]
+    fn cancelling_a_permission_replies_reject() {
+        assert_eq!(
+            question_reject_route("permission-per_1"),
+            QuestionReplyRoute::Permission {
+                id: "per_1",
+                reply: "reject",
+            }
+        );
+        assert_eq!(question_reject_route("que_1"), QuestionReplyRoute::Question);
+    }
+
+    #[tokio::test]
+    async fn permission_answer_posts_to_permission_reply_url() {
+        let (url, rx) = recording_server().await;
+        let backend = AgentBackend::Server(
+            crate::opencode_server::OpencodeServerBackend::from_env(url, None),
+        );
+
+        backend
+            .answer_question(
+                "ses_1",
+                "permission-per_1",
+                vec![vec![crate::stream::PERMISSION_ALLOW_ONCE_LABEL.to_string()]],
+            )
+            .await
+            .unwrap();
+
+        let request = rx.await.unwrap();
+        assert!(
+            request.starts_with("POST /permission/per_1/reply "),
+            "{request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_question_answer_posts_to_session_question_url() {
+        let (url, rx) = recording_server().await;
+        let backend = AgentBackend::Server(
+            crate::opencode_server::OpencodeServerBackend::from_env(url, None),
+        );
+
+        backend
+            .answer_question("ses_1", "que_1", vec![vec!["yes".to_string()]])
+            .await
+            .unwrap();
+
+        let request = rx.await.unwrap();
+        assert!(
+            request.starts_with("POST /api/session/ses_1/question/que_1/reply "),
+            "{request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_cancel_posts_to_permission_reply_url() {
+        let (url, rx) = recording_server().await;
+        let backend = AgentBackend::Server(
+            crate::opencode_server::OpencodeServerBackend::from_env(url, None),
+        );
+
+        backend
+            .cancel_question("ses_1", "permission-per_1")
+            .await
+            .unwrap();
+
+        let request = rx.await.unwrap();
+        assert!(
+            request.starts_with("POST /permission/per_1/reply "),
+            "{request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cli_backend_cannot_answer_questions() {
+        let backend = AgentBackend::Cli(AgentCliBackend {
+            command: vec!["command-that-must-not-run".to_string()],
+            workspace: None,
+        });
+
+        let reply = backend
+            .answer_question("ses_1", "que_1", vec![vec!["yes".to_string()]])
+            .await
+            .unwrap_err();
+        let cancel = backend.cancel_question("ses_1", "que_1").await.unwrap_err();
+
+        assert!(reply.to_string().contains("question 回答"), "{reply}");
+        assert!(cancel.to_string().contains("question 取消"), "{cancel}");
     }
 
     #[tokio::test]
