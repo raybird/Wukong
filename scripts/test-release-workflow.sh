@@ -15,6 +15,10 @@ for contract in \
   'release-manifest.json' 'scripts/generate-sha256sums.sh dist' \
    'name: release-assets' 'files: dist/*' \
    'cp release/package.json release/package-lock.json release-context/release/' '--data-compatibility release/data-compatibility.json' \
+   'run: scripts/resolve-opencode-version.sh' \
+   'opencode_version: ${{ steps.opencode.outputs.version }}' \
+   'OPENCODE_VERSION_PIN: ${{ vars.OPENCODE_VERSION_PIN }}' \
+   'OPENCODE_VERSION_PIN: ${{ needs.publish-image.outputs.opencode_version }}' \
    "printf 'validate: tag=%q\\n' \"\$tag\"" 'validate: annotation=' 'validate: channel=rc' \
    'refs/tags/release-source/$tag' 'uses: docker/login-action@v3'; do
   require_text "$contract"

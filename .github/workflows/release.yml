@@ -108,8 +108,14 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       digest: ${{ steps.image.outputs.digest }}
+      opencode_version: ${{ steps.opencode.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+      - id: opencode
+        name: Re-pin opencode to the newest release
+        env:
+          OPENCODE_VERSION_PIN: ${{ vars.OPENCODE_VERSION_PIN }}
+        run: scripts/resolve-opencode-version.sh
       - name: Install registry client
         run: |
           set -euo pipefail
@@ -175,6 +181,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Pin the opencode version that the image actually shipped
+        env:
+          OPENCODE_VERSION_PIN: ${{ needs.publish-image.outputs.opencode_version }}
+        run: scripts/resolve-opencode-version.sh
       - uses: actions/download-artifact@v4
         with:
           pattern: release-assets-*
