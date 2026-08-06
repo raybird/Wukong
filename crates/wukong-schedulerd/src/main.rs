@@ -11,7 +11,9 @@ use wukong_gateway::config::{default_scope, GatewayConfig};
 use wukong_gateway::workspace_dir;
 use wukong_memory::Memory;
 use wukong_runtime::util::now_unix;
-use wukong_scheduler::{ClaimedJobOutcome, ExecutionContext, Job, SchedulerStore};
+use wukong_scheduler::{
+    ClaimedJobOutcome, ExecutionContext, Job, PermissionPolicy, SchedulerStore,
+};
 use wukong_tg_client::client::ReqwestTgClient;
 
 #[derive(Debug, Parser)]
@@ -182,6 +184,7 @@ async fn run_scan(
             memory,
             backend,
             base_config: cfg,
+            permission_policy: PermissionPolicy::from_env(),
         };
         let output = match wukong_scheduler::run_claimed_job(store, &ctx, &job, worker_id)
             .await

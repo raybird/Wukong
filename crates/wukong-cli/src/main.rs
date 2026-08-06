@@ -10,7 +10,9 @@ use wukong_gateway::StreamEvent;
 use wukong_memory::Memory;
 use wukong_runtime::maintenance::{memory_consolidate, memory_prune, memory_snapshot};
 use wukong_runtime::util::now_unix;
-use wukong_scheduler::{ExecutionContext, Job, JobKind, MaintenanceTask, NewJob, SchedulerStore};
+use wukong_scheduler::{
+    ExecutionContext, Job, JobKind, MaintenanceTask, NewJob, PermissionPolicy, SchedulerStore,
+};
 
 #[tokio::main]
 async fn main() {
@@ -263,6 +265,7 @@ async fn trigger_job(
         memory,
         backend,
         base_config: cfg,
+        permission_policy: PermissionPolicy::from_env(),
     };
     match wukong_scheduler::run_claimed_job(store, &ctx, job, worker_id)
         .await

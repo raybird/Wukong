@@ -86,7 +86,7 @@ policy 時，應開獨立 server/config，不要放寬共用 client。
 **驗收**：新容器（全新 volume）啟動後 config 即含該規則；重放同類任務不再出現
 `permission=external_directory patterns=["/tmp/*"]`。
 
-### W2（P0）權限回覆邏輯上收 gateway，Web 與 CLI 共用
+### W2（P0）權限回覆邏輯上收 gateway，Web 與 CLI 共用 — 已完成（2026-08-06，commit `3c8279c`）
 
 **問題**：`permission_id()` 只存在於 Telegram。Web 會把 `permission-xxx` 送到
 `/api/session/{id}/question/permission-xxx/reply`，正確端點是
@@ -108,7 +108,7 @@ policy 時，應開獨立 server/config，不要放寬共用 client。
 「一般 question id → question 端點」兩條分支；Web Console 對權限詢問按下允許／
 拒絕後，OpenCode log 對該 permission id 有對應 reply。
 
-### W3（P0）scheduler 的無人值守權限策略
+### W3（P0）scheduler 的無人值守權限策略 — 已完成（2026-08-06）
 
 **問題**：`executor.rs:94-102` 兩個 callback 都是 no-op，排程工作既不允許也不
 拒絕。`SCHEDULED_TURN_AUTONOMY_HINT` 只約束模型呼叫 `question` 工具，對 server
@@ -231,6 +231,10 @@ docker compose logs opencode-server | grep -i "permission="
    pattern 語法（阻擋 W1 實作，其餘工作不受影響）。
 2. handover 記錄 `scheduler_runs.id=574` 在最後觀察時仍是 `running`，需補上其最終
    狀態，事故證據鏈才完整。
-3. scheduler auto-allow policy 的設定介面：環境變數、`.wukong/settings.toml`，
-   或 per-job 欄位。
-4. CLI／REPL 是否要做到完整互動回覆，或僅顯示權限詢問即可。
+3. ~~scheduler auto-allow policy 的設定介面~~ → 已定案（W3）：`ExecutionContext`
+   新增 `permission_policy` 欄位，binary 端以 `WUKONG_SCHED_PERMISSION` 環境變數
+   決定（只有 `allow` 開啟自動允許）。放在 context 而不是只讀 env，是為了讓策略
+   可在測試中直接指定，不必動 process-global 環境變數。
+4. ~~CLI／REPL 是否要做到完整互動回覆~~ → 已定案（W2）：本次只讓詢問可見並提示
+   改用 Web／Telegram 回覆。CLI 要真的能回覆需要在 REPL 加互動輸入迴圈，屬獨立
+   工作，目前沒有需求驅動。

@@ -109,6 +109,7 @@ Docker 模式下 schedulerd 預設會隨 `docker compose up -d` 啟動，讓排�
 
 - **前提**：底層 agent（opencode）需具備 shell 執行權限，且 `wukong` 在其 PATH 上。若 `wukong` 不在 PATH，設定 `WUKONG_BIN=/絕對/路徑/wukong`，注入的指令會改用該路徑。
 - **結果回送 Telegram**：當排程是從 Telegram 建立的（scope 形如 `user:tg-<chat_id>`），`wukong-schedulerd` 觸發後會把該回合結果**主動推回原聊天室**——成功送渲染後的 HTML、失敗送一行簡短錯誤。daemon 需設定 `WUKONG_TG_TOKEN` 才能投遞；設 `WUKONG_SCHED_NOTIFY=0` 可全域關閉。
+- **權限詢問處置**：排程回合是無人值守的，opencode 送出的權限詢問**預設一律拒絕**，並把處置結果附在該 run 的訊息（`[無人值守權限]` 區塊）與 log。沒有這層策略時，詢問不會有人回答，opencode 會一直等到 `WUKONG_AGENT_TIMEOUT_SECS` 才失敗。若部署明確信任 container 隔離，可設 `WUKONG_SCHED_PERMISSION=allow` 讓權限請求自動允許一次；一般 question（非權限）在任何設定下都仍會被拒絕。
 - 投遞為 best-effort：推送失敗只記 log，不影響 job 本身的成功狀態（仍記於 `schedule runs`）。
 - 共用的 Telegram 傳輸層（client + scope 解析）抽於 `wukong-tg-client` crate，由 bot 與排程 daemon 共用。
 
