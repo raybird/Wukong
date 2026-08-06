@@ -4,7 +4,7 @@
 
 部署目錄：`~/Documents/RunWuKong`
 
-部署版本：`ghcr.io/raybird/wukong:v0.18.7`
+事故版本：`ghcr.io/raybird/wukong:v0.18.7`
 
 關聯規劃：`docs/superpowers/specs/2026-08-06-opencode-permission-hang-remediation-design.md`
 
@@ -161,12 +161,78 @@ Session not found: ses_0d26d72abffeF0N0i4HhS66V7A
 一致。當時的整體 SQLite integrity check 仍通過，因此目前不能判定為整個 DB 損壞，
 應視為需要持續監控的次要問題。
 
+## 2026-08-07 追記：v0.19.0 修復後狀態
+
+### 已套用的修復
+
+- `main` 已 fast-forward 至 `7b5f20a`，包含 permission hang 的完整修復鏈。
+- `~/Documents/RunWuKong` 現在使用 `ghcr.io/raybird/wukong:v0.19.0`，OpenCode
+  版本為 `1.18.14`。
+- `opencode.json` baseline、`user.json`、`.wukong-baseline` 與舊設定 backup 都已
+  存在，`external_directory` 的 `/tmp` 三種 pattern、compaction 與 CPU guardrail
+  已實際載入。
+- `WUKONG_SCHED_PERMISSION=reject` 已生效；streaming scheduler turn 的 permission
+  request 會即時拒絕，不再被動等待 1200 秒。非 streaming 路徑的限制見下方高風險 2。
+- 四個 container 啟動後 healthcheck 通過，`RestartCount=0`，沒有 OOM。
+
+### 高風險 1：回覆失敗時可能跳過 abort 與 cleanup
+
+Scheduler 在 permission 回覆重試 3 次仍失敗時，會在
+`crates/wukong-scheduler/src/executor.rs:209-225` 跳出 `select!`，並 drop 正在執行
+的 `run_turn` future。
+
+但 OpenCode server 只有在 `consume_event_stream` 正常回傳 error 後，才會執行
+`abort_session` 與 session cleanup：
+
+- `crates/wukong-gateway/src/opencode_server.rs:637-645`
+- `crates/wukong-runtime/src/turn.rs:393-398`
+
+因此 cancellation path 可能不會送出 `/session/{id}/abort`，也可能跳過 runtime
+session lease release，留下仍在 server 執行的 prompt 或 zombie session，重新引發
+session 404、foreign key constraint 或後續 lease 卡住。現有 regression test 使用 fake
+backend，只驗證 scheduler 很快返回，尚未驗證真實 OpenCode server 的 abort/cleanup。
+
+處理方向：為 streaming backend 加 cancellation-safe cleanup，或在 scheduler 中止 turn
+前顯式 abort、釋放 session lease，並新增真實 server cancellation integration test。
+
+### 高風險 2：非 streaming 路徑仍繞過 permission policy
+
+新的 `PermissionPolicy` 只接在 `run_unattended_turn` 的 streaming event channel。
+以下路徑仍使用 `run_ephemeral`，沒有 `QuestionResponder`：
+
+- Planner：`crates/wukong-runtime/src/turn.rs:172-179`、
+  `crates/wukong-orchestrator/src/router.rs:226-244`
+- Memory summarizer：`crates/wukong-gateway/src/summarize.rs:25-42`
+- Automatic maintenance：`crates/wukong-schedulerd/src/main.rs:107-129`
+
+這些呼叫透過同步的 `POST /session/{id}/message` 等待回覆；若工具觸發
+`external_directory` permission，scheduler 沒有事件 channel 可以處理，仍可能等待
+到 20 分鐘 client timeout。Planner 的 `tool_overrides` 只關閉 `question` 工具，不能
+阻止 OpenCode server 在工具執行前攔截 permission。
+
+處理方向：讓非 streaming backend call 共用 unattended permission responder，或明確
+禁止這些路徑使用會觸碰外部目錄的工具；新增 planner、summarizer、maintenance 的
+permission hang regression test。
+
+### 中風險：拒絕 permission 後仍可能被記為成功
+
+如果 OpenCode 在收到 reject 後仍能完成回合，scheduler 會把 job 記為 success，僅在
+輸出附加 `[無人值守權限]`。這可能把「部分工作被拒絕」誤看成完整成功，監控與通知
+需同時檢查該區塊，或另訂 permission-denied 的 job status。
+
+### Production 驗證缺口
+
+本次已完成 workspace tests、clippy、fmt、Docker runtime checks 與 release workflow
+checks；但 v0.19.0 啟動後尚未觀察到新的 scheduler run。OpenCode log 最後一筆
+`external_directory` ask 發生在 v0.19.0 啟動前，因此目前只能確認 baseline 已載入，
+不能宣稱修復已完成 production end-to-end 驗證。
+
 ## 建議處理順序
 
-### P0：解除 scheduler permission hang
+### P0：解除 scheduler permission hang（v0.19.0 已實作，待 production 驗證）
 
-在既有 `opencode.json` 的 `permission` 下新增目前觀測到的最小候選規則，先處理
-反覆出現的 `/tmp/*`：
+v0.19.0 已由 entrypoint baseline 自動寫入規則；以下保留給仍在 v0.18.7 或未完成
+baseline migration 的部署使用，先處理反覆出現的 `/tmp/*`：
 
 ```json
 {
@@ -186,9 +252,10 @@ Telegram 與 Scheduler；`/tmp/**` 也會允許所有會觸碰該路徑的 path-
 目錄。若需要更寬鬆的 scheduler policy，應考慮獨立 server/config，而不是放寬
 所有共用 client。
 
-### P0：修正 scheduler 的無人值守權限策略
+### P0：修正 scheduler 的無人值守權限策略（v0.19.0 已實作，仍需補 cancellation）
 
-Scheduler 不應再使用完全 no-op 的 event callback。建議加入明確策略：
+v0.19.0 已將 no-op callback 改為明確的 `PermissionPolicy`；以下列出仍需完成的
+cancellation 與驗收事項：
 
 - 對不允許的 permission request 立即 reject 並記錄路徑與 permission id。
 - 如果部署明確信任 container 隔離，再提供可配置的 auto-allow policy。
@@ -201,10 +268,11 @@ Scheduler 不應再使用完全 no-op 的 event callback。建議加入明確策
 超過 20 分鐘而不代表單一 stream 逾時；單純提高 timeout 也不能解決 permission
 hang，只會把等待時間拉長。
 
-### P1：套用 v0.18.7 長對話護欄
+### P1：套用長對話護欄（v0.19.0 baseline 已套用）
 
-手動合併 `snapshot`、`compaction`、`tool_output`、`watcher.ignore` 設定，並重啟
-OpenCode server。注意 `snapshot: false` 會停用 OpenCode 自己的 revert/undo，
+仍在 v0.18.7 或未完成 baseline migration 的部署，需手動合併 `snapshot`、
+`compaction`、`tool_output`、`watcher.ignore` 設定並重啟 OpenCode server；v0.19.0
+應確認 baseline 已載入。注意 `snapshot: false` 會停用 OpenCode 自己的 revert/undo，
 但不會影響 workspace 的 Git 歷史。
 
 ### P2：保留狀態後再處理 database 成長
@@ -226,3 +294,7 @@ VACUUM 或 volume 重建前，先備份現有 state，並保留 `opencode.log` �
 - 不再出現同一 job 的 1200 秒 stream timeout。
 - `opencode.db` 增長速度、CPU 與 block I/O 下降。
 - 若發生 timeout，錯誤能清楚指出是模型/工具逾時，而不是模糊的 idle timeout。
+- permission reply 失敗時，OpenCode session 有收到 abort，Wukong session lease 有釋放。
+- planner、memory summarizer、automatic maintenance 觸發 permission 時不會等待到
+  1200 秒。
+- permission 被拒絕但 job 仍成功時，監控能辨識 `[無人值守權限]` 並標記為部分成功。
