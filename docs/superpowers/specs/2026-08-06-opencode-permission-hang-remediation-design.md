@@ -56,7 +56,7 @@
 
 ## 工作項目
 
-### W1（P0）補上 `external_directory` 規則，並同步 seed script
+### W1（P0）補上 `external_directory` 規則，並同步 seed script — repo 端已完成（2026-08-06），現行部署待套用
 
 **問題**：容器內 config 與 seed script 都沒有 `permission.external_directory`，
 OpenCode 對外部工作目錄預設 `ask`。
@@ -68,15 +68,28 @@ OpenCode 對外部工作目錄預設 `ask`。
 - 以相同內容合併進 `~/Documents/RunWuKong` 既有的 `opencode-config` volume，
   保留現有 `permission.bash` 全部規則，重啟 `opencode-server`。
 
-**前置驗證**：實作前必須先確認 opencode `1.17.18` 的 `external_directory`
-接受的形態。log 回報的 pattern 是 `/tmp/*`，而直覺寫法是 `/tmp/**`，兩者在多數
-glob 實作下涵蓋範圍不同（`/tmp/**` 通常不匹配 `/tmp` 本身）。可能的形態：
+**前置驗證**：已完成（2026-08-06，查 <https://opencode.ai/docs/permissions/> 與
+<https://opencode.ai/config.json> schema）。`external_directory` 的 schema 是
+`anyOf[字串, 物件]`：字串限 `ask` / `allow` / `deny`，物件則是 glob → 動作；
+預設值為 `ask`；比對規則與 `bash` 相同，**最後符合者勝出**，`*` 匹配零或多個
+字元、`?` 匹配一個、`**` 為遞迴。
+
+因為 opencode 把該次請求回報成 `/tmp/*`，而 `/tmp/**` 在多數 glob 實作下不匹配
+`/tmp` 本身，seed 一次寫入三種鍵形涵蓋所有情況：
 
 ```json
-{ "permission": { "external_directory": { "/tmp": "allow", "/tmp/**": "allow" } } }
+{
+  "permission": {
+    "external_directory": {
+      "/tmp": "allow",
+      "/tmp/*": "allow",
+      "/tmp/**": "allow"
+    }
+  }
+}
 ```
 
-或僅接受純字串 `"external_directory": "allow"`。確認前不要寫死任一種。
+三個都是 `allow`，所以「最後符合者勝出」不影響結果。
 
 **範圍聲明**：這是共用 OpenCode server 的全域 policy，會同時影響 Web、Telegram
 與 Scheduler，也會放行所有觸碰該路徑的 path-based tools。若之後 log 出現
@@ -227,8 +240,8 @@ docker compose logs opencode-server | grep -i "permission="
 
 ## 待確認事項
 
-1. opencode `1.17.18` 的 `permission.external_directory` 實際接受的設定形態與
-   pattern 語法（阻擋 W1 實作，其餘工作不受影響）。
+1. ~~opencode `1.17.18` 的 `permission.external_directory` 設定形態與 pattern
+   語法~~ → 已查證（見 W1 前置驗證）。
 2. handover 記錄 `scheduler_runs.id=574` 在最後觀察時仍是 `running`，需補上其最終
    狀態，事故證據鏈才完整。
 3. ~~scheduler auto-allow policy 的設定介面~~ → 已定案（W3）：`ExecutionContext`

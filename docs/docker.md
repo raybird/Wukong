@@ -10,6 +10,7 @@
 - **UID/GID 對齊**：runtime user 與 host 一致，避免檔案權限問題
 - **預設 Web + Telegram + Scheduler**：`docker compose up -d` 會啟動 Web Console、Telegram Bot 與排程 daemon；CLI / REPL 透過被動 `run` 使用
 - **非互動權限處理**：Wukong 驅動 `opencode run` 時 stdin 永遠為空（CLI/Web/Telegram/Scheduler 皆然），opencode 無法回應互動式權限詢問。因此容器內 `WUKONG_AGENT_CMD` 預設帶 `--dangerously-skip-permissions`（自動核准詢問），並由 entrypoint 在缺檔時 seed 一份 `~/.config/opencode/opencode.json`：該旗標仍尊重 `deny` 規則，故內含一組黑名單擋下對絕對路徑的毀滅性遞迴刪除（`rm -rf /…`、`sudo rm`、家目錄等變形），同時放行 `/workspace` 內的刪除。這是 **防呆/防幻覺護欄而非資安牆**（glob 字串比對擋不住 `find -delete`、變數展開等繞法），真正的隔離邊界仍是 container 本身與 host 掛載目錄的範圍。要自訂規則，直接把你的 `opencode.json` 放進 `opencode-config` volume 即可覆蓋（缺檔才會 seed）。
+  - ⚠️ **該旗標只作用於 CLI backend**。Compose 預設走 `opencode serve`（見下節），而 `serve` 沒有對等旗標，所以對 Web／Telegram／Scheduler 而言 **`opencode.json` 是唯一的權限控制**。seed 因此明確放行 `/tmp`（`external_directory` 預設為 `ask`，無人值守排程會卡在沒人回答的詢問上直到 stream deadline）。要放行其他路徑請逐項加入，不要改成整包 `"external_directory": "allow"`——它會套用到所有 path-based 工具。事故脈絡見 `docs/2026-08-06-docker-runtime-handover.md`。
 
 ## Docker 低延遲 opencode serve 模式
 

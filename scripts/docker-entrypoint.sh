@@ -108,14 +108,26 @@ OPENCODE_CONFIG="/home/wukong/.config/opencode"
 mkdir -p "$OPENCODE_CONFIG"
 
 # ── Seed a default opencode config with a destructive-command guard ──
-# Wukong always drives `opencode run` with stdin=null, so opencode can never
-# receive an interactive permission answer (REPL, Web, Telegram, Scheduler all
-# alike). We therefore run with `--dangerously-skip-permissions` (set in
-# WUKONG_AGENT_CMD) to auto-approve prompts — but that flag still honours any
-# explicit `deny`, so this config keeps a denylist that blocks catastrophic
-# recursive deletes of absolute paths while still allowing deletes inside
-# /workspace. Only written when missing; drop your own opencode.json into the
-# `opencode-config` volume to override.
+# Two backends reach opencode, and only one of them takes a CLI flag:
+#   * CLI backend (`opencode run`) — Wukong always starts it with stdin=null, so
+#     it can never answer an interactive prompt. WUKONG_AGENT_CMD therefore
+#     carries `--dangerously-skip-permissions`.
+#   * Server backend (`opencode serve`) — the compose default, selected by
+#     WUKONG_AGENT_SERVER_URL. `serve` has no equivalent flag, so THIS FILE is
+#     the only permission control Web, Telegram and Scheduler have.
+# `--dangerously-skip-permissions` still honours an explicit `deny`, so the bash
+# denylist below blocks catastrophic recursive deletes of absolute paths while
+# still allowing deletes inside /workspace. Only written when missing; drop your
+# own opencode.json into the `opencode-config` volume to override.
+#
+#   external_directory - defaults to `ask`, which is what stalls unattended work:
+#                 a scheduled job touching /tmp stops on a prompt nobody answers
+#                 until the stream deadline kills the turn (see
+#                 docs/2026-08-06-docker-runtime-handover.md). /tmp is allowed
+#                 explicitly in three key forms because opencode matches the
+#                 requested path against these globs and reports the request as
+#                 `/tmp/*`. Grant further paths one at a time — do NOT relax this
+#                 to a blanket "allow", it applies to every path-based tool.
 #
 # The seed also carries CPU guardrails for long conversations. opencode 1.18
 # persists every streaming update as a FULL snapshot of the part into its
@@ -137,7 +149,7 @@ mkdir -p "$OPENCODE_CONFIG"
 #   watcher     - keeps the in-container file watcher off build output.
 OPENCODE_CONFIG_FILE="$OPENCODE_CONFIG/opencode.json"
 if [[ ! -f "$OPENCODE_CONFIG_FILE" ]]; then
-    echo "[wukong] Seeding default opencode.json (destructive-rm guard + CPU guardrails)..."
+    echo "[wukong] Seeding default opencode.json (destructive-rm guard + /tmp access + CPU guardrails)..."
     cat > "$OPENCODE_CONFIG_FILE" <<'OPENCODE_JSON'
 {
   "$schema": "https://opencode.ai/config.json",
@@ -161,6 +173,11 @@ if [[ ! -f "$OPENCODE_CONFIG_FILE" ]]; then
     ]
   },
   "permission": {
+    "external_directory": {
+      "/tmp": "allow",
+      "/tmp/*": "allow",
+      "/tmp/**": "allow"
+    },
     "bash": {
       "*": "allow",
       "*rm -rf /*": "deny",
