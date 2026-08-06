@@ -104,10 +104,26 @@ if [[ -n "${WUKONG_WORKSPACE:-}" ]]; then
 fi
 
 # Ensure opencode config dir exists (backed by Docker volume)
-OPENCODE_CONFIG="/home/wukong/.config/opencode"
-mkdir -p "$OPENCODE_CONFIG"
+# NOTE: this must NOT be named OPENCODE_CONFIG — opencode reads that variable as
+# a path to a config FILE, and it is exported below to point at the user layer.
+OPENCODE_CONFIG_DIR="/home/wukong/.config/opencode"
+mkdir -p "$OPENCODE_CONFIG_DIR"
 
-# ── Seed a default opencode config with a destructive-command guard ──
+# ── Layered opencode config: shipped baseline + untouched user overrides ──
+# opencode merges its config sources deeply, later sources winning per key, in
+# this order: ~/.config/opencode/opencode.json (global) → $OPENCODE_CONFIG →
+# project config → OPENCODE_CONFIG_CONTENT. We use the bottom two layers:
+#
+#   opencode.json - Wukong's baseline. REWRITTEN ON EVERY START so that new
+#                   defaults ship with an image upgrade. Never hand-edit it.
+#   user.json     - your overrides, pointed at by OPENCODE_CONFIG. Created empty
+#                   once and never touched again; keys here beat the baseline.
+#
+# Seeding only when the file was missing (the pre-0.18.8 behaviour) meant no
+# existing deployment ever received a new default: the v0.18.7 CPU guardrails
+# and the external_directory rule below both failed to reach running hosts.
+#
+# ── The baseline: a destructive-command guard ──
 # Two backends reach opencode, and only one of them takes a CLI flag:
 #   * CLI backend (`opencode run`) — Wukong always starts it with stdin=null, so
 #     it can never answer an interactive prompt. WUKONG_AGENT_CMD therefore
@@ -117,8 +133,11 @@ mkdir -p "$OPENCODE_CONFIG"
 #     the only permission control Web, Telegram and Scheduler have.
 # `--dangerously-skip-permissions` still honours an explicit `deny`, so the bash
 # denylist below blocks catastrophic recursive deletes of absolute paths while
-# still allowing deletes inside /workspace. Only written when missing; drop your
-# own opencode.json into the `opencode-config` volume to override.
+# still allowing deletes inside /workspace. To change any of it, put your own
+# keys in user.json — do not edit opencode.json, it is overwritten on restart.
+# Keep user rules specific and self-contained: opencode resolves permissions by
+# "last matching rule wins", and merging two rule objects gives no guarantee
+# about where a user key lands in that order.
 #
 #   external_directory - defaults to `ask`, which is what stalls unattended work:
 #                 a scheduled job touching /tmp stops on a prompt nobody answers
@@ -147,10 +166,25 @@ mkdir -p "$OPENCODE_CONFIG"
 #                 replace) Wukong's WUKONG_SESSION_COMPACT_EVERY_TURNS, which
 #                 compacts on turn count rather than on context pressure.
 #   watcher     - keeps the in-container file watcher off build output.
-OPENCODE_CONFIG_FILE="$OPENCODE_CONFIG/opencode.json"
-if [[ ! -f "$OPENCODE_CONFIG_FILE" ]]; then
-    echo "[wukong] Seeding default opencode.json (destructive-rm guard + /tmp access + CPU guardrails)..."
-    cat > "$OPENCODE_CONFIG_FILE" <<'OPENCODE_JSON'
+OPENCODE_CONFIG_FILE="$OPENCODE_CONFIG_DIR/opencode.json"
+OPENCODE_USER_CONFIG_FILE="$OPENCODE_CONFIG_DIR/user.json"
+OPENCODE_BASELINE_MARKER="$OPENCODE_CONFIG_DIR/.wukong-baseline"
+
+# One-time migration off the old seed-if-missing layout. A config that predates
+# the marker may carry hand-written rules, and those must not vanish just
+# because the baseline is now managed: keep a backup and promote it to the user
+# layer, where it still wins over the baseline.
+if [[ -f "$OPENCODE_CONFIG_FILE" && ! -f "$OPENCODE_BASELINE_MARKER" ]]; then
+    cp -a "$OPENCODE_CONFIG_FILE" "$OPENCODE_CONFIG_FILE.pre-baseline.bak"
+    if [[ ! -f "$OPENCODE_USER_CONFIG_FILE" ]]; then
+        cp -a "$OPENCODE_CONFIG_FILE" "$OPENCODE_USER_CONFIG_FILE"
+        echo "[wukong] Existing opencode.json moved to user.json (backup: opencode.json.pre-baseline.bak)."
+        echo "[wukong] Delete user.json to run on Wukong defaults alone."
+    fi
+fi
+
+echo "[wukong] Writing opencode.json baseline (destructive-rm guard + /tmp access + CPU guardrails)..."
+cat > "$OPENCODE_CONFIG_FILE" <<'OPENCODE_JSON'
 {
   "$schema": "https://opencode.ai/config.json",
   "snapshot": false,
@@ -198,7 +232,14 @@ if [[ ! -f "$OPENCODE_CONFIG_FILE" ]]; then
   }
 }
 OPENCODE_JSON
+printf 'wukong-managed baseline; edits belong in user.json\n' > "$OPENCODE_BASELINE_MARKER"
+
+# The user layer is created once and never rewritten.
+if [[ ! -f "$OPENCODE_USER_CONFIG_FILE" ]]; then
+    printf '{\n  "$schema": "https://opencode.ai/config.json"\n}\n' > "$OPENCODE_USER_CONFIG_FILE"
 fi
+# opencode reads this as the higher-precedence config layer, so user keys win.
+export OPENCODE_CONFIG="$OPENCODE_USER_CONFIG_FILE"
 
 chown -R wukong:wukong /home/wukong/.config 2>/dev/null || true
 

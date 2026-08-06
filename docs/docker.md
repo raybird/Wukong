@@ -10,7 +10,23 @@
 - **UID/GID 對齊**：runtime user 與 host 一致，避免檔案權限問題
 - **預設 Web + Telegram + Scheduler**：`docker compose up -d` 會啟動 Web Console、Telegram Bot 與排程 daemon；CLI / REPL 透過被動 `run` 使用
 - **非互動權限處理**：Wukong 驅動 `opencode run` 時 stdin 永遠為空（CLI/Web/Telegram/Scheduler 皆然），opencode 無法回應互動式權限詢問。因此容器內 `WUKONG_AGENT_CMD` 預設帶 `--dangerously-skip-permissions`（自動核准詢問），並由 entrypoint 在缺檔時 seed 一份 `~/.config/opencode/opencode.json`：該旗標仍尊重 `deny` 規則，故內含一組黑名單擋下對絕對路徑的毀滅性遞迴刪除（`rm -rf /…`、`sudo rm`、家目錄等變形），同時放行 `/workspace` 內的刪除。這是 **防呆/防幻覺護欄而非資安牆**（glob 字串比對擋不住 `find -delete`、變數展開等繞法），真正的隔離邊界仍是 container 本身與 host 掛載目錄的範圍。要自訂規則，直接把你的 `opencode.json` 放進 `opencode-config` volume 即可覆蓋（缺檔才會 seed）。
-  - ⚠️ **該旗標只作用於 CLI backend**。Compose 預設走 `opencode serve`（見下節），而 `serve` 沒有對等旗標，所以對 Web／Telegram／Scheduler 而言 **`opencode.json` 是唯一的權限控制**。seed 因此明確放行 `/tmp`（`external_directory` 預設為 `ask`，無人值守排程會卡在沒人回答的詢問上直到 stream deadline）。要放行其他路徑請逐項加入，不要改成整包 `"external_directory": "allow"`——它會套用到所有 path-based 工具。事故脈絡見 `docs/2026-08-06-docker-runtime-handover.md`。
+  - ⚠️ **該旗標只作用於 CLI backend**。Compose 預設走 `opencode serve`（見下節），而 `serve` 沒有對等旗標，所以對 Web／Telegram／Scheduler 而言 **`opencode.json` 是唯一的權限控制**。baseline 因此明確放行 `/tmp`（`external_directory` 預設為 `ask`，無人值守排程會卡在沒人回答的詢問上直到 stream deadline）。要放行其他路徑請逐項加入，不要改成整包 `"external_directory": "allow"`——它會套用到所有 path-based 工具。事故脈絡見 `docs/2026-08-06-docker-runtime-handover.md`。
+
+### opencode 設定分層（baseline / user）
+
+`opencode-config` volume 內有兩份設定，opencode 會**深度合併**它們，後者的鍵勝出：
+
+| 檔案 | 誰維護 | 行為 |
+|------|--------|------|
+| `opencode.json` | Wukong | **每次容器啟動都覆寫**成映像檔內的 baseline。不要手改 |
+| `user.json` | 你 | 由 `OPENCODE_CONFIG` 指向；只在缺檔時建立，之後 Wukong 永不覆寫 |
+
+這個分層是為了讓**新版預設能隨映像檔升級自動生效**。舊版邏輯只在缺檔時 seed，導致既有部署永遠拿不到新預設——v0.18.7 的 CPU guardrail 與 `external_directory` 規則都因此沒進到執行中的主機。
+
+- **自訂設定**：寫進 `user.json`，例如把某個操作改成 `ask`、加自己的 deny 規則、換 model。
+- **升級行為**：新版 baseline 新增的鍵自動生效；你在 `user.json` 設過的鍵維持不變。
+- **首次升級遷移**：若既有 `opencode.json` 是舊版 seed 出來的（沒有 `.wukong-baseline` 標記），entrypoint 會備份成 `opencode.json.pre-baseline.bak`，並把內容複製到 `user.json`，避免手改過的規則消失。想回到純預設，刪掉 `user.json` 再重啟即可。
+- **注意合併順序**：opencode 以「最後符合的規則勝出」解析權限，而兩個 rule 物件合併後，你的鍵落在順序中的哪個位置沒有保證。自訂規則請寫得具體、自足，不要依賴它與 baseline 規則的相對順序。
 
 ## Docker 低延遲 opencode serve 模式
 

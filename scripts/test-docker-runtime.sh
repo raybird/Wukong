@@ -104,6 +104,20 @@ require_in_file 'cp -a "$IMAGE_SKILLS/." "$tmp_dir/"' "$entrypoint" \
     "entrypoint must copy image skill assets into a temporary directory"
 require_in_file 'mv "$tmp_dir" "$WORKSPACE_SKILLS"' "$entrypoint" \
     "entrypoint must atomically install workspace skill assets"
+require_in_file 'OPENCODE_CONFIG_DIR="/home/wukong/.config/opencode"' "$entrypoint" \
+    "entrypoint must keep the config directory out of the OPENCODE_CONFIG variable name"
+require_in_file 'export OPENCODE_CONFIG="$OPENCODE_USER_CONFIG_FILE"' "$entrypoint" \
+    "entrypoint must point opencode at the user config layer"
+require_in_file 'cat > "$OPENCODE_CONFIG_FILE" <<' "$entrypoint" \
+    "entrypoint must rewrite the baseline on every start so upgrades ship new defaults"
+require_in_file 'cp -a "$OPENCODE_CONFIG_FILE" "$OPENCODE_CONFIG_FILE.pre-baseline.bak"' "$entrypoint" \
+    "entrypoint must back up a pre-baseline config before taking over opencode.json"
+require_in_file 'if [[ ! -f "$OPENCODE_USER_CONFIG_FILE" ]]; then' "$entrypoint" \
+    "entrypoint must create the user config layer only when missing"
+require_in_file '"external_directory": {' "$entrypoint" \
+    "baseline must grant external_directory access explicitly"
+require_in_file '"*rm -rf /*": "deny"' "$entrypoint" \
+    "baseline must retain the destructive-rm denylist"
 require_in_file "curl -fsS http://localhost:4096/global/health || exit 1" "$compose_file" \
     "opencode server must expose a Compose healthcheck"
 require_count_in_file "condition: service_healthy" 3 "$compose_file" \
