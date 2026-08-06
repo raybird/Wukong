@@ -140,7 +140,7 @@ policy 時，應開獨立 server/config，不要放寬共用 client。
 **驗收**：新增 `wukong-scheduler` 回歸測試——mock backend 送出 `QuestionRequest`
 後，job 應在秒級以 permission denied 收尾，而非等到 timeout。
 
-### W4（P1）讓逾時錯誤可診斷
+### W4（P1）讓逾時錯誤可診斷 — 已完成（2026-08-06）
 
 **問題**：`opencode_server.rs:499-503` 對所有逾時都回報
 `stream timed out before session became idle`，掩蓋了「有未回覆的 permission」

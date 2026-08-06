@@ -5,7 +5,7 @@ use crate::backend::{agent_timeout, AgentRequest, AgentResponse, AiBackend};
 use crate::error::GatewayError;
 use crate::stream::StreamEvent;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use event_map::{map_server_event, ServerEventAction};
+use event_map::{event_type_of, map_server_event, ServerEventAction};
 use reqwest::{StatusCode, Url};
 use serde::Serialize;
 use serde_json::Value;
@@ -477,6 +477,9 @@ impl OpencodeServerBackend {
         }
     }
 
+    /// 逾時或斷線時用來說明「卡在哪裡」。單看「before session became idle」
+    /// 分不出是模型還在跑、工具還在跑，還是有一則沒人回覆的權限詢問——本次
+    /// 事故就是後者被誤讀成前者（見 docs/2026-08-06-docker-runtime-handover.md）。
     async fn consume_event_stream(
         &self,
         mut response: reqwest::Response,
@@ -488,6 +491,7 @@ impl OpencodeServerBackend {
         // 避免 chunk 邊界落在 UTF-8 字元中間時產生 U+FFFD 亂碼。
         let mut buffer: Vec<u8> = Vec::new();
         let mut seen_tools = std::collections::HashSet::new();
+        let mut progress = StreamProgress::default();
         let deadline = tokio::time::sleep(agent_timeout());
         tokio::pin!(deadline);
 
@@ -498,15 +502,20 @@ impl OpencodeServerBackend {
                 _ = &mut deadline => {
                     return Err(GatewayError::AgentFailed {
                         code: None,
-                        stderr: "opencode server stream timed out before session became idle".to_string(),
+                        stderr: format!(
+                            "opencode server stream timed out before session became idle ({})",
+                            progress.describe()
+                        ),
                     });
                 }
             };
             let Some(chunk) = chunk else {
                 return Err(GatewayError::AgentFailed {
                     code: None,
-                    stderr: "opencode server event stream ended before session became idle"
-                        .to_string(),
+                    stderr: format!(
+                        "opencode server event stream ended before session became idle ({})",
+                        progress.describe()
+                    ),
                 });
             };
             buffer.extend_from_slice(&chunk);
@@ -521,8 +530,12 @@ impl OpencodeServerBackend {
                         Ok(value) => value,
                         Err(_) => continue,
                     };
+                    let event_type = event_type_of(&value).to_string();
                     match map_server_event(&value, session_id, &mut seen_tools) {
-                        ServerEventAction::Emit(event) => on_event(event),
+                        ServerEventAction::Emit(event) => {
+                            progress.record(&event_type, &event);
+                            on_event(event);
+                        }
                         ServerEventAction::Idle => return Ok(()),
                         ServerEventAction::Ignore => {}
                     }
@@ -938,6 +951,47 @@ fn question_reply_body(answers: Vec<Vec<String>>) -> QuestionReplyBody {
     QuestionReplyBody { answers }
 }
 
+/// 本次串流看到多少進度，只用於組錯誤訊息。
+#[derive(Default)]
+struct StreamProgress {
+    events: usize,
+    last_event: Option<(String, std::time::Instant)>,
+    pending_requests: Vec<String>,
+}
+
+impl StreamProgress {
+    fn record(&mut self, event_type: &str, event: &StreamEvent) {
+        self.events += 1;
+        self.last_event = Some((event_type.to_string(), std::time::Instant::now()));
+        if let StreamEvent::QuestionRequest(request) = event {
+            if !self.pending_requests.contains(&request.request_id) {
+                self.pending_requests.push(request.request_id.clone());
+            }
+        }
+    }
+
+    /// 只陳述這條 stream 觀測得到的事實：待決的詢問可能已由別的路徑回覆，
+    /// 回覆本身不會回到這條 stream 上，所以措辭是「沒看到回覆」而非「未回覆」。
+    fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        match &self.last_event {
+            Some((event_type, at)) => parts.push(format!(
+                "events seen: {}, last {event_type} {}s ago",
+                self.events,
+                at.elapsed().as_secs()
+            )),
+            None => parts.push("no events arrived for this session".to_string()),
+        }
+        if !self.pending_requests.is_empty() {
+            parts.push(format!(
+                "no reply observed for pending request(s): {}",
+                self.pending_requests.join(", ")
+            ));
+        }
+        parts.join("; ")
+    }
+}
+
 fn question_reply_url(base_url: &str, session_id: &str, request_id: &str) -> String {
     format!(
         "{}/api/session/{}/question/{}/reply",
@@ -1187,6 +1241,70 @@ mod tests {
             stderr.contains("stream timed out before session became idle"),
             "{stderr}"
         );
+    }
+
+    /// SSE server 送出一則 permission.asked 後就不再前進，模擬無人回覆權限詢問。
+    async fn pending_permission_sse_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 1024];
+            let _ = socket.read(&mut buf).await.unwrap();
+            let event = concat!(
+                "data: {\"payload\":{\"type\":\"permission.asked\",\"properties\":{",
+                "\"id\":\"per_1\",\"sessionID\":\"ses_1\",\"permission\":\"external_directory\",",
+                "\"patterns\":[\"/tmp/*\"]}}}\n\n"
+            );
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{event}"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// 逾時訊息必須指出卡住的原因。事故當下只看得到「before session became
+    /// idle」，讀起來像模型逾時，實際上是沒人回覆的權限詢問。
+    #[tokio::test]
+    async fn stream_timeout_names_the_pending_permission_request() {
+        let _guard = crate::backend::AGENT_TIMEOUT_ENV_LOCK.lock().await;
+        std::env::set_var("WUKONG_AGENT_TIMEOUT_SECS", "1");
+        let backend = OpencodeServerBackend::from_env(pending_permission_sse_server().await, None);
+
+        let response = backend.open_event_stream().await.unwrap();
+        let result = backend
+            .consume_event_stream(response, "ses_1", &mut |_| {})
+            .await;
+        std::env::remove_var("WUKONG_AGENT_TIMEOUT_SECS");
+
+        let stderr = agent_failed_stderr(result.unwrap_err());
+        assert!(stderr.contains("permission.asked"), "{stderr}");
+        assert!(stderr.contains("permission-per_1"), "{stderr}");
+        assert!(stderr.contains("no reply observed"), "{stderr}");
+    }
+
+    #[tokio::test]
+    async fn stream_timeout_reports_when_no_events_arrived() {
+        let _guard = crate::backend::AGENT_TIMEOUT_ENV_LOCK.lock().await;
+        std::env::set_var("WUKONG_AGENT_TIMEOUT_SECS", "1");
+        let backend = OpencodeServerBackend::from_env(silent_sse_server().await, None);
+
+        let response = backend.open_event_stream().await.unwrap();
+        let result = backend
+            .consume_event_stream(response, "ses_1", &mut |_| {})
+            .await;
+        std::env::remove_var("WUKONG_AGENT_TIMEOUT_SECS");
+
+        let stderr = agent_failed_stderr(result.unwrap_err());
+        assert!(stderr.contains("no events arrived"), "{stderr}");
+        assert!(!stderr.contains("no reply observed"), "{stderr}");
     }
 
     #[tokio::test]

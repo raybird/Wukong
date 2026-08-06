@@ -225,6 +225,17 @@ pub(super) enum ServerEventAction {
     Ignore,
 }
 
+/// 取出事件型別（opencode 有時把事件包在 `payload` 底下）。錯誤診斷也需要它，
+/// 共用同一份解析才不會與 `map_server_event` 走鐘。
+pub(super) fn event_type_of(value: &Value) -> &str {
+    value
+        .get("payload")
+        .unwrap_or(value)
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+}
+
 pub(super) fn map_server_event(
     value: &Value,
     session_id: &str,
@@ -234,10 +245,7 @@ pub(super) fn map_server_event(
         Some(payload) => payload,
         None => value,
     };
-    let event_type = payload
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    let event_type = event_type_of(value);
     let properties = payload.get("properties").unwrap_or(payload);
 
     if event_type == "session.idle" {
