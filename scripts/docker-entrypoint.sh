@@ -276,7 +276,17 @@ case "${1:-}" in
         # put that reset back. It is a sibling process, not a wrapper, so opencode
         # stays PID 1 and its own signal handling is untouched.
         if [[ "${1:-}" == "opencode" && "${2:-}" == "serve" ]]; then
-            gosu wukong /usr/local/bin/opencode-idle-restart.sh &
+            # Say so out loud when the script is missing. v0.20.0 shipped an image
+            # without it (the release build uses Dockerfile.release with a curated
+            # context that had not been updated), and because this is launched in
+            # the background the failure was invisible: opencode started fine and
+            # the restart simply never happened.
+            if [[ -x /usr/local/bin/opencode-idle-restart.sh ]]; then
+                gosu wukong /usr/local/bin/opencode-idle-restart.sh &
+            else
+                echo "[wukong] WARNING: opencode-idle-restart.sh is missing from this image;" >&2
+                echo "[wukong] the periodic idle restart is DISABLED. This is a packaging bug." >&2
+            fi
         fi
         # Allow `docker compose run --rm wukong <tool> ...` for runtime setup.
         exec gosu wukong "$@"

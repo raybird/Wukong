@@ -14,7 +14,10 @@ target/
 # CI / Scripts
 .github/
 scripts/*.sh
+# Anything the entrypoint or the image needs at runtime must be re-included here,
+# or the COPY in Dockerfile silently gets nothing.
 !scripts/docker-entrypoint.sh
+!scripts/opencode-idle-restart.sh
 
 # Documentation
 docs/

@@ -184,14 +184,31 @@ require_in_file "WUKONG_OPENCODE_CPUS" .env.example \
 
 # ── opencode 週期性重啟（W2）──
 idle_restart="scripts/opencode-idle-restart.sh"
-require_in_file "COPY scripts/opencode-idle-restart.sh" "$dockerfile" \
-    "the idle-restart supervisor must ship in the image"
+release_dockerfile="Dockerfile.release"
+
+# v0.20.0 shipped the entrypoint's call to this script but not the script itself:
+# the released image is built from Dockerfile.release with a hand-curated context in
+# release.yml, and only the dev Dockerfile had been updated. Nothing failed the
+# build — the file just was not there, and the feature silently did nothing. So every
+# runtime file now has to be asserted in all THREE places that decide whether it
+# reaches the image.
+for df in "$dockerfile" "$release_dockerfile"; do
+    require_in_file "COPY scripts/opencode-idle-restart.sh" "$df" \
+        "$df must copy the idle-restart supervisor into the image"
+    require_in_file "tzdata" "$df" \
+        "$df needs tzdata; without it TZ silently falls back to UTC and the restart window moves"
+done
+require_in_file "cp scripts/docker-entrypoint.sh scripts/opencode-idle-restart.sh release-context/scripts/" \
+    "$release_workflow" \
+    "the release build context is curated file-by-file; an omitted script vanishes with no build error"
+require_in_file "!scripts/opencode-idle-restart.sh" .dockerignore \
+    "scripts/*.sh is ignored, so runtime scripts must be re-included explicitly"
 require_in_file "opencode-idle-restart.sh" "$entrypoint" \
     "the entrypoint must start the supervisor alongside opencode serve"
 require_in_file '"${1:-}" == "opencode" && "${2:-}" == "serve"' "$entrypoint" \
     "the supervisor must start only for opencode serve, not for run/gh/agent-reach"
-require_in_file "tzdata" "$dockerfile" \
-    "TZ cannot resolve without tzdata, and the restart window is a local-time range"
+require_in_file "the periodic idle restart is DISABLED" "$entrypoint" \
+    "a missing supervisor must be reported loudly, not fail silently in the background"
 
 # opencode 只攔 SIGINT，沒攔 SIGTERM，而核心會丟棄送給 PID 1 的預設動作訊號——
 # 少了 stop_signal，每次 docker stop 都會空等 10 秒再被 SIGKILL，WAL 不會乾淨收尾。

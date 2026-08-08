@@ -22,7 +22,7 @@ RUN sed -i \
       /etc/apt/sources.list.d/debian.sources && \
     printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99snapshot && \
     apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl git gh gosu nodejs npm python3 python3-pip pipx ripgrep fzf && \
+    ca-certificates curl git gh gosu nodejs npm python3 python3-pip pipx ripgrep fzf tzdata && \
     rm -rf /var/lib/apt/lists/*
 
 COPY release/package.json release/package-lock.json /opt/wukong-release/
@@ -50,7 +50,12 @@ RUN mkdir -p "$PIPX_HOME" "$PIPX_BIN_DIR" && chown -R wukong:wukong /home/wukong
 COPY workspace/SOUL.md workspace/AGENTS.md /usr/local/share/wukong/
 COPY crates/wukong-skills/assets/superpowers /usr/local/share/wukong/skills/superpowers
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+# The entrypoint launches this for `opencode serve`. It must be copied here AND
+# added to the curated release-context in .github/workflows/release.yml — that
+# workflow copies files in one by one, so anything not listed there simply is not
+# in the build context and vanishes from the image without any build error.
+COPY scripts/opencode-idle-restart.sh /usr/local/bin/opencode-idle-restart.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/opencode-idle-restart.sh
 
 ENV WUKONG_WORKSPACE=/workspace
 WORKDIR /workspace

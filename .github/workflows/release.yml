@@ -157,7 +157,7 @@ jobs:
           cp release/package.json release/package-lock.json release-context/release/
           cp workspace/SOUL.md workspace/AGENTS.md release-context/workspace/
           cp -R crates/wukong-skills/assets/superpowers release-context/crates/wukong-skills/assets/
-          cp scripts/docker-entrypoint.sh release-context/scripts/
+          cp scripts/docker-entrypoint.sh scripts/opencode-idle-restart.sh release-context/scripts/
           set -a; source release/runtime-inputs.env; set +a
           created="$(git show -s --format=%cI "$COMMIT")"
           docker buildx build --platform linux/amd64 --push --metadata-file metadata.json \

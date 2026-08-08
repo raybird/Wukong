@@ -166,7 +166,32 @@ server 一直不閒置，重啟就永遠不會發生。
 
 **進度（2026-08-08）**：repo 端已完成，`scripts/opencode-idle-restart.sh` 由
 entrypoint 在 `opencode serve` 時以背景 sibling 程序啟動（不是 wrapper，opencode
-仍是 PID 1，其訊號處理不受影響）。
+仍是 PID 1，其訊號處理不受影響）。**v0.20.0 因封裝疏漏未生效，v0.20.1 修正**，見下方。
+
+### 事故：v0.20.0 出貨了一個不會運作的功能
+
+映像檔裡沒有 supervisor，但 entrypoint 會去呼叫它，因此 v0.20.0 的自動重啟從未發生。
+
+根因是**發布映像不是用 `Dockerfile` 建置的**。CI 走 `Dockerfile.release`，搭配
+`release.yml` 裡逐檔 `cp` 出來的 build context；而當時只更新了開發用的 `Dockerfile`。
+`.dockerignore` 的 `scripts/*.sh` 也擋著同一個檔案。三道關卡都沒列到它，於是它安靜地
+消失——**build 不報錯、容器照常啟動、opencode 照常服務**，唯一的症狀是重啟從未發生。
+
+放行它的是測試本身：當時的斷言寫成檢查 `$dockerfile`（＝開發用 `Dockerfile`），
+所以測試全綠。**斷言查錯檔案比沒有斷言更危險**，它把「沒驗證」偽裝成「已驗證」。
+
+處置：
+
+- `Dockerfile.release` 補 `COPY` 與 `chmod`，並補上 `tzdata`（先前僅開發 Dockerfile 有；
+  v0.20.0 的映像是靠相依套件間接帶進 tzdata 才沒出事，那不是能依賴的行為）。
+- `release.yml` 的 context 複製列入該檔。
+- `.dockerignore` 以 `!scripts/opencode-idle-restart.sh` 重新納入。
+- entrypoint 改為缺檔時明確警告，不再被背景 `&` 吞掉。
+- 測試改為對 `Dockerfile`、`Dockerfile.release`、`release.yml` 三處同時斷言，並以真實
+  `docker build` 驗證 `.dockerignore` 確實放行、以模擬 CI 的 context 組裝驗證複製到位。
+
+**通則**：任何需要在執行期存在於映像檔的檔案，都必須同時通過這三道關卡，而驗證必須
+針對發布路徑而非開發路徑。
 
 實作時量測發現三件事，都改變了設計：
 

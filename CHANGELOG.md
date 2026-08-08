@@ -11,7 +11,30 @@
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-08-08
+
+修正 v0.20.0 的封裝疏漏：**該版的 opencode 閒置自動重啟完全不會運作。**
+
+### Fixed
+
+- **`opencode-idle-restart.sh` 沒有被打包進 v0.20.0 的映像檔。** 發布用的映像是以
+  `Dockerfile.release` 搭配 `release.yml` 裡逐檔複製的 build context 建置的，而
+  v0.20.0 只更新了開發用的 `Dockerfile`；`.dockerignore` 的 `scripts/*.sh` 也一併把它
+  擋掉了。三處都沒有列到這個檔案，於是它安靜地從映像檔消失——**build 不會失敗、容器
+  照常啟動、opencode 照常服務，只有自動重啟從未發生**。已補齊 `Dockerfile.release`
+  的 `COPY`、`release.yml` 的 context 複製與 `.dockerignore` 的重新納入。
+- entrypoint 在找不到 supervisor 時改為明確警告。先前是以背景工作啟動，缺檔的錯誤
+  被 `&` 吞掉，沒有任何可見症狀。
+- `Dockerfile.release` 補上 `tzdata`（先前只有開發用 `Dockerfile` 有）。v0.20.0 的
+  映像剛好由相依套件間接帶進 tzdata 才沒出事，但那不是能依賴的行為。
+- `test-docker-runtime.sh` 改為對 `Dockerfile`、`Dockerfile.release` 與
+  `release.yml` 的 context 複製三處同時斷言。原本的斷言只檢查開發用 `Dockerfile`，
+  所以測試全綠卻放行了一個功能完全失效的版本。
+
 ## [0.20.0] - 2026-08-08
+
+> ⚠️ 本版的 opencode 閒置自動重啟因封裝疏漏而不會運作，請直接使用 v0.20.1。
+> 其餘變更（cgroup 上限、healthcheck、`stop_signal`）在本版均正常。
 
 `opencode-server` 長期維持 14-25% idle CPU。本版以同版本 opencode 的對照實驗查出
 那不是 Bun 常駐 runtime 的固有成本——同版本、同量級 DB 的全新實例只有約 1%——而是
