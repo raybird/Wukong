@@ -36,8 +36,11 @@ FROM debian:bookworm-slim
 ARG OPENCODE_VERSION=latest
 
 # Install runtime deps + gosu + opencode npm package (pinned via OPENCODE_VERSION)
+# tzdata is required for TZ to resolve: without it the container silently stays on
+# UTC, which would put the opencode idle-restart window (a local-time range) hours
+# away from where the operator thinks it is.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl git gh gosu nodejs npm python3 python3-pip pipx ripgrep fzf && \
+    ca-certificates curl git gh gosu nodejs npm python3 python3-pip pipx ripgrep fzf tzdata && \
     npm install -g "opencode-ai@${OPENCODE_VERSION}" && \
     opencode --version && \
     rm -rf /var/lib/apt/lists/* /root/.npm
@@ -71,7 +74,8 @@ COPY crates/wukong-skills/assets/superpowers /usr/local/share/wukong/skills/supe
 
 # Prepare directories and entrypoint
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+COPY scripts/opencode-idle-restart.sh /usr/local/bin/opencode-idle-restart.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/opencode-idle-restart.sh
 
 # Default environment
 ENV WUKONG_WORKSPACE=/workspace

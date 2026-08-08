@@ -23,6 +23,11 @@
 
 ### Changed
 
+- **`opencode-server` 改用 `SIGINT` 關閉。** opencode 只註冊 SIGINT 處理常式、沒有攔
+  SIGTERM，而核心會丟棄送給 PID 1 的預設動作訊號——所以先前每次 `docker stop` 或
+  `docker compose restart` 的 SIGTERM 都被忽略，空等 10 秒寬限期後才被 Docker 從外部
+  SIGKILL，SQLite WAL 沒有乾淨 checkpoint 的機會。改設 `stop_signal: SIGINT` 後約
+  0.1 秒乾淨退出。
 - `opencode-server` 的 healthcheck 從每 2 秒改為每 30 秒，啟動期則以
   `start_interval: 2s` 維持快探。2 秒間隔每天在容器 cgroup 內 fork 約 43,200 次
   shell+curl，那些 CPU 會計入 `docker stats` 而被誤讀成 opencode 自身的閒置負載。
@@ -31,6 +36,15 @@
 
 ### Added
 
+- **`opencode-server` 會在離峰時段閒置時自行重啟。** `opencode serve` 常駐不死，每回合
+  的殘留（heap、快取、DB handle）全部留存，idle CPU 隨累積工作量上升；CLI 模式沒有這個
+  問題，因為 `opencode run` 每回合退出、等於免費獲得重置。新增的 supervisor 在
+  `WUKONG_OPENCODE_RESTART_WINDOW`（預設 `03:00-05:00`）內、且三項條件同時成立時讓
+  server 自行退出並由 `restart` 拉起：無近期 session 更新、對外埠無 `ESTABLISHED`
+  連線、`opencode.db` 已停止寫入。窗口內始終不閒置就跳過等隔天，**不會強制中斷進行中
+  的回合**。設為空字串可完全停用。
+  **⚠️ 窗口是容器本地時間，預設 `TZ=UTC`**——請在 `.env` 設定 `TZ`（例如
+  `Asia/Taipei`），否則 `03:00` 會落在你以為的時間之外。映像檔因此加裝 `tzdata`。
 - `scripts/collect-opencode-baseline.sh`：蒐集 `opencode-server` 的常駐基線樣本。
   CPU、RSS、thread 與 cgroup 數值全部由 host 端讀 `/proc` 與 cgroup 檔案取得，
   不需要 `docker exec`；並且先靜置量完 CPU 才做 SQLite 等侵入式查詢，避免診斷

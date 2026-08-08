@@ -269,6 +269,15 @@ case "${1:-}" in
         exec gosu wukong "$@"
         ;;
     opencode|agent-reach|gh|python3|pipx)
+        # `opencode serve` is the only long-lived one of these, and it is the one
+        # that accumulates: unlike `opencode run`, which exits after every turn and
+        # so resets its heap, caches and DB handles for free, the server keeps every
+        # turn's residue forever. Start the idle-restart supervisor alongside it to
+        # put that reset back. It is a sibling process, not a wrapper, so opencode
+        # stays PID 1 and its own signal handling is untouched.
+        if [[ "${1:-}" == "opencode" && "${2:-}" == "serve" ]]; then
+            gosu wukong /usr/local/bin/opencode-idle-restart.sh &
+        fi
         # Allow `docker compose run --rm wukong <tool> ...` for runtime setup.
         exec gosu wukong "$@"
         ;;

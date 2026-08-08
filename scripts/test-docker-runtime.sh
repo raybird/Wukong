@@ -182,4 +182,36 @@ done
 require_in_file "WUKONG_OPENCODE_CPUS" .env.example \
     "resource knobs must be documented where operators actually look"
 
+# ── opencode 週期性重啟（W2）──
+idle_restart="scripts/opencode-idle-restart.sh"
+require_in_file "COPY scripts/opencode-idle-restart.sh" "$dockerfile" \
+    "the idle-restart supervisor must ship in the image"
+require_in_file "opencode-idle-restart.sh" "$entrypoint" \
+    "the entrypoint must start the supervisor alongside opencode serve"
+require_in_file '"${1:-}" == "opencode" && "${2:-}" == "serve"' "$entrypoint" \
+    "the supervisor must start only for opencode serve, not for run/gh/agent-reach"
+require_in_file "tzdata" "$dockerfile" \
+    "TZ cannot resolve without tzdata, and the restart window is a local-time range"
+
+# opencode 只攔 SIGINT，沒攔 SIGTERM，而核心會丟棄送給 PID 1 的預設動作訊號——
+# 少了 stop_signal，每次 docker stop 都會空等 10 秒再被 SIGKILL，WAL 不會乾淨收尾。
+for compose in "$compose_file" "$release_compose"; do
+    require_in_file "stop_signal: SIGINT" "$compose" \
+        "$compose must stop opencode with SIGINT; SIGTERM is ignored by pid 1"
+done
+
+# 空字串必須真的能停用。compose 與腳本兩層都得用 ${VAR-default}；只要有一層寫成
+# ${VAR:-default}，空值就會被當成未設定而套回預設，停用開關就是壞的。
+for compose in "$compose_file" "$release_compose"; do
+    require_in_file 'WUKONG_OPENCODE_RESTART_WINDOW-03:00-05:00' "$compose" \
+        "$compose must use \${VAR-default} so an empty window disables the restart"
+done
+require_in_file 'WINDOW="${WUKONG_OPENCODE_RESTART_WINDOW-03:00-05:00}"' "$idle_restart" \
+    "the supervisor must use \${VAR-default} so an empty window disables the restart"
+
+require_in_file 'kill -INT' "$idle_restart" \
+    "the supervisor must signal with SIGINT; SIGTERM never reaches pid 1"
+require_in_file '$4 == "01"' "$idle_restart" \
+    "only ESTABLISHED sockets count as activity; TIME_WAIT would never drain"
+
 echo "docker runtime persistence checks passed"

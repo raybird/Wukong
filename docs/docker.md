@@ -205,8 +205,16 @@ services:
 | `WUKONG_BIN` | 注入排程能力提示詞時使用的 `wukong` 指令路徑（agent 自行建排程時用） | `wukong` |
 | `WUKONG_SCHED_NOTIFY` | schedulerd 是否把排程結果回送 Telegram（`0` 關閉） | `1` |
 | `WUKONG_SCHED_PERMISSION` | 無人值守排程遇到 opencode 權限詢問時的處置；`allow` 才自動允許一次，其餘一律拒絕 | `reject` |
+| `TZ` | 容器時區。**`opencode-server` 的重啟窗口是本地時間**，不設就是 UTC，窗口會落在你以為的時間之外 | `UTC` |
+| `WUKONG_OPENCODE_RESTART_WINDOW` | `opencode-server` 的離峰重啟窗口（`HH:MM-HH:MM`，可跨午夜）。**設為空字串完全停用** | `03:00-05:00` |
+| `WUKONG_OPENCODE_RESTART_MIN_UPTIME_SECS` | 已執行未滿此秒數就不重啟，避免部署或故障後接連重啟 | `43200`（12h） |
+| `WUKONG_OPENCODE_IDLE_QUIET_SECS` | 「閒置」須持續多久才動手；三項條件同時成立才算閒置 | `300` |
 | `WUKONG_OPENCODE_CPUS` / `_MEM` / `_PIDS` | `opencode-server` 與 `cli` profile 的 cgroup 上限（agent 實際幹活的容器）。溫度壓不下來就調降 CPU；回合明顯變慢且溫度尚可再往上加 | `1.5` / `2g` / `256` |
 | `WUKONG_SVC_CPUS` / `_MEM` / `_PIDS` | `wukong-web`／`wukong-telegram`／`wukong-schedulerd` 的 cgroup 上限。重活都在 opencode-server，這層只是 HTTP client；schedulerd 開 `WUKONG_EMBED=1` 時要調高 MEM（embedding 模型載在該程序內） | `0.5` / `768m` / `128` |
+
+**關於 opencode server 的週期性重啟：** `opencode serve` 常駐不死，每回合的殘留（heap、快取、DB handle）全部留存，idle CPU 會隨累積工作量上升；CLI 模式沒有這個問題，因為 `opencode run` 每回合退出，等於免費獲得重置。容器內因此常駐一個 supervisor，在 `WUKONG_OPENCODE_RESTART_WINDOW` 的窗口內、且**三項條件同時成立**時讓 server 自行退出，由 `restart: unless-stopped` 拉起：無近期 session 更新、對外埠沒有 `ESTABLISHED` 連線、`opencode.db` 已停止寫入（第三項用來涵蓋 compaction 等背景工作）。
+
+窗口內若始終不閒置就**跳過、等隔天，不會強制中斷進行中的回合**。代價是：若排程任務集中在凌晨，server 可能長期湊不齊條件而從不重啟——那時該換窗口，而不是調短門檻。是否真的重啟過，看 `docker logs wukong-opencode-server | grep wukong-idle-restart`；每次跳過都會寫明是哪一項條件沒過。
 
 **關於資源上限：** 上限一律**改在 `.env`，不要直接編輯 `docker-compose.yml`**——後者由 release bundle 擁有，`install.sh --upgrade` 會覆寫它，手改會無聲消失；`.env` 則會保留。另外要知道設了 `mem_limit` 就多出一種原本不存在的失敗模式：容器可能被 OOM kill 再由 `restart` 拉起，進行中的回合會遺失。調低之前先用 `scripts/collect-opencode-baseline.sh` 確認 cgroup `memory.events` 的 `oom` 仍為 `0`。
 

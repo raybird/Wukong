@@ -164,12 +164,53 @@ bundle 擁有、`--upgrade` 會覆寫，W3/W4 的變更可經此通道送達。
 若日後有排程任務集中在凌晨，需重新選擇窗口，否則兩者會互相排擠——排程回合讓
 server 一直不閒置，重啟就永遠不會發生。
 
+**進度（2026-08-08）**：repo 端已完成，`scripts/opencode-idle-restart.sh` 由
+entrypoint 在 `opencode serve` 時以背景 sibling 程序啟動（不是 wrapper，opencode
+仍是 PID 1，其訊號處理不受影響）。
+
+實作時量測發現三件事，都改變了設計：
+
+- **必須送 SIGINT，不能送 SIGTERM。** opencode 的 `SigCgt` 是 `0x10002`，只註冊了
+  SIGINT 與 SIGCHLD，沒有攔 SIGTERM。而核心對 PID 1 有特殊規則：**只有裝了處理常式
+  的訊號才會送達**，採預設動作的一律丟棄。容器內 opencode 正是 PID 1，所以 SIGTERM
+  會石沉大海，同 namespace 內連 SIGKILL 都殺不掉它。SIGINT 實測 0.1 秒乾淨退出。
+- **這順帶暴露一個既有問題**：compose 原本沒設 `stop_signal`，所以每次
+  `docker stop` / `docker compose restart` 送的 SIGTERM 都被忽略，空等 10 秒寬限期
+  後被 Docker 從外部 SIGKILL——**現行部署的每一次重啟都不是優雅關閉**，SQLite WAL
+  沒有乾淨 checkpoint 的機會。兩份 compose 已補上 `stop_signal: SIGINT`。
+- **連線檢查只能數 `ESTABLISHED`（state `01`）。** 起初寫成「非 LISTEN」，但
+  healthcheck 與 supervisor 自己的探測結束後會留下 TIME_WAIT（`06`），那樣永遠判不
+  出閒置。條件順序也調整為由便宜到昂貴，把會發 HTTP 請求的 `sessions_idle` 放到最後，
+  避免探測本身建立的連線干擾前一項判斷。
+
+另外兩個容易踩的坑：
+
+- **`${VAR:-default}` 不能用在「空字串即停用」的開關上**——空值會被當成未設定而套回
+  預設，等於停用開關是壞的。compose 與腳本兩層都改用 `${VAR-default}`，並加了測試
+  斷言鎖住這件事。
+- **窗口是容器本地時間，而容器預設是 UTC。** 不設 `TZ` 的話 03:00-05:00 會落在台灣
+  時間上午 11 點。Dockerfile 因此補裝 `tzdata`（缺它時 `TZ` 會靜默退回 UTC），compose
+  傳遞 `TZ`，`.env.example` 直接給了 `TZ=Asia/Taipei`，supervisor 啟動時也會把解析
+  後的窗口與時區印進 log，讓設錯的人第一眼就看得到。
+
 **驗收**：
 
 1. 重啟後 idle CPU 回到 W1 記錄的初始基線量級（開發機實測為 1% 上下）。
 2. 以人工延長的回合驗證：達到門檻但回合仍在進行時，server 不退出。
 3. 重啟後既有 session 仍可續接——`opencode.db` 為持久 volume，session 不隨程序消滅。
 4. 連續 7 日觀察，idle CPU 不再單調上升。
+
+第 2 項已在開發機以真實 `opencode serve` 驗證：持有一條 ESTABLISHED 連線時
+supervisor 正確跳過且未動到程序；連線關閉後於下一輪判定閒置並送出 SIGINT，
+opencode 乾淨退出。停用、格式錯誤、窗口外三條邊界路徑亦已驗證。
+
+部署後確認實際有沒有重啟過：
+
+```bash
+docker logs wukong-opencode-server 2>&1 | grep wukong-idle-restart | tail -20
+```
+
+每次跳過都會寫明是哪一項條件沒過，因此「從未重啟」與「重啟過但沒效果」可以分辨。
 
 ### W3（P1）將 cgroup 硬邊界做成出貨預設
 

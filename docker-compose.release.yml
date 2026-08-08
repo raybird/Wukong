@@ -39,6 +39,14 @@ services:
       - USER_ID=${USER_ID:-1000}
       - GROUP_ID=${GROUP_ID:-1000}
       - WUKONG_WORKSPACE=/workspace
+      # The idle-restart window is a LOCAL-time range, so TZ decides what it means.
+      # Without tzdata + TZ the container is UTC and 03:00 lands mid-afternoon.
+      - TZ=${TZ:-UTC}
+      # Empty disables the periodic restart entirely. Note the `-` (not `:-`): with
+      # `:-` an empty value would fall back to the default and silently re-enable it.
+      - WUKONG_OPENCODE_RESTART_WINDOW=${WUKONG_OPENCODE_RESTART_WINDOW-03:00-05:00}
+      - WUKONG_OPENCODE_RESTART_MIN_UPTIME_SECS=${WUKONG_OPENCODE_RESTART_MIN_UPTIME_SECS:-43200}
+      - WUKONG_OPENCODE_IDLE_QUIET_SECS=${WUKONG_OPENCODE_IDLE_QUIET_SECS:-300}
     volumes:
       - ${WUKONG_HOST_WORKSPACE:-./workspace}:/workspace
       - opencode-config:/home/wukong/.config/opencode
@@ -47,6 +55,12 @@ services:
       - gh-config:/home/wukong/.config/gh
     command: ["opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"]
     restart: unless-stopped
+    # opencode installs a handler for SIGINT only (SigCgt 0x10002) and none for
+    # SIGTERM. The kernel drops default-action signals sent to PID 1, so the usual
+    # SIGTERM from `docker stop` is silently ignored and every shutdown waits out the
+    # 10s grace period before being SIGKILLed — no clean SQLite WAL checkpoint.
+    # SIGINT exits in ~0.1s cleanly.
+    stop_signal: SIGINT
     # Agent turns run here, so this is the container that can eat the host. Tune via
     # .env (preserved across `install.sh --upgrade`) — do NOT hand-edit the values
     # below, this file is bundle-owned and gets overwritten on upgrade.
