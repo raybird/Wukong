@@ -12,6 +12,8 @@ OpenCode：`1.18.14`（npm 最新版為 `1.18.15`）
 
 - `docs/2026-08-06-docker-runtime-handover.md`
 - `docs/docker.md`
+- `docs/superpowers/specs/2026-08-08-opencode-server-residency-remediation-design.md`
+  （修復規劃；含 2026-08-08 對照實驗，已推翻本文第 4 點的主要假設——見下方追記）
 
 ## 摘要
 
@@ -328,6 +330,49 @@ Wukong 的 session lease 只會保護同一個 scope：
 - OpenCode session delete 是否會完整 cascade 清除所有對應 event/part；清理前必須先在
   備份或副本驗證。
 - 1.18.15 是否修復此 CPU 行為。版本存在，但未在本次調查中宣稱有相關修復。
+
+## 2026-08-08 追記：對照實驗結果
+
+本文成稿後，在開發機上以**同版本 opencode 1.18.14** 做了對照實驗。量測方式為
+`/proc/<pid>/stat` 的 `utime+stime` 差分（真實區間 CPU），而非本文批評過的
+`ps -eo %cpu`。開發機 `opencode.db` 為 787 MB / 646 sessions，與主機的
+1.33 GiB / 100 sessions 屬同一量級。
+
+| 條件 | idle CPU | RSS | threads |
+|---|---:|---:|---:|
+| 空目錄啟動 `opencode serve` | 0.5-1.1% | 305 MiB | 14-16 |
+| 於含 23 GB `target/` 的 repo 啟動 | 0.6-1.0% | 299 MiB | 11-14 |
+| 本文記錄的部署主機 | 14-25% | 782 MiB | 21 |
+
+據此**推翻本文第 4 點的主要假設**（「最符合證據的解釋是 OpenCode/Bun 的常駐
+runtime、heap 維護或其他 idle housekeeping」）：若成立，同版本的全新實例應呈現
+相同基線，實測僅約 1%。同時排除另外兩項：
+
+- **非 watcher 掃到 build artifact**——刻意在 23 GB `target/`（比主機 workspace 大
+  四倍）下啟動，CPU 無變化。本文「排除中的工作負載」一節的判斷因此得到獨立佐證。
+- **非 2 秒 healthcheck**——實測純閒置 0.95%、加上 2 秒 healthcheck 為 1.45%，
+  server 端僅多約 0.5 個百分點。本文將其列為「低」風險是正確的，現有量化數字。
+
+開發機實例與主機實例的關鍵差異是**執行時間與工作負載**：前者為全新啟動、僅執行
+60 秒。累積的跡象存在於本文自己的數字中——RSS 由 305 MiB 成長為 782 MiB、thread
+由 11-16 成長為 21，而每 session 事件數由開發機的 87（互動式使用）成長為主機的
+3,565（Wukong 回合），相差 40 倍。後者與 `scripts/docker-entrypoint.sh` 記載的
+約 430 倍串流寫入放大一致。
+
+修正後的假設是：**idle CPU 來自常駐程序內隨回合累積而不被釋放的狀態，而非
+`opencode serve` 的固有成本。** CLI 模式沒有同樣現象，是因為 `opencode run`
+每回合退出，累積在結構上不可能發生——差異在程序生命週期，不在效率高低。
+
+### 對本文「建議處理順序」的一項修正
+
+P1 的「升級 1.18.15 後以受控重啟的 idle baseline 進行 A/B 量測」**在設計上無法
+產生結論**：升級必然重啟容器，若真正機制是累積，重啟本身就會讓 idle CPU 回落，
+因此「版本修好了」與「重啟清掉了累積」會給出相同的觀測結果，且兩者都會在數週後
+復發。正確做法是先取得重啟前基線，再於 +0h / +6h / +24h / +72h 連續取樣並對齊
+期間執行的回合數。
+
+完整規劃見
+`docs/superpowers/specs/2026-08-08-opencode-server-residency-remediation-design.md`。
 
 ## 風險評估
 

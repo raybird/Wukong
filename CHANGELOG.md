@@ -11,6 +11,24 @@
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/collect-opencode-baseline.sh`：蒐集 `opencode-server` 的常駐基線樣本。
+  CPU、RSS、thread 與 cgroup 數值全部由 host 端讀 `/proc` 與 cgroup 檔案取得，
+  不需要 `docker exec`；並且先靜置量完 CPU 才做 SQLite 等侵入式查詢，避免診斷
+  指令自己的 CPU 被計進容器 cgroup 而誤讀為 opencode 的閒置負載。輸出為可直接
+  `diff` 的 `key: value` 純文字，同時涵蓋 `memory.events` 與 CPU throttling 欄位。
+
+### Docs
+
+- 新增整機凍結與 opencode 資源調查交接文件
+  `docs/2026-08-08-system-freeze-opencode-resource-handover.md`，並以 2026-08-08
+  的對照實驗追記修正其主要假設：`opencode serve` 的 14-25% idle CPU 不是 Bun 常駐
+  runtime 的固有成本（同版本全新實例僅約 1%），而是隨回合累積且從不釋放的狀態。
+  CLI 模式沒有同樣現象，因為 `opencode run` 每回合退出，累積在結構上不可能發生。
+  修復規劃見
+  `docs/superpowers/specs/2026-08-08-opencode-server-residency-remediation-design.md`。
+
 ## [0.19.0] - 2026-08-06
 
 排程任務會停在沒人回答的權限詢問上，直到 20 分鐘 agent timeout 才失敗。本版修掉
