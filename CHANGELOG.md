@@ -43,8 +43,8 @@
   server 自行退出並由 `restart` 拉起：無近期 session 更新、對外埠無 `ESTABLISHED`
   連線、`opencode.db` 已停止寫入。窗口內始終不閒置就跳過等隔天，**不會強制中斷進行中
   的回合**。設為空字串可完全停用。
-  **⚠️ 窗口是容器本地時間，預設 `TZ=UTC`**——請在 `.env` 設定 `TZ`（例如
-  `Asia/Taipei`），否則 `03:00` 會落在你以為的時間之外。映像檔因此加裝 `tzdata`。
+  窗口是容器本地時間，compose 預設 `TZ=Asia/Taipei`（映像檔因此加裝 `tzdata`；
+  缺它時 `TZ` 會靜默退回 UTC）。不在 +08:00 的部署請在 `.env` 覆寫 `TZ`。
 - `scripts/collect-opencode-baseline.sh`：蒐集 `opencode-server` 的常駐基線樣本。
   CPU、RSS、thread 與 cgroup 數值全部由 host 端讀 `/proc` 與 cgroup 檔案取得，
   不需要 `docker exec`；並且先靜置量完 CPU 才做 SQLite 等侵入式查詢，避免診斷

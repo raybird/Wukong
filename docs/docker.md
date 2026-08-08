@@ -205,7 +205,7 @@ services:
 | `WUKONG_BIN` | 注入排程能力提示詞時使用的 `wukong` 指令路徑（agent 自行建排程時用） | `wukong` |
 | `WUKONG_SCHED_NOTIFY` | schedulerd 是否把排程結果回送 Telegram（`0` 關閉） | `1` |
 | `WUKONG_SCHED_PERMISSION` | 無人值守排程遇到 opencode 權限詢問時的處置；`allow` 才自動允許一次，其餘一律拒絕 | `reject` |
-| `TZ` | 容器時區。**`opencode-server` 的重啟窗口是本地時間**，不設就是 UTC，窗口會落在你以為的時間之外 | `UTC` |
+| `TZ` | 容器時區。**`opencode-server` 的重啟窗口是本地時間**，由此決定實際落點；不在 +08:00 才需要改 | `Asia/Taipei` |
 | `WUKONG_OPENCODE_RESTART_WINDOW` | `opencode-server` 的離峰重啟窗口（`HH:MM-HH:MM`，可跨午夜）。**設為空字串完全停用** | `03:00-05:00` |
 | `WUKONG_OPENCODE_RESTART_MIN_UPTIME_SECS` | 已執行未滿此秒數就不重啟，避免部署或故障後接連重啟 | `43200`（12h） |
 | `WUKONG_OPENCODE_IDLE_QUIET_SECS` | 「閒置」須持續多久才動手；三項條件同時成立才算閒置 | `300` |

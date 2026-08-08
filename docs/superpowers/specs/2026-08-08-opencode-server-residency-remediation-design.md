@@ -189,9 +189,12 @@ entrypoint 在 `opencode serve` 時以背景 sibling 程序啟動（不是 wrapp
   預設，等於停用開關是壞的。compose 與腳本兩層都改用 `${VAR-default}`，並加了測試
   斷言鎖住這件事。
 - **窗口是容器本地時間，而容器預設是 UTC。** 不設 `TZ` 的話 03:00-05:00 會落在台灣
-  時間上午 11 點。Dockerfile 因此補裝 `tzdata`（缺它時 `TZ` 會靜默退回 UTC），compose
-  傳遞 `TZ`，`.env.example` 直接給了 `TZ=Asia/Taipei`，supervisor 啟動時也會把解析
-  後的窗口與時區印進 log，讓設錯的人第一眼就看得到。
+  時間上午 11 點，而唯一的症狀是「重啟沒有在我以為的時間發生」——很難察覺。Dockerfile
+  因此補裝 `tzdata`（缺它時 `TZ` 會靜默退回 UTC），且**預設值 `TZ=Asia/Taipei` 放在
+  compose 而非 `.env`**：compose 是 bundle 擁有、升級時覆寫的檔案，預設放那裡才會隨
+  版本送達每一個既有部署；`.env` 是使用者覆寫層，既有部署永遠不會自動獲得那裡的新值。
+  這與 v0.19.0 把 opencode baseline 從 seed-if-missing 改為每次覆寫是同一個道理。
+  supervisor 啟動時也會把解析後的窗口與時區印進 log，讓設錯的人第一眼就看得到。
 
 **驗收**：
 

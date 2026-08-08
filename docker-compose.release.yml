@@ -39,9 +39,13 @@ services:
       - USER_ID=${USER_ID:-1000}
       - GROUP_ID=${GROUP_ID:-1000}
       - WUKONG_WORKSPACE=/workspace
-      # The idle-restart window is a LOCAL-time range, so TZ decides what it means.
-      # Without tzdata + TZ the container is UTC and 03:00 lands mid-afternoon.
-      - TZ=${TZ:-UTC}
+      # The idle-restart window below is a LOCAL-time range, so TZ decides what it
+      # actually means. Defaulting to UTC made 03:00 land at 11:00 in +08:00 and the
+      # only symptom would be "the restart never happens when I expect" — so the
+      # default lives here, where it ships with every release, rather than in .env,
+      # which existing deployments would never receive. Override in .env if you are
+      # not in +08:00.
+      - TZ=${TZ:-Asia/Taipei}
       # Empty disables the periodic restart entirely. Note the `-` (not `:-`): with
       # `:-` an empty value would fall back to the default and silently re-enable it.
       - WUKONG_OPENCODE_RESTART_WINDOW=${WUKONG_OPENCODE_RESTART_WINDOW-03:00-05:00}

@@ -211,6 +211,14 @@ require_in_file 'WINDOW="${WUKONG_OPENCODE_RESTART_WINDOW-03:00-05:00}"' "$idle_
 
 require_in_file 'kill -INT' "$idle_restart" \
     "the supervisor must signal with SIGINT; SIGTERM never reaches pid 1"
+
+# 預設時區必須留在 compose。放到 .env 的話既有部署永遠拿不到它——.env 是使用者擁有、
+# 升級時保留的層，只有 compose 的預設會隨版本送達（同 v0.19.0 的 opencode baseline）。
+# 沒有 TZ 就退回 UTC，窗口會安靜地落在錯誤的時間，而唯一症狀是「重啟沒發生」。
+for compose in "$compose_file" "$release_compose"; do
+    require_in_file 'TZ=${TZ:-Asia/Taipei}' "$compose" \
+        "$compose must ship a real timezone default; the restart window is local time"
+done
 require_in_file '$4 == "01"' "$idle_restart" \
     "only ESTABLISHED sockets count as activity; TIME_WAIT would never drain"
 
