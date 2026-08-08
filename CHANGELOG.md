@@ -11,6 +11,17 @@
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-08-08
+
+`opencode-server` 長期維持 14-25% idle CPU。本版以同版本 opencode 的對照實驗查出
+那不是 Bun 常駐 runtime 的固有成本——同版本、同量級 DB 的全新實例只有約 1%——而是
+常駐程序內隨回合累積且從不釋放的狀態。CLI 模式沒有這個現象，不是因為它比較有效率，
+而是 `opencode run` 每回合退出，累積在結構上不可能發生；差異在程序生命週期。本版為
+server 模式補回那個 CLI 免費獲得的週期性重置，同時保留暖啟動的低延遲優勢，並為所有
+容器補上先前完全缺席的 cgroup 硬上限。調查見
+`docs/2026-08-08-system-freeze-opencode-resource-handover.md`，規劃見
+`docs/superpowers/specs/2026-08-08-opencode-server-residency-remediation-design.md`。
+
 ### ⚠️ 升級注意
 
 - **所有容器都加上了 cgroup 硬上限。** 先前四個 service 全是無限制狀態，任一 agent
