@@ -205,6 +205,10 @@ services:
 | `WUKONG_BIN` | 注入排程能力提示詞時使用的 `wukong` 指令路徑（agent 自行建排程時用） | `wukong` |
 | `WUKONG_SCHED_NOTIFY` | schedulerd 是否把排程結果回送 Telegram（`0` 關閉） | `1` |
 | `WUKONG_SCHED_PERMISSION` | 無人值守排程遇到 opencode 權限詢問時的處置；`allow` 才自動允許一次，其餘一律拒絕 | `reject` |
+| `WUKONG_OPENCODE_CPUS` / `_MEM` / `_PIDS` | `opencode-server` 與 `cli` profile 的 cgroup 上限（agent 實際幹活的容器）。溫度壓不下來就調降 CPU；回合明顯變慢且溫度尚可再往上加 | `1.5` / `2g` / `256` |
+| `WUKONG_SVC_CPUS` / `_MEM` / `_PIDS` | `wukong-web`／`wukong-telegram`／`wukong-schedulerd` 的 cgroup 上限。重活都在 opencode-server，這層只是 HTTP client；schedulerd 開 `WUKONG_EMBED=1` 時要調高 MEM（embedding 模型載在該程序內） | `0.5` / `768m` / `128` |
+
+**關於資源上限：** 上限一律**改在 `.env`，不要直接編輯 `docker-compose.yml`**——後者由 release bundle 擁有，`install.sh --upgrade` 會覆寫它，手改會無聲消失；`.env` 則會保留。另外要知道設了 `mem_limit` 就多出一種原本不存在的失敗模式：容器可能被 OOM kill 再由 `restart` 拉起，進行中的回合會遺失。調低之前先用 `scripts/collect-opencode-baseline.sh` 確認 cgroup `memory.events` 的 `oom` 仍為 `0`。
 
 **Volume 架構：**
 

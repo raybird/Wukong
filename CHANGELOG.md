@@ -11,6 +11,24 @@
 
 ## [Unreleased]
 
+### ⚠️ 升級注意
+
+- **所有容器都加上了 cgroup 硬上限。** 先前四個 service 全是無限制狀態，任一 agent
+  回合或工具都能用盡整台主機的 CPU、記憶體與 PID。預設值：`opencode-server` 與
+  `cli` profile 為 `cpus 1.5` / `mem_limit 2g` / `pids_limit 256`，其餘 service 為
+  `0.5` / `768m` / `128`。要調整請改 `.env` 的 `WUKONG_OPENCODE_*` 與
+  `WUKONG_SVC_*`，**不要直接編輯 `docker-compose.yml`**——它由 release bundle 擁有、
+  升級時會被覆寫，手改會無聲消失。另外請注意 `mem_limit` 引入了一種原本不存在的
+  失敗模式：容器可能被 OOM kill 再由 `restart` 拉起，進行中的回合會遺失。
+
+### Changed
+
+- `opencode-server` 的 healthcheck 從每 2 秒改為每 30 秒，啟動期則以
+  `start_interval: 2s` 維持快探。2 秒間隔每天在容器 cgroup 內 fork 約 43,200 次
+  shell+curl，那些 CPU 會計入 `docker stats` 而被誤讀成 opencode 自身的閒置負載。
+  改用 `start_interval` 是因為 web／telegram／schedulerd 都以 `depends_on` 等待
+  server 健康，單純放寬 `interval` 會讓每次啟動多等最多 30 秒。需 Docker Engine 25.0+。
+
 ### Added
 
 - `scripts/collect-opencode-baseline.sh`：蒐集 `opencode-server` 的常駐基線樣本。

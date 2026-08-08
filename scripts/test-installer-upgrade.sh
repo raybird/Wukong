@@ -167,7 +167,10 @@ PY
 
 test_docker() {
     prepare
-    printf 'USER_SECRET=preserve\n' > "$DEPLOYMENT/.env"
+    # WUKONG_OPENCODE_CPUS stands in for the whole resource-limit escape hatch: the
+    # compose file is bundle-owned and replaced on upgrade, so .env is the only place
+    # a tuned limit can survive. If .env ever became release-owned, this catches it.
+    printf 'USER_SECRET=preserve\nWUKONG_OPENCODE_CPUS=1.0\n' > "$DEPLOYMENT/.env"
     printf 'keep\n' > "$DEPLOYMENT/compose.override.yml"
     mkdir -p "$DEPLOYMENT/workspace"; printf 'state\n' > "$DEPLOYMENT/workspace/custom"
     run_installer '' --mode docker --version v9.9.9 >/dev/null
@@ -177,6 +180,7 @@ test_docker() {
     assert_not_contains "$LOG" 'build'
     assert_not_contains "$LOG" ' down'
     assert_contains "$DEPLOYMENT/.env" 'USER_SECRET=preserve'
+    assert_contains "$DEPLOYMENT/.env" 'WUKONG_OPENCODE_CPUS=1.0'
     assert_contains "$DEPLOYMENT/compose.override.yml" 'keep'
     assert_contains "$DEPLOYMENT/workspace/custom" 'state'
 }

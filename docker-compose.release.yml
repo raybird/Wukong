@@ -25,6 +25,12 @@ services:
     stdin_open: true
     tty: true
     command: ["wukong"]
+    # This profile has no WUKONG_AGENT_SERVER_URL, so it runs `opencode run` inside
+    # its OWN container rather than talking to opencode-server. It therefore needs
+    # agent-sized limits, not the smaller client-side ones the other services get.
+    cpus: "${WUKONG_OPENCODE_CPUS:-1.5}"
+    mem_limit: "${WUKONG_OPENCODE_MEM:-2g}"
+    pids_limit: ${WUKONG_OPENCODE_PIDS:-256}
 
   opencode-server:
     image: ghcr.io/raybird/wukong:__WUKONG_VERSION__
@@ -41,12 +47,26 @@ services:
       - gh-config:/home/wukong/.config/gh
     command: ["opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"]
     restart: unless-stopped
+    # Agent turns run here, so this is the container that can eat the host. Tune via
+    # .env (preserved across `install.sh --upgrade`) — do NOT hand-edit the values
+    # below, this file is bundle-owned and gets overwritten on upgrade.
+    cpus: "${WUKONG_OPENCODE_CPUS:-1.5}"
+    mem_limit: "${WUKONG_OPENCODE_MEM:-2g}"
+    mem_reservation: "512m"
+    pids_limit: ${WUKONG_OPENCODE_PIDS:-256}
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:4096/global/health || exit 1"]
-      interval: 2s
-      timeout: 2s
-      retries: 30
-      start_period: 2s
+      # Three services wait for this container to report healthy before they start,
+      # so the first probe must stay fast — that is what start_interval is for.
+      # Steady-state probing relaxes
+      # to 30s: at 2s this forked a shell+curl inside this container's cgroup ~43k
+      # times a day, and that CPU lands in `docker stats` where it reads as opencode's
+      # own idle load. Requires Docker Engine 25.0+ for start_interval.
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 2s
 
   wukong-telegram:
     image: ghcr.io/raybird/wukong:__WUKONG_VERSION__
@@ -76,6 +96,10 @@ services:
       opencode-server:
         condition: service_healthy
     restart: unless-stopped
+    # Talks to opencode-server over HTTP, so the heavy work happens there, not here.
+    cpus: "${WUKONG_SVC_CPUS:-0.5}"
+    mem_limit: "${WUKONG_SVC_MEM:-768m}"
+    pids_limit: ${WUKONG_SVC_PIDS:-128}
 
   wukong-web:
     image: ghcr.io/raybird/wukong:__WUKONG_VERSION__
@@ -108,6 +132,10 @@ services:
       opencode-server:
         condition: service_healthy
     restart: unless-stopped
+    # Talks to opencode-server over HTTP, so the heavy work happens there, not here.
+    cpus: "${WUKONG_SVC_CPUS:-0.5}"
+    mem_limit: "${WUKONG_SVC_MEM:-768m}"
+    pids_limit: ${WUKONG_SVC_PIDS:-128}
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8787/healthz || exit 1"]
       interval: 30s
@@ -146,6 +174,12 @@ services:
       opencode-server:
         condition: service_healthy
     restart: unless-stopped
+    # Talks to opencode-server over HTTP, but also runs memory maintenance locally.
+    # Raise WUKONG_SVC_MEM if you turn on WUKONG_EMBED=1 here — the local embedding
+    # model is loaded in this process, not in opencode-server.
+    cpus: "${WUKONG_SVC_CPUS:-0.5}"
+    mem_limit: "${WUKONG_SVC_MEM:-768m}"
+    pids_limit: ${WUKONG_SVC_PIDS:-128}
 
 volumes:
   opencode-config:

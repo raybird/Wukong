@@ -199,6 +199,21 @@ pids_limit: 256
 串流中斷。目前 `memory.current` 約 902 MiB（其中約 321 MiB 為可回收 file cache），
 2g 留有緩衝，但驗收必須涵蓋此風險。
 
+**進度（2026-08-08）**：repo 端已完成，待隨下一次 `install.sh --upgrade` 送達部署主機。
+
+實作時修正了原提案的兩點：
+
+- **`wukong` CLI profile 不能用「較小值」。** 它沒有 `WUKONG_AGENT_SERVER_URL`，會在
+  自己的容器內跑 `opencode run`，因此需要與 `opencode-server` 同級的上限；給
+  `cpus 0.5` 會直接把它掐死。
+- **上限一律經 env 變數指定**（`WUKONG_OPENCODE_*` / `WUKONG_SVC_*`），不寫死數值。
+  因為 `docker-compose.yml` 是 bundle 擁有、升級時會被覆寫，寫死的話使用者唯一的
+  調整途徑就是手改該檔，而那個調整會在下次升級無聲消失；`.env` 才是保留的那一層。
+
+實際值：`opencode-server` 與 `wukong` 為 `1.5` / `2g` / `256`（server 另加
+`mem_reservation: 512m`）；`wukong-web`、`wukong-telegram`、`wukong-schedulerd`
+為 `0.5` / `768m` / `128`。已同步寫入 `.env.example` 與 `docs/docker.md` 的變數表。
+
 **驗收**：
 
 1. `docker inspect` 顯示各 service 的 `NanoCpus`、`Memory`、`PidsLimit` 不再為 0 或空值。
@@ -206,18 +221,32 @@ pids_limit: 256
    `oom_kill` 維持為 0。
 3. `compose.override.yml` 可覆寫上述值且於 `--upgrade` 後保留。
 
+前兩項可直接用 `scripts/collect-opencode-baseline.sh` 取得（已含
+`limit_*`、`cgroup_memory_events_*` 與 `cgroup_cpu_*` 欄位）。第 3 項與 `.env`
+的保留行為由 `scripts/test-installer-upgrade.sh` 的 `test_docker` 涵蓋。
+
 ### W4（P1）調降 healthcheck 頻率
 
 **問題**：`opencode-server` healthcheck 為 2 秒一次，每日約 43,200 次；每次於容器
 cgroup 內生成 shell + curl，該 CPU 會計入 `docker stats` 而被誤讀為 opencode 自身負載。
 
-**變更**：`interval` 由 2s 調整為 30s，保留較短 `start_period` 與合理 `retries`，
-避免啟動期誤判。兩份 compose 同步修改。
+**變更**：`interval` 由 2s 調整為 30s，兩份 compose 同步修改。
+
+**進度（2026-08-08）**：已完成。實作時發現原提案漏了一件事——`wukong-web`、
+`wukong-telegram`、`wukong-schedulerd` 三個 service 都以 `depends_on` 搭配
+`service_healthy` 等待 opencode-server，**所以 2 秒間隔其實兼任了啟動排序的角色**；
+單純改成 30s 會讓每次 `compose up` 的依賴服務多等最多 30 秒。
+
+改用 `start_interval: 2s` 搭配 `start_period: 60s`：啟動期維持 2 秒快探（依賴服務
+照樣立刻解除等待），進入穩態後才放寬到 30s。`retries` 由 30 降為 3、`timeout` 由
+2s 提高為 5s，故障偵測時間與原本的 2s×30 相當。`start_interval` 需要 Docker Engine
+25.0+（已於 28.1.1 / Compose v2.35.1 驗證）。
 
 **注意**：本項已量化為約 0.5-0.8 個百分點，是**降噪與正確歸因**，不是對 14-25% 的
 修復。不得以本項的完成宣稱問題已解決。
 
-**驗收**：service 於調整後仍穩定 healthy；啟動期不因 `retries` 不足而誤判為 unhealthy。
+**驗收**：service 於調整後仍穩定 healthy；`compose up` 時依賴服務的等待時間沒有
+明顯變長；啟動期不因 `retries` 不足而誤判為 unhealthy。
 
 ### W5（P2）將現場調查沉澱為可重複執行的診斷產出
 

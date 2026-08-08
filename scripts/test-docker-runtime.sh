@@ -139,4 +139,47 @@ if awk '
     exit 1
 fi
 
+# ── 資源上限 ──
+# 五個 service 都必須有 cgroup 硬邊界。少任何一個，該容器就能用盡整台主機的 CPU、
+# 記憶體與 PID——這正是 2026-08-07 整機凍結時的狀態。
+for compose in "$compose_file" "$release_compose"; do
+    for key in "cpus:" "mem_limit:" "pids_limit:"; do
+        require_count_in_file "$key" 5 "$compose" \
+            "$compose must set $key on all five services"
+    done
+done
+require_in_file "mem_reservation:" "$compose_file" \
+    "opencode-server needs a memory reservation so it is not the first to be reclaimed"
+require_in_file "mem_reservation:" "$release_compose" \
+    "release opencode-server needs a memory reservation too"
+
+# ── Healthcheck 頻率 ──
+# 2 秒間隔每天在容器 cgroup 內 fork 約 43,200 次 shell+curl，那些 CPU 會計入
+# docker stats 而被誤讀為 opencode 自身的閒置負載。改用 start_interval 只在啟動期
+# 快探，讓三個 depends_on 的 service 仍能立刻解除等待。
+for compose in "$compose_file" "$release_compose"; do
+    if grep -Eq '^[[:space:]]*interval: 2s' "$compose"; then
+        echo "FAIL: $compose still probes every 2s outside start_period" >&2
+        echo "use start_interval for startup probing and relax interval to 30s" >&2
+        exit 1
+    fi
+done
+require_in_file "start_interval: 2s" "$compose_file" \
+    "opencode-server must probe fast during start_period or dependents are delayed"
+require_in_file "start_interval: 2s" "$release_compose" \
+    "release opencode-server must probe fast during start_period too"
+
+# 上限必須經由 env 變數指定。寫死數值的話，使用者唯一的調整方式就是手改 compose，
+# 而那個檔案是 bundle 擁有的、`install.sh --upgrade` 會覆寫它——調整會無聲消失。
+# .env 才是升級時保留的那一層，所以逃生口必須留在 env 變數上。
+for compose in "$compose_file" "$release_compose"; do
+    for var in WUKONG_OPENCODE_CPUS WUKONG_OPENCODE_MEM WUKONG_OPENCODE_PIDS \
+               WUKONG_SVC_CPUS WUKONG_SVC_MEM WUKONG_SVC_PIDS; do
+        require_in_file "\${$var:-" "$compose" \
+            "$compose must expose the limit through $var so .env can override it"
+    done
+done
+require_in_file "WUKONG_OPENCODE_CPUS" .env.example \
+    "resource knobs must be documented where operators actually look"
+
 echo "docker runtime persistence checks passed"
