@@ -19,8 +19,11 @@
     `Dockerfile.release` 的每一個 `COPY` 來源，逐一確認該路徑在 repo 內存在、且
     `release.yml` 確實把它複製進 `release-context/`。發布用的 build context 是逐檔
     組出來的，漏列的檔案不會讓 build 失敗，只會安靜地從映像檔消失。
-  - `test-release-image.sh smoke` 擴充為檢查映像檔內的執行期檔案（entrypoint、
-    idle-restart supervisor、四支 binary）確實存在且可執行，並確認 tzdata 已安裝。
+  - `test-release-image.sh smoke` 改為檢查映像檔的實際內容：entrypoint 與 idle-restart
+    supervisor 以絕對路徑確認存在且可執行，四支 binary 加 `opencode`、`agent-reach` 以
+    `command -v` 確認可在 PATH 上解析（涵蓋符號連結與 pipx 安裝位置），並確認 tzdata
+    已安裝。全部收斂成單一容器啟動，耗時約 0.2 秒。原本逐支跑 `--help` 要數分鐘，卻
+    證明不了比「能被解析」更多的事——v0.20.0 壞的是檔案不存在，不是 binary 有問題。
     `release.yml` 會在**貼上任何公開 tag 之前**對剛建好的映像執行它，因此壞掉的映像
     不會取得公開 tag；另有斷言鎖住這個先後順序。
 

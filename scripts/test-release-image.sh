@@ -116,32 +116,40 @@ check_context() {
   done <<<"$sources"
 }
 
-# Runtime files the entrypoint depends on. A missing one here is invisible at build
-# time and usually silent at run time too, so assert against the real image.
+# Runtime files the entrypoint depends on by absolute path. A missing one is invisible
+# at build time and silent at run time too, so assert against the real image.
 RUNTIME_EXECUTABLES=(
   /usr/local/bin/docker-entrypoint.sh
   /usr/local/bin/opencode-idle-restart.sh
-  /usr/local/bin/wukong
-  /usr/local/bin/wukong-telegram
-  /usr/local/bin/wukong-web
-  /usr/local/bin/wukong-schedulerd
 )
 
+# Tools that must resolve on PATH. `command -v` covers existence, executability and
+# symlink targets — opencode is a symlink into /opt and agent-reach lives in the
+# runtime user's pipx bin, so neither has a stable absolute path worth hardcoding.
+RUNTIME_COMMANDS=(
+  wukong wukong-telegram wukong-web wukong-schedulerd opencode agent-reach
+)
+
+# This runs in CI between building the image and publishing its tag, so it is kept to
+# a single container start. It deliberately does NOT execute the tools: `--help` on
+# six binaries cost minutes and proved nothing that resolving them on PATH does not,
+# because what broke in v0.20.0 was a file being absent, not a binary being broken.
 check_smoke() {
-  local image="${1:?usage: test-release-image.sh smoke <image>}" path
-  for binary in wukong wukong-telegram wukong-web wukong-schedulerd opencode agent-reach; do
-    docker run --rm --entrypoint "$binary" "$image" --help >/dev/null
-  done
+  local image="${1:?usage: test-release-image.sh smoke <image>}" output probe
 
-  for path in "${RUNTIME_EXECUTABLES[@]}"; do
-    docker run --rm --entrypoint test "$image" -x "$path" ||
-      fail "$image is missing an executable runtime file: $path"
-  done
-
-  # The restart window is a local-time range; without tzdata TZ silently resolves to
-  # UTC and the window quietly moves by the offset.
-  docker run --rm --entrypoint test "$image" -f /usr/share/zoneinfo/Asia/Taipei ||
-    fail "$image has no tzdata, so TZ cannot resolve and the restart window would drift"
+  probe='
+for p in '"${RUNTIME_EXECUTABLES[*]}"'; do
+  [ -x "$p" ] || { echo "missing executable runtime file: $p"; exit 1; }
+done
+for c in '"${RUNTIME_COMMANDS[*]}"'; do
+  command -v "$c" >/dev/null 2>&1 || { echo "not resolvable on PATH: $c"; exit 1; }
+done
+# The restart window is a local-time range; without tzdata TZ silently resolves to
+# UTC and the window quietly moves by the offset.
+[ -f /usr/share/zoneinfo/Asia/Taipei ] || { echo "missing tzdata"; exit 1; }
+'
+  output="$(docker run --rm --entrypoint sh "$image" -c "$probe" 2>&1)" ||
+    fail "$image failed its runtime contents check: ${output:-no output}"
 
   [[ "$(docker image inspect --format '{{.Config.User}}' "$image")" != "" ]] || true
 }
