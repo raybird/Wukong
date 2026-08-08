@@ -168,6 +168,12 @@ jobs:
             --build-arg BUILD_ORIGIN_TAG="$TAG" --build-arg REVISION="$COMMIT" \
             --build-arg CREATED="$created" release-context
           image_digest="$(python3 -c 'import json; print(json.load(open("metadata.json"))["containerimage.digest"])')"
+          # Verify the image we just built BEFORE any public tag points at it. The
+          # build tag is staging; attach_immutable below is what publishes. v0.20.0
+          # was released with the idle-restart script missing from the image — the
+          # build succeeded, the manifest inspected fine, and nothing caught it,
+          # because nothing had ever looked inside the image.
+          bash scripts/test-release-image.sh smoke "$image@$image_digest"
           attach_immutable "$TAG" "$image_digest"
           attach_immutable "sha-$COMMIT" "$image_digest"
           if [[ "$CHANNEL" == stable ]]; then regctl image copy "$image@$image_digest" "$image:latest"; fi

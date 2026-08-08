@@ -11,6 +11,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- 發布流程新增兩道能真正擋下 v0.20.0 那類問題的檢查。原本的斷言都只是靜態文字比對，
+  而且比對的是開發用 `Dockerfile`，所以測試全綠卻放行了一個功能完全失效的版本。
+  - `test-release-image.sh context`（已納入預設 `all`，發版 preflight 會跑）：解析
+    `Dockerfile.release` 的每一個 `COPY` 來源，逐一確認該路徑在 repo 內存在、且
+    `release.yml` 確實把它複製進 `release-context/`。發布用的 build context 是逐檔
+    組出來的，漏列的檔案不會讓 build 失敗，只會安靜地從映像檔消失。
+  - `test-release-image.sh smoke` 擴充為檢查映像檔內的執行期檔案（entrypoint、
+    idle-restart supervisor、四支 binary）確實存在且可執行，並確認 tzdata 已安裝。
+    `release.yml` 會在**貼上任何公開 tag 之前**對剛建好的映像執行它，因此壞掉的映像
+    不會取得公開 tag；另有斷言鎖住這個先後順序。
+
 ## [0.20.1] - 2026-08-08
 
 修正 v0.20.0 的封裝疏漏：**該版的 opencode 閒置自動重啟完全不會運作。**
