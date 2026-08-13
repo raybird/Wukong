@@ -11,6 +11,26 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Memoria runtime image 從 **2.15 GB 降到 1.26 GB**（-41%），並跟進 Memoria **1.27.0**。
+  - 兩個缺陷都出在 layer 的語意：layer 記錄的是它結束當下的檔案狀態，所以**後面的
+    `rm` 不會讓 image 變小**（被刪的位元組留在前面的 layer），而**後面的 `chmod -R`
+    更糟**——改動每個檔案的 metadata 會把整棵樹複製進新 layer。`docker history` 實測：
+    刪除層 6.78 kB（一個位元組都沒回收，而它的註解宣稱省了 ~200 MB），chmod 層 899 MB，
+    是它上面那個 889 MB 安裝層的完整複本。
+  - 那句「~200 MB off the image」是隨 v0.21.0 出貨的假註解——**它宣稱了一件從未發生
+    的事，而且沒有任何測試會為此紅燈，因為斷言的對象是一段散文**。要驗證這類敘述只能
+    去問產物（`docker history`），不能問文件。
+  - 所有寫入 `/opt/memoria` 的步驟折進單一 `RUN`，刪除與 chmod 因此真正生效。代價是
+    build cache 粒度變粗，但這個 image 只在 `MEMORIA_VERSION` 變動時重建。
+  - `scripts/test-memoria-runtime.sh` 的預設 image tag 改為從 overlay 推導，不再寫死。
+    寫死的 tag 會在版本一變就過期，而測試會轉去驗證一個沒有人部署的 image。
+  - 順帶記錄實測的體積分佈，供未來壓縮參考：`onnxruntime-node` 513 MB、
+    `onnxruntime-web` 130 MB（瀏覽器 WASM build，Node 下永不載入，但是
+    `@huggingface/transformers` 的 `dependencies` 硬相依）、transformers 146 MB
+    （含模型快取 130 MB）、`better-sqlite3` 僅 12 MB。
+
 ### Fixed
 
 - **installer 會在執行中被自己的新版覆寫，導致 bash 解析錯位。** `scripts/install.sh`

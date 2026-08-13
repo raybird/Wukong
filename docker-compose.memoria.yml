@@ -33,14 +33,15 @@ services:
     # that stays up; `docker compose ps` showing it as exited 0 is correct.
     # Local tag with no registry prefix on purpose: this image is not published,
     # so a registry-qualified name would make compose attempt a pull that cannot
-    # succeed. The `build` below produces it on first `up` (~5 min, ~2.2 GB — the
-    # embedding model and onnxruntime dominate). Publishing it to GHCR would need
-    # a new job in release.yml; that has deliberately not been added.
-    image: wukong-memoria-runtime:${WUKONG_MEMORIA_VERSION:-1.25.0}
+    # succeed. The `build` below produces it on first `up` (~5 min, ~1.3 GB —
+    # onnxruntime-node alone is 513 MB, well ahead of transformers at 146 MB).
+    # Publishing it to GHCR would need a new job in release.yml; that has
+    # deliberately not been added.
+    image: wukong-memoria-runtime:${WUKONG_MEMORIA_VERSION:-1.27.0}
     build:
       context: docker/memoria-runtime
       args:
-        MEMORIA_VERSION: ${WUKONG_MEMORIA_VERSION:-1.25.0}
+        MEMORIA_VERSION: ${WUKONG_MEMORIA_VERSION:-1.27.0}
         # Must match the Node major inside the Wukong image (bookworm → 18).
         # scripts/test-memoria-runtime.sh asserts the pairing.
         NODE_MAJOR: ${WUKONG_MEMORIA_NODE_MAJOR:-18}

@@ -14,8 +14,13 @@
 # Usage: scripts/test-memoria-runtime.sh [runtime-image] [wukong-image]
 set -euo pipefail
 
-RUNTIME_IMAGE="${1:-wukong-memoria-runtime:1.25.0-test}"
-WUKONG_IMAGE="${2:-ghcr.io/raybird/wukong:v0.20.1}"
+# Defaults derived from the overlay, not hardcoded: a pinned tag here would go
+# stale the moment WUKONG_MEMORIA_VERSION moves, and the test would then verify
+# an image nobody deploys.
+_overlay="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/docker-compose.memoria.yml"
+_memoria_version="$(sed -n 's/.*WUKONG_MEMORIA_VERSION:-\([0-9][0-9.]*\).*/\1/p' "$_overlay" | head -1)"
+RUNTIME_IMAGE="${1:-wukong-memoria-runtime:${_memoria_version:?cannot read WUKONG_MEMORIA_VERSION default from the overlay}}"
+WUKONG_IMAGE="${2:-ghcr.io/raybird/wukong:v0.21.2}"
 VOL_RUNTIME="wukong-memoria-runtime-test-$$"
 VOL_DATA="wukong-memoria-data-test-$$"
 # A pristine, root-owned volume for the unprivileged run; the one above has
