@@ -1,6 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ── Run from a private copy ──
+# bash reads a script lazily, by byte offset, and the Docker upgrade path
+# replaces scripts/install.sh — it is release-owned — while this process is still
+# running. The moment the file on disk changes length, every later read resumes
+# at the old offset inside different content and bash executes fragments of the
+# new file.
+#
+# Seen upgrading v0.21.1 → v0.21.2: `line 603: gv[2]: command not found`, a piece
+# of `sys.argv[2]` from a heredoc. That run had already finished its work, so the
+# damage was a lost success message — but where the corruption lands is decided
+# purely by the size difference between the two versions, and the same offset in
+# another release could resume inside a cleanup loop or an abort. v0.20.0 through
+# v0.21.0 were all byte-identical here, which is the only reason this never fired
+# before.
+#
+# Re-exec from a copy and the file on disk is free to change under us. Nothing
+# here reads $0 or BASH_SOURCE for anything but this, so the copy is equivalent.
+if [[ -z "${WUKONG_INSTALLER_SELF_COPY:-}" ]]; then
+    _wukong_self="$(mktemp "${TMPDIR:-/tmp}/wukong-install-self.XXXXXX")"
+    cat "${BASH_SOURCE[0]}" > "$_wukong_self"
+    WUKONG_INSTALLER_SELF_COPY="$_wukong_self" exec bash "$_wukong_self" "$@"
+fi
+
 REPO="raybird/Wukong"
 GITHUB="https://github.com"
 API="https://api.github.com/repos"
@@ -18,6 +41,9 @@ VERSION=""
 VERSION_EXPLICIT=false
 FLAVOR=musl
 TEMP_DIRS=()
+# The copy we are executing from. Removing an open script file is fine on Linux;
+# bash keeps reading through its own descriptor.
+[[ -z "${WUKONG_INSTALLER_SELF_COPY:-}" ]] || TEMP_DIRS+=("$WUKONG_INSTALLER_SELF_COPY")
 # Files the release bundle owns: replaced on every install/upgrade, backed up and
 # restored on rollback. A bundle file that is NOT listed here is shipped but never
 # written to disk. `.env.example` documents the Memoria overlay and tells the user

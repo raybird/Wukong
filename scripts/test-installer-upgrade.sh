@@ -461,12 +461,54 @@ test_docker_bundle_missing_required_entry() {
     [[ ! -f "$DEPLOYMENT/.wukong-release" ]] || fail "aborted install must not write release metadata"
 }
 
+# The installer is release-owned, so an upgrade overwrites scripts/install.sh
+# while bash is still reading it. Nothing goes wrong while the two versions are
+# byte-identical — which they were from v0.20.0 to v0.21.0, hiding this for three
+# releases — but the moment the shipped installer differs in length, bash resumes
+# at a stale byte offset inside the new file and runs whatever text is there.
+# The fixture must therefore ship an installer of a DIFFERENT size than the one
+# under test, or it reproduces nothing.
+test_docker_installer_replaces_itself_mid_run() {
+    prepare
+    local stage="$TMP/selfrepl" out
+    rm -rf "$stage"; mkdir -p "$stage"
+    tar -xzf "$RELEASES/wukong-docker-v9.9.9.tar.gz" -C "$stage"
+    # Inserted near the TOP, not appended: only a change BEFORE the reader's
+    # current offset shifts the rest of the file out from under it. Appending
+    # leaves every earlier byte where it was and reproduces nothing.
+    python3 - "$stage/wukong-docker/scripts/install.sh" <<'PAD'
+import sys
+path = sys.argv[1]
+lines = open(path).read().split("\n")
+pad = ["# padding that shifts every following byte in the shipped installer"] * 400
+open(path, "w").write("\n".join(lines[:2] + pad + lines[2:]))
+PAD
+    tar -C "$stage" -czf "$RELEASES/wukong-docker-v9.9.9.tar.gz" wukong-docker
+    (cd "$RELEASES" && sha256sum ./*.tar.gz ./release-manifest.json | sed 's|  \./|  |' > SHA256SUMS)
+
+    # Run the DEPLOYMENT's own copy, which is what a real upgrade does and the
+    # only way the running file is also the file being overwritten. run_installer
+    # executes the repo copy, so the two paths never collide and it reproduces
+    # nothing.
+    mkdir -p "$DEPLOYMENT/scripts"
+    cp "$INSTALLER" "$DEPLOYMENT/scripts/install.sh"
+    out="$(cd "$DEPLOYMENT" && WUKONG_TEST_RELEASES="$RELEASES" FIXTURE_TAG=v9.9.9 \
+        bash scripts/install.sh --mode docker --version v9.9.9 2>&1)" ||
+        fail "upgrade failed while replacing its own script: $out"
+    grep -Fq 'completed: v9.9.9' <<<"$out" ||
+        fail "installer did not reach its completion message: $out"
+    ! grep -Eq 'command not found|syntax error|unexpected token' <<<"$out" ||
+        fail "installer executed fragments of its replacement: $out"
+    assert_file "$DEPLOYMENT/.wukong-release"
+}
+
 case "$CASE" in
     parsing) test_parsing ;;
     verification) test_verification ;;
     docker) test_docker ;;
     docker-forward-compat) test_docker_forward_compatible_bundle ;;
     docker-missing-entry) test_docker_bundle_missing_required_entry ;;
+    docker-self-replace) test_docker_installer_replaces_itself_mid_run ;;
     metadata) test_metadata ;;
     binary-clean) test_binary_clean ;;
     binary-upgrade) test_binary_upgrade ;;
@@ -482,7 +524,7 @@ case "$CASE" in
     docker-project) test_docker_project_resolution ;;
     docker-project-conflicts) test_docker_project_conflicts ;;
     docker-project-persistence) test_docker_project_persistence ;;
-    all) test_parsing; test_verification; test_docker; test_docker_forward_compatible_bundle; test_docker_bundle_missing_required_entry; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_docker_compose_repair; test_docker_project_resolution; test_docker_project_conflicts; test_docker_project_persistence; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
+    all) test_parsing; test_verification; test_docker; test_docker_forward_compatible_bundle; test_docker_bundle_missing_required_entry; test_docker_installer_replaces_itself_mid_run; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_docker_compose_repair; test_docker_project_resolution; test_docker_project_conflicts; test_docker_project_persistence; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
     *) fail "unknown test case: $CASE" ;;
 esac
 
