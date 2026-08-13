@@ -36,4 +36,42 @@ done
 ! grep -Fq "'checksums-*.txt'" "$workflow" || { echo "stable promotion must consume global SHA256SUMS only" >&2; exit 1; }
 ! grep -Fq 'attach_immutable latest' "$workflow" || { echo "latest must remain a mutable stable pointer" >&2; exit 1; }
 
+# ── The bundle and the installer are two curated lists that must agree ──
+# v0.21.0 shipped `docker-compose.memoria.yml` and `docker/memoria-runtime/` inside
+# the bundle but never added them to install.sh's DOCKER_RELEASE_OWNED, so the
+# installer wrote neither to disk. The shipped `.env.example` still told users to
+# set COMPOSE_FILE to that overlay — and COMPOSE_FILE applies to every compose
+# invocation, so following the documented instructions broke the entire deployment,
+# not just the optional feature.
+#
+# The same shape as the v0.20.0 incident (a file silently absent from a curated
+# list), one list further down the pipeline. Anything release.yml puts in the
+# bundle must be either installed or explicitly declared as not-installed.
+installer="$(dirname "${BASH_SOURCE[0]}")/install.sh"
+
+# Deliberately shipped but never written into the deployment: consumed from the
+# release directory during install, not needed at runtime.
+bundle_not_installed=(data-compatibility.json release-manifest.json)
+
+bundle_files="$(sed -n '/mkdir -p dist\/wukong-docker/,/tar -C dist/p' "$workflow" |
+  sed -n 's|.*dist/wukong-docker/\([A-Za-z0-9._/-]*\).*|\1|p;s|^ *cp \([A-Za-z0-9._/-]*\) dist/wukong-docker/$|\1|p' |
+  sed 's|.*/||' | sort -u | grep -v '^$')"
+[[ -n "$bundle_files" ]] || { echo "could not read the bundle assembly block from $workflow" >&2; exit 1; }
+
+for f in $bundle_files; do
+  grep -Fq "$f" "$installer" && continue
+  printf '%s\n' "${bundle_not_installed[@]}" | grep -Fqx "$f" && continue
+  echo "bundle ships '$f' but install.sh neither installs it nor declares it excluded" >&2
+  echo "add it to DOCKER_RELEASE_OWNED, or to bundle_not_installed in this test" >&2
+  exit 1
+done
+
+# The overlay specifically: named in the shipped .env.example, so it must install.
+for owned in docker-compose.memoria.yml docker/memoria-runtime/Dockerfile \
+             docker/memoria-runtime/publish.sh docker/memoria-runtime/memoria-wrapper.sh \
+             docker/memoria-runtime/memoria-vector-sync.sh; do
+  grep -Fq "    $owned" "$installer" ||
+    { echo "install.sh must own the Memoria overlay file: $owned" >&2; exit 1; }
+done
+
 echo "release workflow checks passed"

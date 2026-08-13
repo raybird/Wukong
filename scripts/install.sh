@@ -18,7 +18,25 @@ VERSION=""
 VERSION_EXPLICIT=false
 FLAVOR=musl
 TEMP_DIRS=()
-DOCKER_RELEASE_OWNED=(docker-compose.yml .env.example LICENSE scripts/install.sh)
+# Files the release bundle owns: replaced on every install/upgrade, backed up and
+# restored on rollback. A bundle file that is NOT listed here is shipped but never
+# written to disk. `.env.example` documents the Memoria overlay and tells the user
+# to set COMPOSE_FILE, and COMPOSE_FILE affects EVERY compose invocation — so
+# omitting the overlay does not merely disable a feature, it breaks the whole
+# deployment for anyone who follows those instructions.
+# scripts/test-release-workflow.sh asserts this list stays in step with what
+# release.yml puts in the bundle.
+DOCKER_RELEASE_OWNED=(
+    docker-compose.yml
+    .env.example
+    LICENSE
+    scripts/install.sh
+    docker-compose.memoria.yml
+    docker/memoria-runtime/Dockerfile
+    docker/memoria-runtime/publish.sh
+    docker/memoria-runtime/memoria-wrapper.sh
+    docker/memoria-runtime/memoria-vector-sync.sh
+)
 DOCKER_PROJECT_NAME=""
 DOCKER_CONTAINER_NAMES=(wukong-cli wukong-opencode-server wukong-telegram wukong-web wukong-schedulerd)
 
@@ -518,7 +536,10 @@ install_docker() {
     archive="$RELEASE_DIR/wukong-docker-${VERSION}.tar.gz"
     download_release_file "wukong-docker-${VERSION}.tar.gz" "$archive"
     verify_sha256sums_entry "$RELEASE_DIR/SHA256SUMS" "$archive" "wukong-docker-${VERSION}.tar.gz"
-    validate_archive_entries "$archive" wukong-docker/docker-compose.yml wukong-docker/.env.example wukong-docker/LICENSE wukong-docker/data-compatibility.json wukong-docker/scripts/install.sh wukong-docker/release-manifest.json
+    # Every owned file must actually be in the archive: the copy loop below would
+    # otherwise abort mid-install with a bare `cp` error, after the image pull.
+    validate_archive_entries "$archive" wukong-docker/data-compatibility.json wukong-docker/release-manifest.json \
+        "${DOCKER_RELEASE_OWNED[@]/#/wukong-docker/}"
     stage="$(mktemp -d "${PWD}/.wukong-stage.XXXXXX")"; TEMP_DIRS+=("$stage")
     extract_archive_to "$archive" "$stage"
     expected="$(read_manifest_field "$RELEASE_DIR/release-manifest.json" image.digest)"

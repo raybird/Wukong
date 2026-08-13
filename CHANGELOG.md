@@ -11,6 +11,27 @@
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-08-13
+
+### Fixed
+
+- v0.21.0 的 Memoria overlay 檔案雖然打進了 release bundle，`install.sh` 卻從未把它們
+  寫到磁碟上——`DOCKER_RELEASE_OWNED` 只列了四個檔案，而複製迴圈只走那份清單。
+  - 影響比「功能沒作用」嚴重得多：一起安裝的 `.env.example` 會叫使用者設
+    `COMPOSE_FILE=docker-compose.yml:docker-compose.memoria.yml`，而 `COMPOSE_FILE`
+    影響**每一個** compose 指令。照文件做的人會得到
+    `stat .../docker-compose.memoria.yml: no such file or directory`，**整個部署的
+    compose 全部失效**。升級路徑更糟：`install.sh` 在複製完檔案後會跑
+    `docker compose up -d --force-recreate`，已設 `COMPOSE_FILE` 的部署會當場失敗並回滾。
+  - overlay 的五個檔案已納入 `DOCKER_RELEASE_OWNED`，因此也一併受既有的備份／回滾保護。
+    `validate_archive_entries` 改為由該清單推導，缺檔會在拉映像檔前就明確中止，而不是
+    在複製時吐一個裸的 `cp` 錯誤。
+  - `test-release-workflow.sh` 新增守門：release.yml 放進 bundle 的每個檔案，都必須
+    要嘛被 `install.sh` 安裝、要嘛在測試中明列為「刻意不安裝」。這與 v0.20.0 是同一類
+    錯誤——檔案從一份策展清單中安靜消失——只是發生在流程的下一段。原本的
+    `test-release-image.sh context` 只驗 `Dockerfile.release` 的 COPY 來源，涵蓋不到
+    installer 這份清單。
+
 ## [0.21.0] - 2026-08-13
 
 ### Added
