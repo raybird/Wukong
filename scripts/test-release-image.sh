@@ -147,11 +147,44 @@ done
 # The restart window is a local-time range; without tzdata TZ silently resolves to
 # UTC and the window quietly moves by the offset.
 [ -f /usr/share/zoneinfo/Asia/Taipei ] || { echo "missing tzdata"; exit 1; }
+# Printed, not asserted here — the expected value lives in the repo, not the image.
+node --version 2>/dev/null || echo "v0.0.0-no-node"
 '
   output="$(docker run --rm --entrypoint sh "$image" -c "$probe" 2>&1)" ||
     fail "$image failed its runtime contents check: ${output:-no output}"
 
+  check_memoria_node_major "$(printf '%s\n' "$output" | tail -1)"
+
   [[ "$(docker image inspect --format '{{.Config.User}}' "$image")" != "" ]] || true
+}
+
+# The optional Memoria overlay mounts a runtime whose native modules
+# (better-sqlite3, onnxruntime) are ABI-specific prebuilds, and they are loaded by
+# THIS image's Node. Bumping the base image's Node major therefore breaks every
+# deployment that enabled the overlay — with a NODE_MODULE_VERSION error raised
+# inside the agent's shell, where nobody is watching. A full end-to-end check
+# (scripts/test-memoria-runtime.sh) builds a ~2.2 GB image and is far too heavy to
+# run per release, but comparing the two declared majors costs nothing and catches
+# exactly this drift.
+check_memoria_node_major() {
+  local image_node="${1:-}" image_major overlay overlay_major
+  overlay="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/docker-compose.memoria.yml"
+  [[ -f "$overlay" ]] || return 0
+
+  overlay_major="$(sed -n 's/.*WUKONG_MEMORIA_NODE_MAJOR:-\([0-9]\+\).*/\1/p' "$overlay" | head -1)"
+  [[ -n "$overlay_major" ]] ||
+    fail "cannot read WUKONG_MEMORIA_NODE_MAJOR default from docker-compose.memoria.yml"
+
+  image_major="${image_node#v}"
+  image_major="${image_major%%.*}"
+  [[ "$image_major" =~ ^[0-9]+$ ]] ||
+    fail "could not read node major from the release image (got '${image_node}')"
+
+  [[ "$image_major" == "$overlay_major" ]] ||
+    fail "node major drift: release image has $image_major, docker-compose.memoria.yml \
+defaults WUKONG_MEMORIA_NODE_MAJOR to $overlay_major. The Memoria overlay's native \
+modules are built for the latter and will fail with NODE_MODULE_VERSION. Update the \
+overlay default and re-run scripts/test-memoria-runtime.sh."
 }
 
 case "${1:-all}" in

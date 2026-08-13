@@ -11,6 +11,8 @@
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-08-13
+
 ### Added
 
 - 發布流程新增兩道能真正擋下 v0.20.0 那類問題的檢查。原本的斷言都只是靜態文字比對，
@@ -44,6 +46,11 @@
   - `scripts/test-memoria-runtime.sh`：把 runtime 倒進真的 volume、掛進真的 Wukong image，
     跑 agent 真正會下的指令。守的是 ABI 配對——`better-sqlite3` 用 ABI 專屬 prebuild，
     build 期不會察覺不合，只在 agent shell 裡炸 `NODE_MODULE_VERSION`。
+  - 上面那支要 build 2.2 GB 的 image，太重、不適合每次發版跑，所以
+    `test-release-image.sh smoke` 另外加了一條零成本的斷言：發布映像檔的 node 主版號
+    必須等於 `docker-compose.memoria.yml` 的 `WUKONG_MEMORIA_NODE_MAJOR` 預設值。
+    base image 換 Debian 版本（node 18 → 20）就是靠這條擋下來，否則所有啟用 overlay
+    的部署會靜默壞掉。
 
 ### Changed
 
