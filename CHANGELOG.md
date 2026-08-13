@@ -27,6 +27,24 @@
     `release.yml` 會在**貼上任何公開 tag 之前**對剛建好的映像執行它，因此壞掉的映像
     不會取得公開 tag；另有斷言鎖住這個先後順序。
 
+- 選用的 Memoria 記憶層：容器內的 agent 可以擁有跟 host 一樣的 `memoria` CLI（含語意召回）。
+  預設不啟用，在 `.env` 設 `COMPOSE_FILE=docker-compose.yml:docker-compose.memoria.yml` 開啟。
+  - 走 runtime volume 而非併進 Wukong image，兩者的發版節奏因此解耦——升級只要改
+    `.env` 的 `WUKONG_MEMORIA_VERSION`，不必重建 Wukong image。
+  - 純加法：資料 volume 的權限交接由 publisher 容器（本來就是 root）處理，而不是改
+    Wukong 的 entrypoint，所以現有已發布的 image 直接就能用，不需要重建或升級。
+  - 必須是 CLI 而不是 sidecar：Memoria 的 HTTP API 只有 `recall`/`remember`，沒有
+    `brief` 和 `feedback`，而後兩者是 host workflow 的一部分。
+  - 容器記憶存在獨立的 `memoria-data` volume，與 host 的 `~/.memoria` 無關。
+  - `memoria-vector-sync` 把 Memoria `OPERATIONS.md` 的三步 ingest 包成一個指令。少了它
+    向量表是空的，而 `--mode vector` 仍會回傳字面召回的結果、看起來像正常運作。
+  - `memoria` 包了一層 flock 並行閘門（`WUKONG_MEMORIA_VECTOR_MAX_CONCURRENCY`，預設 1）。
+    Memoria 上游沒有並行上限（issue-8），每個 helper 峰值 450–624 MB，兩三個同時進來就
+    足以打爆 agent 容器。被擋下的那次會退回字面召回並在 stderr 明講，不靜默降級。
+  - `scripts/test-memoria-runtime.sh`：把 runtime 倒進真的 volume、掛進真的 Wukong image，
+    跑 agent 真正會下的指令。守的是 ABI 配對——`better-sqlite3` 用 ABI 專屬 prebuild，
+    build 期不會察覺不合，只在 agent shell 裡炸 `NODE_MODULE_VERSION`。
+
 ### Changed
 
 - 修掉記憶層與 Web 層的效能瓶頸。以 20,000 筆記憶（含 embedding）實測：寫入

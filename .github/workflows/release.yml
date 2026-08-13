@@ -216,6 +216,11 @@ jobs:
           mkdir -p dist/wukong-docker/scripts
           cp dist/docker-compose.yml dist/wukong-docker/docker-compose.yml
           cp .env.example LICENSE dist/wukong-docker/
+          # Optional Memoria overlay. Ships with its build context because the
+          # runtime image is built locally on opt-in rather than published.
+          mkdir -p dist/wukong-docker/docker
+          cp docker-compose.memoria.yml dist/wukong-docker/
+          cp -R docker/memoria-runtime dist/wukong-docker/docker/
           cp release/data-compatibility.json dist/wukong-docker/
           cp scripts/install.sh dist/wukong-docker/scripts/install.sh
           runtime_inputs="$(python3 -c 'import json; d={}; [d.__setitem__(*line.strip().split("=", 1)) for line in open("release/runtime-inputs.env") if line.strip() and not line.startswith("#")]; print(json.dumps(d, sort_keys=True))')"

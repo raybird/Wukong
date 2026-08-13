@@ -1,0 +1,90 @@
+# Optional overlay: give the in-container agent the Memoria CLI, wired the same
+# way as on the host (CLI on PATH + MEMORIA_HOME), including the semantic-recall
+# layer.
+#
+# Every knob below is named WUKONG_MEMORIA_* rather than MEMORIA_*. Compose
+# substitutes ${VARS} from the invoking shell, and a host that runs Memoria
+# already exports MEMORIA_HOME / LIBSQL_URL / MEMORIA_VECTOR_RECALL_CMD /
+# MEMORIA_VECTOR_TIMEOUT_MS — those would silently win over the values meant for
+# the container and point it at host paths that do not exist inside it.
+#
+# Opt in by adding this file to the compose stack — put this in .env:
+#
+#     COMPOSE_FILE=docker-compose.yml:docker-compose.memoria.yml
+#
+# then `docker compose up -d`. Leaving it out changes nothing, which is why this
+# lives in its own file rather than behind a profile: opencode-server would
+# otherwise have to depend_on a profile-gated service, and compose refuses to
+# start a stack whose depends_on target is disabled.
+#
+# Why a runtime volume rather than baking Memoria into the Wukong image: it
+# decouples the two release cadences. Upgrading is MEMORIA_VERSION in .env plus
+# `docker compose up -d memoria-runtime` — no Wukong image rebuild.
+#
+# ── Memory budget ──
+# Memoria spawns one helper per semantic recall, peaking at 450–624 MB and ~1.8
+# cores, with no upstream concurrency limit (Memoria issue-8). The wrapper in
+# the runtime image serialises those calls (MEMORIA_VECTOR_MAX_CONCURRENCY,
+# default 1), so the ceiling is one helper on top of opencode itself — hence the
+# raised default below. Increase both together or not at all.
+services:
+  memoria-runtime:
+    # Publishes the runtime into the shared volume, then exits. Not a service
+    # that stays up; `docker compose ps` showing it as exited 0 is correct.
+    # Local tag with no registry prefix on purpose: this image is not published,
+    # so a registry-qualified name would make compose attempt a pull that cannot
+    # succeed. The `build` below produces it on first `up` (~5 min, ~2.2 GB — the
+    # embedding model and onnxruntime dominate). Publishing it to GHCR would need
+    # a new job in release.yml; that has deliberately not been added.
+    image: wukong-memoria-runtime:${WUKONG_MEMORIA_VERSION:-1.25.0}
+    build:
+      context: docker/memoria-runtime
+      args:
+        MEMORIA_VERSION: ${WUKONG_MEMORIA_VERSION:-1.25.0}
+        # Must match the Node major inside the Wukong image (bookworm → 18).
+        # scripts/test-memoria-runtime.sh asserts the pairing.
+        NODE_MAJOR: ${WUKONG_MEMORIA_NODE_MAJOR:-18}
+    container_name: wukong-memoria-runtime
+    environment:
+      # This container runs as root, so it is also where the data volume changes
+      # hands to the unprivileged user the agent runs as. Keeping that here
+      # rather than in Wukong's entrypoint is what lets this overlay work against
+      # an already-published Wukong image, with no rebuild.
+      - MEMORIA_DATA_UID=${USER_ID:-1000}
+      - MEMORIA_DATA_GID=${GROUP_ID:-1000}
+    volumes:
+      - memoria-runtime:/out
+      - memoria-data:/data-init
+    restart: "no"
+
+  opencode-server:
+    # The agent's shell runs here, so this is the only container that needs the
+    # CLI. Memoria's HTTP API would not do: it exposes recall/remember but not
+    # `brief` or `feedback`, and both are part of the host workflow.
+    depends_on:
+      memoria-runtime:
+        condition: service_completed_successfully
+    volumes:
+      - memoria-runtime:/opt/memoria:ro
+      - memoria-data:/memoria
+    environment:
+      # Prepending to PATH means restating it: compose replaces the image's ENV
+      # rather than extending it.
+      - PATH=/opt/memoria/bin:/home/wukong/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+      # Deliberately NOT the host's ~/.memoria. Container memories stay separate,
+      # matching how the TeleNexus deployment keeps its own Memoria volume.
+      - MEMORIA_HOME=/memoria
+      - LIBSQL_URL=file:/memoria/.memory/vectors.db
+      - MEMORIA_EMBED_PROVIDER=${WUKONG_MEMORIA_EMBED_PROVIDER:-local}
+      - MEMORIA_VECTOR_RECALL_CMD=/opt/memoria/lib/node_modules/@raybird.chen/memoria/skills/memoria-vector/vector-recall.mjs
+      # Host measurement: ~1s warm spawn. The container shares 1.5 cores with
+      # opencode, so cold starts run longer than they do on the host.
+      - MEMORIA_VECTOR_TIMEOUT_MS=${WUKONG_MEMORIA_VECTOR_TIMEOUT_MS:-20000}
+      - MEMORIA_VECTOR_MAX_CONCURRENCY=${WUKONG_MEMORIA_VECTOR_MAX_CONCURRENCY:-1}
+    mem_limit: "${WUKONG_OPENCODE_MEM_MEMORIA:-3g}"
+
+volumes:
+  memoria-runtime:
+    driver: local
+  memoria-data:
+    driver: local

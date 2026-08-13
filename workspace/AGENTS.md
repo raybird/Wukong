@@ -20,6 +20,22 @@ Wukong Orchestrator 採用「按需拉取（Pull-on-demand）」的技能加載�
 ## 🧠 記憶與歷史整合
 * 每次執行，Wukong 會在 `[相關記憶]` 區塊中提供與當前情境高度關聯的歷史決策或事件，請將其做為核心 context 納入考量。
 
+### 兩套記憶不要混用
+
+這個 runtime 可能同時存在兩套彼此獨立的記憶系統，資料不共用、不同步：
+
+| | Wukong 記憶 | Memoria |
+|---|---|---|
+| 誰寫入 | Wukong 每回合自動 recall / remember | 你主動下 `memoria` 指令 |
+| 你看到的形式 | `[相關記憶]` 區塊 | 你自己執行指令的輸出 |
+| 內容 | 本 runtime 的對話與事件 | 跨 session 的決策、repo 狀態、技能效用 |
+
+* `[相關記憶]` 是 Wukong 自己的記憶，**不需要**也不應該再用 `memoria` 去查一次。
+* 只有 `memoria` 指令存在時（`command -v memoria`）才有 Memoria 這一層；沒有就是這套部署沒開，不要嘗試安裝。
+* 有的時候：需要跨 session 的長期決策脈絡、或要記錄一個未來 session 也該知道的結論。
+* 用完 `memoria recall` 請回報 `memoria feedback <recall_id> --score <0..1>`，那是效用訊號的唯一來源。
+* 語意召回要**明確加上** `--mode vector`；不加的話走的是字面比對，不會用到語意層。
+
 ## 🌐 網路資訊檢索能力
 
 Docker runtime 可能已預裝 `agent-reach` 與 `gh`，用來擴充即時網路資訊檢索能力。當使用者要求最新資訊、閱讀網頁、查 GitHub repository/issue、整理 YouTube/RSS/社群平台內容、或進行全網調研時，不要只依賴模型記憶，應先檢查可用工具。
