@@ -15,17 +15,21 @@
 
 ### Fixed
 
-- v0.21.0 的 Memoria overlay 檔案雖然打進了 release bundle，`install.sh` 卻從未把它們
-  寫到磁碟上——`DOCKER_RELEASE_OWNED` 只列了四個檔案，而複製迴圈只走那份清單。
-  - 影響比「功能沒作用」嚴重得多：一起安裝的 `.env.example` 會叫使用者設
-    `COMPOSE_FILE=docker-compose.yml:docker-compose.memoria.yml`，而 `COMPOSE_FILE`
-    影響**每一個** compose 指令。照文件做的人會得到
-    `stat .../docker-compose.memoria.yml: no such file or directory`，**整個部署的
-    compose 全部失效**。升級路徑更糟：`install.sh` 在複製完檔案後會跑
-    `docker compose up -d --force-recreate`，已設 `COMPOSE_FILE` 的部署會當場失敗並回滾。
-  - overlay 的五個檔案已納入 `DOCKER_RELEASE_OWNED`，因此也一併受既有的備份／回滾保護。
-    `validate_archive_entries` 改為由該清單推導，缺檔會在拉映像檔前就明確中止，而不是
-    在複製時吐一個裸的 `cp` 錯誤。
+- **v0.21.0 無法透過 `install.sh` 安裝或升級。** 該版把 Memoria overlay 的五個檔案加進
+  了 release bundle，卻沒有同步 `install.sh` 的清單。
+  - `safe_list_archive` 是**完全相等**比對，不是「至少包含」。v0.21.0 的允許清單有六項、
+    bundle 內有十一個檔案，所以 `install.sh` 會拒絕它自己的 bundle，以
+    `unsafe or unexpected archive contents` 中止——發生在拉映像檔之前，**與有沒有啟用
+    overlay 無關，所有使用者都受影響**。
+  - 就算通過驗證也還有第二層問題：複製迴圈只走 `DOCKER_RELEASE_OWNED`，overlay 檔案不會
+    落到磁碟上；而一起安裝的 `.env.example` 會叫使用者設
+    `COMPOSE_FILE=docker-compose.yml:docker-compose.memoria.yml`，那會讓**每一個**
+    compose 指令都失敗。
+  - overlay 的五個檔案已納入 `DOCKER_RELEASE_OWNED`（因此也一併受既有的備份／回滾保護），
+    `validate_archive_entries` 改為由該清單推導，兩層問題一次解決。
+  - `test-installer-upgrade.sh` 的 fixture 補上這些檔案。先前的 fixture 只造六個檔案，
+    形狀與真實 bundle 不同，所以測試全綠卻放行了一個裝不起來的版本——這正是 v0.21.0
+    逃掉的原因。
   - `test-release-workflow.sh` 新增守門：release.yml 放進 bundle 的每個檔案，都必須
     要嘛被 `install.sh` 安裝、要嘛在測試中明列為「刻意不安裝」。這與 v0.20.0 是同一類
     錯誤——檔案從一份策展清單中安靜消失——只是發生在流程的下一段。原本的

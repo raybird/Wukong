@@ -40,6 +40,18 @@ make_release() {
     printf 'EXAMPLE=1\n' > "$docker_stage/.env.example"
     printf 'MIT\n' > "$docker_stage/LICENSE"
     printf '%s\n' '{"affectedState":[],"backupRequired":false,"instructionsUrl":null,"irreversibleMigration":false,"rollbackSafeTo":"v0.17.1","schemaVersion":1}' > "$docker_stage/data-compatibility.json"
+    # The optional Memoria overlay. `safe_list_archive` matches the archive against
+    # its allowlist EXACTLY, so a fixture missing these would not merely under-test
+    # the installer — it would diverge from the real bundle and go green while the
+    # shipped installer rejects the real thing. That is precisely how v0.21.0
+    # escaped: its allowlist listed six entries while the bundle carried eleven.
+    mkdir -p "$docker_stage/docker/memoria-runtime"
+    printf 'services: {}\n' > "$docker_stage/docker-compose.memoria.yml"
+    printf 'FROM scratch\n' > "$docker_stage/docker/memoria-runtime/Dockerfile"
+    for stub in publish.sh memoria-wrapper.sh memoria-vector-sync.sh; do
+        printf '#!/usr/bin/env bash\n' > "$docker_stage/docker/memoria-runtime/$stub"
+        chmod +x "$docker_stage/docker/memoria-runtime/$stub"
+    done
     cp "$INSTALLER" "$docker_stage/scripts/install.sh"
     python3 - "$RELEASES/release-manifest.json" "$tag" <<'PY'
 import json, os, sys
