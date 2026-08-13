@@ -30,6 +30,9 @@
   - `test-installer-upgrade.sh` 的 fixture 補上這些檔案。先前的 fixture 只造六個檔案，
     形狀與真實 bundle 不同，所以測試全綠卻放行了一個裝不起來的版本——這正是 v0.21.0
     逃掉的原因。
+  - `test-docker-runtime.sh` 原本用字面字串比對 `DOCKER_RELEASE_OWNED` 的單行寫法，
+    改為逐項檢查成員。字面比對讓排版變更看起來像契約破壞，更糟的是清單一長它就不再
+    斷言任何事——v0.21.0 加了五個檔案，這道檢查既沒察覺、也不需要跟著改。
   - `test-release-workflow.sh` 新增守門：release.yml 放進 bundle 的每個檔案，都必須
     要嘛被 `install.sh` 安裝、要嘛在測試中明列為「刻意不安裝」。這與 v0.20.0 是同一類
     錯誤——檔案從一份策展清單中安靜消失——只是發生在流程的下一段。原本的

@@ -122,8 +122,26 @@ require_in_file "curl -fsS http://localhost:4096/global/health || exit 1" "$comp
     "opencode server must expose a Compose healthcheck"
 require_count_in_file "condition: service_healthy" 3 "$compose_file" \
     "web, telegram, and scheduler must wait for a healthy opencode server"
-require_in_file 'DOCKER_RELEASE_OWNED=(docker-compose.yml .env.example LICENSE scripts/install.sh)' scripts/install.sh \
-    "installer must replace only Docker release-owned files"
+# The point is which files the installer replaces, not how the array is typed.
+# Pinning the single-line literal made a formatting change look like a contract
+# break, and — worse — it silently stopped asserting anything the moment the real
+# list grew: v0.21.0 added five bundle files and this check neither noticed nor
+# needed to change. Assert membership instead, and require the entries the
+# deployment cannot run without.
+for owned in docker-compose.yml .env.example LICENSE scripts/install.sh \
+             docker-compose.memoria.yml docker/memoria-runtime/Dockerfile \
+             docker/memoria-runtime/publish.sh docker/memoria-runtime/memoria-wrapper.sh \
+             docker/memoria-runtime/memoria-vector-sync.sh; do
+    awk -v want="$owned" '
+        /^DOCKER_RELEASE_OWNED=\(/ { inside = 1 }
+        inside && $0 ~ "(^|[( \t])" want "([ \t)]|$)" { found = 1 }
+        inside && /^\)/ { inside = 0 }
+        END { exit !found }
+    ' scripts/install.sh || {
+        echo "FAIL: installer must replace Docker release-owned file: $owned" >&2
+        exit 1
+    }
+done
 if grep -Eq 'docker compose (build|down)' scripts/install.sh; then
     echo "FAIL: release installer must pull and recreate without local builds or volume removal" >&2
     exit 1
