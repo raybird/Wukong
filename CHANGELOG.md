@@ -11,6 +11,36 @@
 
 ## [Unreleased]
 
+## [0.21.2] - 2026-08-13
+
+### Fixed
+
+- **既有部署無法升級到 v0.21.1。** installer 對 release bundle 的內容驗證是**完全相等**
+  比對，所以任何在 bundle 增減檔案的版本，都會讓所有更早的部署在驗證階段中止——而能夠
+  接受新 bundle 的 installer，只能從那個被拒絕的 bundle 裡送達。v0.21.0 加了五個檔案，
+  第一次觸發了這個死結。
+  - Docker bundle 的驗證改為「必要檔案至少存在」而非「完全相等」。保護解壓的檢查完全
+    未變：絕對路徑、`..`、symlink／hardlink、非一般檔案一律拒絕；owned 清單裡的每個
+    檔案仍必須存在，缺一就在拉映像檔前中止。
+  - 放寬對完整性沒有損失：`verify_sha256sums_entry` 在此之前已把整個歸檔逐位元組比對過
+    release 的 `SHA256SUMS`，所以「非預期」的成員只可能是我們自己發布的檔案。
+  - 單一 binary 的 tarball 仍維持完全相等比對——那裡「一個歸檔、一個預期檔案」是對的語意。
+  - 新增兩項測試：帶有未知額外檔案的 bundle **必須**能安裝（模擬未來版本），缺少 owned
+    檔案的 bundle **必須**中止。前者在改動前會紅燈，已驗證。
+
+> ⚠️ **v0.21.1 之前的部署需要一次性手動步驟。** 修正本身也只能透過 bundle 送達，所以
+> 舊 installer 仍會拒絕它。請先從 bundle 取出新的 installer 再升級：
+>
+> ```bash
+> curl -fsSL -o /tmp/b.tar.gz \
+>   https://github.com/raybird/Wukong/releases/download/v0.21.2/wukong-docker-v0.21.2.tar.gz
+> tar -xzf /tmp/b.tar.gz -C /tmp wukong-docker/scripts/install.sh
+> cp /tmp/wukong-docker/scripts/install.sh scripts/install.sh
+> bash scripts/install.sh --upgrade --version v0.21.2
+> ```
+>
+> 這是最後一次需要這麼做；之後往 bundle 加檔案不會再破壞升級路徑。
+
 ## [0.21.1] - 2026-08-13
 
 ### Fixed

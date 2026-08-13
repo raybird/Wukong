@@ -40,11 +40,11 @@ make_release() {
     printf 'EXAMPLE=1\n' > "$docker_stage/.env.example"
     printf 'MIT\n' > "$docker_stage/LICENSE"
     printf '%s\n' '{"affectedState":[],"backupRequired":false,"instructionsUrl":null,"irreversibleMigration":false,"rollbackSafeTo":"v0.17.1","schemaVersion":1}' > "$docker_stage/data-compatibility.json"
-    # The optional Memoria overlay. `safe_list_archive` matches the archive against
-    # its allowlist EXACTLY, so a fixture missing these would not merely under-test
-    # the installer — it would diverge from the real bundle and go green while the
-    # shipped installer rejects the real thing. That is precisely how v0.21.0
-    # escaped: its allowlist listed six entries while the bundle carried eleven.
+    # The optional Memoria overlay. The fixture must mirror the real bundle's
+    # shape: a fixture that is missing files the shipped bundle carries does not
+    # merely under-test the installer, it goes green while the shipped installer
+    # rejects the real thing. That is how v0.21.0 escaped — its archive check
+    # demanded an exact match against six entries while the bundle carried eleven.
     mkdir -p "$docker_stage/docker/memoria-runtime"
     printf 'services: {}\n' > "$docker_stage/docker-compose.memoria.yml"
     printf 'FROM scratch\n' > "$docker_stage/docker/memoria-runtime/Dockerfile"
@@ -422,10 +422,51 @@ PY
     assert_same "$TMP/metadata-before" "$HOME/.wukong/install.json"
 }
 
+# A bundle from a FUTURE release will carry files this installer has never heard
+# of. Rejecting them deadlocks every existing deployment: the installer that
+# understands the new bundle can only be delivered inside that same bundle.
+# v0.21.0 hit exactly this. The required entries stay required; extras must not
+# abort the install.
+test_docker_forward_compatible_bundle() {
+    prepare
+    local stage="$TMP/fwd"
+    rm -rf "$stage"; mkdir -p "$stage"
+    tar -xzf "$RELEASES/wukong-docker-v9.9.9.tar.gz" -C "$stage"
+    mkdir -p "$stage/wukong-docker/docker/some-future-thing"
+    printf 'from a later release\n' > "$stage/wukong-docker/docker/some-future-thing/config.yml"
+    printf 'also new\n' > "$stage/wukong-docker/FUTURE.md"
+    tar -C "$stage" -czf "$RELEASES/wukong-docker-v9.9.9.tar.gz" wukong-docker
+    (cd "$RELEASES" && sha256sum ./*.tar.gz ./release-manifest.json | sed 's|  \./|  |' > SHA256SUMS)
+
+    run_installer '' --mode docker --version v9.9.9 >/dev/null ||
+        fail "a bundle carrying unknown extra files must still install"
+    assert_file "$DEPLOYMENT/.wukong-release"
+    # Unknown files are not owned, so they are validated but never written out.
+    [[ ! -e "$DEPLOYMENT/FUTURE.md" ]] || fail "unowned bundle file must not be installed"
+}
+
+# The flip side: relaxing "exact" to "at least" must not let a bundle missing a
+# file the installer will copy slip through and fail mid-install, after the pull.
+test_docker_bundle_missing_required_entry() {
+    prepare
+    local stage="$TMP/missing"
+    rm -rf "$stage"; mkdir -p "$stage"
+    tar -xzf "$RELEASES/wukong-docker-v9.9.9.tar.gz" -C "$stage"
+    rm -f "$stage/wukong-docker/docker-compose.memoria.yml"
+    tar -C "$stage" -czf "$RELEASES/wukong-docker-v9.9.9.tar.gz" wukong-docker
+    (cd "$RELEASES" && sha256sum ./*.tar.gz ./release-manifest.json | sed 's|  \./|  |' > SHA256SUMS)
+
+    ! run_installer '' --mode docker --version v9.9.9 >/dev/null 2>&1 ||
+        fail "a bundle missing an owned file must abort"
+    [[ ! -f "$DEPLOYMENT/.wukong-release" ]] || fail "aborted install must not write release metadata"
+}
+
 case "$CASE" in
     parsing) test_parsing ;;
     verification) test_verification ;;
     docker) test_docker ;;
+    docker-forward-compat) test_docker_forward_compatible_bundle ;;
+    docker-missing-entry) test_docker_bundle_missing_required_entry ;;
     metadata) test_metadata ;;
     binary-clean) test_binary_clean ;;
     binary-upgrade) test_binary_upgrade ;;
@@ -441,7 +482,7 @@ case "$CASE" in
     docker-project) test_docker_project_resolution ;;
     docker-project-conflicts) test_docker_project_conflicts ;;
     docker-project-persistence) test_docker_project_persistence ;;
-    all) test_parsing; test_verification; test_docker; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_docker_compose_repair; test_docker_project_resolution; test_docker_project_conflicts; test_docker_project_persistence; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
+    all) test_parsing; test_verification; test_docker; test_docker_forward_compatible_bundle; test_docker_bundle_missing_required_entry; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_docker_compose_repair; test_docker_project_resolution; test_docker_project_conflicts; test_docker_project_persistence; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
     *) fail "unknown test case: $CASE" ;;
 esac
 

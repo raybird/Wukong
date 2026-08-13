@@ -167,6 +167,45 @@ PY
 }
 
 validate_archive_entries() { safe_list_archive "$@" || abort "unsafe or unexpected archive contents"; }
+
+# Same safety checks as safe_list_archive, but the named entries are a REQUIRED
+# MINIMUM rather than the exact contents.
+#
+# Exact matching is right for a binary tarball (one archive, one expected file).
+# It is wrong for the Docker bundle, whose file list grows across releases: an
+# installer already on disk would reject every future bundle that adds a file,
+# and the installer that understands the new bundle can only arrive inside it.
+# v0.21.0 added five files and produced exactly that deadlock — every existing
+# deployment was unable to upgrade, and could not receive the fix either.
+#
+# Dropping exact-match here costs nothing in integrity: verify_sha256sums_entry
+# has already matched the archive byte-for-byte against the release's SHA256SUMS
+# before this runs, so unexpected members would be files we published ourselves.
+# The checks that actually protect extraction — no absolute paths, no `..`, no
+# symlinks or hard links, regular files only — are unchanged.
+require_archive_entries() {
+    local archive="$1"; shift
+    python3 - "$archive" "$@" <<'PY' || abort "unsafe archive contents or missing required entries"
+import sys, tarfile
+archive, required = sys.argv[1], set(sys.argv[2:])
+try:
+    with tarfile.open(archive, "r:gz") as tar:
+        names = []
+        for member in tar.getmembers():
+            name = member.name.rstrip("/")
+            if name.startswith("/") or ".." in name.split("/") or member.issym() or member.islnk():
+                raise ValueError("unsafe archive entry: " + member.name)
+            if member.isdir(): continue
+            if not member.isfile(): raise ValueError("unexpected archive entry: " + member.name)
+            names.append(name)
+        if len(names) != len(set(names)): raise ValueError("duplicate archive entries")
+        missing = required - set(names)
+        if missing: raise ValueError("archive is missing required entries: " + ", ".join(sorted(missing)))
+except (tarfile.TarError, ValueError) as error:
+    raise SystemExit(str(error))
+PY
+}
+
 extract_archive_to() { tar -xzf "$1" -C "$2"; }
 
 valid_compose_project() { [[ "$1" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; }
@@ -538,7 +577,9 @@ install_docker() {
     verify_sha256sums_entry "$RELEASE_DIR/SHA256SUMS" "$archive" "wukong-docker-${VERSION}.tar.gz"
     # Every owned file must actually be in the archive: the copy loop below would
     # otherwise abort mid-install with a bare `cp` error, after the image pull.
-    validate_archive_entries "$archive" wukong-docker/data-compatibility.json wukong-docker/release-manifest.json \
+    # Required-minimum, not exact — see require_archive_entries for why a future
+    # bundle must be allowed to carry files this installer has never heard of.
+    require_archive_entries "$archive" wukong-docker/data-compatibility.json wukong-docker/release-manifest.json \
         "${DOCKER_RELEASE_OWNED[@]/#/wukong-docker/}"
     stage="$(mktemp -d "${PWD}/.wukong-stage.XXXXXX")"; TEMP_DIRS+=("$stage")
     extract_archive_to "$archive" "$stage"
