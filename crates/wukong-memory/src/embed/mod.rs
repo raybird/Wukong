@@ -211,7 +211,10 @@ mod tests {
         assert_eq!(cosine_similarity_blob(&q, &embedding_to_blob(&[1.0])), 0.0);
         assert_eq!(cosine_similarity_blob(&[], &[]), 0.0);
         // A blob of zeros has no direction.
-        assert_eq!(cosine_similarity_blob(&q, &embedding_to_blob(&[0.0, 0.0])), 0.0);
+        assert_eq!(
+            cosine_similarity_blob(&q, &embedding_to_blob(&[0.0, 0.0])),
+            0.0
+        );
     }
 
     #[test]

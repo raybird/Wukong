@@ -3,9 +3,7 @@ use crate::model::{
     AgeBuckets, AgentSessionState, EmbeddingCoverage, KindCount, MemoryKind, MemoryRecord,
     RecallTelemetryInput, RecallTelemetrySummary, ScopeCount, Snapshot, Stats,
 };
-use sqlx::sqlite::{
-    SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
-};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, SqlitePool};
 use std::str::FromStr;
 
@@ -1193,7 +1191,10 @@ mod tests {
             )
             .await
             .unwrap();
-        let hits = store.keyword_candidates("\"hello\"", 10, None).await.unwrap();
+        let hits = store
+            .keyword_candidates("\"hello\"", 10, None)
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].bm25.is_some());
     }
@@ -1305,7 +1306,15 @@ mod tests {
     async fn recent_candidates_spend_the_limit_inside_the_scope() {
         let store = test_store().await;
         store
-            .insert_memory(None, "project:Alpha", MemoryKind::Note, "alpha", 1.0, 100, None)
+            .insert_memory(
+                None,
+                "project:Alpha",
+                MemoryKind::Note,
+                "alpha",
+                1.0,
+                100,
+                None,
+            )
             .await
             .unwrap();
         for i in 0..60 {
@@ -1338,11 +1347,27 @@ mod tests {
     async fn keyword_candidates_honour_the_scope_filter() {
         let store = test_store().await;
         store
-            .insert_memory(None, "project:Alpha", MemoryKind::Note, "shared term", 1.0, 100, None)
+            .insert_memory(
+                None,
+                "project:Alpha",
+                MemoryKind::Note,
+                "shared term",
+                1.0,
+                100,
+                None,
+            )
             .await
             .unwrap();
         store
-            .insert_memory(None, "project:Beta", MemoryKind::Note, "shared term", 1.0, 200, None)
+            .insert_memory(
+                None,
+                "project:Beta",
+                MemoryKind::Note,
+                "shared term",
+                1.0,
+                200,
+                None,
+            )
             .await
             .unwrap();
 
