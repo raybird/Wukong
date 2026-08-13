@@ -1,10 +1,11 @@
-use crate::embed::blob_to_embedding;
 use crate::error::Result;
 use crate::model::{
     AgeBuckets, AgentSessionState, EmbeddingCoverage, KindCount, MemoryKind, MemoryRecord,
     RecallTelemetryInput, RecallTelemetrySummary, ScopeCount, Snapshot, Stats,
 };
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
+};
 use sqlx::{Row, SqlitePool};
 use std::str::FromStr;
 
@@ -108,6 +109,11 @@ impl Store {
         let opts = SqliteConnectOptions::from_str(db_url)?
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
+            // WAL already survives a process crash at synchronous=NORMAL; FULL
+            // only adds durability against an OS/power loss, at the cost of an
+            // fsync per commit. Every turn writes several rows, so that fsync
+            // dominates remember() latency.
+            .synchronous(SqliteSynchronous::Normal)
             // Let a writer wait for an in-flight write instead of failing with
             // SQLITE_BUSY (background backfill can overlap foreground writes).
             .busy_timeout(std::time::Duration::from_secs(5));
@@ -172,20 +178,29 @@ impl Store {
     }
 
     /// Keyword candidates ranked by FTS5 bm25 (best first).
-    pub async fn keyword_candidates(&self, match_expr: &str, limit: i64) -> Result<Vec<Candidate>> {
-        let rows = sqlx::query(
+    ///
+    /// `scopes`, when given, restricts the scan to those scopes (a recall
+    /// scope's ancestry). Filtering in SQL rather than after the fact means
+    /// `limit` is spent entirely on rows the caller can actually use.
+    pub async fn keyword_candidates(
+        &self,
+        match_expr: &str,
+        limit: i64,
+        scopes: Option<&[String]>,
+    ) -> Result<Vec<Candidate>> {
+        let sql = format!(
             "SELECT m.id, m.scope, m.kind, m.text, m.created_at, m.recall_count, m.importance,
                     bm25(memories_fts) AS bm25
              FROM memories_fts
              JOIN memories m ON m.id = memories_fts.rowid
-             WHERE memories_fts MATCH ?1
+             WHERE memories_fts MATCH ?{}
              ORDER BY bm25 ASC
-             LIMIT ?2",
-        )
-        .bind(match_expr)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
+             LIMIT ?",
+            scope_in_clause("m.scope", scopes)
+        );
+        let mut q = sqlx::query(&sql).bind(match_expr);
+        q = bind_scopes(q, scopes);
+        let rows = q.bind(limit).fetch_all(&self.pool).await?;
         Ok(rows
             .into_iter()
             .map(|r| {
@@ -197,20 +212,25 @@ impl Store {
     }
 
     /// Bounded fallback for short CJK queries when FTS5 has no keyword hits.
-    pub async fn cjk_fallback_candidates(&self, query: &str, limit: i64) -> Result<Vec<Candidate>> {
+    pub async fn cjk_fallback_candidates(
+        &self,
+        query: &str,
+        limit: i64,
+        scopes: Option<&[String]>,
+    ) -> Result<Vec<Candidate>> {
         let pattern = format!("%{}%", query.trim());
-        let rows = sqlx::query(
+        let sql = format!(
             "SELECT id, scope, kind, text, created_at, recall_count, importance,
                     NULL AS bm25
              FROM memories
-             WHERE text LIKE ?1
+             WHERE text LIKE ?{}
              ORDER BY created_at DESC
-             LIMIT ?2",
-        )
-        .bind(pattern)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
+             LIMIT ?",
+            scope_in_clause("scope", scopes)
+        );
+        let mut q = sqlx::query(&sql).bind(pattern);
+        q = bind_scopes(q, scopes);
+        let rows = q.bind(limit).fetch_all(&self.pool).await?;
 
         Ok(rows
             .into_iter()
@@ -223,17 +243,23 @@ impl Store {
     }
 
     /// Most recent memories (tree/recency source). bm25 is None.
-    pub async fn recent_candidates(&self, limit: i64) -> Result<Vec<Candidate>> {
-        let rows = sqlx::query(
+    pub async fn recent_candidates(
+        &self,
+        limit: i64,
+        scopes: Option<&[String]>,
+    ) -> Result<Vec<Candidate>> {
+        let sql = format!(
             "SELECT id, scope, kind, text, created_at, recall_count, importance,
                     NULL AS bm25
              FROM memories
+             {}
              ORDER BY created_at DESC
-             LIMIT ?1",
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
+             LIMIT ?",
+            scope_where_clause(scopes)
+        );
+        let mut q = sqlx::query(&sql);
+        q = bind_scopes(q, scopes);
+        let rows = q.bind(limit).fetch_all(&self.pool).await?;
         Ok(rows
             .into_iter()
             .map(|r| {
@@ -275,26 +301,33 @@ impl Store {
         Ok(())
     }
 
-    /// All memories that have an embedding, paired with the decoded vector.
-    /// bm25/vector_sim on the Candidate are None (filled later during ranking).
-    pub async fn embedded_candidates(&self, limit: i64) -> Result<Vec<(Candidate, Vec<f32>)>> {
-        let rows = sqlx::query(
+    /// All memories that have an embedding, paired with the raw little-endian
+    /// f32 blob. bm25/vector_sim on the Candidate are None (filled later during
+    /// ranking). The blob is handed back undecoded so the caller can score it
+    /// with `cosine_similarity_blob` without allocating a vector per row.
+    pub async fn embedded_candidates(
+        &self,
+        limit: i64,
+        scopes: Option<&[String]>,
+    ) -> Result<Vec<(Candidate, Vec<u8>)>> {
+        let sql = format!(
             "SELECT id, scope, kind, text, created_at, recall_count, importance,
                     NULL AS bm25, embedding
              FROM memories
-             WHERE embedding IS NOT NULL
+             WHERE embedding IS NOT NULL{}
              ORDER BY created_at DESC
-             LIMIT ?1",
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
+             LIMIT ?",
+            scope_in_clause("scope", scopes)
+        );
+        let mut q = sqlx::query(&sql);
+        q = bind_scopes(q, scopes);
+        let rows = q.bind(limit).fetch_all(&self.pool).await?;
         Ok(rows
             .into_iter()
             .map(|r| {
                 let blob: Vec<u8> = r.get::<Vec<u8>, _>("embedding");
                 let cand = row_to_candidate(r);
-                (cand, blob_to_embedding(&blob))
+                (cand, blob)
             })
             .collect())
     }
@@ -389,23 +422,48 @@ impl Store {
         importance_floor: f64,
         now: i64,
     ) -> Result<Vec<i64>> {
-        let cutoff = now - max_age_secs;
-        let mut sql = String::from(
-            "SELECT id FROM memories
-             WHERE (
-                 consolidated_into IS NOT NULL
-                 OR (kind IN ('event','note') AND created_at < ?1 AND recall_count = 0 AND importance < ?2)
-             )",
+        let sql = format!("SELECT id FROM memories {}", prune_where_clause(scope));
+        let rows = self
+            .bind_prune_args(&sql, scope, max_age_secs, importance_floor, now)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.into_iter().map(|r| r.get::<i64, _>("id")).collect())
+    }
+
+    /// How many rows `prune_candidates` would return, without materializing them.
+    pub async fn count_prune_candidates(
+        &self,
+        scope: Option<&str>,
+        max_age_secs: i64,
+        importance_floor: f64,
+        now: i64,
+    ) -> Result<i64> {
+        let sql = format!(
+            "SELECT COUNT(*) AS c FROM memories {}",
+            prune_where_clause(scope)
         );
-        if scope.is_some() {
-            sql.push_str(" AND scope = ?3");
-        }
-        let mut q = sqlx::query(&sql).bind(cutoff).bind(importance_floor);
+        let row = self
+            .bind_prune_args(&sql, scope, max_age_secs, importance_floor, now)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.get::<i64, _>("c"))
+    }
+
+    fn bind_prune_args<'q>(
+        &self,
+        sql: &'q str,
+        scope: Option<&'q str>,
+        max_age_secs: i64,
+        importance_floor: f64,
+        now: i64,
+    ) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
+        let mut q = sqlx::query(sql)
+            .bind(now - max_age_secs)
+            .bind(importance_floor);
         if let Some(s) = scope {
             q = q.bind(s);
         }
-        let rows = q.fetch_all(&self.pool).await?;
-        Ok(rows.into_iter().map(|r| r.get::<i64, _>("id")).collect())
+        q
     }
 
     /// Read the stored opencode session id for a scope.
@@ -766,9 +824,8 @@ impl Store {
         let consolidation_candidates = consq.fetch_one(&self.pool).await?.get::<i64, _>("c");
 
         let prune_candidates = self
-            .prune_candidates(scope, max_age_secs, importance_floor, now)
-            .await?
-            .len() as i64;
+            .count_prune_candidates(scope, max_age_secs, importance_floor, now)
+            .await?;
 
         Ok(Snapshot {
             total: base.total,
@@ -793,7 +850,8 @@ impl Store {
             (Some(scope), Some(kind)) => {
                 sqlx::query(
                     "SELECT id, scope, kind, text, importance, created_at, last_recalled_at,
-                            session_id, recall_count, embedding, consolidated_into
+                            session_id, recall_count,
+                            embedding IS NOT NULL AS has_embedding, consolidated_into
                      FROM memories
                      WHERE scope = ?1 AND kind = ?2
                      ORDER BY created_at DESC, id DESC
@@ -808,7 +866,8 @@ impl Store {
             (Some(scope), None) => {
                 sqlx::query(
                     "SELECT id, scope, kind, text, importance, created_at, last_recalled_at,
-                            session_id, recall_count, embedding, consolidated_into
+                            session_id, recall_count,
+                            embedding IS NOT NULL AS has_embedding, consolidated_into
                      FROM memories
                      WHERE scope = ?1
                      ORDER BY created_at DESC, id DESC
@@ -822,7 +881,8 @@ impl Store {
             (None, Some(kind)) => {
                 sqlx::query(
                     "SELECT id, scope, kind, text, importance, created_at, last_recalled_at,
-                            session_id, recall_count, embedding, consolidated_into
+                            session_id, recall_count,
+                            embedding IS NOT NULL AS has_embedding, consolidated_into
                      FROM memories
                      WHERE kind = ?1
                      ORDER BY created_at DESC, id DESC
@@ -836,7 +896,8 @@ impl Store {
             (None, None) => {
                 sqlx::query(
                     "SELECT id, scope, kind, text, importance, created_at, last_recalled_at,
-                            session_id, recall_count, embedding, consolidated_into
+                            session_id, recall_count,
+                            embedding IS NOT NULL AS has_embedding, consolidated_into
                      FROM memories
                      ORDER BY created_at DESC, id DESC
                      LIMIT ?1",
@@ -970,6 +1031,42 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+    create_indexes(pool).await?;
+    Ok(())
+}
+
+/// Indexes for the recall/backfill/observability hot paths. Created after
+/// `migrate` has added the v2 columns, because two of them are partial indexes
+/// over `embedding`.
+async fn create_indexes(pool: &SqlitePool) -> Result<()> {
+    // `recent_candidates`: ORDER BY created_at DESC LIMIT n.
+    sqlx::query("CREATE INDEX IF NOT EXISTS memories_created_at_idx ON memories(created_at DESC)")
+        .execute(pool)
+        .await?;
+    // `list_records` / `consolidation_candidates` / `stats`: filter or group by scope.
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS memories_scope_created_at_idx
+         ON memories(scope, created_at DESC, id DESC)",
+    )
+    .execute(pool)
+    .await?;
+    // `embedded_candidates`: the vector-recall scan, newest first.
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS memories_embedded_idx
+         ON memories(created_at DESC)
+         WHERE embedding IS NOT NULL",
+    )
+    .execute(pool)
+    .await?;
+    // `rows_missing_embedding`: without this the backfill loop re-scans an
+    // ever-longer prefix of already-embedded rows to find each next batch.
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS memories_missing_embedding_idx
+         ON memories(id)
+         WHERE embedding IS NULL",
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -988,6 +1085,52 @@ fn row_to_agent_session_state(r: sqlx::sqlite::SqliteRow) -> AgentSessionState {
 /// Comma-separated `?` placeholders for an `IN (…)` clause with `n` binds.
 fn sql_placeholders(n: usize) -> String {
     vec!["?"; n].join(",")
+}
+
+/// Shared `WHERE` for the prune id-list and its count. Binds, in order:
+/// created-at cutoff, importance floor, and the scope when one is given.
+fn prune_where_clause(scope: Option<&str>) -> String {
+    let mut sql = String::from(
+        "WHERE (
+             consolidated_into IS NOT NULL
+             OR (kind IN ('event','note') AND created_at < ? AND recall_count = 0 AND importance < ?)
+         )",
+    );
+    if scope.is_some() {
+        sql.push_str(" AND scope = ?");
+    }
+    sql
+}
+
+/// ` AND <column> IN (?,…)` for a scope allow-list, or empty when unfiltered.
+/// Pair every call with `bind_scopes` on the same query, in the same order.
+fn scope_in_clause(column: &str, scopes: Option<&[String]>) -> String {
+    match scopes {
+        Some(s) if !s.is_empty() => {
+            format!(" AND {column} IN ({})", sql_placeholders(s.len()))
+        }
+        _ => String::new(),
+    }
+}
+
+/// Same allow-list as `scope_in_clause` but as a standalone `WHERE`.
+fn scope_where_clause(scopes: Option<&[String]>) -> String {
+    match scopes {
+        Some(s) if !s.is_empty() => format!("WHERE scope IN ({})", sql_placeholders(s.len())),
+        _ => String::new(),
+    }
+}
+
+fn bind_scopes<'q>(
+    mut q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
+    scopes: Option<&'q [String]>,
+) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
+    if let Some(scopes) = scopes {
+        for scope in scopes {
+            q = q.bind(scope);
+        }
+    }
+    q
 }
 
 fn row_to_candidate(r: sqlx::sqlite::SqliteRow) -> Candidate {
@@ -1016,7 +1159,7 @@ fn row_to_memory_record(r: sqlx::sqlite::SqliteRow) -> MemoryRecord {
         created_at: r.get::<i64, _>("created_at"),
         last_recalled_at: r.get::<Option<i64>, _>("last_recalled_at"),
         recall_count: r.get::<i64, _>("recall_count"),
-        has_embedding: r.get::<Option<Vec<u8>>, _>("embedding").is_some(),
+        has_embedding: r.get::<i64, _>("has_embedding") != 0,
         consolidated_into: r.get::<Option<i64>, _>("consolidated_into"),
     }
 }
@@ -1050,7 +1193,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let hits = store.keyword_candidates("\"hello\"", 10).await.unwrap();
+        let hits = store.keyword_candidates("\"hello\"", 10, None).await.unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].bm25.is_some());
     }
@@ -1066,7 +1209,7 @@ mod tests {
             .insert_memory(None, "global", MemoryKind::Note, "second", 1.0, 200, None)
             .await
             .unwrap();
-        let recent = store.recent_candidates(10).await.unwrap();
+        let recent = store.recent_candidates(10, None).await.unwrap();
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].text, "second"); // newest first
         assert!(recent[0].bm25.is_none());
@@ -1150,8 +1293,131 @@ mod tests {
             .unwrap()
             .0;
         store.touch_recalled(&[id], 500).await.unwrap();
-        let recent = store.recent_candidates(1).await.unwrap();
+        let recent = store.recent_candidates(1, None).await.unwrap();
         assert_eq!(recent[0].recall_count, 1);
+    }
+
+    /// The scope allow-list is applied in SQL, so `limit` is spent inside the
+    /// scope. With the filter applied after the fetch instead, the 60 newer
+    /// out-of-scope rows below would consume the whole window and the caller
+    /// would see nothing.
+    #[tokio::test]
+    async fn recent_candidates_spend_the_limit_inside_the_scope() {
+        let store = test_store().await;
+        store
+            .insert_memory(None, "project:Alpha", MemoryKind::Note, "alpha", 1.0, 100, None)
+            .await
+            .unwrap();
+        for i in 0..60 {
+            store
+                .insert_memory(
+                    None,
+                    "project:Beta",
+                    MemoryKind::Note,
+                    "beta",
+                    1.0,
+                    200 + i,
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+
+        let scoped = vec!["project:Alpha".to_string()];
+        let rows = store.recent_candidates(50, Some(&scoped)).await.unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "alpha");
+        // Unfiltered, the same limit returns only the newer Beta rows.
+        let all = store.recent_candidates(50, None).await.unwrap();
+        assert_eq!(all.len(), 50);
+        assert!(all.iter().all(|c| c.scope == "project:Beta"));
+    }
+
+    #[tokio::test]
+    async fn keyword_candidates_honour_the_scope_filter() {
+        let store = test_store().await;
+        store
+            .insert_memory(None, "project:Alpha", MemoryKind::Note, "shared term", 1.0, 100, None)
+            .await
+            .unwrap();
+        store
+            .insert_memory(None, "project:Beta", MemoryKind::Note, "shared term", 1.0, 200, None)
+            .await
+            .unwrap();
+
+        let scoped = vec!["project:Alpha".to_string()];
+        let rows = store
+            .keyword_candidates("\"shared\"", 50, Some(&scoped))
+            .await
+            .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].scope, "project:Alpha");
+    }
+
+    /// Vector recall scans every embedded row, so restricting that scan to the
+    /// caller's scope is where the filter saves the most work.
+    #[tokio::test]
+    async fn embedded_candidates_honour_the_scope_filter() {
+        use crate::embed::embedding_to_blob;
+        let store = test_store().await;
+        let a = store
+            .insert_memory(None, "project:Alpha", MemoryKind::Note, "a", 1.0, 100, None)
+            .await
+            .unwrap()
+            .0;
+        let b = store
+            .insert_memory(None, "project:Beta", MemoryKind::Note, "b", 1.0, 200, None)
+            .await
+            .unwrap()
+            .0;
+        for id in [a, b] {
+            store
+                .update_embedding(id, &embedding_to_blob(&[1.0f32, 0.0]), "mock")
+                .await
+                .unwrap();
+        }
+
+        let scoped = vec!["project:Alpha".to_string()];
+        let rows = store.embedded_candidates(50, Some(&scoped)).await.unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0.scope, "project:Alpha");
+        assert_eq!(store.embedded_candidates(50, None).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn count_prune_candidates_matches_the_id_list() {
+        let store = test_store().await;
+        let now = 1_000_000_000i64;
+        let old = now - 40 * 86_400;
+        let a = store
+            .insert_memory(None, "project:X", MemoryKind::Event, "a", 1.0, old, None)
+            .await
+            .unwrap()
+            .0;
+        store.mark_consolidated(&[a], 999).await.unwrap();
+        store
+            .insert_memory(None, "project:X", MemoryKind::Note, "b", 0.2, old, None)
+            .await
+            .unwrap();
+        store
+            .insert_memory(None, "project:X", MemoryKind::Note, "c", 0.9, old, None)
+            .await
+            .unwrap();
+
+        for scope in [Some("project:X"), None] {
+            let ids = store
+                .prune_candidates(scope, 30 * 86_400, 0.5, now)
+                .await
+                .unwrap();
+            let count = store
+                .count_prune_candidates(scope, 30 * 86_400, 0.5, now)
+                .await
+                .unwrap();
+            assert_eq!(count, ids.len() as i64);
+        }
     }
 
     #[tokio::test]
@@ -1228,10 +1494,11 @@ mod tests {
             .update_embedding(id, &embedding_to_blob(&v), "mock")
             .await
             .unwrap();
-        let embedded = store.embedded_candidates(10).await.unwrap();
+        let embedded = store.embedded_candidates(10, None).await.unwrap();
         assert_eq!(embedded.len(), 1);
         assert_eq!(embedded[0].0.id, id);
-        assert_eq!(embedded[0].1, v);
+        // The blob comes back undecoded; it must round-trip to the original vector.
+        assert_eq!(crate::embed::blob_to_embedding(&embedded[0].1), v);
     }
 
     #[tokio::test]
@@ -1405,10 +1672,10 @@ mod tests {
             .0;
         let n = store.delete_memories(&[id]).await.unwrap();
         assert_eq!(n, 1);
-        assert_eq!(store.recent_candidates(10).await.unwrap().len(), 0);
+        assert_eq!(store.recent_candidates(10, None).await.unwrap().len(), 0);
         assert_eq!(
             store
-                .keyword_candidates("\"gizmo\"", 10)
+                .keyword_candidates("\"gizmo\"", 10, None)
                 .await
                 .unwrap()
                 .len(),
@@ -1445,7 +1712,7 @@ mod tests {
             .0;
         assert_eq!(
             store
-                .keyword_candidates("\"widget\"", 10)
+                .keyword_candidates("\"widget\"", 10, None)
                 .await
                 .unwrap()
                 .len(),
@@ -1459,7 +1726,7 @@ mod tests {
         // FTS index must no longer match the deleted row.
         assert_eq!(
             store
-                .keyword_candidates("\"widget\"", 10)
+                .keyword_candidates("\"widget\"", 10, None)
                 .await
                 .unwrap()
                 .len(),

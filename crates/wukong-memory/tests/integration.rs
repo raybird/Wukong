@@ -488,3 +488,28 @@ async fn vector_recall_is_not_truncated_by_recency() {
         hits.data.iter().map(|h| &h.text).collect::<Vec<_>>()
     );
 }
+
+/// `records` reports embedding coverage without the row's vector being read
+/// back — the column is a `NOT NULL` test in SQL, not the blob itself.
+#[tokio::test]
+async fn records_report_embedding_coverage() {
+    let file = NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", file.path().display());
+    std::mem::forget(file);
+    let mem = Memory::open(&url)
+        .await
+        .unwrap()
+        .with_embedder(std::sync::Arc::new(wukong_memory::MockEmbedder::new(8)));
+    mem.remember(RememberInput {
+        scope: "global".to_string(),
+        session_id: None,
+        items: vec![item("embedded row")],
+    })
+    .await
+    .unwrap();
+
+    let page = mem.records(Some("global"), None, 10).await.unwrap();
+
+    assert_eq!(page.records.len(), 1);
+    assert!(page.records[0].has_embedding);
+}

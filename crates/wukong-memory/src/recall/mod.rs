@@ -1,4 +1,4 @@
-use crate::embed::cosine_similarity;
+use crate::embed::cosine_similarity_blob;
 use crate::model::{RecallExplanation, RecallMode};
 use crate::scope::Scope;
 use crate::scoring::{combined_score, time_decay, Weights, HALF_LIFE_DAYS};
@@ -218,15 +218,19 @@ pub fn sources_for_mode(mode: RecallMode) -> (bool, bool, bool) {
 
 /// Build vector candidates from embedded rows: compute cosine to the query,
 /// set vector_sim, sort by similarity (best first), and keep `limit`.
+///
+/// Rows arrive as raw little-endian f32 blobs straight from SQLite and are
+/// scored in place — decoding each into a `Vec<f32>` first would allocate once
+/// per scanned row, and this scans the whole embedded set on every recall.
 pub fn build_vector_candidates(
     query_vec: &[f32],
-    embedded: Vec<(Candidate, Vec<f32>)>,
+    embedded: Vec<(Candidate, Vec<u8>)>,
     limit: usize,
 ) -> Vec<Candidate> {
     let mut cands: Vec<Candidate> = embedded
         .into_iter()
-        .map(|(mut c, v)| {
-            c.vector_sim = Some(cosine_similarity(query_vec, &v));
+        .map(|(mut c, blob)| {
+            c.vector_sim = Some(cosine_similarity_blob(query_vec, &blob));
             c.source_signals.push("vector".to_string());
             c
         })
@@ -258,6 +262,10 @@ pub fn apply_vector_sims(mut base: Vec<Candidate>, vector: Vec<Candidate>) -> Ve
 mod tests {
     use super::*;
     use crate::model::MemoryKind;
+
+    fn blob(v: &[f32]) -> Vec<u8> {
+        crate::embed::embedding_to_blob(v)
+    }
 
     fn cand(id: i64, scope: &str, created_at: i64, bm25: Option<f64>) -> Candidate {
         Candidate {
@@ -392,8 +400,8 @@ mod tests {
     fn build_vector_candidates_sorts_and_truncates() {
         let q = vec![1.0f32, 0.0];
         let embedded = vec![
-            (cand(1, "global", 0, None), vec![0.0f32, 1.0]), // cosine 0
-            (cand(2, "global", 0, None), vec![1.0f32, 0.0]), // cosine 1
+            (cand(1, "global", 0, None), blob(&[0.0, 1.0])), // cosine 0
+            (cand(2, "global", 0, None), blob(&[1.0, 0.0])), // cosine 1
         ];
         let out = build_vector_candidates(&q, embedded, 1);
         assert_eq!(out.len(), 1);

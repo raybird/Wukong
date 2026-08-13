@@ -27,6 +27,26 @@
     `release.yml` 會在**貼上任何公開 tag 之前**對剛建好的映像執行它，因此壞掉的映像
     不會取得公開 tag；另有斷言鎖住這個先後順序。
 
+### Changed
+
+- 修掉記憶層與 Web 層的效能瓶頸。以 20,000 筆記憶（含 embedding）實測：寫入
+  26.6 秒 → 8.8 秒，帶 scope 的 hybrid recall 單次 554 ms → 96 ms。
+  - `memories` 表除了 `dedupe_key` 之外沒有任何索引，`recent_candidates`、
+    `embedded_candidates`、`list_records`、`rows_missing_embedding` 全都在做全表掃描
+    加 temp B-tree 排序。補上 `created_at`、`(scope, created_at, id)` 兩個索引，以及
+    `embedding IS NOT NULL` / `IS NULL` 兩個 partial index。後者尤其重要：backfill
+    每批 32 筆，之前每次都要重新掃過愈來愈長的已嵌入前綴。
+  - scope 過濾從「撈完再濾」改成下推到 SQL。之前 fetch limit 會被其他 scope 的資料
+    吃掉——共用 DB 上每個 Telegram 對話各佔一個 scope，這個浪費會隨使用者數放大。
+  - 向量召回不再把每一列的 embedding BLOB 解成 `Vec<f32>`。新增
+    `cosine_similarity_blob` 直接在 bytes 上算，省下每列一次配置。
+  - `list_records` 之前為了判斷 `has_embedding` 把整個 BLOB 撈回來；`snapshot` 為了
+    算 prune 數量把所有 id 撈回來再取 `len()`。改為 SQL 層的 `IS NOT NULL` 與 `COUNT(*)`。
+  - 兩個 SQLite store 在 WAL 下改用 `synchronous=NORMAL`，不再每次 commit 都 fsync；
+    `wukong-chat-history` 先前完全沒設定 WAL 與 busy_timeout。
+  - Web 每個 chat API 請求（含 SSE 迴圈與 turn 執行緒）都會 `ChatHistoryStore::open`
+    一次，等於重建連線池並重跑整份 schema DDL。改為在 `AppState` 持有共用 store。
+
 ## [0.20.1] - 2026-08-08
 
 修正 v0.20.0 的封裝疏漏：**該版的 opencode 閒置自動重啟完全不會運作。**

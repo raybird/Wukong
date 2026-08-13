@@ -6,7 +6,11 @@ pub use attachments::{
 };
 
 use serde::Serialize;
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
+};
 use sqlx::{Row, SqlitePool};
+use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ChatMessage {
@@ -76,8 +80,20 @@ pub struct ChatHistoryStore {
 }
 
 impl ChatHistoryStore {
+    /// Open (creating if missing) the chat-history database and apply the
+    /// schema. This runs ~15 DDL statements and builds a connection pool, so
+    /// callers should open once and share the (cheaply cloneable) store rather
+    /// than opening per request.
     pub async fn open(db_url: &str) -> Result<Self, sqlx::Error> {
-        let pool = SqlitePool::connect(db_url).await?;
+        let opts = SqliteConnectOptions::from_str(db_url)?
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            // WAL survives a process crash at NORMAL; FULL only guards against
+            // OS/power loss and costs an fsync on every message insert.
+            .synchronous(SqliteSynchronous::Normal)
+            // Live-event writes from a turn overlap SSE reads and history reads.
+            .busy_timeout(std::time::Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new().connect_with(opts).await?;
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS chat_threads (
                 id TEXT PRIMARY KEY,

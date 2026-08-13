@@ -11,7 +11,7 @@ use axum::Json;
 use std::convert::Infallible;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt;
-use wukong_chat_history::{ChatAttachment, ChatHistoryStore, ChatMessage};
+use wukong_chat_history::{ChatAttachment, ChatMessage};
 use wukong_cli::run_turn_traced;
 use wukong_gateway::backend::AiBackend;
 use wukong_gateway::config::GatewayConfig;
@@ -210,10 +210,7 @@ where
         let _ = tx.send(SseMsg::Error("空白訊息".to_string()));
         let _ = tx.send(SseMsg::Done);
     } else {
-        let store = match ChatHistoryStore::open(&state.db_url).await {
-            Ok(store) => store,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-        };
+        let store = state.history.clone();
         let scope = selected_scope(&state.scope, params.scope.clone());
         let thread = match store.default_thread(&scope).await {
             Ok(thread) => thread,
@@ -228,7 +225,6 @@ where
 
         let mem = state.memory.clone();
         let backend = state.backend.clone();
-        let db_url = state.db_url.clone();
         let settings_path = state.settings_path.clone();
         // run_turn's future is not Send (AiBackend uses async_fn_in_trait and the
         // callbacks are dyn FnMut), so it can't ride tokio::spawn or the axum
@@ -289,7 +285,7 @@ where
                         None => format!("指令 /{name} 尚未支援"),
                     };
                     let html = wukong_render::to_web_html(&reply);
-                    if let Ok(store) = ChatHistoryStore::open(&db_url).await {
+                    {
                         let _ = store
                             .insert_message(
                                 &thread,
@@ -394,7 +390,7 @@ where
                 match result {
                     Ok(out) => {
                         let html = wukong_render::to_web_html(&out.text);
-                        if let Ok(store) = ChatHistoryStore::open(&db_url).await {
+                        {
                             let now = now_unix();
                             if let Ok(message_id) = store
                                 .insert_message(
@@ -440,7 +436,7 @@ where
                     }
                     Err(e) => {
                         let msg = e.to_string();
-                        if let Ok(store) = ChatHistoryStore::open(&db_url).await {
+                        {
                             if let Ok(message_id) = store
                                 .insert_message(
                                     &thread,
@@ -492,10 +488,7 @@ where
     }
 
     let limit = capped_limit(params.limit);
-    let store = match ChatHistoryStore::open(&state.db_url).await {
-        Ok(store) => store,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
+    let store = &state.history;
     let scope = selected_scope(&state.scope, params.scope.clone());
     let thread = match store.default_thread(&scope).await {
         Ok(thread) => thread,
@@ -607,10 +600,7 @@ where
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let store = match ChatHistoryStore::open(&state.db_url).await {
-        Ok(store) => store,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
+    let store = &state.history;
     let attachment = match store.attachment(id).await {
         Ok(Some(attachment)) => attachment,
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
@@ -669,10 +659,7 @@ where
     if !authorized(&state.token, params.token.as_deref()) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let store = match ChatHistoryStore::open(&state.db_url).await {
-        Ok(store) => store,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
+    let store = &state.history;
     match store.list_steps(message_id).await {
         Ok(steps) => Json(steps).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -694,10 +681,7 @@ where
     if !authorized(&state.token, params.token.as_deref()) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let store = match ChatHistoryStore::open(&state.db_url).await {
-        Ok(store) => store,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
+    let store = &state.history;
     match store.list_events(message_id).await {
         Ok(events) => Json(events).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -717,10 +701,7 @@ where
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let store = match ChatHistoryStore::open(&state.db_url).await {
-        Ok(store) => store,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
+    let store = &state.history;
     match store.list_scopes(&state.scope).await {
         Ok(scopes) => Json(scopes).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -748,18 +729,11 @@ where
         Some(scope) => scope,
         None => return (StatusCode::BAD_REQUEST, "missing scope").into_response(),
     };
-    let db_url = state.db_url.clone();
+    let store = state.history.clone();
     let mut cursor = params.after.unwrap_or(0).max(0);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
 
     tokio::spawn(async move {
-        let store = match ChatHistoryStore::open(&db_url).await {
-            Ok(store) => store,
-            Err(e) => {
-                let _ = tx.send(Event::default().event("error").data(e.to_string()));
-                return;
-            }
-        };
         let mut idle_ticks = 0;
         loop {
             match store.live_events_after(&scope, cursor, 50).await {

@@ -16,6 +16,7 @@ use chrono::{NaiveDate, TimeZone, Utc};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use wukong_chat_history::ChatHistoryStore;
 use wukong_gateway::backend::AiBackend;
 use wukong_memory::{Memory, RecallMode, RecallQuery};
 use wukong_scheduler::SchedulerStore;
@@ -29,6 +30,10 @@ pub struct AppState<B: AiBackend> {
     pub backend: Arc<B>,
     pub scope: String,
     pub db_url: String,
+    /// Shared chat-history handle. Opened once at startup: `open` builds a
+    /// connection pool and replays the whole schema, so doing it per request
+    /// put a dozen DDL round-trips in front of every chat API call.
+    pub history: ChatHistoryStore,
     pub token: Option<String>,
     pub settings_path: std::path::PathBuf,
 }
@@ -41,6 +46,7 @@ impl<B: AiBackend> Clone for AppState<B> {
             backend: self.backend.clone(),
             scope: self.scope.clone(),
             db_url: self.db_url.clone(),
+            history: self.history.clone(),
             token: self.token.clone(),
             settings_path: self.settings_path.clone(),
         }
@@ -1059,7 +1065,8 @@ mod tests {
             memory: Arc::new(Memory::open(&url).await.unwrap()),
             backend: Arc::new(MockBackend::new(replies)),
             scope: "global".to_string(),
-            db_url: url,
+            db_url: url.clone(),
+            history: ChatHistoryStore::open(&url).await.unwrap(),
             token: token.map(|s| s.to_string()),
             settings_path: tempfile::NamedTempFile::new().unwrap().path().to_path_buf(),
         }
@@ -1488,7 +1495,8 @@ mod tests {
             memory: Arc::new(Memory::open(&url).await.unwrap()),
             backend: Arc::new(ReasoningBackend { reasoning }),
             scope: "global".to_string(),
-            db_url: url,
+            db_url: url.clone(),
+            history: ChatHistoryStore::open(&url).await.unwrap(),
             token: None,
             settings_path: tempfile::NamedTempFile::new().unwrap().path().to_path_buf(),
         }
@@ -1538,7 +1546,8 @@ mod tests {
             memory: Arc::new(Memory::open(&url).await.unwrap()),
             backend: Arc::new(QuestionState),
             scope: "global".to_string(),
-            db_url: url,
+            db_url: url.clone(),
+            history: ChatHistoryStore::open(&url).await.unwrap(),
             token: None,
             settings_path: tempfile::NamedTempFile::new().unwrap().path().to_path_buf(),
         }
@@ -1603,7 +1612,8 @@ mod tests {
             memory: Arc::new(Memory::open(&url).await.unwrap()),
             backend: backend.clone(),
             scope: "global".to_string(),
-            db_url: url,
+            db_url: url.clone(),
+            history: ChatHistoryStore::open(&url).await.unwrap(),
             token: None,
             settings_path: tempfile::NamedTempFile::new().unwrap().path().to_path_buf(),
         });
@@ -1639,7 +1649,8 @@ mod tests {
             memory: Arc::new(Memory::open(&url).await.unwrap()),
             backend: backend.clone(),
             scope: "global".to_string(),
-            db_url: url,
+            db_url: url.clone(),
+            history: ChatHistoryStore::open(&url).await.unwrap(),
             token: None,
             settings_path: tempfile::NamedTempFile::new().unwrap().path().to_path_buf(),
         });
@@ -1690,7 +1701,8 @@ mod tests {
             memory: Arc::new(Memory::open(&url).await.unwrap()),
             backend: Arc::new(ReasoningToolBackend),
             scope: "global".to_string(),
-            db_url: url,
+            db_url: url.clone(),
+            history: ChatHistoryStore::open(&url).await.unwrap(),
             token: None,
             settings_path: tempfile::NamedTempFile::new().unwrap().path().to_path_buf(),
         }

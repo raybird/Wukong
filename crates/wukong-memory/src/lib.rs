@@ -294,6 +294,13 @@ impl Memory {
             Some(s) => Some(Scope::parse(s)?),
             None => None,
         };
+        // Push the scope allow-list into SQL so the fetch limit is spent on rows
+        // that survive filtering, and so a scoped recall never reads (or scores)
+        // another scope's rows. `filter_by_scope` below stays as a safety net.
+        let allowed_scopes: Option<Vec<String>> = scope_filter
+            .as_ref()
+            .map(|s| s.ancestry().iter().map(|s| s.to_string()).collect());
+        let allowed_scopes = allowed_scopes.as_deref();
         let (use_keyword, use_recent, use_vector) = sources_for_mode(query.mode);
         let limit = fetch_limit(query.top_k);
         let now = now_unix();
@@ -301,10 +308,13 @@ impl Memory {
         let keyword = if use_keyword {
             match fts_match_string(&query.query) {
                 Some(expr) => {
-                    let hits = self.store.keyword_candidates(&expr, limit).await?;
+                    let hits = self
+                        .store
+                        .keyword_candidates(&expr, limit, allowed_scopes)
+                        .await?;
                     if hits.is_empty() && contains_cjk(&query.query) {
                         self.store
-                            .cjk_fallback_candidates(&query.query, limit)
+                            .cjk_fallback_candidates(&query.query, limit, allowed_scopes)
                             .await?
                     } else {
                         hits
@@ -316,7 +326,7 @@ impl Memory {
             Vec::new()
         };
         let recent = if use_recent {
-            self.store.recent_candidates(limit).await?
+            self.store.recent_candidates(limit, allowed_scopes).await?
         } else {
             Vec::new()
         };
@@ -336,7 +346,10 @@ impl Memory {
                     // recent — otherwise an older but semantically closer memory
                     // is truncated before ranking. Capped to bound work on very
                     // large stores (ANN indexing is future work).
-                    let embedded = self.store.embedded_candidates(MAX_VECTOR_SCAN).await?;
+                    let embedded = self
+                        .store
+                        .embedded_candidates(MAX_VECTOR_SCAN, allowed_scopes)
+                        .await?;
                     let vector_cands =
                         build_vector_candidates(&qvec, embedded, query.top_k.max(5) * 4);
                     apply_vector_sims(merged, vector_cands)
@@ -726,7 +739,7 @@ mod tests {
         assert!(after.batches.is_empty());
 
         // The summary text came from the summarizer.
-        let recent = mem.store.recent_candidates(10).await.unwrap();
+        let recent = mem.store.recent_candidates(10, None).await.unwrap();
         assert!(recent
             .iter()
             .any(|c| c.kind == MemoryKind::Summary && c.text == "SUMMARY(2)"));
@@ -756,7 +769,7 @@ mod tests {
         assert_eq!(deleted, 2);
 
         // The summary survives (never prunable).
-        let recent = mem.store.recent_candidates(10).await.unwrap();
+        let recent = mem.store.recent_candidates(10, None).await.unwrap();
         assert!(recent.iter().all(|c| c.kind == MemoryKind::Summary));
     }
 

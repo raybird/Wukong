@@ -42,6 +42,16 @@ async fn main() {
         }
     };
 
+    // Opened once and shared by every handler: `open` applies the full schema,
+    // which is far too much work to repeat per request.
+    let history = match wukong_chat_history::ChatHistoryStore::open(&db_url).await {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("error: failed to open chat history: {e}");
+            std::process::exit(1);
+        }
+    };
+
     let agent_command = wukong_runtime::util::agent_command_from_env();
     let backend = build_backend_from_env(agent_command, workspace_dir());
 
@@ -50,6 +60,7 @@ async fn main() {
         backend: Arc::new(backend),
         scope,
         db_url,
+        history,
         token,
         settings_path: wukong_settings::default_settings_path(),
     };

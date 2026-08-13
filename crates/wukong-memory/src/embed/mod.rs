@@ -23,6 +23,30 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
     dot / (na.sqrt() * nb.sqrt())
 }
 
+/// Cosine similarity between a query vector and a stored little-endian f32
+/// blob, read straight out of the bytes. Same result as
+/// `cosine_similarity(a, &blob_to_embedding(blob))` but without allocating a
+/// `Vec<f32>` per row — vector recall scores thousands of rows per query.
+pub fn cosine_similarity_blob(a: &[f32], blob: &[u8]) -> f64 {
+    if a.is_empty() || blob.len() != a.len() * 4 {
+        return 0.0;
+    }
+    let mut dot = 0.0f64;
+    let mut na = 0.0f64;
+    let mut nb = 0.0f64;
+    for (i, chunk) in blob.chunks_exact(4).enumerate() {
+        let x = a[i] as f64;
+        let y = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f64;
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    dot / (na.sqrt() * nb.sqrt())
+}
+
 /// Serialize an embedding to little-endian f32 bytes.
 pub fn embedding_to_blob(v: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(v.len() * 4);
@@ -169,6 +193,25 @@ mod tests {
         assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
         assert_eq!(cosine_similarity(&[1.0], &[1.0, 2.0]), 0.0);
         assert_eq!(cosine_similarity(&[], &[]), 0.0);
+    }
+
+    #[test]
+    fn cosine_on_blob_matches_decoded_vector() {
+        let q = vec![0.3f32, -0.7, 1.2, 0.0];
+        let stored = vec![0.9f32, 0.1, -0.4, 2.0];
+        let blob = embedding_to_blob(&stored);
+        let via_blob = cosine_similarity_blob(&q, &blob);
+        let via_vec = cosine_similarity(&q, &blob_to_embedding(&blob));
+        assert!((via_blob - via_vec).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cosine_on_blob_rejects_dimension_mismatch() {
+        let q = vec![1.0f32, 0.0];
+        assert_eq!(cosine_similarity_blob(&q, &embedding_to_blob(&[1.0])), 0.0);
+        assert_eq!(cosine_similarity_blob(&[], &[]), 0.0);
+        // A blob of zeros has no direction.
+        assert_eq!(cosine_similarity_blob(&q, &embedding_to_blob(&[0.0, 0.0])), 0.0);
     }
 
     #[test]
