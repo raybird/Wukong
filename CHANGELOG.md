@@ -11,6 +11,8 @@
 
 ## [Unreleased]
 
+## [0.21.3] - 2026-08-13
+
 ### Changed
 
 - Memoria runtime image 從 **2.15 GB 降到 1.26 GB**（-41%），並跟進 Memoria **1.27.0**。
