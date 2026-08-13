@@ -77,8 +77,9 @@ else
     exit 1
 fi
 
-# The three commands the host workflow uses. `brief` and `feedback` are why the
-# CLI has to be here at all: Memoria's HTTP API does not expose either.
+# The three commands the host workflow uses. `brief` is why the CLI has to be
+# here at all — it is the one with no HTTP endpoint, so a sidecar could not
+# serve it.
 for cmd in "memoria init" "memoria remember '容器內語意召回驗證：悟空的記憶層'" "memoria brief"; do
     if run_in_wukong "$cmd" >/dev/null 2>&1; then
         pass "${cmd%% *} ${cmd#* } ok"

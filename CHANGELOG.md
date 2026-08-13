@@ -35,8 +35,9 @@
     `.env` 的 `WUKONG_MEMORIA_VERSION`，不必重建 Wukong image。
   - 純加法：資料 volume 的權限交接由 publisher 容器（本來就是 root）處理，而不是改
     Wukong 的 entrypoint，所以現有已發布的 image 直接就能用，不需要重建或升級。
-  - 必須是 CLI 而不是 sidecar：Memoria 的 HTTP API 只有 `recall`/`remember`，沒有
-    `brief` 和 `feedback`，而後兩者是 host workflow 的一部分。
+  - 必須是 CLI 而不是 sidecar：Memoria 的 HTTP API 沒有 `brief` 的端點，而那是
+    host workflow 每次開場要讀的東西。（`feedback` 有——`POST /v1/recall/:id/outcome`，
+    只是 CLI 與 HTTP 命名不同。）
   - 容器記憶存在獨立的 `memoria-data` volume，與 host 的 `~/.memoria` 無關。
   - `memoria-vector-sync` 把 Memoria `OPERATIONS.md` 的三步 ingest 包成一個指令。少了它
     向量表是空的，而 `--mode vector` 仍會回傳字面召回的結果、看起來像正常運作。

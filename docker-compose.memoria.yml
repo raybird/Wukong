@@ -59,8 +59,9 @@ services:
 
   opencode-server:
     # The agent's shell runs here, so this is the only container that needs the
-    # CLI. Memoria's HTTP API would not do: it exposes recall/remember but not
-    # `brief` or `feedback`, and both are part of the host workflow.
+    # CLI. Memoria's HTTP API would not do: `brief` has no endpoint, and the host
+    # workflow opens with it. (`feedback` does have one — POST
+    # /v1/recall/:id/outcome — the CLI and HTTP names just differ.)
     depends_on:
       memoria-runtime:
         condition: service_completed_successfully
