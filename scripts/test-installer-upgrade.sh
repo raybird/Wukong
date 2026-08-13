@@ -125,6 +125,14 @@ run_installer() {
     (cd "$DEPLOYMENT" && printf '%b' "$input" | WUKONG_TEST_RELEASES="$RELEASES" FIXTURE_TAG="${FIXTURE_TAG:-v9.9.9}" bash "$INSTALLER" "$@")
 }
 
+run_piped_installer() {
+    (
+        cd "$DEPLOYMENT"
+        cat "$INSTALLER" |
+            WUKONG_TEST_RELEASES="$RELEASES" FIXTURE_TAG="${FIXTURE_TAG:-v9.9.9}" bash -s -- "$@"
+    )
+}
+
 prepare() { rm -rf "$HOME" "$DEPLOYMENT"; mkdir -p "$HOME" "$DEPLOYMENT"; : > "$LOG"; make_release; make_fakes; }
 
 test_parsing() {
@@ -502,6 +510,16 @@ PAD
     assert_file "$DEPLOYMENT/.wukong-release"
 }
 
+test_stdin_installer() {
+    prepare
+    local out
+    out="$(run_piped_installer --mode docker --version v9.9.9 2>&1)" ||
+        fail "installer failed when read from stdin: $out"
+    grep -Fq 'completed: v9.9.9' <<<"$out" ||
+        fail "stdin installer did not reach its completion message: $out"
+    assert_file "$DEPLOYMENT/.wukong-release"
+}
+
 case "$CASE" in
     parsing) test_parsing ;;
     verification) test_verification ;;
@@ -509,6 +527,7 @@ case "$CASE" in
     docker-forward-compat) test_docker_forward_compatible_bundle ;;
     docker-missing-entry) test_docker_bundle_missing_required_entry ;;
     docker-self-replace) test_docker_installer_replaces_itself_mid_run ;;
+    stdin) test_stdin_installer ;;
     metadata) test_metadata ;;
     binary-clean) test_binary_clean ;;
     binary-upgrade) test_binary_upgrade ;;
@@ -524,7 +543,7 @@ case "$CASE" in
     docker-project) test_docker_project_resolution ;;
     docker-project-conflicts) test_docker_project_conflicts ;;
     docker-project-persistence) test_docker_project_persistence ;;
-    all) test_parsing; test_verification; test_docker; test_docker_forward_compatible_bundle; test_docker_bundle_missing_required_entry; test_docker_installer_replaces_itself_mid_run; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_docker_compose_repair; test_docker_project_resolution; test_docker_project_conflicts; test_docker_project_persistence; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
+    all) test_parsing; test_verification; test_docker; test_docker_forward_compatible_bundle; test_docker_bundle_missing_required_entry; test_docker_installer_replaces_itself_mid_run; test_stdin_installer; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_docker_compose_repair; test_docker_project_resolution; test_docker_project_conflicts; test_docker_project_persistence; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
     *) fail "unknown test case: $CASE" ;;
 esac
 

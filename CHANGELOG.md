@@ -11,6 +11,19 @@
 
 ## [Unreleased]
 
+## [0.21.4] - 2026-08-14
+
+### Fixed
+
+- **修正 installer 透過 `curl ... | bash` 執行時的 `BASH_SOURCE[0]: unbound variable`。**
+  `set -u` 下，stdin 執行沒有可供 self-copy 的來源檔案；installer 現在只在有實際
+  腳本路徑時建立私有副本，並以回歸測試覆蓋 pipe 執行方式。
+
+### Changed
+
+- 安裝與 Docker 文件新增可直接複製的既有部署升級指令：
+  `curl ... | bash -s -- --mode docker --upgrade`。
+
 ## [0.21.3] - 2026-08-13
 
 ### Changed
@@ -567,7 +580,9 @@ server 模式補回那個 CLI 免費獲得的週期性重置，同時保留暖�
   不安全綁定（`0.0.0.0` + 空 token）啟動即拒絕（fail-closed，可用
   `WUKONG_WEB_ALLOW_INSECURE=1` 覆寫）；Telegram callback 加白名單檢查。
 
-[Unreleased]: https://github.com/raybird/Wukong/compare/v0.18.4...HEAD
+[Unreleased]: https://github.com/raybird/Wukong/compare/v0.21.4...HEAD
+[0.21.4]: https://github.com/raybird/Wukong/compare/v0.21.3...v0.21.4
+[0.21.3]: https://github.com/raybird/Wukong/compare/v0.21.2...v0.21.3
 [0.18.4]: https://github.com/raybird/Wukong/compare/v0.18.3...v0.18.4
 [0.18.3]: https://github.com/raybird/Wukong/compare/v0.18.2...v0.18.3
 [0.18.2]: https://github.com/raybird/Wukong/compare/v0.18.0...v0.18.2

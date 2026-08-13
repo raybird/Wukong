@@ -16,9 +16,10 @@ set -euo pipefail
 # v0.21.0 were all byte-identical here, which is the only reason this never fired
 # before.
 #
-# Re-exec from a copy and the file on disk is free to change under us. Nothing
-# here reads $0 or BASH_SOURCE for anything but this, so the copy is equivalent.
-if [[ -z "${WUKONG_INSTALLER_SELF_COPY:-}" ]]; then
+# Re-exec from a copy and the file on disk is free to change under us. When
+# invoked as `bash -s`, BASH_SOURCE[0] is unset; stdin is already the script
+# input, so there is no file to copy and no deployment file can affect it.
+if [[ -z "${WUKONG_INSTALLER_SELF_COPY:-}" && -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
     _wukong_self="$(mktemp "${TMPDIR:-/tmp}/wukong-install-self.XXXXXX")"
     cat "${BASH_SOURCE[0]}" > "$_wukong_self"
     WUKONG_INSTALLER_SELF_COPY="$_wukong_self" exec bash "$_wukong_self" "$@"

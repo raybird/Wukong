@@ -109,6 +109,12 @@ sequenceDiagram
 curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash
 ```
 
+既有 Docker 部署升級時，請在 Runtime／部署目錄直接執行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash -s -- --mode docker --upgrade
+```
+
 Binary 安裝可用 `--mode binary --upgrade` 保留既有元件、設定與 workspace 升級；加上 `--with-schedulerd` 可在 Linux 明確安裝 Scheduler user service，`--rollback` 可回復最後一個已驗證 transaction。Docker installer 驗證 release checksum、manifest 與 GHCR image digest，且不會移除 volumes；stable promotion 必須附上已提交的 RC rehearsal evidence。
 
 基本使用：
