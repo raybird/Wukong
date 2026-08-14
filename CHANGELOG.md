@@ -11,6 +11,8 @@
 
 ## [Unreleased]
 
+## [0.21.5] - 2026-08-14
+
 ### Fixed
 
 - **中文查詢從來沒有走到關鍵字索引。** FTS5 的 unicode61 tokenizer 把一整串連續 CJK
@@ -33,6 +35,15 @@
   - 這類失效**無法用分數偵測**：`confidence` 源自 `relevance`，而 `relevance` 正是壞掉的
     東西。所以新增的測試斷言的是 `source_signals`（誰回答的）與 `lexical > 0`（有沒有被
     排序），而不是命中數——只斷言「有命中」的話，壞掉的行為也會通過。
+
+### Documentation
+
+- 新增 `docs/2026-08-14-memory-recall-verification-handover.md`：CJK 召回缺陷的完整調查、
+  尚未拍板的「排程產出寫進使用者 scope」、以及未來若加記憶健康檢查時「連線不可 pool」
+  的地雷與判別法。
+- `CLAUDE.md` 新增「驗證紀律」兩條：要驗證一句宣稱就去問產物而不是問描述它的檔案
+  （註解與 fixture 沒有執行語意，沒有測試會為它們紅燈）；診斷訊號不可與被診斷的機制
+  同源（`confidence` 由 `relevance` 算出，而壞的正是 `relevance`）。
 
 ## [0.21.4] - 2026-08-14
 
@@ -603,7 +614,8 @@ server 模式補回那個 CLI 免費獲得的週期性重置，同時保留暖�
   不安全綁定（`0.0.0.0` + 空 token）啟動即拒絕（fail-closed，可用
   `WUKONG_WEB_ALLOW_INSECURE=1` 覆寫）；Telegram callback 加白名單檢查。
 
-[Unreleased]: https://github.com/raybird/Wukong/compare/v0.21.4...HEAD
+[Unreleased]: https://github.com/raybird/Wukong/compare/v0.21.5...HEAD
+[0.21.5]: https://github.com/raybird/Wukong/compare/v0.21.4...v0.21.5
 [0.21.4]: https://github.com/raybird/Wukong/compare/v0.21.3...v0.21.4
 [0.21.3]: https://github.com/raybird/Wukong/compare/v0.21.2...v0.21.3
 [0.18.4]: https://github.com/raybird/Wukong/compare/v0.18.3...v0.18.4
