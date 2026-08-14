@@ -58,11 +58,8 @@ installer 會從 GitHub Release 下載並驗證 `SHA256SUMS`、`release-manifest
 若你當初是用 `install.sh --mode docker` 在空目錄產生部署檔案，請在同一個部署目錄重新下載新版 Docker bundle。`.env`、workspace、Compose override 與其他自訂檔會保留；`--upgrade` 只會覆蓋 bundle 擁有的 `docker-compose.yml`、`.env.example`、`LICENSE`、`scripts/install.sh`，然後 pull 並重建服務。
 
 ```bash
-cd /path/to/wukong-docker
-
-curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh \
-  | bash -s -- --upgrade
-
+# 請在既有 Wukong Docker 部署目錄執行
+curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash -s -- --mode docker --upgrade
 ```
 
 `--upgrade` 會先比對目標 release、`.wukong-release` 與目前的 Compose image 設定；已是相同版本時會直接結束，不呼叫 Docker。需要重新部署相同版本時可加上 `--force`。

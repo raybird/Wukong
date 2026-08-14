@@ -38,6 +38,12 @@ curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install
 
 Docker `--upgrade` 會先檢查本機 release metadata 與 Compose image；版本相同時直接結束，`--force` 可要求重新部署。installer 會將 Compose project 寫入 `.wukong-release`，並在 legacy metadata 缺少此欄位時從既有 container labels 判斷。全新安裝可用 `COMPOSE_PROJECT_NAME=<name>` 指定 project；既有部署不得用它切換 ownership，任何 metadata、labels 或手動值衝突都會在 mutation 前中止，且 installer 不會自動遷移 volumes。
 
+既有 Docker 部署升級（請在 Runtime／部署目錄執行）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash -s -- --mode docker --upgrade
+```
+
 手動選項：
 
 ```bash
