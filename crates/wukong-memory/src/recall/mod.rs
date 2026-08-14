@@ -54,6 +54,65 @@ pub fn is_trivial(query: &str) -> bool {
     tokens.is_empty() || tokens.iter().all(|t| STOPWORDS.contains(&t.as_str()))
 }
 
+/// Rewrite runs of CJK as overlapping bigrams so a tokenizer with no notion of
+/// Chinese word boundaries still produces useful terms.
+///
+/// FTS5's unicode61 tokenizer emits exactly one token per contiguous CJK run, so
+/// a stored 「幫我看一下排程設定有沒有問題」 could only ever be matched by a query
+/// that repeated that whole run character for character. Everything else missed
+/// the index entirely and fell through to the `LIKE '%…%'` fallback, which
+/// returns rows but carries no bm25 — leaving Chinese recall unranked and its
+/// reported confidence pinned at 0.
+///
+/// Applying this to BOTH the indexed text and the query gives both sides the
+/// same boundaries: 「排程設定」 becomes 「排程 程設 設定」, which the tokenizer can
+/// split, so the terms line up and bm25 works again. Rewriting only one side
+/// would not help — FTS5 compares tokens for equality, and the document's single
+/// large token matches nothing.
+///
+/// A run of one character is emitted as-is so single-character queries keep
+/// working, and non-CJK text passes through untouched so English tokenisation
+/// and its existing ranking are unaffected.
+pub fn cjk_expand(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() * 2);
+    let mut run: Vec<char> = Vec::new();
+    for ch in text.chars() {
+        if is_cjk_char(ch) {
+            run.push(ch);
+        } else {
+            flush_cjk_run(&mut out, &mut run);
+            out.push(ch);
+        }
+    }
+    flush_cjk_run(&mut out, &mut run);
+    out
+}
+
+/// Emit one accumulated CJK run, space-separated from whatever surrounds it.
+/// The padding matters: without it `a排程b` would still be one token, because
+/// Latin letters and CJK are both alphanumeric to the tokenizer.
+fn flush_cjk_run(out: &mut String, run: &mut Vec<char>) {
+    if run.is_empty() {
+        return;
+    }
+    if !out.is_empty() && !out.ends_with(' ') {
+        out.push(' ');
+    }
+    if run.len() == 1 {
+        out.push(run[0]);
+    } else {
+        for (i, pair) in run.windows(2).enumerate() {
+            if i > 0 {
+                out.push(' ');
+            }
+            out.push(pair[0]);
+            out.push(pair[1]);
+        }
+    }
+    out.push(' ');
+    run.clear();
+}
+
 /// Lowercase alphanumeric tokens.
 pub fn tokenize(query: &str) -> Vec<String> {
     query
@@ -65,8 +124,12 @@ pub fn tokenize(query: &str) -> Vec<String> {
 
 /// Build an FTS5 MATCH expression: each token quoted, OR-joined.
 /// Returns None when there are no usable tokens.
+///
+/// The query goes through `cjk_expand` first, mirroring what was done to the
+/// indexed text. Skipping it here would leave Chinese queries as one token
+/// again, matching nothing.
 pub fn fts_match_string(query: &str) -> Option<String> {
-    let tokens = tokenize(query);
+    let tokens = tokenize(&cjk_expand(query));
     if tokens.is_empty() {
         return None;
     }
@@ -292,6 +355,37 @@ mod tests {
         assert!(!is_trivial("連線"));
         assert!(is_trivial("可以"));
         assert!(contains_cjk("連線池設定"));
+    }
+
+    #[test]
+    fn cjk_expand_produces_overlapping_bigrams() {
+        assert_eq!(cjk_expand("排程設定"), "排程 程設 設定 ");
+        // A single character has no pair; it must survive rather than vanish.
+        assert_eq!(cjk_expand("排"), "排 ");
+        // Latin is untouched, so English tokenisation and ranking are unchanged.
+        assert_eq!(cjk_expand("scheduler settings"), "scheduler settings");
+    }
+
+    #[test]
+    fn cjk_expand_separates_runs_from_adjacent_latin() {
+        // Without the padding these would tokenise as one term: Latin letters and
+        // CJK are both alphanumeric, so nothing would split `a排程b`.
+        assert_eq!(cjk_expand("a排程b"), "a 排程 b");
+        assert_eq!(cjk_expand("User: 排程壞了"), "User: 排程 程壞 壞了 ");
+    }
+
+    #[test]
+    fn expanded_query_and_document_share_terms() {
+        // The property the whole fix rests on: both sides must yield overlapping
+        // tokens. Rewriting only one side leaves the other as a single term.
+        let doc = tokenize(&cjk_expand("幫我看一下排程設定有沒有問題"));
+        for query in ["排程設定", "排程 設定", "排程"] {
+            let q = tokenize(&cjk_expand(query));
+            assert!(
+                q.iter().any(|t| doc.contains(t)),
+                "query {query:?} shares no term with the document"
+            );
+        }
     }
 
     #[test]

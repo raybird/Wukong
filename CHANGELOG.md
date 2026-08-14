@@ -11,6 +11,29 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **中文查詢從來沒有走到關鍵字索引。** FTS5 的 unicode61 tokenizer 把一整串連續 CJK
+  當成**單一 token**，所以只有在查詢字串與文件裡那串中文一字不差相同時才會命中。其餘
+  全部落到 `LIKE '%查詢%'` 子字串 fallback。
+  - 實測（修正前）：`排程 設定` **0 筆**（FTS 對不上，fallback 又去找含空格的字面字串）；
+    `排程設定` 命中但來源是 `cjk_fallback`、`lexical=0`。
+  - 更要命的是 fallback 產生的候選 `bm25: None` → `lexical_norm = 0` → **中文查詢的相關性
+    排序完全失效**，排的是時間不是相關度。而 `confidence` 由 relevance 算出，所以
+    **中文召回一律回報 0.000**——同一語料同樣命中一筆，英文是 1.000。
+  - 連帶讓診斷數字失真：記憶健康快照的 `avg_top_relevance` 對純中文使用者恆讀 0.000，
+    與「從來沒找到東西」在數字上無法區分，儘管 fallback 每次都撈得到。
+  - 修法是在**寫入與查詢兩側**把連續 CJK 展開成重疊 2-gram（`排程設定` → `排程 程設 設定`），
+    讓 tokenizer 有邊界可切。只做單側無效——FTS5 比對的是 token 等值，文件那顆大 token
+    對不上任何東西。新增 `memories.search_text` 欄位存放展開後的形式，FTS 索引建在它上面，
+    以維持 external-content 表與 delete trigger 的一致性。
+  - 修正後：`排程 設定` 5 筆、來源 `keyword`、confidence **1.000**，與英文對等。
+  - 既有資料庫會自動遷移（回填 `search_text` + 重建 FTS + 換 trigger），5,000 列實測
+    **232 ms**。有測試確認遷移不會弄丟資料，且原本存在的中文記憶在升級後變得搜得到。
+  - 這類失效**無法用分數偵測**：`confidence` 源自 `relevance`，而 `relevance` 正是壞掉的
+    東西。所以新增的測試斷言的是 `source_signals`（誰回答的）與 `lexical > 0`（有沒有被
+    排序），而不是命中數——只斷言「有命中」的話，壞掉的行為也會通過。
+
 ## [0.21.4] - 2026-08-14
 
 ### Fixed

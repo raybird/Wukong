@@ -23,21 +23,29 @@ CREATE TABLE IF NOT EXISTS memories (
     scope            TEXT NOT NULL,
     kind             TEXT NOT NULL,
     text             TEXT NOT NULL,
+    -- `text` rewritten by recall::cjk_expand. The FTS index is built on THIS
+    -- column, not on `text`: FTS5's tokenizer cannot split Chinese, so the
+    -- searchable form needs explicit bigram boundaries. Keeping it as a real
+    -- column (rather than indexing a transformed string directly) is what lets
+    -- the external-content FTS table and its delete trigger stay consistent —
+    -- both read the same stored value.
+    search_text      TEXT,
     created_at       INTEGER NOT NULL,
     last_recalled_at INTEGER,
     recall_count     INTEGER NOT NULL DEFAULT 0,
     importance       REAL NOT NULL DEFAULT 1.0
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-    text,
+    search_text,
     content='memories',
     content_rowid='id'
 );
 CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
-    INSERT INTO memories_fts(rowid, text) VALUES (new.id, new.text);
+    INSERT INTO memories_fts(rowid, search_text) VALUES (new.id, new.search_text);
 END;
 CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
-    INSERT INTO memories_fts(memories_fts, rowid, text) VALUES('delete', old.id, old.text);
+    INSERT INTO memories_fts(memories_fts, rowid, search_text)
+    VALUES('delete', old.id, old.search_text);
 END;
 CREATE TABLE IF NOT EXISTS agent_sessions (
     scope       TEXT PRIMARY KEY,
@@ -159,14 +167,18 @@ impl Store {
         }
 
         let row = sqlx::query(
-            "INSERT INTO memories (session_id, scope, kind, text, created_at, importance, dedupe_key)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO memories
+                 (session_id, scope, kind, text, search_text, created_at, importance, dedupe_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              RETURNING id",
         )
         .bind(session_id)
         .bind(scope)
         .bind(kind.as_str())
         .bind(text)
+        // The AFTER INSERT trigger reads new.search_text, so this must be set in
+        // the same statement or the row is written but never indexed.
+        .bind(crate::recall::cjk_expand(text))
         .bind(now)
         .bind(importance)
         .bind(dedupe_key)
@@ -1029,7 +1041,78 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+    if !names.iter().any(|n| n == "search_text") {
+        sqlx::query("ALTER TABLE memories ADD COLUMN search_text TEXT")
+            .execute(pool)
+            .await?;
+    }
+    migrate_fts_to_search_text(pool).await?;
     create_indexes(pool).await?;
+    Ok(())
+}
+
+/// Move the FTS index from `text` to the bigram-expanded `search_text`.
+///
+/// Databases created before this indexed `memories.text` directly, which meant
+/// Chinese was one token per contiguous run and effectively unsearchable. The
+/// conversion has to rebuild the index, so it is gated on the stored table
+/// definition rather than run every open.
+async fn migrate_fts_to_search_text(pool: &SqlitePool) -> Result<()> {
+    let existing: Option<String> =
+        sqlx::query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memories_fts'")
+            .fetch_optional(pool)
+            .await?
+            .and_then(|r| r.get::<Option<String>, _>("sql"));
+
+    match existing {
+        // Already the new shape (or a fresh database, where SCHEMA just built it).
+        Some(sql) if sql.contains("search_text") => return Ok(()),
+        None => return Ok(()),
+        Some(_) => {}
+    }
+
+    // Backfill in batches. The expansion happens in Rust, so this cannot be a
+    // single UPDATE — and doing it before the rebuild matters, because `rebuild`
+    // reads the content table and would otherwise index a column of NULLs.
+    loop {
+        let rows = sqlx::query(
+            "SELECT id, text FROM memories WHERE search_text IS NULL ORDER BY id ASC LIMIT 500",
+        )
+        .fetch_all(pool)
+        .await?;
+        if rows.is_empty() {
+            break;
+        }
+        let mut tx = pool.begin().await?;
+        for row in &rows {
+            sqlx::query("UPDATE memories SET search_text = ?2 WHERE id = ?1")
+                .bind(row.get::<i64, _>("id"))
+                .bind(crate::recall::cjk_expand(&row.get::<String, _>("text")))
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+    }
+
+    // Drop the triggers first: they reference the old column and would fire
+    // against a table that no longer has it.
+    sqlx::raw_sql(
+        "DROP TRIGGER IF EXISTS memories_ai;
+         DROP TRIGGER IF EXISTS memories_ad;
+         DROP TABLE IF EXISTS memories_fts;
+         CREATE VIRTUAL TABLE memories_fts USING fts5(
+             search_text, content='memories', content_rowid='id');
+         INSERT INTO memories_fts(memories_fts) VALUES('rebuild');
+         CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+             INSERT INTO memories_fts(rowid, search_text) VALUES (new.id, new.search_text);
+         END;
+         CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
+             INSERT INTO memories_fts(memories_fts, rowid, search_text)
+             VALUES('delete', old.id, old.search_text);
+         END;",
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
