@@ -80,6 +80,25 @@ wukong-orchestrator → wukong-gateway → wukong-memory
 
 會話隔離：只有最後一棒才帶入 / 更新 scope 的 `session_id`，前面輔助棒為 stateless。
 
+### 驗證紀律
+
+兩條在 2026-08-14 同一天各命中兩次以上的規則，證據見
+`docs/2026-08-14-memory-recall-verification-handover.md`。
+
+- **要驗證一句宣稱，去問產物，不要問描述它的檔案。** 註解、文件、測試 fixture 都沒有
+  執行語意，所以**沒有任何測試會為它們紅燈**。同一天出現三個實例：一句宣稱省了
+  ~200 MB 但實際省 0 的 Dockerfile 註解（隨版本出貨）、一份只造 6 個檔案而真實 bundle
+  有 11 個的 fixture（測試全綠卻放行了一個裝不起來的版本）、一句比對陣列單行寫法的斷言
+  （清單一長就不再斷言任何事）。用 `docker history` 問 layer 大小、`tar -tf` 問歸檔內容、
+  `EXPLAIN QUERY PLAN` 問索引有沒有被用、實際跑一次召回問語料品質。無法變成可執行的
+  敘述就刪掉它——把「Routes (12 endpoints)」改成只留清單，是消滅第二份真相而不是承諾
+  同步它。
+- **診斷訊號不可與被診斷的機制同源。** `confidence` 由 `relevance` 算出，而中文召回壞的
+  正是 `relevance`——所以中文查詢無論成功與否都回報 0.000，用它偵測不到自己失效。要用
+  **結構性**訊號：`source_signals` 說是誰回答的（`keyword` / `cjk_fallback` / `vector`），
+  那由查詢路徑決定、不經過計分。寫測試時斷言「誰回答的」與「有沒有被排序」，不要只斷言
+  命中數——`!hits.is_empty()` 在壞掉的行為下也會通過。
+
 ### 關鍵設計細節
 
 - **假 agent 測試法**：`--agent-cmd "printf fixer"` 或 `echo` 可在無 LLM 下驗證完整流程。
