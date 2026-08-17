@@ -11,6 +11,30 @@
 
 ## [Unreleased]
 
+## [0.21.7] - 2026-08-17
+
+### Fixed
+
+- **多個服務同時開記憶庫時，schema 遷移會互相踩死。** 容器部署裡 `wukong-web`、
+  `wukong-telegram`、`wukong-schedulerd` 由 compose 同時拉起，三者都指向
+  `/data/memory.db`。遷移是 check-then-act（`PRAGMA table_info` 看欄位在不在，不在就
+  `ALTER`），三者可以同時讀到「不在」然後同時 `ALTER`，後到的拿到
+  `duplicate column name`，整個 `Store::open` 失敗。
+  - 升級 v0.21.6 到既有部署時實際發生：`wukong-schedulerd` 崩了一次，靠
+    `restart: unless-stopped` 才活過來。**沒有重啟政策的進入點會直接停在那裡。**
+  - SQLite 沒有 `ADD COLUMN IF NOT EXISTS`，檢查與 `ALTER` 之間也無法在單一語句內
+    原子化，所以改成容忍 `duplicate column name`——對手已經把我們要的欄位加好了，
+    結果狀態正是我們要的。
+  - **不是 `search_text` 專有的問題。** 五個 `ALTER` 全部走同一個 helper：
+    `embedding`、`embedding_model`、`consolidated_into`、`dedupe_key` 一直都有這個
+    競態（回歸測試三者都重現得出來），只是 `search_text` 剛好是第一個需要在既有
+    多服務部署上執行的遷移。
+  - FTS 重建那段另外用 `BEGIN IMMEDIATE` 序列化並在取得鎖後重新確認：它是
+    `DROP` + `CREATE` 的多語句序列，而 SQLite 只逐語句上寫鎖。回填刻意留在鎖外分批
+    做，它以 `search_text IS NULL` 為條件、本身可重入。
+  - 回歸測試用三條 OS 執行緒各跑獨立 runtime，斷言「每一個都成功」而不是「至少一個
+    成功」——壞掉的行為下也會有贏家。拿掉修正 15 次全紅，修好後 25 次全綠。
+
 ## [0.21.6] - 2026-08-17
 
 ### Security
@@ -671,7 +695,8 @@ server 模式補回那個 CLI 免費獲得的週期性重置，同時保留暖�
   不安全綁定（`0.0.0.0` + 空 token）啟動即拒絕（fail-closed，可用
   `WUKONG_WEB_ALLOW_INSECURE=1` 覆寫）；Telegram callback 加白名單檢查。
 
-[Unreleased]: https://github.com/raybird/Wukong/compare/v0.21.6...HEAD
+[Unreleased]: https://github.com/raybird/Wukong/compare/v0.21.7...HEAD
+[0.21.7]: https://github.com/raybird/Wukong/compare/v0.21.6...v0.21.7
 [0.21.6]: https://github.com/raybird/Wukong/compare/v0.21.5...v0.21.6
 [0.21.5]: https://github.com/raybird/Wukong/compare/v0.21.4...v0.21.5
 [0.21.4]: https://github.com/raybird/Wukong/compare/v0.21.3...v0.21.4
