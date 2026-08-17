@@ -20,7 +20,13 @@ set -euo pipefail
 _overlay="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/docker-compose.memoria.yml"
 _memoria_version="$(sed -n 's/.*WUKONG_MEMORIA_VERSION:-\([0-9][0-9.]*\).*/\1/p' "$_overlay" | head -1)"
 RUNTIME_IMAGE="${1:-wukong-memoria-runtime:${_memoria_version:?cannot read WUKONG_MEMORIA_VERSION default from the overlay}}"
-WUKONG_IMAGE="${2:-ghcr.io/raybird/wukong:v0.21.2}"
+# 同一條理由適用於 Wukong image，但這裡原本寫死 v0.21.2——而本腳本存在的核心目的就是
+# 驗證 Memoria runtime 與 Wukong image 之間的 Node ABI 配對。拿四個版本前的 image 去驗，
+# 驗到的是沒人會部署的組合，而且**不會有任何症狀**：只要 Node 大版本剛好沒動就一直全綠。
+# 改成取最近的 release tag。發版 preflight 時新 tag 尚未建立，取到的是上一版——那正確，
+# 因為那才是 GHCR 上目前存在的 image。
+_latest_tag="$(git -C "$(dirname "$_overlay")" describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
+WUKONG_IMAGE="${2:-ghcr.io/raybird/wukong:${_latest_tag:-v0.21.2}}"
 VOL_RUNTIME="wukong-memoria-runtime-test-$$"
 VOL_DATA="wukong-memoria-data-test-$$"
 # A pristine, root-owned volume for the unprivileged run; the one above has
@@ -41,6 +47,27 @@ echo
 docker volume create "$VOL_RUNTIME" >/dev/null
 docker volume create "$VOL_DATA" >/dev/null
 docker volume create "$VOL_DATA_NONROOT" >/dev/null
+
+# 這個腳本吃**已建好**的 image，自己不 build。而預設 tag 是從 overlay 的
+# WUKONG_MEMORIA_VERSION 讀出來的，所以升級版本號之後第一次跑必然找不到 image——
+# 若不先分辨這種情況，錯誤訊息會是「runtime failed to publish」，讀起來像發佈邏輯壞了，
+# 而不是「你還沒 build」。實際上就是這樣浪費過一次診斷。
+if ! docker image inspect "$RUNTIME_IMAGE" >/dev/null 2>&1; then
+    fail "image $RUNTIME_IMAGE 不存在（本腳本不負責 build）"
+    echo "    先建它：WUKONG_MEMORIA_VERSION=${RUNTIME_IMAGE##*:} docker compose build memoria-runtime" >&2
+    exit 1
+fi
+
+# Wukong image 改成隨 release tag 走之後，第一次跑會在檢查途中觸發 pull，而 pull 的進度
+# 訊息會混進被擷取的輸出裡——實測讓版本字串變成
+# `(vUnable to find image ... 1.28.1)`。擷取到的髒字串同樣可能掩蓋錯的版本，所以先拉乾淨。
+if ! docker image inspect "$WUKONG_IMAGE" >/dev/null 2>&1; then
+    echo "pulling $WUKONG_IMAGE ..."
+    docker pull -q "$WUKONG_IMAGE" >/dev/null || {
+        fail "無法取得 $WUKONG_IMAGE"
+        exit 1
+    }
+fi
 
 # ── 1. Publish into the volume ──
 if docker run --rm -e MEMORIA_DATA_UID=1000 -e MEMORIA_DATA_GID=1000 \

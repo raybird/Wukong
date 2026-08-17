@@ -11,6 +11,51 @@
 
 ## [Unreleased]
 
+## [0.21.9] - 2026-08-17
+
+### Added
+
+- **在末棒的 prompt 告訴 agent 有長期記憶 CLI 可用。** Memoria overlay 一直只接在環境層
+  ——CLI 在 PATH 上、`MEMORIA_HOME` 與 vector helper 都設好了——但從來沒接到 prompt 層，
+  所以 agent 不知道它存在。實測結果是容器的 Memoria store **四天零筆 agent 寫入的記憶**，
+  只有 overlay 設起來那天的初始化那一筆。**可用性不等於可發現性。**
+  - 對照組就在隔壁：排程能力有一個常駐注入的 `[排程能力]` 區塊，明確告訴 agent 指令怎麼下、
+    而且「不要只用文字描述而不執行」。Memoria 少的就是這個。
+  - 閘門是 `WUKONG_MEMORIA_HINT`（啟用 overlay 時預設開啟，設 `0` 關閉），刻意用明確開關而
+    不是自動偵測：prompt 是在 `wukong-web`／`telegram`／`schedulerd` 裡組的，但 agent 的
+    shell 跑在 `opencode-server`，那是唯一被 overlay 接線的容器。探測自己的環境會回答錯的
+    問題，而告訴 agent 一個不在它 PATH 上的 CLI 比不說更糟——它會去試、失敗，然後把失敗
+    回報給使用者。
+  - prompt 內容明講兩套記憶的分工：對話已由 `wukong-memory` 自動保存，**不要再寫一次**。
+    `remember` 限於決策與理由、學到的限制、非顯而易見的結論。少了這句 agent 會把對話鏡射
+    進去，把真正的決策埋在閒聊底下——另一個以 Memoria 為記憶層的部署實測過同型稀釋，5:1。
+  - 只注入末棒，理由同排程：輔助棒是 stateless 的，它寫下的記憶會比產生它的推理活得更久
+    而且無法追溯回去。
+
+### Changed
+
+- **Memoria runtime 預設版本 1.28.0 → 1.28.1。** 修的是 1.28.0 的殘留：中文片語（如
+  `記憶召回`）即使每個組成都在語料裡仍回 0 筆，而結構相同的英文查詢可以。這是我們回報給
+  上游的觀察，1.28.1 讓中文片語與英文同構查詢語意一致。
+  - 上一版接好 prompt 層之後這個修正才真的有意義——先前沒有查詢會走到那條路徑。
+
+### Fixed
+
+- Compose 的 `environment` 以 list 形式覆寫是**合併**不是取代，已用 `docker compose config`
+  對 `docker-compose.yml` 與 `docker-compose.release.yml` 兩種組合實測確認：新增旗標的那三個
+  服務基礎變數全數保留。（沒有這個確認，overlay 會清掉它們的 `WUKONG_MEMORY_DB` 等設定。）
+- **`scripts/test-memoria-runtime.sh` 驗的是四個版本前的 Wukong image。** `WUKONG_IMAGE`
+  寫死 `v0.21.2`，而這個腳本存在的核心目的就是驗 Memoria runtime 與 Wukong image 之間的
+  Node ABI 配對——拿舊 image 去驗，驗到的是沒人會部署的組合，而且**不會有任何症狀**：
+  只要 Node 大版本剛好沒動就一直全綠。改成取最近的 release tag。
+  - 諷刺的是它上一行的註解正好寫著「不寫死，寫死會過期、測到沒人部署的 image」——那條原則
+    只套用到兩個 image 的其中一個。
+- `test-memoria-runtime.sh` 在 image 不存在時報 `runtime failed to publish`，讀起來像發佈
+  邏輯壞了，實際是「還沒 build」。升級版本號後第一次跑必然遇到。改成先分辨並印出建置指令。
+- 同上腳本：Wukong image 改成隨 tag 走之後，第一次執行會在檢查途中 pull，進度訊息混進被
+  擷取的輸出，讓版本字串變成 `(vUnable to find image ... 1.28.1)`。改成先拉乾淨再測——
+  被污染的擷取同樣可能掩蓋錯誤的版本。
+
 ## [0.21.8] - 2026-08-17
 
 ### Changed
@@ -718,7 +763,8 @@ server 模式補回那個 CLI 免費獲得的週期性重置，同時保留暖�
   不安全綁定（`0.0.0.0` + 空 token）啟動即拒絕（fail-closed，可用
   `WUKONG_WEB_ALLOW_INSECURE=1` 覆寫）；Telegram callback 加白名單檢查。
 
-[Unreleased]: https://github.com/raybird/Wukong/compare/v0.21.8...HEAD
+[Unreleased]: https://github.com/raybird/Wukong/compare/v0.21.9...HEAD
+[0.21.9]: https://github.com/raybird/Wukong/compare/v0.21.8...v0.21.9
 [0.21.8]: https://github.com/raybird/Wukong/compare/v0.21.7...v0.21.8
 [0.21.7]: https://github.com/raybird/Wukong/compare/v0.21.6...v0.21.7
 [0.21.6]: https://github.com/raybird/Wukong/compare/v0.21.5...v0.21.6
