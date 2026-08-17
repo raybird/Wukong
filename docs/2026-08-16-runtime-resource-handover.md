@@ -133,3 +133,48 @@ RunWuKong 約 5.9 GiB，其中 workspace/projects 約 5.7 GiB。Docker 仍保留
 - active session 數量
 - timeout 數量
 - MaxListenersExceededWarning 是否再次出現
+
+## 追補：2026-08-17 回覆失敗調查
+
+本次追查仍為唯讀，沒有重啟容器、修改設定或刪除資料。
+
+### 直接根因
+
+OpenCode 持久化 log 在 `2026-08-16T20:00Z` 左右反覆出現 provider HTTP 429：
+`Rate limit exceeded`。受影響 model 包含 `big-pickle` 與 `deepseek-v4-flash-free`。
+
+實際流程是：
+
+    provider rate limit
+      -> OpenCode 內部反覆重試/等待
+      -> gateway 收不到有效 event
+      -> 20 分鐘 agent timeout
+      -> scheduler 回報 stream timeout
+      -> Telegram 仍成功送出錯誤結果
+
+最新失敗 job 在 `2026-08-16T20:22:57Z`（台灣時間 2026-08-17 04:22:57）被記錄，
+但後續仍有 `result delivered to telegram`，所以這次不是 Telegram 回覆傳輸故障。
+
+目前 `WUKONG_AGENT_TIMEOUT_SECS=1200` 只控制整體等待時間，沒有把 provider 429
+快速、明確地傳回排程層。現行 OpenCode 設定已允許 `/tmp`，本次沒有看到 permission
+request；因此先前的 permission hang 不是本次主要根因。
+
+### 資源與恢復面的補充
+
+2026-08-17 早上的快照仍顯示所有容器無 restart/OOM；OpenCode cgroup current 約
+1.0 GiB、歷史 peak 約 2.0 GiB，`oom`/`oom_kill` 仍為 0。主機上的
+`jy-analysis-windows` QEMU container 約使用 6 GiB、CPU 約 119%，且沒有資源上限，
+會增加主機延遲與 CPU contention，但不能解釋 provider HTTP 429。
+
+idle-restart 仍因 scheduler 保持 established connection 而跳過；這是故障後的恢復
+阻塞點，不是本次 provider rate limit 的直接原因。後續應以 active session/job marker
+判斷是否能重啟，不應把任何 TCP connection 視為活躍工作。
+
+### 後續處置優先順序
+
+1. 為 OpenCode provider 加入可觀測的 429 原始錯誤、`retry-after` 與 bounded backoff，
+   並準備 model/provider fallback 或降低同帳號併發。
+2. 讓 gateway 在 provider 429 時快速結束該 job，避免等滿 20 分鐘才產生模糊的
+   `no events` timeout。
+3. 修正 idle-restart 的 active-work 判斷與 connection cleanup。
+4. 以一次受控測試確認 quota reset 後的成功率，再恢復全部排程。
