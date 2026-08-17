@@ -48,6 +48,55 @@ pub fn final_answer_directive() -> &'static str {
      不要只執行動作而不回覆文字。"
 }
 
+/// Whether to advertise the Memoria CLI to the agent.
+///
+/// Off unless `WUKONG_MEMORIA_HINT` says otherwise, and it has to be an explicit
+/// opt-in rather than auto-detection: this prompt is built inside
+/// `wukong-web`/`wukong-telegram`/`wukong-schedulerd`, but the agent's shell runs
+/// in the **opencode-server** container, which is the only one the Memoria
+/// overlay wires up. Probing our own environment would answer the wrong
+/// question, and telling the agent about a CLI that is not on its PATH is worse
+/// than saying nothing — it would try, fail, and report the failure to the user.
+///
+/// `docker-compose.memoria.yml` sets this on the three services that build
+/// prompts, so enabling the overlay is still a single decision for the operator.
+pub fn memoria_hint_enabled() -> bool {
+    matches!(
+        std::env::var("WUKONG_MEMORIA_HINT")
+            .unwrap_or_default()
+            .trim(),
+        "1" | "true" | "yes"
+    )
+}
+
+/// Tell the agent it has a durable, cross-session memory CLI.
+///
+/// This exists because the Memoria overlay was wired at the environment layer
+/// (CLI on PATH, `MEMORIA_HOME`, vector helper) but never at the prompt layer,
+/// so the agent was never told it existed and the container's store stayed
+/// empty — four days, zero agent-written memories. Availability is not
+/// discoverability.
+///
+/// The division of labour matters and is stated explicitly below: `wukong-memory`
+/// already records every turn automatically, so Memoria is *not* a transcript.
+/// Without that line the agent would mirror the conversation into it and bury
+/// the durable facts under chatter — the same dilution another Memoria-backed
+/// deployment measured at 5:1.
+pub fn memoria_capability_hint() -> &'static str {
+    "[長期記憶能力]\n\
+     你可以透過 `memoria` CLI 存取跨 session 的長期知識庫。它與本回合自動記錄的對話\
+     記憶是兩套東西：對話已經被自動保存，**不需要**你再寫一次。\n\
+     - 查詢既有結論：`memoria recall \"<查詢>\"`。回答涉及先前的決策、限制或踩過的坑時先查，\
+     不要憑印象。\n\
+     - 用到了就回報效用：`memoria feedback <recall_id> --score <0..1>`。那是這個系統唯一的\
+     效用訊號來源，沒有回報它就學不到什麼有用。\n\
+     - 記錄值得跨 session 留存的事：`memoria remember \"<內容>\"`。限於**決策與其理由、\
+     學到的限制、非顯而易見的結論**；閒聊、可從程式碼或 git 讀出的事實、只在本回合有效的\
+     內容都不要寫——寫進去會稀釋掉真正有用的部分。\n\
+     - 寫入後向量索引不會自動更新，需要語意查詢才找得到時執行 `memoria-vector-sync`。\n\
+     規則：查詢與寫入都由你自行判斷時機，不需要每回合都做，也不要為了做而做。"
+}
+
 /// Resolve the `wukong` binary name used inside the scheduling capability hint.
 /// Defaults to `wukong` (assumes it is on PATH in the agent runtime); override
 /// with `WUKONG_BIN` (e.g. an absolute path) when it is not.

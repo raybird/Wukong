@@ -212,6 +212,13 @@ pub async fn run_turn_traced_with_attachments(
                 &cfg.scope,
                 &persona::scheduling_bin(),
             ));
+            // Same reasoning as scheduling: only the final, user-facing step.
+            // Helper steps are stateless, so a memory they wrote would outlive
+            // the reasoning that produced it with no way to trace it back.
+            if persona::memoria_hint_enabled() {
+                prompt.push_str("\n\n");
+                prompt.push_str(persona::memoria_capability_hint());
+            }
         }
         let session_id = if is_final { stored.clone() } else { None };
         if is_final {
@@ -898,6 +905,73 @@ mod tests {
         assert!(prompts[2].contains("[排程能力]"));
         assert!(prompts[2].contains("schedule add-turn"));
         assert!(prompts[2].contains("--scope \"project:T\""));
+    }
+
+    /// Both the off and on cases live in one test on purpose: `WUKONG_MEMORIA_HINT`
+    /// is process-global, so two tests toggling it would race under the default
+    /// parallel harness and the failure would look like flakiness rather than a
+    /// shared-state bug.
+    ///
+    /// The off case is the one that matters most. Most deployments do not enable
+    /// the Memoria overlay, and advertising a CLI that is not on the agent's PATH
+    /// is worse than silence — it would try, fail, and surface the failure to the
+    /// user. Asserting only the on case would let a default-on regression ship.
+    #[tokio::test]
+    async fn run_turn_advertises_memoria_only_when_enabled_and_only_on_the_final_step() {
+        const MARKER: &str = "[長期記憶能力]";
+
+        std::env::remove_var("WUKONG_MEMORIA_HINT");
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["explorer, fixer", "e1", "f2"]);
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "remember this",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        {
+            let prompts = backend.prompts.lock().unwrap();
+            assert_eq!(prompts.len(), 3);
+            assert!(
+                prompts.iter().all(|p| !p.contains(MARKER)),
+                "預設不得宣傳 memoria：多數部署沒有啟用 overlay，agent 的 PATH 上沒有這個 CLI"
+            );
+        }
+
+        std::env::set_var("WUKONG_MEMORIA_HINT", "1");
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["explorer, fixer", "e1", "f2"]);
+        let result = run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "remember this",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await;
+        std::env::remove_var("WUKONG_MEMORIA_HINT");
+        result.unwrap();
+
+        let prompts = backend.prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 3);
+        // prompts[0] = planner, [1] = explorer (helper), [2] = fixer (final).
+        assert!(
+            !prompts[1].contains(MARKER),
+            "輔助棒是 stateless 的，不該讓它寫入長期記憶"
+        );
+        assert!(prompts[2].contains(MARKER), "末棒應該拿到能力區塊");
+        assert!(prompts[2].contains("memoria recall"));
+        assert!(prompts[2].contains("memoria feedback"));
+        // 分工必須寫在 prompt 裡：少了這句 agent 會把對話鏡射進去，把真正的決策稀釋掉。
+        assert!(
+            prompts[2].contains("不需要"),
+            "必須說明對話已自動保存、不要重複寫入"
+        );
     }
 
     #[tokio::test]

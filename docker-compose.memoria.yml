@@ -85,6 +85,28 @@ services:
       - MEMORIA_VECTOR_MAX_CONCURRENCY=${WUKONG_MEMORIA_VECTOR_MAX_CONCURRENCY:-1}
     mem_limit: "${WUKONG_OPENCODE_MEM_MEMORIA:-3g}"
 
+  # The three services below get no Memoria wiring of their own — the CLI lives
+  # in opencode-server, which is where the agent's shell runs. What they need is
+  # the one flag that makes run_turn tell the agent the CLI exists.
+  #
+  # Splitting it this way is not incidental: the prompt is built HERE, the CLI
+  # runs THERE. Before this flag, the overlay wired the environment and stopped,
+  # so the agent was never told and the container's store stayed empty for four
+  # days. Availability is not discoverability.
+  #
+  # The flag has to be explicit rather than auto-detected, because these
+  # containers cannot see opencode-server's PATH; probing their own environment
+  # would answer the wrong question.
+  wukong-web:
+    environment:
+      - WUKONG_MEMORIA_HINT=${WUKONG_MEMORIA_HINT:-1}
+  wukong-telegram:
+    environment:
+      - WUKONG_MEMORIA_HINT=${WUKONG_MEMORIA_HINT:-1}
+  wukong-schedulerd:
+    environment:
+      - WUKONG_MEMORIA_HINT=${WUKONG_MEMORIA_HINT:-1}
+
 volumes:
   memoria-runtime:
     driver: local
