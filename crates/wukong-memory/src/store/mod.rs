@@ -1008,26 +1008,16 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         .fetch_all(pool)
         .await?;
     let names: Vec<String> = cols.iter().map(|r| r.get::<String, _>("name")).collect();
-    if !names.iter().any(|n| n == "embedding") {
-        sqlx::query("ALTER TABLE memories ADD COLUMN embedding BLOB")
-            .execute(pool)
-            .await?;
-    }
-    if !names.iter().any(|n| n == "embedding_model") {
-        sqlx::query("ALTER TABLE memories ADD COLUMN embedding_model TEXT")
-            .execute(pool)
-            .await?;
-    }
-    if !names.iter().any(|n| n == "consolidated_into") {
-        sqlx::query("ALTER TABLE memories ADD COLUMN consolidated_into INTEGER")
-            .execute(pool)
-            .await?;
-    }
-    if !names.iter().any(|n| n == "dedupe_key") {
-        sqlx::query("ALTER TABLE memories ADD COLUMN dedupe_key TEXT")
-            .execute(pool)
-            .await?;
-    }
+    add_column_if_missing(pool, &names, "embedding", "embedding BLOB").await?;
+    add_column_if_missing(pool, &names, "embedding_model", "embedding_model TEXT").await?;
+    add_column_if_missing(
+        pool,
+        &names,
+        "consolidated_into",
+        "consolidated_into INTEGER",
+    )
+    .await?;
+    add_column_if_missing(pool, &names, "dedupe_key", "dedupe_key TEXT").await?;
     sqlx::query(
         "CREATE UNIQUE INDEX IF NOT EXISTS memories_dedupe_key_idx
          ON memories(dedupe_key)
@@ -1041,14 +1031,39 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
-    if !names.iter().any(|n| n == "search_text") {
-        sqlx::query("ALTER TABLE memories ADD COLUMN search_text TEXT")
-            .execute(pool)
-            .await?;
-    }
+    add_column_if_missing(pool, &names, "search_text", "search_text TEXT").await?;
     migrate_fts_to_search_text(pool).await?;
     create_indexes(pool).await?;
     Ok(())
+}
+
+/// `ALTER TABLE memories ADD COLUMN`，容忍另一個行程剛好搶先加好同一欄。
+///
+/// SQLite 沒有 `ADD COLUMN IF NOT EXISTS`，而容器部署裡 `wukong-web`、
+/// `wukong-telegram`、`wukong-schedulerd` 會**同時**開同一個 `/data/memory.db`：三者
+/// 各自讀到「欄位不存在」，然後各自下 ALTER，後到的拿到 `duplicate column name`
+/// 而整個開檔失敗。v0.21.6 升級時 schedulerd 就是這樣崩了一次，靠 `restart:
+/// unless-stopped` 才活過來——沒有重啟政策的進入點會直接停在那裡。
+///
+/// 檢查與 ALTER 之間無法在單一 SQL 語句內原子化，所以改成容忍那個特定錯誤：對手
+/// 已經把我們要的欄位加好了，結果狀態正是我們要的。
+async fn add_column_if_missing(
+    pool: &SqlitePool,
+    existing: &[String],
+    column: &str,
+    definition: &str,
+) -> Result<()> {
+    if existing.iter().any(|n| n == column) {
+        return Ok(());
+    }
+    match sqlx::query(&format!("ALTER TABLE memories ADD COLUMN {definition}"))
+        .execute(pool)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(sqlx::Error::Database(e)) if e.message().contains("duplicate column name") => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Move the FTS index from `text` to the bigram-expanded `search_text`.
@@ -1094,9 +1109,30 @@ async fn migrate_fts_to_search_text(pool: &SqlitePool) -> Result<()> {
         tx.commit().await?;
     }
 
+    // 這段 DDL 必須整塊原子完成。SQLite 只逐語句上寫鎖，所以兩個行程可以交錯：
+    // A 建好 memories_fts，B 的 `DROP TABLE IF EXISTS` 把它砸掉再重建，A 接著
+    // `CREATE TRIGGER` 撞上 B 剛建好的同名 trigger。BEGIN IMMEDIATE 一次取得寫鎖
+    // 讓整塊序列化；busy_timeout 會讓後到者等待而不是立刻失敗。
+    //
+    // 回填刻意留在鎖外分批做：它以 `WHERE search_text IS NULL` 為條件、本身可重入，
+    // 沒必要為它把其他服務擋住整個回填的時間。
+    let mut conn = pool.acquire().await?;
+    sqlx::raw_sql("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
+    // 取得鎖之後重新確認：等鎖的期間對手可能已經把整件事做完了。
+    let still_old: Option<String> =
+        sqlx::query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memories_fts'")
+            .fetch_optional(&mut *conn)
+            .await?
+            .and_then(|r| r.get::<Option<String>, _>("sql"));
+    if !matches!(still_old, Some(ref sql) if !sql.contains("search_text")) {
+        sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await?;
+        return Ok(());
+    }
+
     // Drop the triggers first: they reference the old column and would fire
     // against a table that no longer has it.
-    sqlx::raw_sql(
+    let ddl = sqlx::raw_sql(
         "DROP TRIGGER IF EXISTS memories_ai;
          DROP TRIGGER IF EXISTS memories_ad;
          DROP TABLE IF EXISTS memories_fts;
@@ -1111,9 +1147,18 @@ async fn migrate_fts_to_search_text(pool: &SqlitePool) -> Result<()> {
              VALUES('delete', old.id, old.search_text);
          END;",
     )
-    .execute(pool)
-    .await?;
-    Ok(())
+    .execute(&mut *conn)
+    .await;
+    match ddl {
+        Ok(_) => {
+            sqlx::raw_sql("COMMIT").execute(&mut *conn).await?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await;
+            Err(e.into())
+        }
+    }
 }
 
 /// Indexes for the recall/backfill/observability hot paths. Created after
