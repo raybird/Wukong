@@ -11,6 +11,8 @@
 
 ## [Unreleased]
 
+## [0.21.6] - 2026-08-17
+
 ### Security
 
 - **Telegram bot token 會被寫進日誌。** Telegram 把 token 放在 request path
@@ -50,9 +52,21 @@
   - 新增 `scripts/test-idle-restart-decision.sh`：這個腳本先前只有「字串出現在檔案裡」
     的檢查，而那對本缺陷是盲的。新測試實際把腳本跑起來，用真的 TCP 連線與真的 HTTP
     端點驗證它有沒有送出訊號，並涵蓋「回合進行中不得重啟」這個必須保住的安全閘門。
+- **`WUKONG_OPENCODE_CONN_GRACE_SECS` 沒接進 compose，設了不會有任何作用。** compose 沒有
+  用 `env_file`，變數必須被 `environment` 明列才會進到容器。同時補上 `.env.example` 與
+  `docs/docker.md`，並修正兩處已經過期的描述——閒置判準不再是「三項條件同時成立」。
+  - 新增的檢查涵蓋整個類別：`.env.example` 提供的每一個 `WUKONG_*` 變數都必須被某份
+    compose 接線（`${VAR}` 代入或 `- VAR` 直通）。目前 34 個全數通過。
 - CHANGELOG 有九個版本標題（`0.18.5`–`0.21.2`）沒有對應的連結參照，在 GitHub 上渲染成
   字面方括號文字而不是連結。補齊，並在 `release.sh` 的 preflight 加上比對——標題與參照
   是同一份事實的兩份副本，先前沒有任何東西檢查它們一致。
+
+### Documentation
+
+- 新增 `docs/2026-08-16-runtime-resource-handover.md`（runtime 資源與 provider 事故調查），
+  並附上落地驗證追補：更正三處事實（執行映像實為 v0.21.2 而非 v0.21.5、cgroup 上限實為
+  3 GiB、「沒有可用升級」的結論不成立），記錄 429 的證據不在該文引用的持久化 log 裡
+  （該檔僅有 128 行 `Failed to fetch models.dev`，`429`／`rate limit`／`quota` 皆 0 次）。
 
 ## [0.21.5] - 2026-08-14
 
@@ -657,7 +671,8 @@ server 模式補回那個 CLI 免費獲得的週期性重置，同時保留暖�
   不安全綁定（`0.0.0.0` + 空 token）啟動即拒絕（fail-closed，可用
   `WUKONG_WEB_ALLOW_INSECURE=1` 覆寫）；Telegram callback 加白名單檢查。
 
-[Unreleased]: https://github.com/raybird/Wukong/compare/v0.21.5...HEAD
+[Unreleased]: https://github.com/raybird/Wukong/compare/v0.21.6...HEAD
+[0.21.6]: https://github.com/raybird/Wukong/compare/v0.21.5...v0.21.6
 [0.21.5]: https://github.com/raybird/Wukong/compare/v0.21.4...v0.21.5
 [0.21.4]: https://github.com/raybird/Wukong/compare/v0.21.3...v0.21.4
 [0.21.3]: https://github.com/raybird/Wukong/compare/v0.21.2...v0.21.3
