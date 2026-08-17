@@ -28,6 +28,10 @@ WINDOW="${WUKONG_OPENCODE_RESTART_WINDOW-03:00-05:00}"
 MIN_UPTIME="${WUKONG_OPENCODE_RESTART_MIN_UPTIME_SECS:-43200}"
 QUIET_SECS="${WUKONG_OPENCODE_IDLE_QUIET_SECS:-300}"
 POLL_SECS="${WUKONG_OPENCODE_RESTART_POLL_SECS:-60}"
+# 一條 ESTABLISHED 連線最多能擋下重啟多久。預設刻意大於 WUKONG_AGENT_TIMEOUT_SECS
+# （1200s）：撐過那個時間的回合，gateway 自己也已經放棄了，連線只可能是閒置的
+# keep-alive。設 0 表示完全不因連線而等待。詳見 established_count() 上方說明。
+CONN_GRACE_SECS="${WUKONG_OPENCODE_CONN_GRACE_SECS:-1800}"
 DB="${WUKONG_OPENCODE_DB:-/home/wukong/.local/share/opencode/opencode.db}"
 # 容器內 opencode 是 PID 1。可覆寫是為了讓「真的送出訊號」這條路徑能在容器外測試，
 # 否則測試會把 SIGINT 送給開發機的 init。
@@ -36,6 +40,8 @@ TARGET_PID="${WUKONG_OPENCODE_TARGET_PID:-1}"
 START_EPOCH=$(date +%s)
 LAST_DB_CHANGE="$START_EPOCH"
 LAST_DB_SIG=""
+# 連線第一次擋下重啟的時間點；任何一項閒置條件不成立就清空重算。
+CONN_BLOCKED_SINCE=""
 
 log() { printf '[wukong-idle-restart] %s %s\n' "$(date -Is)" "$*" >&2; }
 
@@ -89,17 +95,39 @@ sys.exit(0 if (time.time() - newest) >= float(sys.argv[1]) else 1)
 ' "$QUIET_SECS" <<<"$body"
 }
 
-# 條件二：對外埠沒有已建立的連線。
+# 條件二：對外埠的 ESTABLISHED 連線數。
 # 映像檔沒裝 iproute2／net-tools，所以直接讀 /proc/net/tcp{,6}：欄位 2 是本地位址
 # HEX:PORT，欄位 4 是狀態。**只數 01（ESTABLISHED）**：進行中的回合會持續握著一條
 # 連線，而 healthcheck 與本腳本自己的探測結束後會留下 TIME_WAIT（06），那些不算活動，
 # 用「非 LISTEN」去數會把它們算進來，導致永遠判不出閒置。
-no_connections() {
-    local hex established
+established_count() {
+    local hex
     hex=$(printf '%04X' "$PORT")
-    established=$(cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk -v p=":$hex" '
-        NR > 1 && index($2, p) && $4 == "01" { n++ } END { print n + 0 }')
-    [[ "$established" == "0" ]]
+    cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk -v p=":$hex" '
+        NR > 1 && index($2, p) && $4 == "01" { n++ } END { print n + 0 }'
+}
+
+# **連線數不等於「有工作在進行」。** wukong-schedulerd 對 server 保有長生命週期的
+# HTTP 連線，閒置時也不會斷，於是「有連線就不重啟」會讓重啟永遠不發生——實測連續
+# 87 次 connection_skips，記憶體一路累積到貼著 cgroup 上限。
+#
+# 但這個訊號仍不能直接丟掉：一個安靜超過 QUIET_SECS 的長工具呼叫期間，session 的
+# time.updated 與 opencode.db 都可能毫無寫入，那時連線是唯一還在說「有人接著」的
+# 東西。所以改成**有上限的等待**：其餘條件都判定閒置、而連線持續存在達
+# CONN_GRACE_SECS 之後，就認定那是閒置的 keep-alive 並放行。
+#
+# 回傳 0 代表「還在寬限期內，先別重啟」。
+connections_still_block() {
+    local conns="$1" now="$2"
+
+    if (( conns == 0 )); then
+        CONN_BLOCKED_SINCE=""
+        return 1
+    fi
+    if [[ -z "$CONN_BLOCKED_SINCE" ]]; then
+        CONN_BLOCKED_SINCE="$now"
+    fi
+    (( now - CONN_BLOCKED_SINCE < CONN_GRACE_SECS ))
 }
 
 # 條件三：opencode.db 已連續 QUIET_SECS 沒有寫入。
@@ -128,20 +156,30 @@ while true; do
     db_quiet >/dev/null 2>&1 || true
 
     if in_window; then
-        uptime=$(( $(date +%s) - START_EPOCH ))
-        # 順序刻意由便宜到昂貴：sessions_idle 會發 HTTP 請求，而那個請求本身就會建立
-        # 一條連線，所以放到最後——只有前面都判定閒置時才問它。
+        now=$(date +%s)
+        uptime=$(( now - START_EPOCH ))
+        # 連線數在問 API **之前**取樣：sessions_idle 自己的 HTTP 請求會建立一條連線。
+        # 原本靠「把 sessions_idle 排到最後」迴避這個自我干擾，代價是粗訊號反過來擋在
+        # 精確訊號前面，schedulerd 的 keep-alive 於是讓 sessions_idle 永遠問不到。
+        # 先取樣就同時解掉兩件事。
+        conns=$(established_count)
         if (( uptime < MIN_UPTIME )); then
             log "in window but uptime ${uptime}s < ${MIN_UPTIME}s; skipping"
+            CONN_BLOCKED_SINCE=""
         elif ! db_quiet; then
             log "in window but opencode.db was written within ${QUIET_SECS}s; skipping"
-        elif ! no_connections; then
-            log "in window but port ${PORT} still has established connections; skipping"
+            CONN_BLOCKED_SINCE=""
         elif ! sessions_idle; then
             log "in window but a session was updated within ${QUIET_SECS}s; skipping"
+            CONN_BLOCKED_SINCE=""
+        elif connections_still_block "$conns" "$now"; then
+            log "in window and otherwise idle, but port ${PORT} has ${conns} established connection(s); waiting up to ${CONN_GRACE_SECS}s (blocked $(( now - CONN_BLOCKED_SINCE ))s so far)"
         elif ! target_is_opencode; then
             log "ERROR: pid $TARGET_PID is not opencode; refusing to signal"
         else
+            if (( conns > 0 )); then
+                log "overriding ${conns} idle keep-alive connection(s) after ${CONN_GRACE_SECS}s with no session or db activity"
+            fi
             log "idle for ${QUIET_SECS}s after ${uptime}s uptime — sending SIGINT to pid $TARGET_PID for a clean restart"
             kill -INT "$TARGET_PID" 2>/dev/null || log "ERROR: failed to signal pid $TARGET_PID"
             # 送出後就交棒：PID 1 退出 → 容器結束 → restart: unless-stopped 拉起。
