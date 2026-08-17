@@ -257,4 +257,43 @@ done
 require_in_file '$4 == "01"' "$idle_restart" \
     "only ESTABLISHED sockets count as activity; TIME_WAIT would never drain"
 
+# 這一項刻意**解析 YAML** 而不是 grep 字串：整份檔案裡有沒有 WUKONG_TG_TOKEN，跟它
+# 有沒有掛在正確的 service 底下是兩回事——本來 telegram 有、schedulerd 沒有，grep
+# 一樣全綠。schedulerd 少了它，build_notifier() 會靜靜停用通知，job 照跑、結果永遠
+# 送不出去，而唯一的訊號是一行啟動日誌。
+python3 - "$compose_file" "$release_compose" <<'PY'
+import sys
+import yaml
+
+# 這些 service 會透過 wukong-tg-client 對外送訊息，都需要 token。
+NEED_TOKEN = ("wukong-telegram", "wukong-schedulerd")
+failed = False
+
+for path in sys.argv[1:]:
+    with open(path) as fh:
+        services = yaml.safe_load(fh).get("services", {})
+    for name in NEED_TOKEN:
+        svc = services.get(name)
+        if svc is None:
+            print(f"FAIL: {path} is missing service {name}", file=sys.stderr)
+            failed = True
+            continue
+        env = svc.get("environment", [])
+        # compose 允許 list（`- VAR` / `- VAR=x`）與 mapping 兩種寫法。
+        names = (
+            set(env)
+            if isinstance(env, dict)
+            else {str(item).split("=", 1)[0] for item in env}
+        )
+        if "WUKONG_TG_TOKEN" not in names:
+            print(
+                f"FAIL: {path} service {name} must receive WUKONG_TG_TOKEN "
+                "or its Telegram delivery silently disables itself",
+                file=sys.stderr,
+            )
+            failed = True
+
+sys.exit(1 if failed else 0)
+PY
+
 echo "docker runtime persistence checks passed"

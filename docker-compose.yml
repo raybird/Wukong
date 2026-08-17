@@ -238,6 +238,9 @@ services:
       - WUKONG_MEMORY_MAINTENANCE_INTERVAL_SECS=${WUKONG_MEMORY_MAINTENANCE_INTERVAL_SECS:-900}
       - WUKONG_MEMORY_CONSOLIDATE_THRESHOLD=${WUKONG_MEMORY_CONSOLIDATE_THRESHOLD:-40}
       - WUKONG_SCHED_PERMISSION=${WUKONG_SCHED_PERMISSION:-reject}
+      # 排程結果回送 Telegram 需要它；沒有這個變數 build_notifier() 會靜靜停用通知，
+      # job 照跑但結果永遠送不出去。設 WUKONG_SCHED_NOTIFY=0 才是刻意關閉。
+      - WUKONG_TG_TOKEN
     volumes:
       - ${WUKONG_HOST_WORKSPACE:-./workspace}:/workspace
       - opencode-config:/home/wukong/.config/opencode
