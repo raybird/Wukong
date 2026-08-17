@@ -37,11 +37,11 @@ services:
     # onnxruntime-node alone is 513 MB, well ahead of transformers at 146 MB).
     # Publishing it to GHCR would need a new job in release.yml; that has
     # deliberately not been added.
-    image: wukong-memoria-runtime:${WUKONG_MEMORIA_VERSION:-1.27.0}
+    image: wukong-memoria-runtime:${WUKONG_MEMORIA_VERSION:-1.28.0}
     build:
       context: docker/memoria-runtime
       args:
-        MEMORIA_VERSION: ${WUKONG_MEMORIA_VERSION:-1.27.0}
+        MEMORIA_VERSION: ${WUKONG_MEMORIA_VERSION:-1.28.0}
         # Must match the Node major inside the Wukong image (bookworm → 18).
         # scripts/test-memoria-runtime.sh asserts the pairing.
         NODE_MAJOR: ${WUKONG_MEMORIA_NODE_MAJOR:-18}
