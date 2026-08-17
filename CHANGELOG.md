@@ -11,6 +11,49 @@
 
 ## [Unreleased]
 
+### Security
+
+- **Telegram bot token 會被寫進日誌。** Telegram 把 token 放在 request path
+  （`/bot<token>/sendMessage`），而 `reqwest::Error` 的 Display 與 Debug 都會印出完整
+  URL。`TgError::Http` 直接包著 `reqwest::Error`，所以 `wukong-telegram` 的
+  `log_send`（12 處）與 `wukong-schedulerd` 的 delivery 警告，**每一次網路層失敗都把
+  token 寫進 stderr → `docker logs`**。改成在型別內就地遮蔽：`TgError::Http` 現在存
+  已遮蔽的字串，`From<reqwest::Error>` 負責轉換。在型別修而不是在呼叫點修，是因為
+  呼叫點會再長出第 13 個。
+  - 附帶修好一件事：舊訊息只說「error sending request for url (...)」，真正的原因躺在
+    source 鏈裡從來沒被印出來。新的渲染會攤平 source 鏈，所以現在看得到
+    `Connection refused (os error 111)` 這類實際原因。
+  - **已經寫進日誌的 token 收不回來，必須輪替。**
+  - 回歸測試用真的 reqwest 失敗來驗，不是字串 fixture——會不會洩漏取決於 reqwest 當下
+    版本怎麼渲染 URL。測試同時斷言「reqwest 仍會在 Display 帶出 URL」這個前提，前提若
+    消失就紅燈，而不是靜靜地變成一個什麼都沒驗到的測試。
+
+### Fixed
+
+- **排程結果永遠送不到 Telegram。** `docker-compose.yml` 與 `docker-compose.release.yml`
+  只把 `WUKONG_TG_TOKEN` 傳給 `wukong-telegram`，沒傳給 `wukong-schedulerd`。少了它，
+  `build_notifier()` 會靜靜停用通知——job 照跑、結果照產生，但永遠送不出去，唯一的訊號
+  是一行啟動日誌。CLAUDE.md 記載的「排程結果回送」在容器部署裡因此從未生效。
+  - 新增的檢查**解析 YAML** 而不是 grep 字串：整份檔案裡有沒有這個變數，跟它掛在哪個
+    service 底下是兩回事，字串比對對這個缺陷完全是盲的。
+- **閒置的 keep-alive 讓 opencode 永遠不重啟。** `opencode-idle-restart.sh` 把任何一條
+  ESTABLISHED 連線都當成「有工作進行中」，而 `wukong-schedulerd` 對 server 保有長生命
+  週期的 HTTP 連線、閒置時也不斷開。實測連續 87 次 `connection_skips`，重啟從未發生，
+  記憶體一路累積到貼著 cgroup 上限。
+  - 連線訊號不能直接丟掉：一個安靜超過 `QUIET_SECS` 的長工具呼叫期間，session 與
+    `opencode.db` 都可能毫無寫入，那時連線是唯一還在說「有人接著」的東西。所以改成
+    **有上限的等待**——其餘條件都判定閒置、而連線持續存在達
+    `WUKONG_OPENCODE_CONN_GRACE_SECS`（預設 1800s）之後才放行。這個預設刻意大於
+    `WUKONG_AGENT_TIMEOUT_SECS`（1200s）：撐過那個時間的回合，gateway 自己也已經放棄了。
+  - 連線數改在呼叫 `/session` **之前**取樣。原本靠「把 `sessions_idle` 排到最後」迴避
+    探測自己建立連線的干擾，代價是粗訊號擋在精確訊號前面，精確訊號永遠問不到。
+  - 新增 `scripts/test-idle-restart-decision.sh`：這個腳本先前只有「字串出現在檔案裡」
+    的檢查，而那對本缺陷是盲的。新測試實際把腳本跑起來，用真的 TCP 連線與真的 HTTP
+    端點驗證它有沒有送出訊號，並涵蓋「回合進行中不得重啟」這個必須保住的安全閘門。
+- CHANGELOG 有九個版本標題（`0.18.5`–`0.21.2`）沒有對應的連結參照，在 GitHub 上渲染成
+  字面方括號文字而不是連結。補齊，並在 `release.sh` 的 preflight 加上比對——標題與參照
+  是同一份事實的兩份副本，先前沒有任何東西檢查它們一致。
+
 ## [0.21.5] - 2026-08-14
 
 ### Fixed
@@ -618,6 +661,15 @@ server 模式補回那個 CLI 免費獲得的週期性重置，同時保留暖�
 [0.21.5]: https://github.com/raybird/Wukong/compare/v0.21.4...v0.21.5
 [0.21.4]: https://github.com/raybird/Wukong/compare/v0.21.3...v0.21.4
 [0.21.3]: https://github.com/raybird/Wukong/compare/v0.21.2...v0.21.3
+[0.21.2]: https://github.com/raybird/Wukong/compare/v0.21.1...v0.21.2
+[0.21.1]: https://github.com/raybird/Wukong/compare/v0.21.0...v0.21.1
+[0.21.0]: https://github.com/raybird/Wukong/compare/v0.20.1...v0.21.0
+[0.20.1]: https://github.com/raybird/Wukong/compare/v0.20.0...v0.20.1
+[0.20.0]: https://github.com/raybird/Wukong/compare/v0.19.0...v0.20.0
+[0.19.0]: https://github.com/raybird/Wukong/compare/v0.18.7...v0.19.0
+[0.18.7]: https://github.com/raybird/Wukong/compare/v0.18.6...v0.18.7
+[0.18.6]: https://github.com/raybird/Wukong/compare/v0.18.5...v0.18.6
+[0.18.5]: https://github.com/raybird/Wukong/compare/v0.18.4...v0.18.5
 [0.18.4]: https://github.com/raybird/Wukong/compare/v0.18.3...v0.18.4
 [0.18.3]: https://github.com/raybird/Wukong/compare/v0.18.2...v0.18.3
 [0.18.2]: https://github.com/raybird/Wukong/compare/v0.18.0...v0.18.2

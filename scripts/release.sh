@@ -58,6 +58,21 @@ require_changelog() {
   else
     grep -Eq "^## \[${escaped_version}\]( - [0-9]{4}-[0-9]{2}-[0-9]{2})?$" CHANGELOG.md || die "changelog is missing $base_version"
   fi
+
+  require_changelog_links
+}
+
+# 版本標題與底部的連結參照是同一份事實的兩份副本，而在此之前沒有任何東西比對它們：
+# 封版只 grep 標題，參照漏掉永遠不會紅燈。實際後果是 0.18.5–0.21.2 共九個版本的
+# 標題在 GitHub 上不是連結，而是字面的方括號文字，沒人發現。
+require_changelog_links() {
+  local missing
+  missing=$(
+    comm -23 \
+      <(grep -Eo '^## \[[0-9][^]]*\]' CHANGELOG.md | sed -E 's/^## \[(.*)\]$/\1/' | sort -u) \
+      <(grep -Eo '^\[[0-9][^]]*\]:' CHANGELOG.md | sed -E 's/^\[(.*)\]:$/\1/' | sort -u)
+  )
+  [[ -z "$missing" ]] || die "changelog headings without a link reference: $(tr '\n' ' ' <<<"$missing")"
 }
 
 require_lockfile() {
@@ -106,6 +121,7 @@ run_required_checks() {
   run_check env WUKONG_RELEASE_UNDER_TEST=1 bash scripts/test-release-command.sh
   run_check bash scripts/test-installer-upgrade.sh
   run_check bash scripts/test-docker-runtime.sh
+  run_check bash scripts/test-idle-restart-decision.sh
 }
 
 print_release_plan() {

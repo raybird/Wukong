@@ -4,7 +4,7 @@
 
 關聯文件：
 
-- `CHANGELOG.md`（`[Unreleased]` 的 CJK 修正、`[0.21.0]`–`[0.21.4]`）
+- `CHANGELOG.md`（`[0.21.5]` 的 CJK 修正、`[0.21.0]`–`[0.21.4]`）
 - `crates/wukong-memory/tests/cjk_recall.rs`（本文第 1 節的回歸測試）
 - `docker-compose.memoria.yml`、`scripts/test-memoria-runtime.sh`
 
