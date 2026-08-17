@@ -178,3 +178,71 @@ idle-restart 仍因 scheduler 保持 established connection 而跳過；這是�
    `no events` timeout。
 3. 修正 idle-restart 的 active-work 判斷與 connection cleanup。
 4. 以一次受控測試確認 quota reset 後的成功率，再恢復全部排程。
+
+---
+
+## 追補：2026-08-17 中午的落地驗證與更正
+
+把上面每一條宣稱拿去問產物（`docker ps` / `docker inspect` / cgroup / 持久化 log）
+之後的結果。已修的部分見 CHANGELOG `[Unreleased]`。
+
+### 三處事實更正
+
+| 原文宣稱 | 實測 |
+|---|---|
+| 執行映像 `v0.21.5` | **`v0.21.2`**（四個容器皆是） |
+| cgroup memory limit `2 GiB` | **3 GiB**（`docker-compose.memoria.yml` 的 overlay 自 08-13 起生效） |
+| 「目前沒有可直接套用的版本升級」 | **落後三個 release** |
+
+三者同源：讀了描述檔（本地 checkout 的 git tag、base compose）而不是問產物。第三項
+是本文頭條結論，而漏掉的 v0.21.3 正是把 image 從 2.15 GB 縮到 1.26 GB 的那一版——
+一份資源 handover 判定沒有可用升級，漏掉的偏偏是唯一直接減資源的版本。
+
+另有一組內部矛盾：`memory.events max = 11046` 只有在使用量真的頂到上限時才累加，
+若上限一直是 3 GiB 而 peak 只有 2.00 GB，該值應為 0。兩個數字至少有一個錯，而舊
+容器已不存在，現在無法判別是哪一個。
+
+當前實測（容器 08-17 09:29 重建，restarts=0，僅 3 小時）：`memory.current` 312 MB、
+`memory.peak` 426 MB、`memory.events` 全 0。這**不推翻**記憶體長期成長的觀察，只是
+現在的容器還太年輕，證不了也駁不了。
+
+### 429 的證據不在本文引用的來源裡
+
+追補段落寫「OpenCode 持久化 log 在 2026-08-16T20:00Z 左右反覆出現 provider HTTP
+429」。該檔（`~/.local/share/opencode/log/opencode.log`，涵蓋 08-13 至 08-17T01:29Z，
+完整包住事故時段）實際內容是：
+
+- ERROR 共 128 行，**訊息只有一種**：`Failed to fetch models.dev`
+  （`GET https://models.opencode.ai/api.json` 連不上）
+- `429`、`rate limit`、`quota`、`too many requests`、`big-pickle`、`deepseek` 的出現
+  次數皆為 **0**
+
+429 可能出現在 `docker logs`（隨 09:29 重建被清空），但本文明確把它歸給持久化 log，
+而那裡沒有。**目前既無法證實也無法否證 429 是根因**，倒是「連不到 models.dev」有
+128 次實證，值得單獨追。
+
+因此原「後續處置優先順序」第 1、2 項（針對 429 的 backoff 與快速失敗）**前提未定**，
+不宜先做。要定案只需一行證據：當時 gateway 吐的是 `no events arrived for this
+session` 還是 `events seen: N, last X`——前者代表 SSE 根本沒東西，補 `session.error`
+無用；後者代表事件有到但被丟掉。`event_map.rs` 目前只認 `session.idle`、
+`session.status`、`permission.asked`、`message.part.updated` 四種，確實沒有
+`session.error`。
+
+### 本文沒抓到、但更該修的一項
+
+`WUKONG_TG_TOKEN` 只傳給 `wukong-telegram`，**沒有傳給 `wukong-schedulerd`**（兩份
+compose 皆然）。`build_notifier()` 因此靜靜停用通知：job 照跑、結果照產生，但永遠送
+不出去，唯一訊號是一行啟動日誌。本文追補寫「Telegram 仍成功送出錯誤結果」，但當前
+容器的啟動日誌是
+`🐵 scheduler 通知停用：未設定 Telegram token`，且 `/workspace/.wukong/` 下沒有
+`settings.toml` 可以提供替代來源。
+
+### 安全項的優先序應該提前
+
+本文把 token 洩漏與 `OPENCODE_SERVER_PASSWORD` 未設定列在「最近運行與異常」的 bullet
+裡，P0 給了記憶體回收。但 token 洩漏是**結構性**的，不是「日誌曾經有」：
+
+`TgError::Http` 直接包 `reqwest::Error`，而後者的 Display／Debug 都會印出完整 URL，
+URL 裡就是 `/bot<token>/`。`log_send`（12 處）與 schedulerd 的 delivery 警告每一次
+網路層失敗都會寫出來。實測（reqwest 0.12.28）確認會洩漏。**已修**——改在型別內遮蔽；
+但已經進日誌的 token 收不回來，**必須輪替**。
