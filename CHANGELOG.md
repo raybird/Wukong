@@ -11,6 +11,29 @@
 
 ## [Unreleased]
 
+## [0.21.8] - 2026-08-17
+
+### Changed
+
+- **Memoria runtime 預設版本 1.27.0 → 1.28.0。** 1.28.0 修掉了 Memoria 自己的中文查詢
+  失效：它的 `TOKEN_SPLIT_PATTERN` 把每個 CJK 字元都當 token 字元，而中文沒有空白，
+  所以整句中文會塌成單一 token 再被要求逐字出現。改法是把連續 CJK 切成重疊 n-gram，
+  n 由呼叫端的 `minLength` 決定（FTS 要 3，正好對上它的 trigram 索引）。
+  - 這是 Memoria 的召回路徑，**與 Wukong 自己的 `wukong-memory` 無關**——那條在
+    `[0.21.5]` 已另行修過，兩者是各自獨立的引擎。受益的是容器內 agent 呼叫
+    `memoria recall` 時的中文命中率。
+  - 只需 `docker compose up -d memoria-runtime`，不必重建 Wukong image。
+  - 升級前已先確認會斷的地方：`MEMORIA_VECTOR_RECALL_CMD` 在 compose 裡是寫死的完整
+    路徑，1.28.0 若搬動 helper 就會靜默失效（實測仍在原處）；Node 大版本仍是 18，
+    `better-sqlite3` 的 ABI 專屬 prebuild 配對成立。
+  - `scripts/test-memoria-runtime.sh` 14 項全過，含 `route_mode=hybrid_vector` 的語意
+    召回、並行閘門、以及非特權使用者路徑。
+
+### Fixed
+
+- `.env.example` 宣稱 runtime image 約 2.2 GB，實測 1.26 GB。那個數字停留在 1.25.0，
+  `[0.21.3]` 的 Dockerfile 修正之後就沒跟上。
+
 ## [0.21.7] - 2026-08-17
 
 ### Fixed
@@ -695,7 +718,8 @@ server 模式補回那個 CLI 免費獲得的週期性重置，同時保留暖�
   不安全綁定（`0.0.0.0` + 空 token）啟動即拒絕（fail-closed，可用
   `WUKONG_WEB_ALLOW_INSECURE=1` 覆寫）；Telegram callback 加白名單檢查。
 
-[Unreleased]: https://github.com/raybird/Wukong/compare/v0.21.7...HEAD
+[Unreleased]: https://github.com/raybird/Wukong/compare/v0.21.8...HEAD
+[0.21.8]: https://github.com/raybird/Wukong/compare/v0.21.7...v0.21.8
 [0.21.7]: https://github.com/raybird/Wukong/compare/v0.21.6...v0.21.7
 [0.21.6]: https://github.com/raybird/Wukong/compare/v0.21.5...v0.21.6
 [0.21.5]: https://github.com/raybird/Wukong/compare/v0.21.4...v0.21.5
