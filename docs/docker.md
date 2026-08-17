@@ -205,11 +205,14 @@ services:
 | `TZ` | 容器時區。**`opencode-server` 的重啟窗口是本地時間**，由此決定實際落點；不在 +08:00 才需要改 | `Asia/Taipei` |
 | `WUKONG_OPENCODE_RESTART_WINDOW` | `opencode-server` 的離峰重啟窗口（`HH:MM-HH:MM`，可跨午夜）。**設為空字串完全停用** | `03:00-05:00` |
 | `WUKONG_OPENCODE_RESTART_MIN_UPTIME_SECS` | 已執行未滿此秒數就不重啟，避免部署或故障後接連重啟 | `43200`（12h） |
-| `WUKONG_OPENCODE_IDLE_QUIET_SECS` | 「閒置」須持續多久才動手；三項條件同時成立才算閒置 | `300` |
+| `WUKONG_OPENCODE_IDLE_QUIET_SECS` | 「閒置」須持續多久才動手（無 session 更新、`opencode.db` 無寫入） | `300` |
+| `WUKONG_OPENCODE_CONN_GRACE_SECS` | 對外埠仍有 `ESTABLISHED` 連線時，最多再等多久才視為閒置的 keep-alive 並放行。`0` 表示不等待 | `1800`（30m） |
 | `WUKONG_OPENCODE_CPUS` / `_MEM` / `_PIDS` | `opencode-server` 與 `cli` profile 的 cgroup 上限（agent 實際幹活的容器）。溫度壓不下來就調降 CPU；回合明顯變慢且溫度尚可再往上加 | `1.5` / `2g` / `256` |
 | `WUKONG_SVC_CPUS` / `_MEM` / `_PIDS` | `wukong-web`／`wukong-telegram`／`wukong-schedulerd` 的 cgroup 上限。重活都在 opencode-server，這層只是 HTTP client；schedulerd 開 `WUKONG_EMBED=1` 時要調高 MEM（embedding 模型載在該程序內） | `0.5` / `768m` / `128` |
 
-**關於 opencode server 的週期性重啟：** `opencode serve` 常駐不死，每回合的殘留（heap、快取、DB handle）全部留存，idle CPU 會隨累積工作量上升；CLI 模式沒有這個問題，因為 `opencode run` 每回合退出，等於免費獲得重置。容器內因此常駐一個 supervisor，在 `WUKONG_OPENCODE_RESTART_WINDOW` 的窗口內、且**三項條件同時成立**時讓 server 自行退出，由 `restart: unless-stopped` 拉起：無近期 session 更新、對外埠沒有 `ESTABLISHED` 連線、`opencode.db` 已停止寫入（第三項用來涵蓋 compaction 等背景工作）。
+**關於 opencode server 的週期性重啟：** `opencode serve` 常駐不死，每回合的殘留（heap、快取、DB handle）全部留存，idle CPU 會隨累積工作量上升；CLI 模式沒有這個問題，因為 `opencode run` 每回合退出，等於免費獲得重置。容器內因此常駐一個 supervisor，在 `WUKONG_OPENCODE_RESTART_WINDOW` 的窗口內、且判定閒置時讓 server 自行退出，由 `restart: unless-stopped` 拉起。閒置的判準是：無近期 session 更新、`opencode.db` 已停止寫入（後者用來涵蓋 compaction 等背景工作）。
+
+對外埠的 `ESTABLISHED` 連線**不是**否決條件，而是一段有上限的等待（`WUKONG_OPENCODE_CONN_GRACE_SECS`，預設 30 分鐘）。原因是連線數不等於有工作進行中：`wukong-schedulerd` 對 server 保有長生命週期的 HTTP 連線、閒置時也不斷開，早期版本把它當成活躍工作，於是條件永遠湊不齊、重啟從未發生。但這個訊號也不能丟掉——一個安靜超過 `WUKONG_OPENCODE_IDLE_QUIET_SECS` 的長工具呼叫期間，session 與 `opencode.db` 都可能毫無寫入，那時連線是唯一還在說「有人接著」的東西。預設的 30 分鐘刻意大於 `WUKONG_AGENT_TIMEOUT_SECS`（1200 秒）：撐過那個時間的回合，gateway 自己也已經放棄了。
 
 窗口內若始終不閒置就**跳過、等隔天，不會強制中斷進行中的回合**。代價是：若排程任務集中在凌晨，server 可能長期湊不齊條件而從不重啟——那時該換窗口，而不是調短門檻。是否真的重啟過，看 `docker logs wukong-opencode-server | grep wukong-idle-restart`；每次跳過都會寫明是哪一項條件沒過。
 

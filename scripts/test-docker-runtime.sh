@@ -296,4 +296,41 @@ for path in sys.argv[1:]:
 sys.exit(1 if failed else 0)
 PY
 
+# .env.example 是對使用者的承諾：列在那裡的變數，設了就該有效。但 compose 沒有用
+# env_file，變數只有被 environment 明列（`- VAR` 直通或 `${VAR}` 代入）才會進到容器
+# ——否則使用者設了完全不會有任何反應，也沒有任何錯誤訊息。
+# WUKONG_OPENCODE_CONN_GRACE_SECS 就是這樣漏掉的：腳本讀它、文件寫它、compose 沒接。
+python3 - .env.example docker-compose.yml docker-compose.release.yml docker-compose.memoria.yml <<'PY'
+import re
+import sys
+
+env_example, *composes = sys.argv[1:]
+
+offered = sorted(
+    set(re.findall(r"^#?\s*(WUKONG_[A-Z0-9_]+)=", open(env_example).read(), re.M))
+)
+blobs = {path: open(path).read() for path in composes}
+
+
+def wired(var):
+    for text in blobs.values():
+        # `${VAR}` / `${VAR:-x}` / `${VAR-x}` 代入，或 `- VAR` 直通。
+        if "${" + var in text:
+            return True
+        if re.search(rf"^\s*-\s*{re.escape(var)}\s*$", text, re.M):
+            return True
+    return False
+
+
+missing = [var for var in offered if not wired(var)]
+if missing:
+    print(
+        "FAIL: .env.example offers variables that no compose file wires up, "
+        "so setting them silently does nothing: " + ", ".join(missing),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+print(f"ok: all {len(offered)} WUKONG_* variables offered in .env.example reach a container")
+PY
+
 echo "docker runtime persistence checks passed"
