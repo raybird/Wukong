@@ -537,6 +537,9 @@ impl OpencodeServerBackend {
                             on_event(event);
                         }
                         ServerEventAction::Idle => return Ok(()),
+                        ServerEventAction::Failed(error) => {
+                            return Err(error.to_gateway_error());
+                        }
                         ServerEventAction::Ignore => {}
                     }
                 }
@@ -583,6 +586,12 @@ impl AiBackend for OpencodeServerBackend {
                 return Err(err);
             }
         };
+
+        // HTTP 200 不代表上游服務了這次請求：opencode server 自己回得好好的，錯誤
+        // 在回應內容裡（assistant message 的 `info.error`）。
+        if let Some(error) = extract_message_error(&value) {
+            return Err(error.to_gateway_error());
+        }
 
         Ok(AgentResponse {
             text: extract_text(&value).trim().to_string(),
@@ -849,6 +858,19 @@ fn extract_session_id(value: &Value) -> Option<String> {
     value.get("id").and_then(Value::as_str).map(str::to_string)
 }
 
+/// 取出回應中最後一則 assistant message 的 `info.error`（見 opencode `/doc` 的
+/// `AssistantMessage.error`）。與事件路徑共用同一份解析。
+fn extract_message_error(value: &Value) -> Option<crate::upstream_error::UpstreamError> {
+    let containers: Vec<&Value> = match value.as_array() {
+        Some(messages) => messages.iter().rev().collect(),
+        None => vec![value],
+    };
+    containers.into_iter().find_map(|message| {
+        let info = message.get("info").unwrap_or(message);
+        crate::upstream_error::parse_error_field(info)
+    })
+}
+
 fn extract_text(value: &Value) -> String {
     let mut out = Vec::new();
     collect_text(value, &mut out);
@@ -1061,6 +1083,42 @@ mod tests {
 
     /// SSE server 把一個含中文 reasoning 的事件拆在多位元組字元中間分兩段送出，
     /// 之後送 session.idle 正常收尾。
+    /// 送一則 session.error、緊接著送 session.idle——這是 2026-09-08 實測到的真實
+    /// 順序（abort 實驗中 session.error 之後確實還會收到 session.idle）。舊行為會
+    /// 讀到 idle 就回 Ok，把失敗的回合當成正常結束。
+    async fn error_then_idle_sse_server(error_json: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 1024];
+            let _ = socket.read(&mut buf).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            socket
+                .write_all(format!("data: {error_json}\n\n").as_bytes())
+                .await
+                .unwrap();
+            socket
+                .write_all(
+                    b"data: {\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"ses_1\"}}\n\n",
+                )
+                .await
+                .unwrap();
+            socket.flush().await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    fn upstream_failure_kind(error: GatewayError) -> crate::upstream_error::UpstreamFailure {
+        match error {
+            GatewayError::UpstreamFailed { kind, .. } => kind,
+            other => panic!("expected UpstreamFailed, got {other:?}"),
+        }
+    }
+
     async fn utf8_splitting_sse_server() -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1305,6 +1363,62 @@ mod tests {
         let stderr = agent_failed_stderr(result.unwrap_err());
         assert!(stderr.contains("no events arrived"), "{stderr}");
         assert!(!stderr.contains("no reply observed"), "{stderr}");
+    }
+
+    /// AC-2：錯誤事件之後就算收到 idle，也不得以 Ok 收場。
+    #[tokio::test]
+    async fn upstream_error_event_fails_the_turn_even_when_idle_follows() {
+        let url = error_then_idle_sse_server(
+            r#"{"type":"session.error","properties":{"sessionID":"ses_1","error":{"name":"APIError","data":{"message":"model reached end of life","statusCode":410}}}}"#,
+        )
+        .await;
+        let backend = OpencodeServerBackend::from_env(url, None);
+        let response = backend.open_event_stream().await.unwrap();
+
+        let result = backend
+            .consume_event_stream(response, "ses_1", &mut |_| {})
+            .await;
+
+        let error = result.expect_err("410 必須讓回合失敗，不能因為隨後的 idle 就當成功");
+        assert_eq!(
+            upstream_failure_kind(error),
+            crate::upstream_error::UpstreamFailure::ModelEol
+        );
+    }
+
+    /// AC-3：被中止的回合同樣不得回報成功，且分類要與下架分得開。
+    #[tokio::test]
+    async fn aborted_turn_does_not_report_success() {
+        let url = error_then_idle_sse_server(
+            r#"{"type":"session.error","properties":{"sessionID":"ses_1","error":{"name":"MessageAbortedError","data":{"message":"Aborted"}}}}"#,
+        )
+        .await;
+        let backend = OpencodeServerBackend::from_env(url, None);
+        let response = backend.open_event_stream().await.unwrap();
+
+        let result = backend
+            .consume_event_stream(response, "ses_1", &mut |_| {})
+            .await;
+
+        let kind = upstream_failure_kind(result.expect_err("中止的回合不是成功"));
+        assert_eq!(kind, crate::upstream_error::UpstreamFailure::Aborted);
+        assert_ne!(kind, crate::upstream_error::UpstreamFailure::ModelEol);
+    }
+
+    /// AC-2 的失敗路徑：沒有錯誤事件時，idle 仍然要正常收尾——偵測不得誤殺。
+    #[tokio::test]
+    async fn plain_idle_still_succeeds() {
+        let url = error_then_idle_sse_server(
+            r#"{"type":"session.status","properties":{"sessionID":"ses_1","status":{"type":"busy"}}}"#,
+        )
+        .await;
+        let backend = OpencodeServerBackend::from_env(url, None);
+        let response = backend.open_event_stream().await.unwrap();
+
+        backend
+            .consume_event_stream(response, "ses_1", &mut |_| {})
+            .await
+            .expect("沒有錯誤事件時必須正常收尾");
     }
 
     #[tokio::test]

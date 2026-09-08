@@ -1,5 +1,6 @@
 use crate::error::GatewayError;
-use crate::stream::{parse_event, parse_session_id, StreamEvent};
+use crate::stream::{parse_event, parse_session_id, parse_upstream_error_line, StreamEvent};
+use crate::upstream_error::classify_text;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -127,6 +128,17 @@ pub fn assemble_argv(
     prompt: &str,
 ) -> Vec<String> {
     let mut argv: Vec<String> = strip_model_args(command);
+    // 沒有這兩個旗標，opencode 只把上游錯誤寫進 ~/.local/share/opencode/log/，stderr
+    // 一個字都沒有——想檢查也拿不到資料。`ERROR` 不可省：預設 INFO 會把每次 bus
+    // publish 都灌進 stderr（實測健康回合的 stderr 只有 32 bytes）。
+    //
+    // 只在真的是 opencode 時才加：`--agent-cmd "printf fixer"` / `echo` 的假 agent
+    // 測試法是既有的除錯手段（見 CLAUDE.md），把 opencode 專屬旗標塞給它會弄壞它。
+    if is_opencode(command) {
+        argv.push("--print-logs".to_string());
+        argv.push("--log-level".to_string());
+        argv.push("ERROR".to_string());
+    }
     if let Some(id) = session_id {
         argv.push("-s".to_string());
         argv.push(id.to_string());
@@ -167,6 +179,15 @@ fn strip_model_args(command: &[String]) -> Vec<String> {
         out.push(arg.clone());
     }
     out
+}
+
+/// 這組 command 是否真的在跑 opencode。用 basename 判斷，涵蓋絕對路徑的寫法。
+fn is_opencode(command: &[String]) -> bool {
+    std::path::Path::new(opencode_binary(command))
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(|stem| stem == "opencode")
+        .unwrap_or(false)
 }
 
 pub fn opencode_binary(command: &[String]) -> &str {
@@ -420,6 +441,16 @@ impl AiBackend for AgentCliBackend {
                 stderr: stderr_buf.trim().to_string(),
             });
         }
+        // exit code 0 不代表上游服務了這次請求：模型被下架時 opencode 會吞掉錯誤、
+        // 吐一段降級文字，然後正常收場。這條路徑沒有結構化事件可讀，只能退回文字
+        // 比對——樣式刻意保持嚴格，寧可漏判也不能砍掉本來會成功的任務。
+        if let Some(kind) = classify_text(&stderr_buf) {
+            return Err(GatewayError::UpstreamFailed {
+                kind,
+                status_code: None,
+                detail: format!("agent 以 exit 0 收場，但 stderr 顯示{kind}"),
+            });
+        }
         Ok(AgentResponse {
             text: stdout_buf.trim().to_string(),
             session_id: None,
@@ -483,6 +514,14 @@ impl AiBackend for AgentCliBackend {
             };
             if let Some(id) = parse_session_id(&line) {
                 session_id = Some(id);
+            }
+            // 先於 parse_event：上游錯誤事件與後續的正常事件會前後腳送達，漏讀就會
+            // 讓一個失敗的回合以 Ok 收場。
+            if let Some(error) = parse_upstream_error_line(&line) {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                stderr_task.abort();
+                return Err(error.to_gateway_error());
             }
             if let Some(ev) = parse_event(&line) {
                 match ev {
@@ -854,7 +893,49 @@ mod tests {
             &[],
             "hi",
         );
-        assert_eq!(argv, vec!["opencode", "run", "hi"]);
+        assert_eq!(
+            argv,
+            vec![
+                "opencode",
+                "run",
+                "--print-logs",
+                "--log-level",
+                "ERROR",
+                "hi"
+            ]
+        );
+    }
+
+    #[test]
+    fn assemble_argv_omits_opencode_flags_for_fake_agents() {
+        // `--agent-cmd "printf fixer"` / `echo` 的假 agent 測試法是既有除錯手段
+        // （CLAUDE.md 有記），opencode 專屬旗標塞給它會弄壞它。
+        let argv = assemble_argv(&["echo".to_string()], None, false, None, None, &[], "hi");
+        assert_eq!(argv, vec!["echo", "hi"]);
+
+        let argv = assemble_argv(
+            &["printf".to_string(), "fixer".to_string()],
+            None,
+            false,
+            None,
+            None,
+            &[],
+            "hi",
+        );
+        assert_eq!(argv, vec!["printf", "fixer", "hi"]);
+
+        // 絕對路徑的 opencode 仍然要加。
+        let argv = assemble_argv(
+            &["/usr/local/bin/opencode".to_string(), "run".to_string()],
+            None,
+            false,
+            None,
+            None,
+            &[],
+            "hi",
+        );
+        assert!(argv.contains(&"--print-logs".to_string()));
+        assert!(argv.contains(&"ERROR".to_string()));
     }
 
     #[test]
@@ -870,7 +951,17 @@ mod tests {
         );
         assert_eq!(
             argv,
-            vec!["opencode", "run", "-s", "ses_x", "--thinking", "hi"]
+            vec![
+                "opencode",
+                "run",
+                "--print-logs",
+                "--log-level",
+                "ERROR",
+                "-s",
+                "ses_x",
+                "--thinking",
+                "hi"
+            ]
         );
     }
 
@@ -890,6 +981,9 @@ mod tests {
             vec![
                 "opencode",
                 "run",
+                "--print-logs",
+                "--log-level",
+                "ERROR",
                 "--model",
                 "opencode/deepseek-v4-flash-free",
                 "hi"
@@ -918,6 +1012,9 @@ mod tests {
             vec![
                 "opencode",
                 "run",
+                "--print-logs",
+                "--log-level",
+                "ERROR",
                 "-s",
                 "ses_x",
                 "--thinking",
@@ -956,6 +1053,9 @@ mod tests {
             vec![
                 "opencode",
                 "run",
+                "--print-logs",
+                "--log-level",
+                "ERROR",
                 "--file",
                 "/tmp/report.pdf",
                 "--file",
@@ -976,7 +1076,19 @@ mod tests {
             &[],
             "hi",
         );
-        assert_eq!(argv, vec!["opencode", "run", "--agent", "plan", "hi"]);
+        assert_eq!(
+            argv,
+            vec![
+                "opencode",
+                "run",
+                "--print-logs",
+                "--log-level",
+                "ERROR",
+                "--agent",
+                "plan",
+                "hi"
+            ]
+        );
     }
 
     #[test]

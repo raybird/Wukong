@@ -2,6 +2,7 @@ use crate::stream::{
     QuestionInfo, QuestionOption, QuestionRequest, StreamEvent, PERMISSION_ALLOW_ALWAYS_LABEL,
     PERMISSION_ALLOW_ONCE_LABEL, PERMISSION_REJECT_LABEL, PERMISSION_REQUEST_PREFIX,
 };
+use crate::upstream_error::{parse_error_field, UpstreamError};
 use serde_json::Value;
 
 fn format_tool_use_name(part: &Value, name: &str) -> String {
@@ -222,6 +223,10 @@ fn truncate_tool_value(value: &str) -> String {
 pub(super) enum ServerEventAction {
     Emit(StreamEvent),
     Idle,
+    /// 上游回報了具名錯誤。**必須**中止這次回合並回 `Err`——在此之前
+    /// `session.error` 落在 fall-through 裡被丟掉，隨後的 `session.idle` 讓一個
+    /// 失敗的回合以 `Ok` 收場（實測：被 abort 的回合會對呼叫端回報成功）。
+    Failed(UpstreamError),
     Ignore,
 }
 
@@ -248,6 +253,15 @@ pub(super) fn map_server_event(
     let event_type = event_type_of(value);
     let properties = payload.get("properties").unwrap_or(payload);
 
+    // 先於 session.idle 判定：錯誤事件與 idle 事件會前後腳送達，漏讀錯誤就會把
+    // 失敗的回合當成正常結束。
+    if event_type == "session.error" {
+        return match (event_session_id(properties), parse_error_field(properties)) {
+            (Some(id), Some(error)) if id == session_id => ServerEventAction::Failed(error),
+            // session 不符（或無從判斷）時一律忽略：不能讓別人的錯誤中止本回合。
+            _ => ServerEventAction::Ignore,
+        };
+    }
     if event_type == "session.idle" {
         return match event_session_id(properties).as_deref() {
             Some(id) if id == session_id => ServerEventAction::Idle,
@@ -783,6 +797,73 @@ mod tests {
         );
     }
 
+    /// AC-1：session.error 不再被忽略，且結構化欄位原樣帶出。
+    #[test]
+    fn session_error_becomes_failed_with_structured_status_code() {
+        let value = serde_json::json!({
+            "type": "session.error",
+            "properties": {
+                "sessionID": "ses_1",
+                "error": {
+                    "name": "APIError",
+                    "data": {"message": "model is gone", "statusCode": 410, "isRetryable": false}
+                }
+            }
+        });
+        let mut seen_tools = std::collections::HashSet::new();
+        match map_server_event(&value, "ses_1", &mut seen_tools) {
+            ServerEventAction::Failed(error) => {
+                assert_eq!(error.name, "APIError");
+                assert_eq!(error.status_code, Some(410));
+                assert_eq!(error.message, "model is gone");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    /// AC-1 失敗路徑：別人的 session 出錯不得中止本回合。
+    #[test]
+    fn session_error_for_another_session_is_ignored() {
+        let value = serde_json::json!({
+            "type": "session.error",
+            "properties": {
+                "sessionID": "ses_OTHER",
+                "error": {"name": "APIError", "data": {"statusCode": 410}}
+            }
+        });
+        let mut seen_tools = std::collections::HashSet::new();
+        assert!(matches!(
+            map_server_event(&value, "ses_1", &mut seen_tools),
+            ServerEventAction::Ignore
+        ));
+
+        // 無從判斷 session 時同樣保守處理。
+        let no_session = serde_json::json!({
+            "type": "session.error",
+            "properties": {"error": {"name": "APIError", "data": {"statusCode": 410}}}
+        });
+        assert!(matches!(
+            map_server_event(&no_session, "ses_1", &mut seen_tools),
+            ServerEventAction::Ignore
+        ));
+    }
+
+    /// AC-3：中止的回合要能與下架區分開，fixture 用 2026-09-08 實測抓到的原文。
+    #[test]
+    fn aborted_session_error_is_classified_as_aborted() {
+        let raw = r#"{"type":"session.error","properties":{"sessionID":"ses_1","error":{"name":"MessageAbortedError","data":{"message":"Aborted"}}}}"#;
+        let value: Value = serde_json::from_str(raw).unwrap();
+        let mut seen_tools = std::collections::HashSet::new();
+        match map_server_event(&value, "ses_1", &mut seen_tools) {
+            ServerEventAction::Failed(error) => {
+                let kind = crate::upstream_error::classify(&error.name, error.status_code);
+                assert_eq!(kind, crate::upstream_error::UpstreamFailure::Aborted);
+                assert_ne!(kind, crate::upstream_error::UpstreamFailure::ModelEol);
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
     #[test]
     fn maps_sse_payload_sequence_to_stream_events_until_idle() {
         let payloads = vec![
@@ -822,6 +903,10 @@ mod tests {
                     break;
                 }
                 ServerEventAction::Ignore => {}
+                // 正常序列不該冒出上游錯誤；真的冒出來要當場紅，不要默默吞掉。
+                ServerEventAction::Failed(error) => {
+                    panic!("unexpected upstream failure in happy path: {error:?}")
+                }
             }
         }
 

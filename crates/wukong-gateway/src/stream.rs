@@ -103,6 +103,22 @@ pub fn parse_event(line: &str) -> Option<StreamEvent> {
     }
 }
 
+/// 從一行 `--format json` 的 NDJSON 取出上游錯誤。
+///
+/// CLI 與 Server 的事件詞彙不同——實測（2026-09-08，opencode 1.18.18）CLI 送
+/// `{"type":"error",…}`，Server SSE 送 `session.error`——但 `error` 物件的形狀相同，
+/// 所以解析共用 [`crate::upstream_error::parse_error_field`]，形狀走鐘時兩條會一起紅。
+///
+/// [`parse_event`] 刻意不處理這件事：上游錯誤不是「可渲染的事件」，是回合的控制流
+/// 結果，該以 `Err` 回給呼叫端，而不是變成一個要每個 renderer 都去 match 的變體。
+pub fn parse_upstream_error_line(line: &str) -> Option<crate::upstream_error::UpstreamError> {
+    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    if value.get("type")?.as_str()? != "error" {
+        return None;
+    }
+    crate::upstream_error::parse_error_field(&value)
+}
+
 /// Extract the opencode session id from one NDJSON line (top-level `sessionID`).
 pub fn parse_session_id(line: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;

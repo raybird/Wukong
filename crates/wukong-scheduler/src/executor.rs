@@ -767,6 +767,71 @@ mod tests {
         assert!(out.message.contains("boom"));
     }
 
+    /// AC-6：上游錯誤導致的排程失敗，紀錄要說得出原因——這正是 TeleNexus 那份
+    /// 100% success rate 的來源：模型下架在排程紀錄裡長得跟成功一模一樣。
+    #[tokio::test]
+    async fn turn_job_reports_upstream_failure_with_its_classification() {
+        let memory = open_memory().await;
+        let backend = MockBackend::new(vec![Err(GatewayError::UpstreamFailed {
+            kind: wukong_gateway::UpstreamFailure::ModelEol,
+            status_code: Some(410),
+            detail: "APIError statusCode=410: model reached end of life".to_string(),
+        })]);
+        let cfg = cfg("project:Base");
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &backend,
+            base_config: &cfg,
+            permission_policy: PermissionPolicy::Reject,
+        };
+        let job = job(JobKind::Turn {
+            scope: "project:Scheduled".to_string(),
+            prompt: "do it".to_string(),
+        });
+
+        let out = execute_job(&ctx, &job).await;
+
+        assert!(!out.success, "上游下架不得記成成功");
+        assert!(
+            out.message
+                .contains(wukong_gateway::UpstreamFailure::ModelEol.label()),
+            "{}",
+            out.message
+        );
+        assert!(out.message.contains("410"), "{}", out.message);
+    }
+
+    /// AC-6 失敗路徑：一般 backend 失敗不得被貼上上游錯誤的分類。
+    #[tokio::test]
+    async fn ordinary_backend_failure_is_not_labelled_as_upstream() {
+        let memory = open_memory().await;
+        let backend = MockBackend::new(vec![Err(GatewayError::AgentFailed {
+            code: Some(1),
+            stderr: "boom".to_string(),
+        })]);
+        let cfg = cfg("project:Base");
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &backend,
+            base_config: &cfg,
+            permission_policy: PermissionPolicy::Reject,
+        };
+        let job = job(JobKind::Turn {
+            scope: "project:Scheduled".to_string(),
+            prompt: "do it".to_string(),
+        });
+
+        let out = execute_job(&ctx, &job).await;
+
+        assert!(!out.success);
+        assert!(!out
+            .message
+            .contains(wukong_gateway::UpstreamFailure::ModelEol.label()));
+        assert!(!out
+            .message
+            .contains(wukong_gateway::UpstreamFailure::RateLimited.label()));
+    }
+
     #[tokio::test]
     async fn turn_job_instructs_agent_to_auto_choose_recommended_options() {
         let memory = open_memory().await;

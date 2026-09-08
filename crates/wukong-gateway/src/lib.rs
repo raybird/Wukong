@@ -8,8 +8,10 @@ pub mod opencode_server;
 pub mod prompt;
 pub mod stream;
 pub mod summarize;
+pub mod upstream_error;
 pub mod workspace;
 
 pub use error::GatewayError;
 pub use stream::StreamEvent;
+pub use upstream_error::{classify, classify_text, UpstreamError, UpstreamFailure};
 pub use workspace::workspace_dir;
