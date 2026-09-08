@@ -34,9 +34,10 @@ pub fn cosine_similarity_blob(a: &[f32], blob: &[u8]) -> f64 {
     let mut dot = 0.0f64;
     let mut na = 0.0f64;
     let mut nb = 0.0f64;
-    for (i, chunk) in blob.chunks_exact(4).enumerate() {
+    let (chunks, _) = blob.as_chunks::<4>();
+    for (i, chunk) in chunks.iter().enumerate() {
         let x = a[i] as f64;
-        let y = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f64;
+        let y = f32::from_le_bytes(*chunk) as f64;
         dot += x * y;
         na += x * x;
         nb += y * y;
@@ -58,9 +59,8 @@ pub fn embedding_to_blob(v: &[f32]) -> Vec<u8> {
 
 /// Deserialize little-endian f32 bytes back to an embedding.
 pub fn blob_to_embedding(b: &[u8]) -> Vec<f32> {
-    b.chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
+    let (chunks, _) = b.as_chunks::<4>();
+    chunks.iter().map(|c| f32::from_le_bytes(*c)).collect()
 }
 
 /// Turns text into a fixed-dimension embedding. Implementors must be cheap to
