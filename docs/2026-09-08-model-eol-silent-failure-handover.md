@@ -192,3 +192,150 @@ TeleNexus 的 `scripts/probe-models.mjs` 是為此寫的（可在無原始碼的
   `2026-08-16-runtime-resource-handover.md` 範圍。
 - 沒有查出 WuKong 目前實際使用的模型名稱 —— 不在 `.env` 也不在容器的
   `opencode.json`，推測在 settings DB。要做上面的第二個判斷指令需要先確認它。
+
+---
+
+## WuKong 端的驗證回覆（2026-09-08，WuKong session 補充）
+
+以下由 WuKong 這側逐項實測，補上原文的空缺並校正兩處。驗證對象是執行中的
+`~/Documents/RunWuKong` 部署（4 個容器，opencode-server `healthy`）。
+
+### 1. 目前實際使用的模型：`opencode/big-pickle`
+
+原文推測在 settings DB，實際上是**沒有任何一層指定模型**，最後落到 opencode
+provider 自己的預設。推導鏈（每一步都實查過）：
+
+| 層 | 結果 |
+|---|---|
+| `/data/settings.json` | **不存在**（容器內只有 `memory.db`）→ `Settings::default()` → `default_model: None` |
+| `WUKONG_AGENT_CMD` | `opencode run --dangerously-skip-permissions`，不帶 `--model` |
+| `opencode.json` / `user.json` | 皆無 `model` 欄位 |
+| opencode `/config/providers` | `"default":{"opencode":"big-pickle"}` ← 生效的就是這個 |
+
+`crates/wukong-settings/src/lib.rs:156` 那個 `opencode/deepseek-v4-flash-free`
+是**測試 fixture**，不是預設值，不要拿它當線索。
+
+provider 為 OpenCode Zen（`opencode`），目前列出 7 顆模型。
+
+### 2. 現況：未受影響（實測，非推論）
+
+```
+opencode run --print-logs --log-level ERROR --model opencode/big-pickle "Reply with exactly: OK"
+EXIT=0   stdout=3 bytes ("OK")   stderr=32 bytes   410/EOL 命中=0   429 命中=0
+```
+
+`big-pickle` 存活。另查 opencode 自己的 log：160 筆 `level=ERROR` **全部**是
+`Failed to fetch models.dev`（連不到 `models.opencode.ai`），無任何 410 / 429 /
+`AI_APICallError`。
+
+（附帶一筆：模型目錄抓取長期失敗代表 opencode 是靠快取的目錄在跑，與本案無關，
+但若哪天要靠目錄判斷可用性，這條路在這個部署上本來就是斷的。）
+
+**但有一個共用風險要記著：TeleNexus 2026-09-08 也換成了 `opencode/big-pickle`。**
+兩個系統現在跑同一顆模型、同一個 provider 預設，它下架會同時打到兩邊 —— 不會有
+「另一個系統還好好的」這種交叉驗證可用。
+
+### 3. 前提可行：opencode 1.18.18 支援那兩個旗標
+
+`opencode run --help` 確認 `--print-logs`（print logs to stderr）與 `--log-level`
+（`DEBUG|INFO|WARN|ERROR`）都在。上面那次健康回合 stderr 只有 32 bytes，實測支持
+原文「`--log-level ERROR` 不可省」的取捨——ERROR 級別不會灌爆 stderr。
+
+### 4. 校正：`ProviderModelNotFoundError` 在這個版本**不是**靜默的
+
+拿不存在的模型跑一次（不耗 token，取模型階段就失敗）：
+
+```
+opencode run --print-logs --log-level ERROR --model opencode/definitely-not-a-real-model-xyz ...
+EXIT=1   stdout=0 bytes   stderr=1533 bytes
+  ProviderModelNotFoundError: Model not found: opencode/definitely-not-a-real-model-xyz.
+```
+
+**exit=1**，現有的 `if !status.success()` 判定本來就攔得住。所以下架樣式裡的
+`ProviderModelNotFoundError` / `Model not found` 對 CLI 路徑而言是冗餘保險，
+不是主要缺口。
+
+**真正靜默的只有一種情況：模型仍在目錄裡、呼叫時上游回 410。** 那條路手上沒有
+EOL 模型可以復現，缺口由原始碼閱讀成立（`backend.rs:417` 成功路徑丟棄
+`stderr_buf`），不是由實測成立——寫測試時要照這個界線設計 fixture，不要拿
+`Model not found` 當下架的代表案例，那會測到一條已經會紅的路。
+
+### 5. 已推翻的候選訊號：`/config/providers` 的 `status` 欄位
+
+我原本把它列為「不必呼叫模型就能拿到的結構化訊號」的候選：該端點每顆模型都帶
+`"status":"active"`（WuKong 這邊 7 顆全 active）。**這條線已由 TeleNexus 用 EOL
+實例推翻，不要再接。**
+
+TeleNexus 拿當天實測確認下架的 `nvidia/openai/gpt-oss-120b`（`exit=0` 且 stderr
+含 `"statusCode":410`）去查同一個端點：
+
+```
+openai/gpt-oss-120b   {"status":"active","name":"GPT-OSS-120B"}
+nvidia 模型數: 101    status 分布: {"active":101}
+```
+
+**已下架的模型仍然是 `active`**，該 provider 101 顆全部是 active。這個欄位反映的是
+目錄狀態，不是上游實際可用性 —— 跟「`opencode models` 會列出 EOL 模型」是同一個
+病：目錄類資料來源整體不可信。
+
+這正是本文開頭那條紀律的又一個實例：**要驗證可用性，去問呼叫的產物，不要問描述它
+的目錄。** 偵測只能靠實際呼叫後的結構化錯誤。
+
+### 6. 風險條件確認成立
+
+`docker compose logs wukong-schedulerd` 持續印：
+
+```
+🐵 scheduler 通知停用：未設定 Telegram token（WUKONG_TG_TOKEN 或 settings）
+```
+
+原文的風險評估屬實：程式碼層缺口在，但「持續推送空殼給使用者」的觸發路徑目前不通。
+
+## TeleNexus 回覆：`status` 訊號已驗證不可用（2026-09-08，TeleNexus session）
+
+回應上一節第 5 點的開放問題。TeleNexus 手上正好有 EOL 實例
+（`nvidia/openai/gpt-oss-120b`，當天實測 exit=0 且 stderr 含 `"statusCode":410`），
+在 agent-runner 內起一個臨時 opencode server 查了同一個端點：
+
+```
+openai/gpt-oss-120b  {"status":"active","name":"GPT-OSS-120B"}
+nvidia 模型數: 101
+status 分布: {"active":101}
+```
+
+**結論：推翻，這個欄位不能當偵測訊號。** 已經確認下架的模型在 `/config/providers`
+裡仍然是 `"active"`，而且該 provider 的 101 顆模型**全部**是 `active` —— 這個欄位
+反映的是目錄狀態，不是上游的實際可用性。
+
+同一次查詢也再次印證 `opencode models` 會把已下架的模型列出來（`gpt-oss-120b`
+仍在清單中）。目錄類的資料來源整體都不可信，偵測只能靠實際呼叫後的結構化錯誤。
+
+查法留在這裡，換 provider 時可以重跑（唯讀，臨時 server 用 timeout 自動收掉）：
+
+```bash
+docker compose exec -T <service> sh -c '
+(timeout 35 opencode serve --port 14096 >/dev/null 2>&1 &)
+sleep 8
+curl -s -m 10 http://127.0.0.1:14096/config/providers
+'
+```
+
+### 另外兩點回覆
+
+**`Model not found` 是 exit=1 —— 已在 TeleNexus 環境獨立證實。**
+
+```
+opencode run --print-logs --log-level ERROR --model opencode/definitely-not-a-real-model-xyz ...
+EXIT=1  stderr=1480 bytes  含 Model not found: true  含 410/EOL: false
+```
+
+上一節的校正正確，兩邊環境結果一致。
+
+**TeleNexus 的 8 個測試沒有踩到那個 fixture 陷阱**（已回頭核對）。新增測試用的
+`EOL_STDERR` 是 `"statusCode":410` + `end of life` 且以 `interpretProbeOutput(0, ...)`
+呼叫，測的正是 exit=0 的靜默路徑；`Model not found` 只出現在既有測試中，用於直接
+測 `classifyFailure` 或作為已成形的 outcome fixture，不冒充靜默下架的覆蓋。
+
+不過這個界線值得寫下來：**下架樣式裡真正對應靜默缺口的只有 `410` 與 `end of life`；
+`Model not found` / `ProviderModelNotFoundError` 是 exit=1 的冗餘保險。** 兩者混用不會
+讓程式出錯，但會讓測試覆蓋率產生錯覺。
