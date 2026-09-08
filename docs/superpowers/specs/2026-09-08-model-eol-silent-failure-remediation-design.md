@@ -352,6 +352,20 @@ EXIT=1
    ——**兩條路徑的事件詞彙不同**（CLI 用 snake_case：`step_start`、`text`）。幸好
    `error` 物件的形狀相同，故解析共用 `parse_error_field`。當初沒有從 SSE 直接推定
    是對的。
-3. **（已知風險，不阻塞）** TeleNexus 2026-09-08 起也使用 `opencode/big-pickle`，
+3. **（待蒐證，跨專案）** `/config/providers` 的 `status` 欄位在**其他 provider**
+   下架時會不會變。第 5 節的推翻只證實了 nvidia 那一顆（101 顆全 `active`），無法
+   推廣到所有 provider。**下次任一邊遇到真實下架時，順手打一次該端點並互相回報**
+   ——TeleNexus 明確提了這個請求。目前結論維持「目錄類資料來源不可信」，不因單一
+   provider 的樣本而改變修法。
+
+4. **（工具可靠度，影響閘門判讀）** GitNexus `impact` 的直接呼叫者計數會低報。
+   本次實測：`map_server_event` 回報 2 個、grep 實際 22 個（21 測試 + 1 生產）；
+   `assemble_argv` 回報 9 個、grep 實際 13 個。**兩次它都正確抓到了生產呼叫端**，
+   少算的都是測試呼叫點——所以它可以當方向指引，不能當覆蓋率保證。TeleNexus 那邊
+   對 `interpretEvent` 遇到更極端的情況（回報 0，實際 2）。
+   本次真正擋住問題的是 Rust 的窮盡比對（編譯器直接擋下沒處理 `ServerEventAction::Failed`
+   的 match）與全套測試，兩者都不依賴那張圖。
+
+5. **（已知風險，不阻塞）** TeleNexus 2026-09-08 起也使用 `opencode/big-pickle`，
    兩系統共用同一顆模型與同一個 provider 預設，它下架會同時影響兩邊，沒有交叉驗證
    可用。狀態：已知會，是否分散模型另案決定。
