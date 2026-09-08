@@ -11,6 +11,52 @@
 
 ## [Unreleased]
 
+## [0.21.10] - 2026-09-08
+
+### Fixed
+
+- **上游錯誤不再以成功收場。** opencode 的 `session.error` 事件過去落在
+  `map_server_event` 的 fall-through 裡被忽略，隨後的 `session.idle` 讓回合以 `Ok`
+  結束——**一個被中止或被上游拒絕的回合，在排程紀錄裡長得跟成功一模一樣**。CLI 的
+  `--format json` 事件流同樣把錯誤事件丟掉，非串流路徑則在 exit 0 時丟棄整個 stderr。
+  - 缺口的正確描述不是「exit code 判定太寬」，是**錯誤事件根本沒被讀**。這點由實測
+    復現：對執行中的 server 開 SSE、送訊息、中途 abort，觀察到 `session.error`
+    （`MessageAbortedError`）之後仍會送 `session.idle`。修復前那個回合回報成功。
+  - 判定順序改為**先結構化訊號、後文字**。新增 `wukong-gateway::upstream_error` 作為
+    唯一的分類真相來源，吃 opencode 具名錯誤的 `name` 與 `data.statusCode`。
+    `statusCode` 是 integer 欄位，比對它是型別安全的整數比較，**結構上不可能被模型
+    輸出裡的數字誤觸**——上游同型事故的修法因為只有 stderr 純文字可用而被迫用寬鬆
+    regex，這裡不必繼承那個妥協。
+  - 兩條 backend 都補上：Server 的 SSE `session.error`、CLI 的 `{"type":"error"}`。
+    **兩者事件詞彙不同**（CLI 是扁平的 snake_case，不是 SSE 的點號命名），實測確認後
+    才實作，沒有從其中一條推定另一條；`error` 物件形狀相同，故共用同一份解析，形狀
+    走鐘時兩條會一起紅。
+  - 非串流的兩條 `run()` 也補了防護：CLI 檢查 stderr、Server 檢查 assistant message
+    的 `info.error`。這兩條目前無生產呼叫端，屬防未來。
+
+### Changed
+
+- **排程與各進入點會開始看到過去看不到的失敗。** 這是上一條的直接後果，也是它的目的：
+  模型下架、上游限流、回合被中止，現在都會讓回合回 `Err` 並在排程紀錄記為
+  `success: false`，訊息帶分類（`模型已下架` / `上游限流` / `回合被中止` / `上游錯誤`），
+  不再與一般 agent 失敗混為一談。**過去這些情況是靜默成功的**，所以升級後失敗數上升
+  不代表變得更不穩，而是原本就存在的失敗終於現形。
+- **`opencode run` 的 argv 會帶上 `--print-logs --log-level ERROR`。** 沒有這兩個旗標，
+  opencode 只把上游錯誤寫進自己的 log，stderr 一個字都沒有。`ERROR` 不可省：預設
+  `INFO` 會把每次 bus publish 灌進 stderr（實測健康回合的 stderr 只有 32 bytes）。
+  僅在指令確實是 opencode 時才加，以免弄壞 `--agent-cmd "printf fixer"` / `echo`
+  的假 agent 測試法。
+
+### Notes
+
+- 純文字退路刻意保持嚴格：**不採裸的 `410` / `429` 數字比對、不認 `404`、不認裸的
+  `Gone`**。跑市場分析的排程出現「成交量 429 億美元」完全正常，一句「the opportunity
+  is gone」也是——**誤殺一個本來會成功的任務比漏判更糟**。`404` 則是非對話類模型打錯
+  端點的正常回應，混進來會讓告警說錯原因。三者都有迴歸測試。
+- 背景與跨專案事故紀錄見 `docs/2026-09-08-model-eol-silent-failure-handover.md`，
+  設計與驗證紀錄見
+  `docs/superpowers/specs/2026-09-08-model-eol-silent-failure-remediation-design.md`。
+
 ## [0.21.9] - 2026-08-17
 
 ### Added
@@ -763,7 +809,8 @@ server 模式補回那個 CLI 免費獲得的週期性重置，同時保留暖�
   不安全綁定（`0.0.0.0` + 空 token）啟動即拒絕（fail-closed，可用
   `WUKONG_WEB_ALLOW_INSECURE=1` 覆寫）；Telegram callback 加白名單檢查。
 
-[Unreleased]: https://github.com/raybird/Wukong/compare/v0.21.9...HEAD
+[Unreleased]: https://github.com/raybird/Wukong/compare/v0.21.10...HEAD
+[0.21.10]: https://github.com/raybird/Wukong/compare/v0.21.9...v0.21.10
 [0.21.9]: https://github.com/raybird/Wukong/compare/v0.21.8...v0.21.9
 [0.21.8]: https://github.com/raybird/Wukong/compare/v0.21.7...v0.21.8
 [0.21.7]: https://github.com/raybird/Wukong/compare/v0.21.6...v0.21.7
