@@ -152,6 +152,42 @@ mod tests {
         );
     }
 
+    /// 真實下架模型的 CLI 事件原文（TeleNexus 2026-09-08 對已 EOL 的模型實測，
+    /// `EXIT=0`、stdout 815 bytes，裡面**只有這一則 error 事件、沒有任何 text
+    /// 事件**）。這條測試把設計階段最後一個推論釘成事實：真實 410 確實以
+    /// `APIError` + integer `data.statusCode` 送達。
+    #[test]
+    fn real_end_of_life_payload_is_classified_as_model_eol() {
+        let line = r#"{"type":"error","sessionID":"ses_x","error":{"name":"APIError","data":{"message":"Gone: {\"type\":\"about:blank\",\"title\":\"Gone\",\"status\":410,\"detail\":\"The model 'x' has reached its end of life on 2026-09-03T08:00:00Z\"}","statusCode":410,"isRetryable":false}}}"#;
+
+        let error = parse_upstream_error_line(line).expect("真實下架事件必須解得出來");
+        assert_eq!(error.name, "APIError");
+        assert_eq!(error.status_code, Some(410));
+        assert_eq!(
+            crate::upstream_error::classify(&error.name, error.status_code),
+            crate::upstream_error::UpstreamFailure::ModelEol
+        );
+
+        // 這則 payload 的 message 裡同時有 "title":"Gone" 與 "status":410——正好
+        // 說明該比對哪一個：裸的 Gone 會被無害句子誤觸，statusCode 不會。
+        assert!(error.message.contains("\"title\":\"Gone\""));
+        assert_eq!(
+            crate::upstream_error::classify_text("Gone are the days of cheap compute"),
+            None
+        );
+    }
+
+    /// 正常事件不得被誤判成上游錯誤。
+    #[test]
+    fn ordinary_events_are_not_upstream_errors() {
+        assert!(parse_upstream_error_line(
+            r#"{"type":"text","part":{"text":"成交量 410 億美元"}}"#
+        )
+        .is_none());
+        assert!(parse_upstream_error_line(r#"{"type":"step_start"}"#).is_none());
+        assert!(parse_upstream_error_line("not json").is_none());
+    }
+
     #[test]
     fn parses_text_event() {
         // opencode nests the assistant text under part.text.

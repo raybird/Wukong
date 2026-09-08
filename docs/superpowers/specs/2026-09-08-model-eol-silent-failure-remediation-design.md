@@ -266,6 +266,12 @@ handover 的樣式表列了 `\bGone\b`。實作時刻意排除：一句「the op
 就會誤觸，與「成交量 429 億美元」是同一類誤判。要判 410 就去比對 `statusCode`。
 已寫進 `classify_text` 的 doc comment 與迴歸測試。
 
+**TeleNexus 已獨立確認並跟進修正**：他們實測四個無害句子（「the opportunity is
+gone」「Gone are the days of cheap compute」「BTC 的漲勢 gone，但 ETH 還在」「此檔
+股票的動能已經 gone」）在原樣式下全部誤觸；移除裸 `Gone` 後全部安全，而真實下架的
+stderr 仍判得出來（410 命中 3 次、`end of life` 3 次，都不依賴 `Gone`）——純改善，
+沒有損失偵測能力。
+
 ## 驗證結果（2026-09-08）
 
 8 條驗收標準全部通過。
@@ -315,12 +321,31 @@ EXIT=1
 
 ## 待確認事項
 
-1. **（未驗證，影響 W2 分類正確性）** 上游 410 是否確實以
-   `session.error` + `APIError{statusCode:410}` 的形狀送達。目前證據是：`/doc` 的
-   schema 定義了該欄位（描述），加上 abort 實驗證實 `session.error` 的**送達與外層
-   形狀**（產物）。**中間那一步——真實 410 落進 `APIError.data.statusCode`——沒有
-   EOL 模型可復現，屬推論。** 狀態：待 TeleNexus 或我方下次遇到真實下架時抓一次
-   payload 證實。W2 的純文字退路即為此推論失準時的保險。
+1. ~~**（未驗證，影響 W2 分類正確性）** 上游 410 是否確實以
+   `APIError{statusCode:410}` 的形狀送達。~~ **已由真實 EOL 實例證實（2026-09-08，
+   TeleNexus 提供）。** 原本這是全案唯一的推論：schema 定義了欄位（描述）、abort
+   實驗證實了送達與外層形狀（產物），但中間那一步沒有 EOL 模型可復現。
+
+   TeleNexus 對已下架的模型實跑 `--format json`，得到 `EXIT=0`、stdout 815 bytes，
+   而且**裡面只有一則 error 事件、沒有任何 text 事件**：
+
+   ```json
+   {"type":"error","sessionID":"…","error":{"name":"APIError","data":{
+     "message":"Gone: {\"title\":\"Gone\",\"status\":410,\"detail\":\"…has reached its end of life…\"}",
+     "statusCode":410,"isRetryable":false,"responseHeaders":{…}}}}
+   ```
+
+   三點都對上了：CLI 用扁平的 `{"type":"error", sessionID, error}`（不是 SSE 的
+   `session.error`/`properties`）、`APIError` 帶 integer `data.statusCode`、
+   `EXIT=0`。已寫成迴歸測試
+   `stream::real_end_of_life_payload_is_classified_as_model_eol`，直接用該原文。
+
+   附帶一提，那則 `message` 字串裡同時有 `"title":"Gone"` 與 `"status":410`——
+   **裸 `Gone` 會誤觸的同時，正確的結構化欄位就在旁邊**，這正是「該比對哪一個」
+   的實證。
+
+   順帶解答了 handover 裡「每次都固定 `outputLen=815`」那個指紋：那 815 bytes 不是
+   降級文字，就是 error 事件本身。
 2. ~~**（未確認，影響 W3）** CLI `--format json` 事件流中錯誤事件的實際 `type`
    字串是否為 `session.error`。~~ **已實測解決（2026-09-08）：不是。** CLI 送的是
    `{"type":"error","sessionID":"…","error":{…}}`，SSE 送的是 `session.error`
