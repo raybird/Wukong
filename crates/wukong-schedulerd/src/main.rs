@@ -106,6 +106,10 @@ async fn run(cli: Cli) -> Result<(), String> {
     loop {
         tokio::select! {
             _ = ticks.tick() => {
+                if let Err(e) = refresh_model_settings(&mut cfg, &settings_path) {
+                    eprintln!("warning: scheduler settings reload failed: {e}");
+                    continue;
+                }
                 if let Err(e) = run_scan(&store, &memory, &backend, &cfg, &worker_id, cli.lease_secs, cli.limit, notifier.as_ref(), history.as_ref()).await {
                     eprintln!("warning: scheduler scan failed: {e}");
                 }
@@ -255,6 +259,18 @@ async fn shutdown_signal() {
     }
 }
 
+// Reload before claiming jobs so UI model changes take effect without a restart.
+// Invalid settings must not run jobs with a stale model.
+fn refresh_model_settings(
+    cfg: &mut GatewayConfig,
+    path: &std::path::Path,
+) -> Result<(), wukong_settings::SettingsError> {
+    let settings = wukong_settings::load_settings(path)?;
+    let agent = wukong_settings::effective_agent_settings(&settings);
+    cfg.apply_default_model(agent.default_model.as_deref());
+    Ok(())
+}
+
 fn resolve_config(cli: &Cli) -> GatewayConfig {
     GatewayConfig {
         scope: cli.scope.clone().unwrap_or_else(default_scope),
@@ -289,6 +305,28 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use wukong_scheduler::{Job, JobKind, NewJob, RunStatus};
+
+    #[test]
+    fn model_settings_follow_changes_and_removal_without_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut cfg = resolve_config(&Cli::parse_from(["wukong-schedulerd"]));
+        for model in [
+            Some("opencode/old-model"),
+            Some("opencode/big-pickle"),
+            None,
+        ] {
+            let mut settings = wukong_settings::Settings::default();
+            settings.agent.default_model = model.map(str::to_string);
+            wukong_settings::save_settings(&path, &settings).unwrap();
+            refresh_model_settings(&mut cfg, &path).unwrap();
+            assert_eq!(cfg.default_model.as_deref(), model);
+        }
+        cfg.apply_default_model(Some("opencode/old-model"));
+        std::fs::write(&path, "{").unwrap();
+        assert!(refresh_model_settings(&mut cfg, &path).is_err());
+        assert_eq!(cfg.default_model.as_deref(), Some("opencode/old-model"));
+    }
 
     async fn open_store() -> (NamedTempFile, SchedulerStore) {
         let file = NamedTempFile::new().unwrap();

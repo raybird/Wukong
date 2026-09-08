@@ -11,6 +11,16 @@
 
 ## [Unreleased]
 
+## [0.21.11] - 2026-09-08
+
+### Fixed
+
+- **排程會在每輪掃描前重新讀取預設模型設定。** 過去 scheduler 只在啟動時讀取
+  `settings.json`，在介面切換模型後仍持續使用舊模型，可能反覆出現 `Model not found`。
+  現在下一輪掃描即套用新模型，不需重啟；清除指定模型也會同步生效。
+- 模型設定讀取或解析失敗時，記錄警告並跳過該輪掃描，避免以過期模型領取任務；
+  設定修復後會在下一輪自動重試。新增模型切換、清除與損壞設定的迴歸測試。
+
 ## [0.21.10] - 2026-09-08
 
 ### Fixed
@@ -809,7 +819,8 @@ server 模式補回那個 CLI 免費獲得的週期性重置，同時保留暖�
   不安全綁定（`0.0.0.0` + 空 token）啟動即拒絕（fail-closed，可用
   `WUKONG_WEB_ALLOW_INSECURE=1` 覆寫）；Telegram callback 加白名單檢查。
 
-[Unreleased]: https://github.com/raybird/Wukong/compare/v0.21.10...HEAD
+[Unreleased]: https://github.com/raybird/Wukong/compare/v0.21.11...HEAD
+[0.21.11]: https://github.com/raybird/Wukong/compare/v0.21.10...v0.21.11
 [0.21.10]: https://github.com/raybird/Wukong/compare/v0.21.9...v0.21.10
 [0.21.9]: https://github.com/raybird/Wukong/compare/v0.21.8...v0.21.9
 [0.21.8]: https://github.com/raybird/Wukong/compare/v0.21.7...v0.21.8
