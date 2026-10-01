@@ -200,6 +200,18 @@ done
 require_in_file "WUKONG_OPENCODE_CPUS" .env.example \
     "resource knobs must be documented where operators actually look"
 
+# ── opencode session 保留期（issue-0003）──
+# compose 逐項把環境變數傳進服務，沒有 env_file：少寫一行，.env 裡的設定就靜靜失效，
+# schedulerd 照預設值跑。兩份 compose 都要有。
+for cf in "$compose_file" "$release_compose"; do
+    require_in_file 'WUKONG_OPENCODE_SESSION_RETENTION_DAYS=${WUKONG_OPENCODE_SESSION_RETENTION_DAYS:-30}' "$cf" \
+        "$cf must pass the opencode session retention setting to wukong-schedulerd"
+done
+require_in_file "WUKONG_OPENCODE_SESSION_RETENTION_DAYS" .env.example \
+    "the retention knob must be documented where operators actually look"
+require_in_file "wukong opencode --help" "$entrypoint" \
+    "the entrypoint must confirm the binary knows the subcommand before calling it; an older wukong runs unknown words as a prompt"
+
 # ── opencode 週期性重啟（W2）──
 idle_restart="scripts/opencode-idle-restart.sh"
 release_dockerfile="Dockerfile.release"

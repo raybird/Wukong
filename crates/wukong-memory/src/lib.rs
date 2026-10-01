@@ -118,6 +118,11 @@ impl Memory {
         self.store.agent_session_state(scope).await
     }
 
+    /// Every opencode session id any scope still points at.
+    pub async fn referenced_session_ids(&self) -> Result<Vec<String>> {
+        self.store.referenced_session_ids().await
+    }
+
     /// Set/overwrite the opencode session id for a scope.
     pub async fn set_agent_session(&self, scope: &str, session_id: &str) -> Result<()> {
         self.store

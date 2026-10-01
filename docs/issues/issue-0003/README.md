@@ -26,7 +26,9 @@ Wukong 自己另存對話（`wukong-memory` 與 `wukong-chat-history`），不�
 ├── docker-compose.yml                   # 可改：只新增環境變數傳遞
 ├── docker-compose.release.yml           # 可改：同上
 ├── .env.example                         # 可改：新增設定
-├── docs/docker.md、CHANGELOG.md         # 可改：設定說明與變更紀錄
+├── docs/docker.md、docs/cli-reference.md、CHANGELOG.md、AGENTS.md  # 可改：設定說明、指令參考與變更紀錄
+├── docs/2026-08-08-system-freeze-opencode-resource-handover.md   # 可改：只加註已回答的未知
+├── Cargo.lock、各 crate 的 Cargo.toml   # 可改：wukong-cli 新增 sqlx、rustix；wukong-runtime 測試用 sqlx
 ├── scripts/opencode-idle-restart.sh     # 不可觸及：閒置重啟的判定不變
 ├── crates/wukong-runtime/src/session.rs # 不可觸及：compaction 與輪替政策不變
 └── opencode.db 的資料表                 # 不可觸及：刪除只走 opencode 的刪除入口，不直接改寫資料列
@@ -151,4 +153,4 @@ Feature: opencode session 的保留期清理
 **建立日期**: 2026-10-01  
 **分級**: Medium（跨五個 crate，但沿既有相依方向、邏輯直觀，不涉及 schema 或架構變更）  
 **風險**: High\
-**狀態**: 待實作
+**狀態**: 實作完成，待審查

@@ -3,12 +3,15 @@ use std::io::{BufRead, Write};
 use wukong_cli::repl::{classify_line, LineAction};
 use wukong_cli::run_turn;
 use wukong_gateway::backend::{build_backend_from_env, AgentBackend};
-use wukong_gateway::cli::{Cli, Command, MemoryOp, ScheduleMaintenanceTaskArg, ScheduleOp};
+use wukong_gateway::cli::{
+    Cli, Command, MemoryOp, OpencodeOp, ScheduleMaintenanceTaskArg, ScheduleOp,
+};
 use wukong_gateway::config::GatewayConfig;
 use wukong_gateway::workspace_dir;
 use wukong_gateway::StreamEvent;
 use wukong_memory::Memory;
 use wukong_runtime::maintenance::{memory_consolidate, memory_prune, memory_snapshot};
+use wukong_runtime::session_retention::{prune_opencode_sessions, render_report, RetentionPolicy};
 use wukong_runtime::util::now_unix;
 use wukong_scheduler::{
     ExecutionContext, Job, JobKind, MaintenanceTask, NewJob, PermissionPolicy, SchedulerStore,
@@ -17,6 +20,22 @@ use wukong_scheduler::{
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    if let Some(Command::Opencode {
+        op: OpencodeOp::Vacuum,
+    }) = &cli.command
+    {
+        // 在開記憶庫之前處理：這個子命令由 opencode-server 容器在啟動 server 前
+        // 呼叫，那個容器不該順手建立或開啟 memory.db。
+        match wukong_cli::opencode_db::run().await {
+            Ok(line) => eprintln!("{line}"),
+            Err(line) => {
+                eprintln!("{line}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     let mut cfg = GatewayConfig::resolve(&cli);
     let settings_path = wukong_settings::default_settings_path();
     let settings = wukong_settings::load_settings(&settings_path).unwrap_or_default();
@@ -33,7 +52,17 @@ async fn main() {
     let backend = build_backend_from_env(cfg.agent_command.clone(), workspace_dir());
 
     if cli.new_session {
-        if let Err(e) = memory.clear_agent_session(&cfg.scope).await {
+        // 與 REPL 的 /new 走同一條路：先刪 opencode 那邊的 session 再清對應，
+        // 否則舊 session 會永遠留在 opencode.db。
+        if let Err(e) = wukong_cli::run_session_command(
+            &memory,
+            &backend,
+            &cfg,
+            &settings_path,
+            wukong_cli::SessionCommand::New,
+        )
+        .await
+        {
             eprintln!("warning: failed to reset session: {e}");
         }
     }
@@ -50,6 +79,22 @@ async fn main() {
         if let Err(e) = run_schedule_op(&memory, &backend, &cfg, op).await {
             eprintln!("error: {e}");
             std::process::exit(1);
+        }
+        return;
+    }
+
+    if let Some(Command::Opencode {
+        op: OpencodeOp::Prune { dry_run },
+    }) = &cli.command
+    {
+        let policy = RetentionPolicy::from_env();
+        match prune_opencode_sessions(&memory, &backend, policy, now_unix() * 1000, *dry_run).await
+        {
+            Ok(report) => println!("{}", render_report(&report, policy)),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
         }
         return;
     }

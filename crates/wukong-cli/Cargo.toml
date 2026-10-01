@@ -19,6 +19,8 @@ wukong-gateway = { path = "../wukong-gateway" }
 wukong-settings = { path = "../wukong-settings" }
 tokio = { workspace = true }
 clap = { workspace = true }
+sqlx = { workspace = true }
+rustix = { version = "1", features = ["fs"] }
 
 [features]
 embed = ["wukong-memory/embed", "wukong-runtime/embed"]

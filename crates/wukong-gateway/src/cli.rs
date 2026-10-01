@@ -62,6 +62,24 @@ pub enum Command {
         #[command(subcommand)]
         op: ScheduleOp,
     },
+    /// opencode state maintenance.
+    Opencode {
+        #[command(subcommand)]
+        op: OpencodeOp,
+    },
+}
+
+/// `wukong opencode <op>`.
+#[derive(Subcommand, Debug)]
+pub enum OpencodeOp {
+    /// Delete opencode sessions past the retention period that no scope points at.
+    Prune {
+        /// List what would be deleted without deleting anything.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
+    /// Reclaim free space in opencode.db (VACUUM) when enough of it is reusable.
+    Vacuum,
 }
 
 /// `wukong memory <op>`.
@@ -197,6 +215,38 @@ mod tests {
             }) => assert!(scope.is_none()),
             _ => panic!("expected memory snapshot"),
         }
+    }
+
+    #[test]
+    fn a_global_flag_before_a_subcommand_turns_it_into_a_prompt() {
+        // 這不是我們想要的行為，而是 clap 設定（args_conflicts_with_subcommands）的
+        // 後果：不會報錯，子命令的字直接變成 prompt、跑一個真的回合。AGENTS.md 與
+        // entrypoint 的防護都建立在這個事實上，所以把它釘住——哪天改成報錯，這個
+        // 測試會提醒把那兩處一起更新。
+        let cli =
+            Cli::try_parse_from(["wukong", "--db", "sqlite://x.db", "opencode", "vacuum"]).unwrap();
+        assert!(cli.command.is_none());
+        assert_eq!(cli.prompt_text(), "opencode vacuum");
+    }
+
+    #[test]
+    fn parses_opencode_ops() {
+        let op = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
+            Some(Command::Opencode { op }) => op,
+            other => panic!("expected opencode op, got {other:?}"),
+        };
+        assert!(matches!(
+            op(&["wukong", "opencode", "prune", "--dry-run"]),
+            OpencodeOp::Prune { dry_run: true }
+        ));
+        assert!(matches!(
+            op(&["wukong", "opencode", "prune"]),
+            OpencodeOp::Prune { dry_run: false }
+        ));
+        assert!(matches!(
+            op(&["wukong", "opencode", "vacuum"]),
+            OpencodeOp::Vacuum
+        ));
     }
 
     #[test]

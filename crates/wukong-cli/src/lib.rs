@@ -1,6 +1,7 @@
 //! wukong-cli: CLI-specific modules for the unified Wukong assistant.
 
 pub mod command;
+pub mod opencode_db;
 pub mod render;
 pub mod repl;
 

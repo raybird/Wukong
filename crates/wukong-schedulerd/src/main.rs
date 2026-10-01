@@ -1,5 +1,6 @@
 mod auto_maintenance;
 mod notify;
+mod session_retention;
 
 use clap::Parser;
 use std::io::Write;
@@ -103,6 +104,21 @@ async fn run(cli: Cli) -> Result<(), String> {
             .unwrap_or(maintenance_config.interval_secs)
             .max(1),
     ));
+    let retention_policy = session_retention::active_policy(
+        &backend,
+        wukong_runtime::session_retention::RetentionPolicy::from_env(),
+    );
+    match retention_policy {
+        Some(policy) => eprintln!(
+            "opencode session retention enabled retention_days={} interval_secs={}",
+            policy.retention_days,
+            session_retention::INTERVAL.as_secs()
+        ),
+        None => eprintln!(
+            "opencode session retention disabled (needs the opencode server backend and WUKONG_OPENCODE_SESSION_RETENTION_DAYS > 0)"
+        ),
+    }
+    let mut retention_ticks = interval(session_retention::INTERVAL);
     loop {
         tokio::select! {
             _ = ticks.tick() => {
@@ -117,6 +133,13 @@ async fn run(cli: Cli) -> Result<(), String> {
             _ = maintenance_ticks.tick() => {
                 if let Err(e) = run_memory_maintenance(&memory, &backend).await {
                     eprintln!("warning: memory maintenance failed: {e}");
+                }
+            }
+            _ = retention_ticks.tick() => {
+                if let Some(policy) = retention_policy {
+                    if let Err(e) = session_retention::run_once(&memory, &backend, policy).await {
+                        eprintln!("warning: opencode session retention failed: {e}");
+                    }
                 }
             }
             _ = shutdown_signal() => {
