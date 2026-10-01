@@ -110,15 +110,16 @@ async fn run(cli: Cli) -> Result<(), String> {
     );
     match retention_policy {
         Some(policy) => eprintln!(
-            "opencode session retention enabled retention_days={} interval_secs={}",
+            "opencode session retention enabled retention_days={} first_run_in_secs={} interval_secs={}",
             policy.retention_days,
+            session_retention::INTERVAL.as_secs(),
             session_retention::INTERVAL.as_secs()
         ),
         None => eprintln!(
             "opencode session retention disabled (needs the opencode server backend and WUKONG_OPENCODE_SESSION_RETENTION_DAYS > 0)"
         ),
     }
-    let mut retention_ticks = interval(session_retention::INTERVAL);
+    let mut retention_ticks = session_retention::ticker();
     loop {
         tokio::select! {
             _ = ticks.tick() => {

@@ -8,9 +8,9 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use wukong_memory::Memory;
 
-/// 只認得刪除 session，其餘一律 404——`--new` 之後的回合因此在第一個請求就失敗
-/// 收場，測試不需要模擬完整的一回合。
-fn recording_server() -> (String, Arc<Mutex<Vec<String>>>) {
+/// 只認得刪除 session（以 `delete_status` 回應），其餘一律 404——`--new` 之後的回合
+/// 因此在第一個請求就失敗收場，測試不需要模擬完整的一回合。
+fn recording_server(delete_status: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let hits = Arc::new(Mutex::new(Vec::new()));
@@ -34,9 +34,12 @@ fn recording_server() -> (String, Arc<Mutex<Vec<String>>>) {
                 words.next().unwrap_or_default()
             );
             let response = if request.starts_with("DELETE /session/") {
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntrue"
+                format!(
+                    "HTTP/1.1 {delete_status}\r\nContent-Type: application/json\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntrue"
+                )
             } else {
                 "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string()
             };
             seen.lock().unwrap().push(request);
             let _ = socket.write_all(response.as_bytes());
@@ -45,8 +48,9 @@ fn recording_server() -> (String, Arc<Mutex<Vec<String>>>) {
     (url, hits)
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn new_flag_deletes_the_session_the_scope_pointed_at() {
+/// 以 `--new` 對一個已指向 `ses_old` 的 scope 跑一次 binary，回傳 server 收到的請求、
+/// 事後該 scope 指向的 session，以及 stderr。
+async fn run_new_flag(delete_status: &'static str) -> (Vec<String>, Option<String>, String) {
     let dir = tempfile::tempdir().unwrap();
     let db_url = format!("sqlite://{}", dir.path().join("memory.db").display());
     Memory::open(&db_url)
@@ -55,7 +59,7 @@ async fn new_flag_deletes_the_session_the_scope_pointed_at() {
         .set_agent_session("project:T", "ses_old")
         .await
         .unwrap();
-    let (server_url, hits) = recording_server();
+    let (server_url, hits) = recording_server(delete_status);
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_wukong"))
         .args(["--new", "--scope", "project:T", "--db", &db_url, "hi"])
@@ -71,12 +75,42 @@ async fn new_flag_deletes_the_session_the_scope_pointed_at() {
         .unwrap();
 
     let seen = hits.lock().unwrap().clone();
+    let memory = Memory::open(&db_url).await.unwrap();
+    let pointed_at = memory.agent_session("project:T").await.unwrap();
+    (
+        seen,
+        pointed_at,
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn new_flag_deletes_the_session_the_scope_pointed_at() {
+    let (seen, pointed_at, stderr) = run_new_flag("200 OK").await;
+
     assert!(
         seen.iter()
             .any(|request| request == "DELETE /session/ses_old"),
-        "the old session was never deleted; server saw {seen:?}\nstderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+        "the old session was never deleted; server saw {seen:?}\nstderr: {stderr}"
     );
-    let memory = Memory::open(&db_url).await.unwrap();
-    assert_eq!(memory.agent_session("project:T").await.unwrap(), None);
+    assert_eq!(pointed_at, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn new_flag_starts_a_fresh_context_even_when_the_delete_fails() {
+    // `--new` 的承諾是下一回合不帶舊 context。刪不掉舊 session 是 opencode 那邊的事，
+    // 留下的無主 session 之後由保留期清理收掉；但對應一定要清，否則這一回合會照樣
+    // 接著舊 session 跑。
+    let (seen, pointed_at, stderr) = run_new_flag("500 Internal Server Error").await;
+
+    assert!(
+        seen.iter()
+            .any(|request| request == "DELETE /session/ses_old"),
+        "the delete was never attempted; server saw {seen:?}"
+    );
+    assert_eq!(pointed_at, None, "stderr: {stderr}");
+    assert!(
+        stderr.contains("ses_old"),
+        "the failure went unreported: {stderr}"
+    );
 }

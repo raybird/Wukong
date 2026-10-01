@@ -4,11 +4,12 @@
 //! 會被續接。背景與量測見 `docs/issues/issue-0003/`。
 
 use crate::WukongError;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use wukong_gateway::backend::{AiBackend, SessionSummary};
 use wukong_memory::Memory;
 
 pub const DEFAULT_RETENTION_DAYS: u32 = 30;
+const RETENTION_DAYS_ENV: &str = "WUKONG_OPENCODE_SESSION_RETENTION_DAYS";
 /// 每輪最多刪除數。實測連續刪除 484 個 session 共 4.43 秒，這個上限只是不讓首次
 /// 套用時的一輪拖得太久，剩下的留給下一輪。
 pub const MAX_DELETES_PER_RUN: usize = 500;
@@ -19,7 +20,8 @@ const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 pub struct RetentionSelection {
     /// 要刪除的 session，由舊到新，已套用每輪上限。
     pub expired: Vec<String>,
-    /// 清單中被 scope 指向、因此不論多舊都保留的 session。
+    /// 因為被 scope 指向（它自己，或它底下的任何子 session）而不論多舊都保留的
+    /// 根 session。
     pub protected: Vec<String>,
     /// `protected` 之中已超過保留期的數量：被棄置 scope 的規模訊號。
     pub stale_protected: usize,
@@ -40,24 +42,55 @@ pub fn select_expired(
         return selection;
     }
     let cutoff_ms = now_ms - i64::from(retention_days) * DAY_MS;
-    let mut expired: Vec<&SessionSummary> = Vec::new();
-    // 子 session 隨父 session 一起消失，不單獨判定。列表已要求只回根 session，
-    // 這裡再擋一次，不把正確性押在 server 端的過濾上。
-    for session in sessions.iter().filter(|session| !session.is_child) {
-        let is_stale = session.updated_ms < cutoff_ms;
+
+    // 刪除根 session 會連整棵樹一起帶走，所以判定單位是樹：只要樹裡有任何一個被
+    // scope 指向就整棵保留；樹的「最後活動」取所有成員中最新的。
+    let parent_of: HashMap<&str, &str> = sessions
+        .iter()
+        .filter_map(|session| Some((session.id.as_str(), session.parent_id.as_deref()?)))
+        .collect();
+    let root_of = |id: &str| {
+        let mut current = id;
+        // 步數上限只是防呆：父子關係成環時不要卡死。
+        for _ in 0..sessions.len() {
+            match parent_of.get(current) {
+                Some(parent) => current = parent,
+                None => break,
+            }
+        }
+        current.to_string()
+    };
+    let mut last_activity: HashMap<String, i64> = HashMap::new();
+    let mut protected_roots: HashSet<String> = HashSet::new();
+    for session in sessions {
+        let root = root_of(&session.id);
         if protected.contains(&session.id) {
-            selection.protected.push(session.id.clone());
+            protected_roots.insert(root.clone());
+        }
+        let activity = last_activity.entry(root).or_insert(session.updated_ms);
+        *activity = (*activity).max(session.updated_ms);
+    }
+
+    let mut expired: Vec<(i64, &str)> = Vec::new();
+    for root in sessions
+        .iter()
+        .filter(|session| session.parent_id.is_none())
+    {
+        let activity = last_activity[&root.id];
+        let is_stale = activity < cutoff_ms;
+        if protected_roots.contains(&root.id) {
+            selection.protected.push(root.id.clone());
             selection.stale_protected += usize::from(is_stale);
         } else if is_stale {
-            expired.push(session);
+            expired.push((activity, &root.id));
         }
     }
-    expired.sort_by_key(|session| session.updated_ms);
+    expired.sort();
     selection.deferred = expired.len().saturating_sub(cap);
     selection.expired = expired
         .into_iter()
         .take(cap)
-        .map(|session| session.id.clone())
+        .map(|(_, id)| id.to_string())
         .collect();
     selection
 }
@@ -70,19 +103,24 @@ pub struct RetentionPolicy {
 
 impl RetentionPolicy {
     pub fn from_env() -> Self {
-        Self::from_value(
-            std::env::var("WUKONG_OPENCODE_SESSION_RETENTION_DAYS")
-                .ok()
-                .as_deref(),
-        )
+        let raw = std::env::var(RETENTION_DAYS_ENV).ok();
+        let policy = Self::from_value(raw.as_deref());
+        if let Some(raw) = raw.filter(|raw| raw.trim().parse::<u32>().is_err()) {
+            eprintln!(
+                "warning: {RETENTION_DAYS_ENV}={raw:?} 不是非負整數，opencode session 保留期清理停用"
+            );
+        }
+        policy
     }
 
-    /// 未設定或無法解析時用預設天數，與其他維護設定的慣例一致。
+    /// 未設定時用預設天數。寫了卻無法解析的值視為停用：`off`、`false`、`-1` 最可能
+    /// 的意思是「不要清」，把它當成 30 天照樣刪，方向正好相反。
     pub fn from_value(days: Option<&str>) -> Self {
         Self {
-            retention_days: days
-                .and_then(|value| value.trim().parse::<u32>().ok())
-                .unwrap_or(DEFAULT_RETENTION_DAYS),
+            retention_days: match days {
+                None => DEFAULT_RETENTION_DAYS,
+                Some(value) => value.trim().parse::<u32>().unwrap_or(0),
+            },
         }
     }
 
@@ -99,6 +137,9 @@ pub struct RetentionReport {
     pub listed: usize,
     /// 列表被截斷：最舊的 session 可能沒被看到。
     pub truncated: bool,
+    /// 這份記憶庫指向的 session 至少有一個出現在 server 的清單裡。為 `false` 時
+    /// 代表記憶庫與 server 對不上，整輪不挑也不刪。
+    pub anchored: bool,
     pub selection: RetentionSelection,
     pub deleted: Vec<String>,
     /// 刪除失敗的 session 與原因；下一輪會再遇到它們。
@@ -109,10 +150,11 @@ impl RetentionReport {
     /// 給日誌用的一行摘要。
     pub fn summary_line(&self) -> String {
         format!(
-            "opencode_session_retention dry_run={} listed={} truncated={} protected={} stale_protected={} expired={} deferred={} deleted={} failed={}",
+            "opencode_session_retention dry_run={} listed={} truncated={} anchored={} protected={} stale_protected={} expired={} deferred={} deleted={} failed={}",
             self.dry_run,
             self.listed,
             self.truncated,
+            self.anchored,
             self.selection.protected.len(),
             self.selection.stale_protected,
             self.selection.expired.len(),
@@ -126,8 +168,17 @@ impl RetentionReport {
 /// 給人看的結果：逐一列出被刪（預覽時為將被刪）與受保護的 session。
 pub fn render_report(report: &RetentionReport, policy: RetentionPolicy) -> String {
     if !policy.enabled() {
-        return "opencode session 保留期清理已停用（WUKONG_OPENCODE_SESSION_RETENTION_DAYS=0）"
-            .to_string();
+        return format!(
+            "opencode session 保留期清理已停用（{RETENTION_DAYS_ENV} 為 0 或無法解析）"
+        );
+    }
+    if !report.anchored {
+        return format!(
+            "未清理：這份記憶庫指向的 session 沒有任何一個出現在 opencode server 的清單裡（共列出 {} 個）。\n\
+             記憶庫與 server 對不上時，server 上真正還有人接著的 session 會被誤判為無主，所以整輪不刪。\n\
+             請確認 WUKONG_MEMORY_DB 與 WUKONG_AGENT_SERVER_URL 指向同一套部署；全新的記憶庫要先跑過一個回合。",
+            report.listed
+        );
     }
     let days = policy.retention_days;
     let mut lines = Vec::new();
@@ -181,7 +232,8 @@ pub fn render_report(report: &RetentionReport, policy: RetentionPolicy) -> Strin
 /// 執行一輪清理。`dry_run` 時只挑選、不刪除。
 ///
 /// 受保護集合或 session 清單任一取不到就回傳錯誤、什麼都不刪：寧可漏一輪，也不要
-/// 在不知道哪些 session 還有人接的情況下動手。
+/// 在不知道哪些 session 還有人接的情況下動手。同理，記憶庫指向的 session 沒有任何
+/// 一個在 server 上時（記憶庫接錯、或是空的），也整輪不刪。
 pub async fn prune_opencode_sessions<B: AiBackend>(
     memory: &Memory,
     backend: &B,
@@ -200,6 +252,13 @@ pub async fn prune_opencode_sessions<B: AiBackend>(
     let listing = backend.list_sessions().await?;
     report.listed = listing.sessions.len();
     report.truncated = listing.truncated;
+    report.anchored = listing
+        .sessions
+        .iter()
+        .any(|session| protected.contains(&session.id));
+    if !report.anchored {
+        return Ok(report);
+    }
     report.selection = select_expired(
         &listing.sessions,
         &protected,
@@ -316,6 +375,10 @@ mod tests {
         assert_eq!(report.selection.stale_protected, 1);
         assert_eq!(report.listed, 4);
         assert!(report.failed.is_empty());
+        assert_eq!(
+            memory.agent_session("user:tg-1").await.unwrap().as_deref(),
+            Some("old_protected")
+        );
     }
 
     #[tokio::test]
@@ -340,6 +403,37 @@ mod tests {
         assert!(preview.deleted.is_empty());
         assert_eq!(preview.selection.expired, ["old_orphan_a", "old_orphan_b"]);
         assert_eq!(preview.selection.expired, executed.delete_calls());
+    }
+
+    #[tokio::test]
+    async fn a_memory_that_matches_nothing_on_the_server_deletes_nothing() {
+        // 記憶庫接錯（或是空的）時，server 上每個過期 session 看起來都是無主的，包括
+        // 真正那份記憶庫還指著的。對不上就當成接錯，寧可不清。
+        for pointed_at in [None, Some("ses_from_another_deployment")] {
+            let (memory, _) = open_memory().await;
+            if let Some(session_id) = pointed_at {
+                memory
+                    .set_agent_session("user:tg-1", session_id)
+                    .await
+                    .unwrap();
+            }
+            for dry_run in [true, false] {
+                let backend = ListingBackend::with(fixture());
+
+                let report = prune_opencode_sessions(&memory, &backend, POLICY, NOW_MS, dry_run)
+                    .await
+                    .unwrap();
+
+                assert_eq!(backend.delete_calls(), Vec::<String>::new());
+                assert!(!report.anchored);
+                assert!(report.selection.expired.is_empty(), "{report:?}");
+                assert_eq!(report.listed, 4);
+                assert!(report.summary_line().contains("anchored=false"));
+                let text = render_report(&report, POLICY);
+                assert!(text.contains("沒有任何一個出現在"), "{text}");
+                assert!(!text.contains("old_orphan_a"), "{text}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -405,6 +499,10 @@ mod tests {
     #[tokio::test]
     async fn one_failed_delete_does_not_stop_the_rest() {
         let (memory, _) = open_memory().await;
+        memory
+            .set_agent_session("user:tg-1", "old_protected")
+            .await
+            .unwrap();
         let backend = ListingBackend {
             undeletable: vec!["old_orphan_a"],
             ..ListingBackend::with(fixture())
@@ -414,11 +512,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            backend.delete_calls(),
-            ["old_protected", "old_orphan_a", "old_orphan_b"]
-        );
-        assert_eq!(report.deleted, ["old_protected", "old_orphan_b"]);
+        assert_eq!(backend.delete_calls(), ["old_orphan_a", "old_orphan_b"]);
+        assert_eq!(report.deleted, ["old_orphan_b"]);
         assert_eq!(report.failed.len(), 1);
         assert_eq!(report.failed[0].0, "old_orphan_a");
         assert!(report.failed[0].1.contains("boom"), "{:?}", report.failed);
@@ -427,6 +522,10 @@ mod tests {
     #[tokio::test]
     async fn truncation_is_carried_into_the_report_and_its_summary() {
         let (memory, _) = open_memory().await;
+        memory
+            .set_agent_session("user:tg-1", "old_protected")
+            .await
+            .unwrap();
         let backend = ListingBackend {
             listing: Ok(SessionListing {
                 sessions: fixture(),
@@ -499,11 +598,11 @@ mod tests {
         assert_eq!(RetentionPolicy::from_value(Some(" 14 ")).retention_days, 14);
         assert!(!RetentionPolicy::from_value(Some("0")).enabled());
         assert!(RetentionPolicy::from_value(None).enabled());
-        // 無法解析的值不能被當成「停用」或「立刻全刪」，退回預設。
-        for invalid in ["", "abc", "-5", "1.5"] {
-            assert_eq!(
-                RetentionPolicy::from_value(Some(invalid)).retention_days,
-                30,
+        // 寫了卻看不懂的值（`off`、`false`、`-1`）最可能的意思是「不要清」，絕不能
+        // 被當成 30 天照樣刪：不確定就不刪。
+        for invalid in ["", "abc", "off", "false", "-5", "1.5"] {
+            assert!(
+                !RetentionPolicy::from_value(Some(invalid)).enabled(),
                 "{invalid:?}"
             );
         }
@@ -513,13 +612,13 @@ mod tests {
         SessionSummary {
             id: id.to_string(),
             updated_ms: NOW_MS - age_ms,
-            is_child: false,
+            parent_id: None,
         }
     }
 
-    fn child(id: &str, age_ms: i64) -> SessionSummary {
+    fn child(id: &str, parent: &str, age_ms: i64) -> SessionSummary {
         SessionSummary {
-            is_child: true,
+            parent_id: Some(parent.to_string()),
             ..session(id, age_ms)
         }
     }
@@ -537,7 +636,7 @@ mod tests {
             session("old_orphan", 40 * DAY_MS),
             session("old_protected", 40 * DAY_MS),
             session("fresh_protected", DAY_MS),
-            child("old_child", 40 * DAY_MS),
+            child("old_child", "fresh_orphan", 40 * DAY_MS),
         ];
 
         let selection = select_expired(
@@ -552,6 +651,43 @@ mod tests {
         assert_eq!(selection.protected, ["old_protected", "fresh_protected"]);
         assert_eq!(selection.stale_protected, 1);
         assert_eq!(selection.deferred, 0);
+    }
+
+    #[test]
+    fn a_scope_pointing_at_a_child_protects_the_whole_tree() {
+        // CLI backend 記下的是串流裡最後一個 session id，那可能是子 session。刪掉它的
+        // 根 session 會連它一起帶走，所以根也必須受保護。
+        let sessions = [
+            session("root", 40 * DAY_MS),
+            child("kid", "root", 40 * DAY_MS),
+            child("grandkid", "kid", 40 * DAY_MS),
+            session("unrelated_root", 40 * DAY_MS),
+        ];
+
+        let selection = select_expired(
+            &sessions,
+            &protect(&["grandkid"]),
+            NOW_MS,
+            30,
+            MAX_DELETES_PER_RUN,
+        );
+
+        assert_eq!(selection.expired, ["unrelated_root"]);
+        assert_eq!(selection.protected, ["root"]);
+    }
+
+    #[test]
+    fn a_root_is_only_as_old_as_its_most_recent_descendant() {
+        let sessions = [
+            session("quiet_root_busy_child", 40 * DAY_MS),
+            child("busy_child", "quiet_root_busy_child", DAY_MS),
+            session("quiet_root_quiet_child", 50 * DAY_MS),
+            child("quiet_child", "quiet_root_quiet_child", 45 * DAY_MS),
+        ];
+
+        let selection = select_expired(&sessions, &protect(&[]), NOW_MS, 30, MAX_DELETES_PER_RUN);
+
+        assert_eq!(selection.expired, ["quiet_root_quiet_child"]);
     }
 
     #[test]

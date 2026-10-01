@@ -723,11 +723,9 @@ impl AiBackend for OpencodeServerBackend {
 
     async fn list_sessions(&self) -> Result<SessionListing, GatewayError> {
         // opencode 沒有「早於某時間」的過濾（`start` 是下界），所以整批取回再由
-        // 呼叫端挑。不帶 limit 時它只回最新的 100 筆。
-        let url = format!(
-            "{}/session?roots=true&limit={SESSION_LIST_LIMIT}",
-            self.base_url
-        );
+        // 呼叫端挑。不帶 limit 時它只回最新的 100 筆。子 session 也要：呼叫端靠它們
+        // 判斷哪個根 session 底下還有人接著。
+        let url = format!("{}/session?limit={SESSION_LIST_LIMIT}", self.base_url);
         let value = self
             .send_json("list_sessions", self.client.get(url))
             .await?;
@@ -910,7 +908,10 @@ fn parse_session_listing(value: &Value, limit: usize) -> Result<SessionListing, 
                 (Some(id), Some(updated_ms)) => Ok(SessionSummary {
                     id: id.to_string(),
                     updated_ms,
-                    is_child: item.get("parentID").is_some_and(|parent| !parent.is_null()),
+                    parent_id: item
+                        .get("parentID")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                 }),
                 _ => Err(malformed(format!(
                     "session without id or time.updated: {item}"
@@ -1599,7 +1600,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_sessions_asks_for_roots_with_an_explicit_limit() {
+    async fn list_sessions_asks_for_every_session_with_an_explicit_limit() {
         let (result, seen) = list_sessions_against(
             "200 OK",
             r#"[
@@ -1611,8 +1612,9 @@ mod tests {
         .await;
 
         // opencode 不帶 limit 時只回 100 筆，而且由新到舊排：被截掉的正是最舊、
-        // 最該被清理的那些。所以這個請求的形狀本身就是行為的一部分。
-        assert_eq!(seen, ["GET /session?roots=true&limit=10000"]);
+        // 最該被清理的那些。所以這個請求的形狀本身就是行為的一部分。不帶 roots：
+        // 呼叫端要看得到子 session，才知道哪個根 session 底下還有人接著。
+        assert_eq!(seen, ["GET /session?limit=10000"]);
         assert_eq!(
             result.unwrap(),
             SessionListing {
@@ -1620,17 +1622,17 @@ mod tests {
                     SessionSummary {
                         id: "ses_new".to_string(),
                         updated_ms: 3000,
-                        is_child: false,
+                        parent_id: None,
                     },
                     SessionSummary {
                         id: "ses_child".to_string(),
                         updated_ms: 2000,
-                        is_child: true,
+                        parent_id: Some("ses_new".to_string()),
                     },
                     SessionSummary {
                         id: "ses_old".to_string(),
                         updated_ms: 1000,
-                        is_child: false,
+                        parent_id: None,
                     },
                 ],
                 truncated: false,

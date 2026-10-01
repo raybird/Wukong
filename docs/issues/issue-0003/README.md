@@ -113,7 +113,7 @@ Feature: opencode session 的保留期清理
 
 ## Gherkin 核准紀錄
 
-- **核准 commit**: 待提交（SCN-001 至 SCN-009 的原核准版本為 c613028，其內容未變）
+- **核准 commit**: cbd65ef（SCN-001 至 SCN-009 的原核准版本為 c613028，其內容未變）
 - **核准來源**: 使用者於 2026-10-01 對話指出 Wukong 與 raybird/telenexus#9 有相同的 `opencode.db` 膨脹問題；我提出設計草稿與九項驗收條件後，使用者同日在確認題中選擇「9 項全部核准」，並選擇由我開立 GitHub issue、以 dev-cycle 推進。九項即 SCN-001 至 SCN-009。「被棄置 scope 的過期」與「長壽 session 輪替」在同一題中列為不在範圍。
 
 - **SCN-010 的核准來源**: 2026-10-01 的獨立審查（[review-6037672.md](./review-6037672.md) 的 M-2）指出清理倚賴「server 上的 session 都屬於這一份記憶庫」這個未被防護的前提，並重現了記憶庫接錯時受保護 session 被列為待刪。使用者同日在確認題的四個選項中只選了「接錯記憶庫時整輪不刪」；「compose 以外預設停用」與「只清標題為 Wukong 的 session」未被選擇，因此不實作。

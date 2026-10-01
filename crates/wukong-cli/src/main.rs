@@ -2,7 +2,7 @@ use clap::Parser;
 use std::io::{BufRead, Write};
 use wukong_cli::repl::{classify_line, LineAction};
 use wukong_cli::run_turn;
-use wukong_gateway::backend::{build_backend_from_env, AgentBackend};
+use wukong_gateway::backend::{build_backend_from_env, AgentBackend, AiBackend};
 use wukong_gateway::cli::{
     Cli, Command, MemoryOp, OpencodeOp, ScheduleMaintenanceTaskArg, ScheduleOp,
 };
@@ -52,17 +52,19 @@ async fn main() {
     let backend = build_backend_from_env(cfg.agent_command.clone(), workspace_dir());
 
     if cli.new_session {
-        // 與 REPL 的 /new 走同一條路：先刪 opencode 那邊的 session 再清對應，
-        // 否則舊 session 會永遠留在 opencode.db。
-        if let Err(e) = wukong_cli::run_session_command(
-            &memory,
-            &backend,
-            &cfg,
-            &settings_path,
-            wukong_cli::SessionCommand::New,
-        )
-        .await
-        {
+        // 先刪 opencode 那邊的 session，否則它會永遠留在 opencode.db。刪不掉也照樣
+        // 清對應：--new 的承諾是這一回合不帶舊 context，留下的無主 session 之後由
+        // 保留期清理收掉。
+        match memory.agent_session(&cfg.scope).await {
+            Ok(Some(session_id)) => {
+                if let Err(e) = backend.delete_session(&session_id).await {
+                    eprintln!("warning: failed to delete session {session_id}: {e}");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("warning: failed to read session: {e}"),
+        }
+        if let Err(e) = memory.clear_agent_session(&cfg.scope).await {
             eprintln!("warning: failed to reset session: {e}");
         }
     }
@@ -88,9 +90,16 @@ async fn main() {
     }) = &cli.command
     {
         let policy = RetentionPolicy::from_env();
+        // 清理的對錯取決於這份記憶庫是不是 server 實際在用的那一份，所以把它印出來。
+        println!("記憶庫：{}", cfg.db_url);
         match prune_opencode_sessions(&memory, &backend, policy, now_unix() * 1000, *dry_run).await
         {
-            Ok(report) => println!("{}", render_report(&report, policy)),
+            Ok(report) => {
+                println!("{}", render_report(&report, policy));
+                if policy.enabled() && (!report.anchored || !report.failed.is_empty()) {
+                    std::process::exit(1);
+                }
+            }
             Err(e) => {
                 eprintln!("error: {e}");
                 std::process::exit(1);

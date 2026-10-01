@@ -45,9 +45,11 @@
 
 1. `time.updated` 早於保留期。
 2. 不被 `agent_sessions` 或 `agent_session_state` 的任何 scope 指向。
-3. 是根 session。列表帶 `roots=true`，取回後再排除帶 `parentID` 的項目，不單靠 server 端的過濾。子 session 隨父 session 一起消失（步驟 1 已確認）。
+3. 是根 session。刪除根 session 會連整棵樹一起帶走（步驟 1 已確認），所以判定單位是樹：樹裡任何一個 session 被 scope 指向就整棵保留；樹的最後活動取所有成員中最新的。為此列表不帶 `roots=true`，子 session 也要取回。
 
 列表一律明確帶 `limit`，並以回傳筆數是否等於 `limit` 判斷是否被截斷。opencode 沒有「早於某時間」的過濾，所以整批取回再挑。
+
+> **2026-10-01 修訂**：原設計只取根 session、子 session 一律略過。審查提出 CLI backend 記下的可能是子 session 的 id，其根 session 過期被刪時會連帶消失，違反 SCN-002，因此改為以樹判定。
 
 ### 失效方向
 
@@ -56,6 +58,8 @@
 - 讀不到指向表、列不出 session、回應解析失敗 → 整輪跳過。列表可能因單一異常資料列而每一輪都失敗（步驟 1 的額外發現），所以失敗紀錄要帶上游回應，讓人看得出是同一個原因在重複。
 - 保留期下限 1 天。進行中的回合所建立、尚未寫回 `agent_sessions` 的 session 必然是新的，下限確保它們不可能成為候選。
 - 單次刪除失敗只記錄，下一輪自然會再遇到它。
+- 記憶庫指向的 session 沒有任何一個出現在 server 的清單裡 → 視為記憶庫接錯，整輪不挑也不刪（SCN-010）。
+- 保留天數寫了卻無法解析（`off`、`false`、`-1`）→ 視為停用並輸出警告，不退回預設的 30 天。
 
 ### 執行位置
 
@@ -63,7 +67,9 @@
 
 只在 Server backend 生效。容器部署的 `opencode-state` volume 專屬於 Wukong；CLI 模式的 `opencode.db` 與使用者自己的 opencode 使用共用，Wukong 無從分辨哪些是自己建的，因此不自動清掃。
 
-每 6 小時一輪，每輪最多刪 500 個，由舊到新刪。
+啟動 6 小時後第一輪，之後每 6 小時一輪；每輪最多刪 500 個、最長 5 分鐘，由舊到新刪。第一輪不在啟動當下，升級後才有時間先預覽。整輪設時間上限，是因為列表與刪除沿用 agent 的 20 分鐘逾時，而清理是在排程迴圈裡同步執行的。
+
+這項清理假設 server 上的 session 都屬於這一套 Wukong，只在 compose 的專屬 volume 成立。SCN-010 的防護擋住「記憶庫接錯」，擋不住「Wukong 與使用者共用同一個 `opencode serve`」（README 的 TBD-5）。
 
 ### 空間回收
 
@@ -72,6 +78,7 @@
 - freelist 佔比達 25% 才做。
 - 剩餘磁碟空間不小於資料庫大小的 2 倍才做。
 - 設 busy timeout；被鎖或任何失敗都只記錄，不阻擋 server 啟動。
+- entrypoint 設 `SQLITE_TMPDIR` 為資料庫所在目錄：`VACUUM` 的暫存複本預設寫在 `/var/tmp`，那是容器的根檔案系統，不在磁碟檢查的範圍內。
 - 由 `wukong` 的子命令執行，才能用 `cargo test` 覆蓋。
 
 即使從不 `VACUUM`，釋出的頁也會被 SQLite 重用，檔案會停止成長；`VACUUM` 只負責讓檔案變小。
@@ -86,7 +93,7 @@
 
 ### 可觀測性
 
-每輪輸出一行：列出數、是否被截斷、受保護數、過期候選數、已刪數、失敗數，以及受保護但已超過保留期的數量。最後一項是被棄置 scope 的規模訊號。
+每輪輸出一行：列出數、是否被截斷、記憶庫是否對得上（`anchored`）、受保護數、過期候選數、已刪數、失敗數，以及受保護但已超過保留期的數量。最後一項是被棄置 scope 的規模訊號。
 
 ## 使用方式對照
 
@@ -116,7 +123,7 @@
 3. ✅ **列表能力與受保護集合**（SCN-004、SCN-005；無相依）
    - 產出：`AiBackend` 列出 session 的能力（Server backend 實作）；`wukong-memory` 列出所有被 scope 指向的 session id。
    - 完成判準：對腳本化 HTTP server 的測試斷言請求帶有 `limit` 與 `roots`、回傳筆數等於 `limit` 時標示截斷、非預期回應回傳錯誤而非空清單；memory 測試斷言兩張表的 id 都被納入。
-   - 完成證據（2026-10-01）：`cargo test -p wukong-gateway --lib list_sessions`、`cargo test -p wukong-memory --lib referenced_session_ids`。紅燈：server backend 尚未覆寫時，三項 `list_sessions_*` 失敗——腳本化 server 收到的請求是 `[]`，期望 `["GET /session?roots=true&limit=10000"]`；memory 的空實作回傳 `[]`，期望三個 id。綠燈：實作後 gateway 5 項、memory 1 項全過。`AiBackend` 以帶預設實作的方法擴充（GitNexus 對該 trait 回報 HIGH、27 個實作者，已事先告知）；既有實作皆未修改，`cargo test` 全 workspace 通過。
+   - 完成證據（2026-10-01）：`cargo test -p wukong-gateway --lib list_sessions`、`cargo test -p wukong-memory --lib referenced_session_ids`。紅燈：server backend 尚未覆寫時，三項 `list_sessions_*` 失敗——腳本化 server 收到的請求是 `[]`，期望 `["GET /session?roots=true&limit=10000"]`；memory 的空實作回傳 `[]`，期望三個 id。綠燈：實作後 gateway 4 項、memory 1 項全過（截斷判定的 `a_full_page_is_reported_as_truncated` 不符合這個篩選字串，在全量測試中執行）。`AiBackend` 以帶預設實作的方法擴充（GitNexus 對該 trait 回報 HIGH、27 個實作者，已事先告知）；既有實作皆未修改，`cargo test` 全 workspace 通過。
 4. ✅ **清理執行與預覽**（SCN-001、SCN-002、SCN-004、SCN-006、SCN-009；相依：步驟 2、3）
    - 產出：`wukong-runtime` 的清理函式與報告；`wukong` 的預覽／手動清理子命令。
    - 完成判準：測試斷言實際送出 `DELETE` 的 id 集合；指向表或列表失敗時送出 0 個 `DELETE`；單一刪除失敗後其餘照常；預覽送出 0 個 `DELETE`，且其清單等於同一 fixture 實際執行所刪的集合。
@@ -146,6 +153,22 @@
      - 全量檢查：`cargo test` 39 個測試套件、587 項通過、0 失敗；`cargo clippy --all-targets -- -D warnings` 無警告；`cargo fmt --all -- --check` 通過；`scripts/test-docker-runtime.sh` 通過。
      - 文件：`docs/docker.md`、`docs/cli-reference.md`、`CHANGELOG.md`、`.env.example`、`AGENTS.md` 已更新；08-08 交接文件在「尚未證實」的對應項下加註。該文件驗證清單的兩個相關勾選項都沒有勾：一項同時要求備份、另一項要求在那台主機上重新量測，本次都沒做。
      - 額外發現：`wukong --db X memory snapshot` 這類「全域旗標在子命令之前」的寫法不會報錯，而是把子命令當成 prompt 跑一個真的回合。驗證過程中我自己踩到一次，已記入 `AGENTS.md` 並以 `a_global_flag_before_a_subcommand_turns_it_into_a_prompt` 釘住。
+9. ✅ **審查退回的修正**（SCN-002、SCN-003、SCN-006、SCN-007、SCN-008、SCN-010；相依：步驟 1 至 8）
+   - 產出：對 [review-6037672.md](./review-6037672.md) 各項發現的修正與證據。
+   - 完成判準：兩項 MUST FIX 各有先紅後綠的測試；採納的 SHOULD FIX 各有測試或實測；未採納的項目有理由；全量檢查通過。
+   - 完成證據（2026-10-01）：
+     - **M-1（`--new` 刪除失敗時帶著舊 context 繼續）**：`cargo test -p wukong-cli --test new_session_flag`。紅燈：假 server 對 `DELETE` 回 500 時，scope 事後仍指向 `ses_old`（期望 `None`）。綠燈：刪除失敗只記警告，對應照樣清除；2 項全過。
+     - **M-2（未防護的前提）**：依使用者核准新增 SCN-010。`cargo test -p wukong-runtime --lib session_retention`，紅燈：`a_memory_that_matches_nothing_on_the_server_deletes_nothing` 在防護未實作時失敗；綠燈後 16 項全過。真實 opencode 複本上：空的記憶庫與指向別處 session 的記憶庫，實際執行 `wukong opencode prune` 都回報未清理、結束碼 1，四張表的列數不變（session 11、message 24、part 60、event 192）；補上該部署真正的兩筆對應後，預覽列出 7 個、實際刪除後受保護的 2 個 session 維持 2／5／14／46。`prune` 輸出第一行顯示所用的記憶庫。共用 server 的殘餘風險記為 README 的 TBD-5，並寫進 `docs/docker.md` 與 `CHANGELOG.md`。
+     - **S-1（無法解析的天數被當成 30 天）**：改為停用並警告。紅燈：`policy_defaults_to_thirty_days_and_zero_disables` 對 `off`、`false`、`-5` 等值失敗；綠燈後通過。實測 `WUKONG_OPENCODE_SESSION_RETENTION_DAYS=off` 時輸出警告與「已停用」。
+     - **S-2（啟動當下就清理）**：第一輪改在啟動後一個完整間隔。實測：修正前 schedulerd 啟動 12 秒內即出現 `opencode_session_retention` 一行（步驟 8）；修正後同樣 12 秒內為 0 行，啟動日誌為 `opencode session retention enabled retention_days=7 first_run_in_secs=21600 interval_secs=21600`。迴圈呼叫清理的接線在步驟 8 已觀察過，這次只改了第一個 tick 的時間點。
+     - **S-3（server 掛住時拖住排程迴圈）**：整輪加 5 分鐘上限。紅燈：對一個接受連線但永不回應的 server，`a_server_that_never_answers_gives_the_loop_back` 在 120 秒內沒有返回；綠燈：以 300 ms 上限執行時 0.31 秒內回傳 `timed out`。沒有另外加「連續失敗就中止」，整輪上限已涵蓋。
+     - **S-4（`VACUUM` 暫存檔寫在容器根檔案系統）**：entrypoint 設 `SQLITE_TMPDIR`。以 `strace` 確認：未設時暫存檔開在 `/var/tmp/etilqs_*`，設定後開在資料庫所在目錄。
+     - **子 session 被指向的情況**（審查列為未查證）：改以樹判定。紅燈：`a_scope_pointing_at_a_child_protects_the_whole_tree` 與 `a_root_is_only_as_old_as_its_most_recent_descendant` 失敗；綠燈後通過。列表改為不帶 `roots=true`，`list_sessions_asks_for_every_session_with_an_explicit_limit` 先紅（收到的仍是帶 `roots=true` 的請求）後綠。
+     - **N-3**：上方步驟 3 的測試數與測試策略表的 SCN-008 已更正。**N-4**：`prune` 在拒絕清理或有刪除失敗時以 1 結束；拒絕清理（1）、成功（0）、停用（0）已實測，「有刪除失敗」這一條沒有實際執行到。**N-2**：runtime 測試補上清理後 scope 對應不變的斷言；`test-docker-runtime.sh` 的字串檢查維持原樣，行為由下方的真實容器驗證承擔。
+     - **未採納**：N-1（時鐘往前跳的健全性檢查）——沒有實際的觸發情境，損害上限是尚未寫回對應的進行中 session。N-5（三份手寫 HTTP stub）——審查判定可接受。
+     - **真實容器重驗**：以最終版 entrypoint 與在 Debian bookworm 容器內重新編譯的最終版 `wukong`，掛進 v0.21.11 映像啟動。資料庫被寫鎖時：`outcome=failed ... database is locked`、警告後 server 健康、檔案維持 454,656 bytes。正常啟動：`outcome=reclaimed before_bytes=454656 after_bytes=294912`，freelist 39／111 → 0／72，`integrity_check` 為 ok；資料庫目錄與容器的 `/var/tmp` 都沒有殘留暫存檔。步驟 8 記錄的「容器驗證用的是精煉前的 binary」這項限制因此解除。
+     - **仍然成立的限制**：SCN-002 的續接沒有以真實模型回合驗證；樹狀保護沒有在真實 opencode 的舊資料上演練（樣本裡沒有夠舊的子 session），由單元測試承擔；容器用的是 gnu binary 而非 release 的 musl binary。
+     - **全量檢查**：`cargo test` 39 個套件、592 項通過、0 失敗；`cargo clippy --all-targets -- -D warnings` 無警告；`cargo fmt --all -- --check` 通過；`scripts/test-docker-runtime.sh` 通過。
 
 ## 測試策略
 
@@ -158,8 +181,9 @@
 | SCN-005 | 步驟 4 腳本化 server 測試 | 步驟 3 | 另以步驟 1 的真實列表確認預設上限 |
 | SCN-006 | 步驟 5 schedulerd 測試 | 步驟 4 | |
 | SCN-007 | 步驟 8 的容器重啟驗證 | 步驟 6 | |
-| SCN-008 | 步驟 7 CLI 測試 | 同層合併 | 以記錄刪除呼叫的 backend 斷言 |
+| SCN-008 | 步驟 7、9 的 binary 層級測試 | 同層合併 | 執行真正的 `wukong`，對記錄請求的假 server 斷言 |
 | SCN-009 | 步驟 4 | 同層合併 | |
+| SCN-010 | 步驟 9 的真實 opencode 驗證 | 步驟 9 的 runtime 測試 | |
 
 斷言一律指名被刪與被留的 id，不只比對數量。驗證命令沿用 `AGENTS.md` 的 `cargo test -p <crate>` 與 `cargo clippy --all-targets -- -D warnings`。
 

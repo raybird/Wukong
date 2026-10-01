@@ -50,8 +50,8 @@ pub struct SessionSummary {
     pub id: String,
     /// Last update, in milliseconds since the Unix epoch.
     pub updated_ms: i64,
-    /// Child sessions live and die with their parent and are never judged alone.
-    pub is_child: bool,
+    /// Set for child sessions, which live and die with their parent.
+    pub parent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

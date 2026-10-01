@@ -288,8 +288,14 @@ case "${1:-}" in
             # a prompt and runs an agent turn with them. This script and the binary
             # normally ship together, but a local `docker build` pairs this script
             # with whatever release the Dockerfile's VERSION arg downloads.
+            #
+            # SQLITE_TMPDIR: VACUUM writes a full temporary copy, by default under
+            # /var/tmp — the container's overlay root filesystem, which the disk
+            # check (made against the database's own filesystem) knows nothing
+            # about. Keep the copy next to the database so the check covers it.
             if wukong opencode --help 2>/dev/null | grep -q 'vacuum'; then
                 WUKONG_OPENCODE_DB="${WUKONG_OPENCODE_DB:-$OPENCODE_STATE/opencode.db}" \
+                    SQLITE_TMPDIR="$OPENCODE_STATE" \
                     gosu wukong wukong opencode vacuum \
                     || echo "[wukong] WARNING: opencode.db vacuum failed; starting the server anyway." >&2
             fi
