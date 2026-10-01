@@ -16,8 +16,8 @@
 - **opencode session 保留期清理。** `opencode.db` 過去只增不減：Wukong 只在輔助棒跑完、
   session 輪替與 `/new` 時刪除 session，回合失敗留下的與人工探測建立的 session 會永久
   留存。`wukong-schedulerd` 現在每 6 小時刪除超過
-  `WUKONG_OPENCODE_SESSION_RETENTION_DAYS`（預設 30，`0` 停用）天、且沒有任何 scope
-  指向的 session；第一輪在啟動 6 小時後。仍被 scope 指向的不論多舊都保留；讀不到
+  `WUKONG_OPENCODE_SESSION_RETENTION_DAYS`（預設 30；`0`、留空或無法解析的值都是停用）
+  天、且沒有任何 scope 指向的 session；第一輪在啟動 6 小時後。仍被 scope 指向的不論多舊都保留；讀不到
   scope 對應、列不出 session、或記憶庫指向的 session 沒有任何一個在 server 上時，
   整輪不刪。只在 server backend 生效。
 - `wukong opencode prune [--dry-run]`：手動清理，或先預覽會刪哪些、哪些受保護。
@@ -39,7 +39,9 @@
 - `wukong --new` 與 `/new` 的刪除只在 opencode server backend 有作用；CLI backend
   （`opencode run`）沒有實作刪除，舊 session 仍留在你的 `opencode.db`。
 - schedulerd 不保存上次清理的時間：若它每次都在 6 小時內重啟，清理不會執行。
-
+- session 超過 10,000 個時列表會被截斷（日誌標示 `truncated=true`）。此時若某個 scope
+  指向的是被截掉的子 session，它的根 session 可能被當成無主而刪除；只有 CLI backend
+  留下的對應會指向子 session。
 - 這項清理刪不到長壽的 scope session。一個長期使用的聊天 scope 會持續累積歷史，而它
   正是被保護的對象；`opencode.db` 若仍然很大，用 `wukong opencode prune --dry-run`
   看可刪的佔多少。見 `docs/issues/issue-0003/`。

@@ -12,10 +12,21 @@ pub const INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 /// 一輪清理的時間上限。正常情況幾秒內結束；上限是為了 server 掛住的時候。
 const RUN_BUDGET: Duration = Duration::from_secs(5 * 60);
 
+/// 這個行程實際使用的間隔。`WUKONG_TEST_OPENCODE_RETENTION_INTERVAL_SECS` 只給
+/// `tests/retention_daemon.rs` 用：要看到真正的 daemon 跑完一輪，不能等六小時。它
+/// 刻意不寫進文件——間隔不是給部署調整的設定。
+pub fn interval() -> Duration {
+    std::env::var("WUKONG_TEST_OPENCODE_RETENTION_INTERVAL_SECS")
+        .ok()
+        .and_then(|secs| secs.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map_or(INTERVAL, Duration::from_secs)
+}
+
 /// 第一輪在啟動後隔一個完整間隔才跑，不在啟動當下。升級後有這段時間可以先用
 /// `wukong opencode prune --dry-run` 看會刪哪些；也避免每次重啟都立刻刪一輪。
-pub fn ticker() -> tokio::time::Interval {
-    tokio::time::interval_at(tokio::time::Instant::now() + INTERVAL, INTERVAL)
+pub fn ticker(every: Duration) -> tokio::time::Interval {
+    tokio::time::interval_at(tokio::time::Instant::now() + every, every)
 }
 
 /// 這個 schedulerd 該不該跑清理；不該跑時回傳 `None`。
@@ -155,7 +166,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn the_first_run_waits_a_full_interval() {
         // 啟動當下就清理的話，升級後根本來不及先預覽。
-        let mut ticks = ticker();
+        let mut ticks = ticker(INTERVAL);
 
         let early = tokio::time::timeout(INTERVAL - Duration::from_secs(1), ticks.tick()).await;
         assert!(

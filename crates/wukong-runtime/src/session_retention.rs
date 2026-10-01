@@ -137,8 +137,8 @@ pub struct RetentionReport {
     pub listed: usize,
     /// 列表被截斷：最舊的 session 可能沒被看到。
     pub truncated: bool,
-    /// 這份記憶庫指向的 session 至少有一個出現在 server 的清單裡。為 `false` 時
-    /// 代表記憶庫與 server 對不上，整輪不挑也不刪。
+    /// 這份記憶庫指向的 session 至少有一個出現在 server 的清單裡；記憶庫與 server
+    /// 都是空的（全新部署）也算。為 `false` 時代表兩者對不上，整輪不挑也不刪。
     pub anchored: bool,
     pub selection: RetentionSelection,
     pub deleted: Vec<String>,
@@ -252,8 +252,9 @@ pub async fn prune_opencode_sessions<B: AiBackend>(
     let listing = backend.list_sessions().await?;
     report.listed = listing.sessions.len();
     report.truncated = listing.truncated;
-    // server 上一個 session 都沒有時談不上對不上，只是沒東西可清。
-    report.anchored = listing.sessions.is_empty()
+    // 兩邊都是空的（全新部署）談不上對不上，只是沒東西可清。記憶庫有指向而 server
+    // 一個都沒列出則是對不上：server 被換掉或清空了。
+    report.anchored = (listing.sessions.is_empty() && protected.is_empty())
         || listing
             .sessions
             .iter()
@@ -451,6 +452,25 @@ mod tests {
         assert!(report.anchored);
         assert_eq!(report.listed, 0);
         assert!(render_report(&report, POLICY).starts_with("已刪除 0 個"));
+    }
+
+    #[tokio::test]
+    async fn a_memory_with_pointers_and_an_empty_server_is_a_mismatch() {
+        // 記憶庫明明指著 session，server 卻一個都沒有：server 被換掉或清空了。這和
+        // 「兩邊都是空的全新部署」不同，要照樣說出原因。
+        let (memory, _) = open_memory().await;
+        memory
+            .set_agent_session("user:tg-1", "ses_that_used_to_exist")
+            .await
+            .unwrap();
+        let backend = ListingBackend::with(Vec::new());
+
+        let report = prune_opencode_sessions(&memory, &backend, POLICY, NOW_MS, false)
+            .await
+            .unwrap();
+
+        assert!(!report.anchored);
+        assert!(render_report(&report, POLICY).contains("沒有任何一個出現在"));
     }
 
     #[tokio::test]

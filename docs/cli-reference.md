@@ -86,7 +86,7 @@ wukong-schedulerd
 
 | 子命令 | 說明 |
 | :--- | :--- |
-| `opencode prune [--dry-run]` | 刪除超過 `WUKONG_OPENCODE_SESSION_RETENTION_DAYS`（預設 30）天、且沒有任何 scope 指向的 opencode session；`--dry-run` 只列出將刪除與受保護的清單。只支援 opencode server backend。輸出第一行是所用的記憶庫；記憶庫指向的 session 沒有任何一個在 server 上時拒絕清理。拒絕清理或有刪除失敗時結束碼為 1 |
+| `opencode prune [--dry-run]` | 刪除超過 `WUKONG_OPENCODE_SESSION_RETENTION_DAYS`（預設 30）天、且沒有任何 scope 指向的 opencode session；`--dry-run` 只列出將刪除與受保護的清單。只支援 opencode server backend。輸出第一行是所用的記憶庫；記憶庫指向的 session 沒有任何一個在 server 上時拒絕清理（記憶庫與 server 都是空的不算）。拒絕清理或有刪除失敗時結束碼為 1 |
 | `opencode vacuum` | `opencode.db` 的可回收空間達 25% 且磁碟放得下時執行 `VACUUM`。資料庫位置取 `WUKONG_OPENCODE_DB`，否則用 opencode 的預設位置。容器啟動 `opencode serve` 前會自動呼叫 |
 
 ## 排程子命令

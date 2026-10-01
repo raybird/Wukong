@@ -204,7 +204,7 @@ require_in_file "WUKONG_OPENCODE_CPUS" .env.example \
 # compose 逐項把環境變數傳進服務，沒有 env_file：少寫一行，.env 裡的設定就靜靜失效，
 # schedulerd 照預設值跑。兩份 compose 都要有。
 for cf in "$compose_file" "$release_compose"; do
-    require_in_file 'WUKONG_OPENCODE_SESSION_RETENTION_DAYS=${WUKONG_OPENCODE_SESSION_RETENTION_DAYS:-30}' "$cf" \
+    require_in_file 'WUKONG_OPENCODE_SESSION_RETENTION_DAYS=${WUKONG_OPENCODE_SESSION_RETENTION_DAYS-30}' "$cf" \
         "$cf must pass the opencode session retention setting to wukong-schedulerd"
 done
 require_in_file "WUKONG_OPENCODE_SESSION_RETENTION_DAYS" .env.example \

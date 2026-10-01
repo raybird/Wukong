@@ -893,9 +893,10 @@ fn parse_session_listing(value: &Value, limit: usize) -> Result<SessionListing, 
         code: None,
         stderr: format!("opencode server list_sessions returned an unexpected payload: {detail}"),
     };
-    let items = value
-        .as_array()
-        .ok_or_else(|| malformed(format!("not an array: {value}")))?;
+    let items = value.as_array().ok_or_else(|| {
+        let shown: String = value.to_string().chars().take(200).collect();
+        malformed(format!("not an array: {shown}"))
+    })?;
     let sessions = items
         .iter()
         .map(|item| {
@@ -913,9 +914,9 @@ fn parse_session_listing(value: &Value, limit: usize) -> Result<SessionListing, 
                         .and_then(Value::as_str)
                         .map(str::to_string),
                 }),
-                _ => Err(malformed(format!(
-                    "session without id or time.updated: {item}"
-                ))),
+                // 只說得出是哪一筆就好：整筆 session 帶著標題，不該進日誌。
+                (Some(id), None) => Err(malformed(format!("session {id} has no time.updated"))),
+                (None, _) => Err(malformed("a session has no id".to_string())),
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1656,6 +1657,26 @@ mod tests {
             let stderr = agent_failed_stderr(result.unwrap_err());
             assert!(stderr.contains("list_sessions"), "{body}: {stderr}");
         }
+    }
+
+    #[test]
+    fn a_malformed_listing_is_reported_without_dumping_its_contents() {
+        // 這些錯誤每一輪都會進 schedulerd 的日誌。session 物件帶著標題，整份回應
+        // 可能有幾 MB——錯誤訊息只需要說得出是哪一筆、哪裡不對。
+        let missing_time = json!([{"id":"ses_1","title":"quarterly salary review"}]);
+        let stderr = agent_failed_stderr(parse_session_listing(&missing_time, 10).unwrap_err());
+        assert!(stderr.contains("ses_1"), "{stderr}");
+        assert!(!stderr.contains("quarterly salary review"), "{stderr}");
+
+        let missing_id = json!([{"title":"quarterly salary review","time":{"updated":1}}]);
+        let stderr = agent_failed_stderr(parse_session_listing(&missing_id, 10).unwrap_err());
+        assert!(!stderr.contains("quarterly salary review"), "{stderr}");
+
+        // serde_json 依鍵名排序輸出，所以把大欄位放在 name 之後。
+        let not_a_list = json!({"name":"UnknownError","stack":"x".repeat(5000)});
+        let stderr = agent_failed_stderr(parse_session_listing(&not_a_list, 10).unwrap_err());
+        assert!(stderr.contains("UnknownError"), "{stderr}");
+        assert!(stderr.len() < 500, "{} bytes", stderr.len());
     }
 
     #[test]

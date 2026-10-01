@@ -28,7 +28,7 @@ Wukong 自己另存對話（`wukong-memory` 與 `wukong-chat-history`），不�
 ├── .env.example                         # 可改：新增設定
 ├── docs/docker.md、docs/cli-reference.md、CHANGELOG.md、AGENTS.md  # 可改：設定說明、指令參考與變更紀錄
 ├── docs/2026-08-08-system-freeze-opencode-resource-handover.md   # 可改：只加註已回答的未知
-├── Cargo.lock、各 crate 的 Cargo.toml   # 可改：wukong-cli 新增 sqlx、rustix；wukong-runtime 測試用 sqlx
+├── Cargo.lock、各 crate 的 Cargo.toml   # 可改：wukong-cli 新增 sqlx、rustix；wukong-runtime 測試用 sqlx；wukong-schedulerd 測試用 tokio test-util
 ├── scripts/opencode-idle-restart.sh     # 不可觸及：閒置重啟的判定不變
 ├── crates/wukong-runtime/src/session.rs # 不可觸及：compaction 與輪替政策不變
 └── opencode.db 的資料表                 # 不可觸及：刪除只走 opencode 的刪除入口，不直接改寫資料列
@@ -113,7 +113,7 @@ Feature: opencode session 的保留期清理
 
 ## Gherkin 核准紀錄
 
-- **核准 commit**: 待提交（前一版為 cbd65ef；SCN-001 至 SCN-007、SCN-009 自 c613028 起未變，SCN-010 自 cbd65ef 起未變）
+- **核准 commit**: 06b25d3（前一版為 cbd65ef；SCN-001 至 SCN-007、SCN-009 自 c613028 起未變，SCN-010 自 cbd65ef 起未變）
 - **核准來源**: 使用者於 2026-10-01 對話指出 Wukong 與 raybird/telenexus#9 有相同的 `opencode.db` 膨脹問題；我提出設計草稿與九項驗收條件後，使用者同日在確認題中選擇「9 項全部核准」，並選擇由我開立 GitHub issue、以 dev-cycle 推進。九項即 SCN-001 至 SCN-009。「被棄置 scope 的過期」與「長壽 session 輪替」在同一題中列為不在範圍。
 
 - **SCN-010 的核准來源**: 2026-10-01 的獨立審查（[review-6037672.md](./review-6037672.md) 的 M-2）指出清理倚賴「server 上的 session 都屬於這一份記憶庫」這個未被防護的前提，並重現了記憶庫接錯時受保護 session 被列為待刪。使用者同日在確認題的四個選項（接錯記憶庫時整輪不刪、compose 以外預設停用、只清標題為 Wukong 的 session、不加程式防護）中只選了第一項；其餘未被選擇，因此不實作。

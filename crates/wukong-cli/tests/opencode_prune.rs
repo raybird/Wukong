@@ -163,6 +163,20 @@ async fn a_memory_database_that_matches_nothing_refuses_and_exits_nonzero() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_memory_with_pointers_against_an_empty_server_refuses() {
+    let outcome = prune(
+        Some("ses_that_used_to_exist"),
+        Some("[]".to_string()),
+        "200 OK",
+    )
+    .await;
+
+    assert_eq!(outcome.deletes, Vec::<String>::new());
+    assert!(outcome.stdout.contains("未清理"), "{}", outcome.stdout);
+    assert_eq!(outcome.code, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_empty_server_is_nothing_to_do_not_a_failure() {
     let outcome = prune(None, Some("[]".to_string()), "200 OK").await;
 
