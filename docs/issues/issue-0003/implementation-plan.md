@@ -45,15 +45,15 @@
 
 1. `time.updated` 早於保留期。
 2. 不被 `agent_sessions` 或 `agent_session_state` 的任何 scope 指向。
-3. 是根 session（以 `roots=true` 列出）。子 session 只隨父 session 一起消失，不單獨判定；此行為待步驟 1 確認。
+3. 是根 session。列表帶 `roots=true`，取回後再排除帶 `parentID` 的項目，不單靠 server 端的過濾。子 session 隨父 session 一起消失（步驟 1 已確認）。
 
-列表一律明確帶 `limit`，並以回傳筆數是否等於 `limit` 判斷是否被截斷。
+列表一律明確帶 `limit`，並以回傳筆數是否等於 `limit` 判斷是否被截斷。opencode 沒有「早於某時間」的過濾，所以整批取回再挑。
 
 ### 失效方向
 
 任何一步不確定就不刪：
 
-- 讀不到指向表、列不出 session、回應解析失敗 → 整輪跳過。
+- 讀不到指向表、列不出 session、回應解析失敗 → 整輪跳過。列表可能因單一異常資料列而每一輪都失敗（步驟 1 的額外發現），所以失敗紀錄要帶上游回應，讓人看得出是同一個原因在重複。
 - 保留期下限 1 天。進行中的回合所建立、尚未寫回 `agent_sessions` 的 session 必然是新的，下限確保它們不可能成為候選。
 - 單次刪除失敗只記錄，下一輪自然會再遇到它。
 
@@ -63,14 +63,14 @@
 
 只在 Server backend 生效。容器部署的 `opencode-state` volume 專屬於 Wukong；CLI 模式的 `opencode.db` 與使用者自己的 opencode 使用共用，Wukong 無從分辨哪些是自己建的，因此不自動清掃。
 
-每輪設刪除上限，由舊到新刪。
+每 6 小時一輪，每輪最多刪 500 個，由舊到新刪。
 
 ### 空間回收
 
 在 `opencode-server` 容器啟動、`exec opencode serve` 之前執行（`scripts/docker-entrypoint.sh:271-292`）。此時 server 尚未開啟資料庫，而既有的離峰閒置重啟讓這個時點大約每天出現一次。
 
-- freelist 佔比超過門檻才做。
-- 剩餘磁碟空間不小於資料庫大小才做。
+- freelist 佔比達 25% 才做。
+- 剩餘磁碟空間不小於資料庫大小的 2 倍才做。
 - 設 busy timeout；被鎖或任何失敗都只記錄，不阻擋 server 啟動。
 - 由 `wukong` 的子命令執行，才能用 `cargo test` 覆蓋。
 
@@ -81,9 +81,8 @@
 | 變數 | 用途 | 預設 |
 |---|---|---|
 | `WUKONG_OPENCODE_SESSION_RETENTION_DAYS` | 保留天數；`0` 停用清理 | `30` |
-| `WUKONG_OPENCODE_SESSION_RETENTION_INTERVAL_SECS` | 清理間隔 | 暫定 `21600`（TBD-1） |
-| `WUKONG_OPENCODE_SESSION_RETENTION_BATCH` | 每輪最多刪除數 | 暫定 `200`（TBD-1） |
-| `WUKONG_OPENCODE_VACUUM_MIN_FREE_RATIO` | freelist 佔比門檻；`0` 停用回收 | 暫定 `0.25`（TBD-2） |
+
+清理間隔、每輪上限與回收門檻是程式內的固定值（見步驟 1 的定案），沒有人要求調整它們，不另開環境變數。
 
 ### 可觀測性
 
@@ -100,9 +99,16 @@
 
 ## 實作步驟
 
-1. 📝 **複本量測**（SCN-001、SCN-005、SCN-007；無相依）
+1. ✅ **複本量測**（SCN-001、SCN-005、SCN-007；無相依）
    - 產出：本步驟下方的量測紀錄；TBD-1、TBD-2 的定案值。
    - 完成判準：在數百 MB 規模的真實 `opencode.db` 複本上記錄 (a) 刪除含子 session 的父 session 前後，父與子在各表的列數；(b) 單次刪除與連續刪除一批的耗時；(c) `VACUUM` 前後檔案大小、耗時、所需暫存空間，以及 server 開著且有連線時的行為；(d) 帶 `roots=true` 與明確 `limit` 的列表回傳是否完整。
+   - 完成證據（2026-10-01）：樣本是開發機 `~/.local/share/opencode/opencode.db` 以 `sqlite3 .backup` 取得的複本（831,176,704 bytes、962 個 session、其中 124 個子 session、`message` 24,444、`part` 106,574、`event` 68,258），放在 repo 之外；以 `ghcr.io/raybird/wukong:v0.21.11` 的拋棄式容器對複本執行 `opencode serve`，刪除走 HTTP `DELETE /session/{id}`，列數以 `sqlite3 -readonly` 查詢。只記彙總數字，複本與容器已於量測後移除。
+     - (a) 刪除一個有 30 個子 session 的父 session：父 `message` 167→0、`part` 682→0；子 `session` 30→0、`message` 334→0、`part` 1,712→0；HTTP 200，0.18 秒。另以空資料庫建立父子各一確認：子 session 的列表項帶 `parentID`；刪父之後子的 `GET` 回 404。
+     - (b) 連續刪除最舊的 50 個：共 0.48 秒，中位數 9 ms、p95 22 ms、最大 48 ms，全數 200。連續刪除 484 個超過 30 天的根 session：共 4.43 秒，中位數 7 ms、p95 22 ms、最大 86 ms，全數 200。片段最多的 session（4,236 筆、15 MB）0.05 秒；事件最多的（5,837 筆、48 MB）0.05 秒，刪後 `event` 與 `event_sequence` 殘留皆為 0。全部刪完後，`message`、`part`、`event` 中找不到對應 session 的列數皆為 0。
+     - (c) 刪完後 freelist 為 200,333／202,924 頁（98%），檔案仍是 831 MB；`VACUUM` 後 9,756,672 bytes，耗時 0.03 秒（成本隨存活資料量而非檔案大小）。在全新複本上對 831 MB 全為存活資料的情況 `VACUUM`：2.59 秒，期間 WAL 峰值 824,374,952 bytes（約等於資料庫大小），checkpoint 0.39 秒，`integrity_check` 為 ok；server 開著時同時輪詢 `/session`，10 次全數成功、最大延遲 2.47 秒。另一連線持有寫鎖時，`VACUUM` 在 5 秒 busy timeout 後回 `database is locked`，檔案不變。另一連線只持有讀取交易時 `VACUUM` 仍成功。暫存檔的用量未量測。
+     - (d) server 目錄為非 git 的 `/workspace` 時，列表查的是 `project_id = 'global'`：不帶參數回 100 筆，`?limit=100000` 與 `?limit=100000&roots=true` 都回 304 筆，等於資料庫中該 project 的 304 個 session，且依 `time.updated` 由新到舊。`roots=true` 會濾掉子 session（空資料庫實測：不帶時回父與子、帶時只回父）。`start` 是 `time.updated` 的下界，沒有「早於」的過濾，所以只能整批取回再挑。
+     - 額外發現：樣本中有 2 筆 `directory` 不是絕對路徑的資料列，只要它落在 `limit` 範圍內，整個列表請求就回 500（server 日誌為 `Path is not absolute: .`）；`limit=200` 成功、`limit=400` 起失敗。量測時在複本上把這 2 筆改成 `/tmp` 才得以繼續。這類資料列不會出現在只由 Wukong 寫入的資料庫，但它說明列表失敗必須整輪不刪（SCN-004），且同一筆壞資料會讓清理每一輪都失敗，紀錄必須看得出來。
+     - 定案：刪除夠快，不需要小批次。TBD-1 定為固定每 6 小時一輪、每輪上限 500 個，不做成環境變數；TBD-2 定為 freelist 佔比達 25% 且剩餘磁碟空間不小於資料庫大小的 2 倍才回收（WAL 峰值量到 1 倍，暫存檔未量測，取保守值），同樣不做成環境變數。
 2. 📝 **挑選邏輯**（SCN-001、SCN-002、SCN-003；相依：步驟 1 確認子 session 行為）
    - 產出：純函式，輸入 session 列表、受保護 id 集合、現在時間與保留期，輸出待刪清單與統計。
    - 完成判準：測試斷言被選中與被保留的具體 id；涵蓋保留期邊界、受保護的過期 session、保留期為 0、低於下限的設定。
@@ -147,7 +153,7 @@
 
 ## 檢查清單
 
-- [ ] 步驟 1 的量測已回寫，TBD-1、TBD-2 已定案
+- [x] 步驟 1 的量測已回寫，TBD-1、TBD-2 已定案
 - [ ] 每個 Scenario 有對應的外迴圈證據
 - [ ] `cargo test` 與 `cargo clippy --all-targets -- -D warnings` 全綠
 - [ ] compose 兩份檔案、`.env.example` 與 `docs/docker.md` 的新變數一致
