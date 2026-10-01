@@ -133,7 +133,7 @@ pub fn assemble_argv(
     // publish 都灌進 stderr（實測健康回合的 stderr 只有 32 bytes）。
     //
     // 只在真的是 opencode 時才加：`--agent-cmd "printf fixer"` / `echo` 的假 agent
-    // 測試法是既有的除錯手段（見 CLAUDE.md），把 opencode 專屬旗標塞給它會弄壞它。
+    // 測試法是既有的除錯手段（見 AGENTS.md），把 opencode 專屬旗標塞給它會弄壞它。
     if is_opencode(command) {
         argv.push("--print-logs".to_string());
         argv.push("--log-level".to_string());
@@ -909,7 +909,7 @@ mod tests {
     #[test]
     fn assemble_argv_omits_opencode_flags_for_fake_agents() {
         // `--agent-cmd "printf fixer"` / `echo` 的假 agent 測試法是既有除錯手段
-        // （CLAUDE.md 有記），opencode 專屬旗標塞給它會弄壞它。
+        // （AGENTS.md 有記），opencode 專屬旗標塞給它會弄壞它。
         let argv = assemble_argv(&["echo".to_string()], None, false, None, None, &[], "hi");
         assert_eq!(argv, vec!["echo", "hi"]);
 
