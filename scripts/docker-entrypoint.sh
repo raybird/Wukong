@@ -294,8 +294,9 @@ case "${1:-}" in
             # check (made against the database's own filesystem) knows nothing
             # about. Keep the copy next to the database so the check covers it.
             if wukong opencode --help 2>/dev/null | grep -q 'vacuum'; then
-                WUKONG_OPENCODE_DB="${WUKONG_OPENCODE_DB:-$OPENCODE_STATE/opencode.db}" \
-                    SQLITE_TMPDIR="$OPENCODE_STATE" \
+                opencode_db="${WUKONG_OPENCODE_DB:-$OPENCODE_STATE/opencode.db}"
+                WUKONG_OPENCODE_DB="$opencode_db" \
+                    SQLITE_TMPDIR="$(dirname "$opencode_db")" \
                     gosu wukong wukong opencode vacuum \
                     || echo "[wukong] WARNING: opencode.db vacuum failed; starting the server anyway." >&2
             fi

@@ -252,10 +252,12 @@ pub async fn prune_opencode_sessions<B: AiBackend>(
     let listing = backend.list_sessions().await?;
     report.listed = listing.sessions.len();
     report.truncated = listing.truncated;
-    report.anchored = listing
-        .sessions
-        .iter()
-        .any(|session| protected.contains(&session.id));
+    // server 上一個 session 都沒有時談不上對不上，只是沒東西可清。
+    report.anchored = listing.sessions.is_empty()
+        || listing
+            .sessions
+            .iter()
+            .any(|session| protected.contains(&session.id));
     if !report.anchored {
         return Ok(report);
     }
@@ -434,6 +436,21 @@ mod tests {
                 assert!(!text.contains("old_orphan_a"), "{text}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn an_empty_server_is_not_a_mismatch() {
+        // 全新部署：server 上一個 session 都沒有。這不是記憶庫接錯，只是沒東西可清。
+        let (memory, _) = open_memory().await;
+        let backend = ListingBackend::with(Vec::new());
+
+        let report = prune_opencode_sessions(&memory, &backend, POLICY, NOW_MS, false)
+            .await
+            .unwrap();
+
+        assert!(report.anchored);
+        assert_eq!(report.listed, 0);
+        assert!(render_report(&report, POLICY).starts_with("已刪除 0 個"));
     }
 
     #[tokio::test]
@@ -688,6 +705,33 @@ mod tests {
         let selection = select_expired(&sessions, &protect(&[]), NOW_MS, 30, MAX_DELETES_PER_RUN);
 
         assert_eq!(selection.expired, ["quiet_root_quiet_child"]);
+    }
+
+    #[test]
+    fn a_child_whose_parent_is_not_listed_is_never_deleted_on_its_own() {
+        // 父 session 不在清單裡（被截斷、或屬於別的 project）時，這個子 session 的樹
+        // 長什麼樣子我們不知道。它不是根，就不由我們判定。
+        let sessions = [
+            child("stray", "parent_not_listed", 40 * DAY_MS),
+            session("old_orphan", 40 * DAY_MS),
+        ];
+
+        let selection = select_expired(&sessions, &protect(&[]), NOW_MS, 30, MAX_DELETES_PER_RUN);
+
+        assert_eq!(selection.expired, ["old_orphan"]);
+    }
+
+    #[test]
+    fn sessions_that_claim_each_other_as_parent_do_not_hang_and_are_left_alone() {
+        let sessions = [
+            child("loop_a", "loop_b", 40 * DAY_MS),
+            child("loop_b", "loop_a", 40 * DAY_MS),
+            session("old_orphan", 40 * DAY_MS),
+        ];
+
+        let selection = select_expired(&sessions, &protect(&[]), NOW_MS, 30, MAX_DELETES_PER_RUN);
+
+        assert_eq!(selection.expired, ["old_orphan"]);
     }
 
     #[test]

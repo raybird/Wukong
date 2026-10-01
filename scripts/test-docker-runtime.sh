@@ -209,7 +209,7 @@ for cf in "$compose_file" "$release_compose"; do
 done
 require_in_file "WUKONG_OPENCODE_SESSION_RETENTION_DAYS" .env.example \
     "the retention knob must be documented where operators actually look"
-require_in_file 'SQLITE_TMPDIR="$OPENCODE_STATE"' "$entrypoint" \
+require_in_file 'SQLITE_TMPDIR="$(dirname "$opencode_db")"' "$entrypoint" \
     "VACUUM's temporary copy must land on the filesystem the disk check measured, not the container's root"
 require_in_file "wukong opencode --help" "$entrypoint" \
     "the entrypoint must confirm the binary knows the subcommand before calling it; an older wukong runs unknown words as a prompt"

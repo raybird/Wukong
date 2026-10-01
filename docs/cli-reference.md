@@ -41,7 +41,7 @@ wukong memory consolidate --scope project:X  # 用 opencode 把零碎 event 聚�
 wukong memory prune --dry-run                # 預覽將刪的低價值/已摘要記憶
 wukong memory export --dir ./mem-md          # 依 DB 全量重建 markdown 鏡像
 
-# opencode 狀態維護（需要 opencode server backend）
+# opencode 狀態維護（prune 需要 opencode server backend）
 wukong opencode prune --dry-run              # 預覽將刪的過期 opencode session 與受保護清單
 wukong opencode vacuum                       # 可回收空間夠多時 VACUUM opencode.db
 

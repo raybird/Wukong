@@ -138,7 +138,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             }
             _ = retention_ticks.tick() => {
                 if let Some(policy) = retention_policy {
-                    if let Err(e) = session_retention::run_once(&memory, &backend, policy).await {
+                    if let Err(e) = session_retention::run_once(&memory, &backend, policy, &cfg.db_url).await {
                         eprintln!("warning: opencode session retention failed: {e}");
                     }
                 }

@@ -26,14 +26,19 @@
 
 ### Fixed
 
-- **`wukong --new` 不再留下舊 session。** 它過去只清除 scope 的對應、不刪 opencode
+- **`wukong --new` 不再留下舊 session（server backend）。** 它過去只清除 scope 的對應、不刪 opencode
   那邊的 session；現在會先刪除。刪除失敗時仍清除對應，這一回合照樣從新 context 開始。
 
 ### 已知限制
 
-- 清理假設 opencode server 上的 session 都屬於這一套 Wukong。把 Wukong 接到你自己
-  也在用的 `opencode serve` 時，請把 `WUKONG_OPENCODE_SESSION_RETENTION_DAYS` 設為
-  `0`，否則你自己超過保留期的 session 會被刪除。compose 部署不受影響。
+- 清理假設 opencode server 上的 session 都屬於這一套 Wukong，而且只有一份記憶庫在
+  用它。把 Wukong 接到你自己也在用的 `opencode serve`，或讓兩份記憶庫（例如主機上的
+  `wukong` 與容器內的服務）共用同一個 server 時，請把
+  `WUKONG_OPENCODE_SESSION_RETENTION_DAYS` 設為 `0`，否則對方超過保留期的 session
+  會被刪除。內建的防護只擋得住「記憶庫與 server 完全對不上」。compose 部署不受影響。
+- `wukong --new` 與 `/new` 的刪除只在 opencode server backend 有作用；CLI backend
+  （`opencode run`）沒有實作刪除，舊 session 仍留在你的 `opencode.db`。
+- schedulerd 不保存上次清理的時間：若它每次都在 6 小時內重啟，清理不會執行。
 
 - 這項清理刪不到長壽的 scope session。一個長期使用的聊天 scope 會持續累積歷史，而它
   正是被保護的對象；`opencode.db` 若仍然很大，用 `wukong opencode prune --dry-run`

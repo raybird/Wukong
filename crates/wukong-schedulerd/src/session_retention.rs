@@ -26,18 +26,36 @@ pub fn active_policy(backend: &AgentBackend, policy: RetentionPolicy) -> Option<
 }
 
 /// 跑一輪清理並記錄結果。錯誤交給呼叫端記錄——清理是背景維護，不能讓排程迴圈停下來。
+/// `db_url` 只用於日誌：記憶庫與 server 對不上時，要說得出用的是哪一份。
 pub async fn run_once(
     memory: &Memory,
     backend: &AgentBackend,
     policy: RetentionPolicy,
+    db_url: &str,
 ) -> Result<RetentionReport, String> {
-    run_within(memory, backend, policy, RUN_BUDGET).await
+    run_within(memory, backend, policy, db_url, RUN_BUDGET).await
+}
+
+/// 一輪清理要寫進日誌的每一行。
+fn log_lines(report: &RetentionReport, db_url: &str) -> Vec<String> {
+    let mut lines = vec![report.summary_line()];
+    if !report.anchored {
+        lines.push(format!(
+            "warning: opencode session retention skipped: 記憶庫 {db_url} 指向的 session 沒有任何一個出現在 opencode server 的清單裡（共列出 {} 個），視為記憶庫與 server 對不上，整輪不刪。請確認這個服務的 WUKONG_MEMORY_DB 與 WUKONG_AGENT_SERVER_URL 屬於同一套部署。",
+            report.listed
+        ));
+    }
+    lines.extend(report.failed.iter().map(|(session_id, reason)| {
+        format!("opencode_session_retention_delete_failed session_id={session_id} error={reason}")
+    }));
+    lines
 }
 
 async fn run_within(
     memory: &Memory,
     backend: &AgentBackend,
     policy: RetentionPolicy,
+    db_url: &str,
     budget: Duration,
 ) -> Result<RetentionReport, String> {
     // 列表與每一個刪除都沿用 agent 的逾時（預設 20 分鐘），而這裡是在排程迴圈裡
@@ -53,11 +71,8 @@ async fn run_within(
             )
         })?
         .map_err(|error| error.to_string())?;
-    eprintln!("{}", report.summary_line());
-    for (session_id, reason) in &report.failed {
-        eprintln!(
-            "opencode_session_retention_delete_failed session_id={session_id} error={reason}"
-        );
+    for line in log_lines(&report, db_url) {
+        eprintln!("{line}");
     }
     Ok(report)
 }
@@ -97,6 +112,60 @@ mod tests {
         assert_eq!(active_policy(&cli_backend(), THIRTY_DAYS), None);
     }
 
+    #[test]
+    fn a_memory_that_does_not_match_the_server_is_explained_in_the_log() {
+        // 定期清理沒有人在看輸出。記憶庫接錯時它每一輪都不刪，如果日誌只有一個
+        // `anchored=false`，看的人不會知道原因，也不知道該去檢查哪一份記憶庫。
+        let unmatched = RetentionReport {
+            listed: 12,
+            anchored: false,
+            ..RetentionReport::default()
+        };
+
+        let lines = log_lines(&unmatched, "sqlite:///data/memory.db");
+
+        assert_eq!(lines[0], unmatched.summary_line());
+        let warning = lines[1..].join("\n");
+        assert!(warning.starts_with("warning: "), "{lines:?}");
+        assert!(warning.contains("sqlite:///data/memory.db"), "{lines:?}");
+        assert!(warning.contains("沒有任何一個出現在"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_normal_run_logs_its_summary_and_each_failed_delete() {
+        let report = RetentionReport {
+            listed: 3,
+            anchored: true,
+            failed: vec![("ses_stuck".to_string(), "boom".to_string())],
+            ..RetentionReport::default()
+        };
+
+        let lines = log_lines(&report, "sqlite:///data/memory.db");
+
+        assert_eq!(
+            lines,
+            [
+                report.summary_line(),
+                "opencode_session_retention_delete_failed session_id=ses_stuck error=boom"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_first_run_waits_a_full_interval() {
+        // 啟動當下就清理的話，升級後根本來不及先預覽。
+        let mut ticks = ticker();
+
+        let early = tokio::time::timeout(INTERVAL - Duration::from_secs(1), ticks.tick()).await;
+        assert!(
+            early.is_err(),
+            "a run fired before the first interval elapsed"
+        );
+        let due = tokio::time::timeout(Duration::from_secs(2), ticks.tick()).await;
+        assert!(due.is_ok(), "no run fired once the interval had elapsed");
+    }
+
     #[tokio::test]
     async fn a_server_that_never_answers_gives_the_loop_back() {
         // 列表與刪除沿用 agent 的 20 分鐘逾時，而清理是在排程迴圈裡同步跑的：server
@@ -114,9 +183,15 @@ mod tests {
         let backend = AgentBackend::Server(OpencodeServerBackend::from_env(url, None));
 
         let started = std::time::Instant::now();
-        let error = run_within(&memory, &backend, THIRTY_DAYS, Duration::from_millis(300))
-            .await
-            .unwrap_err();
+        let error = run_within(
+            &memory,
+            &backend,
+            THIRTY_DAYS,
+            "sqlite://x",
+            Duration::from_millis(300),
+        )
+        .await
+        .unwrap_err();
 
         assert!(error.contains("timed out"), "{error}");
         assert!(started.elapsed() < Duration::from_secs(5));
@@ -128,7 +203,7 @@ mod tests {
         let url = format!("sqlite://{}", file.path().display());
         let memory = Memory::open(&url).await.unwrap();
 
-        let error = run_once(&memory, &server_backend(), THIRTY_DAYS)
+        let error = run_once(&memory, &server_backend(), THIRTY_DAYS, "sqlite://x")
             .await
             .unwrap_err();
 

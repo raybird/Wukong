@@ -116,7 +116,7 @@ Feature: opencode session 的保留期清理
 - **核准 commit**: cbd65ef（SCN-001 至 SCN-009 的原核准版本為 c613028，其內容未變）
 - **核准來源**: 使用者於 2026-10-01 對話指出 Wukong 與 raybird/telenexus#9 有相同的 `opencode.db` 膨脹問題；我提出設計草稿與九項驗收條件後，使用者同日在確認題中選擇「9 項全部核准」，並選擇由我開立 GitHub issue、以 dev-cycle 推進。九項即 SCN-001 至 SCN-009。「被棄置 scope 的過期」與「長壽 session 輪替」在同一題中列為不在範圍。
 
-- **SCN-010 的核准來源**: 2026-10-01 的獨立審查（[review-6037672.md](./review-6037672.md) 的 M-2）指出清理倚賴「server 上的 session 都屬於這一份記憶庫」這個未被防護的前提，並重現了記憶庫接錯時受保護 session 被列為待刪。使用者同日在確認題的四個選項中只選了「接錯記憶庫時整輪不刪」；「compose 以外預設停用」與「只清標題為 Wukong 的 session」未被選擇，因此不實作。
+- **SCN-010 的核准來源**: 2026-10-01 的獨立審查（[review-6037672.md](./review-6037672.md) 的 M-2）指出清理倚賴「server 上的 session 都屬於這一份記憶庫」這個未被防護的前提，並重現了記憶庫接錯時受保護 session 被列為待刪。使用者同日在確認題的四個選項（接錯記憶庫時整輪不刪、compose 以外預設停用、只清標題為 Wukong 的 session、不加程式防護）中只選了第一項；其餘未被選擇，因此不實作。
 
 | Scenario | 核准日期 | 狀態 |
 |----------|---------|------|
@@ -143,7 +143,8 @@ Feature: opencode session 的保留期清理
 6. 啟動前空間回收
 7. 修正 `--new` 漏刪
 8. 複本上的端到端驗證與文件
-9. 審查退回的修正
+9. 審查退回的修正（第一輪）
+10. 審查退回的修正（第二輪）
 
 ## 風險與首要驗證
 
@@ -162,7 +163,10 @@ Feature: opencode session 的保留期清理
 | TBD-1 | 清理間隔與每輪刪除上限的預設值 | 已解決 | 2026-10-01：固定每 6 小時一輪、每輪上限 500 個。連續刪除 484 個 session 共 4.43 秒，不需要小批次，也不另開環境變數 |
 | TBD-2 | 空間回收的觸發門檻 | 已解決 | 2026-10-01：freelist 佔比達 25% 且剩餘磁碟空間不小於資料庫大小的 2 倍才回收。831 MB 全量 `VACUUM` 耗時 2.59 秒、WAL 峰值約 1 倍資料庫大小 |
 | TBD-3 | 受影響部署的資料庫裡，無主 session 佔多少資料量。08-08 記錄的 1.33 GiB 在另一台主機，本機沒有複本；Wukong 的資料量可能集中在少數長壽的 scope session，而它們是本 issue 保留的對象 | 待確認 | 不阻塞實作。步驟 4 的預覽就是量測工具，要在受影響的主機上執行才有答案；若可刪的只佔一小部分，另開 issue 評估輪替 |
-| TBD-5 | 把 Wukong 接到使用者自己也在用的 `opencode serve` 時，只要 Wukong 在上面跑過回合，使用者自己超過保留期的 session 就會被當成無主而刪除（review-6037672 的 M-2 輸入一） | 不影響本次交付 | 2026-10-01：使用者未選擇「compose 以外預設停用」，清理維持預設啟用。改由文件要求這種用法把保留天數設為 0；compose 部署的 volume 專屬於 Wukong，不受影響 |
+| TBD-5 | 一個 opencode server 不只被這一份記憶庫使用時會刪錯：(a) 使用者自己也在用同一個 `opencode serve`；(b) 兩份記憶庫共用一個 server 且各自跑過回合（review-6037672 的 M-2、review-46cd815 的 M-2）。SCN-010 的防護只擋得住「完全對不上」 | 不影響本次交付 | 2026-10-01：使用者未選擇「compose 以外預設停用」，清理維持預設啟用。改由 `docs/docker.md`、`.env.example` 與 `CHANGELOG.md` 寫明「一個 server 只能對應一份記憶庫，否則設為 0」；compose 部署的兩個 volume 都專屬，不受影響 |
+| TBD-6 | SCN-008 只在 opencode server backend 成立。CLI backend 的 `delete_session` 是 trait 的空實作，`wukong --new` 與 `/new` 在該模式下都不會刪除舊 session（review-46cd815 的 S-1） | 待確認 | 不阻塞本次交付：compose 部署走 server backend。要讓 CLI backend 也刪除，需要實作 `opencode session delete` 的呼叫，這會連帶改變輔助棒在 CLI 模式下的行為，應另開 issue；或由使用者決定把 SCN-008 限定為 server backend |
+| TBD-7 | 清單被截斷（超過 10,000 個 session）時，若某個 scope 指向的子 session 被截掉，它的根 session 可能被判為無主而刪除（review-46cd815 的 S-3） | 不影響本次交付 | 2026-10-01：觸發條件是超過 10,000 個 session、且 scope 對應是 CLI backend 留下的子 session id。截斷本身會在輸出與日誌標示。要完整處理得逐一查詢被截掉的受保護 session，本次不做 |
+| TBD-8 | schedulerd 不保存上次清理時間，若每次都在 6 小時內重啟，清理永遠不會執行（review-46cd815 的 N-1） | 不影響本次交付 | 2026-10-01：已寫入 `docs/docker.md` 與 `CHANGELOG.md`，這種情況改用手動 `wukong opencode prune` |
 | TBD-4 | 08-08 文件記錄的 session 數恰為 100，與 `GET /session` 的預設上限相同，當時的實際數量可能更多 | 待確認 | 不影響本次交付；與 TBD-3 一併在受影響主機上確認 |
 
 ## Timeline
@@ -172,6 +176,7 @@ Feature: opencode session 的保留期清理
 | 2026-10-01 | 建立；SCN-001 至 SCN-009 依使用者同日對話核准 | - |
 | 2026-10-01 | 獨立審查 review-6037672 判定 RETURN TO execute-task（兩項 MUST FIX） | - |
 | 2026-10-01 | 規格修訂：新增 SCN-010，依使用者對 M-2 的選擇核准；SCN-001 至 SCN-009 不變 | - |
+| 2026-10-01 | 獨立審查 review-46cd815 判定 RETURN TO execute-task（兩項 MUST FIX） | - |
 
 ---
 **建立日期**: 2026-10-01  

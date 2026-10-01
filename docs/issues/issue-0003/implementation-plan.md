@@ -153,7 +153,7 @@
      - 全量檢查：`cargo test` 39 個測試套件、587 項通過、0 失敗；`cargo clippy --all-targets -- -D warnings` 無警告；`cargo fmt --all -- --check` 通過；`scripts/test-docker-runtime.sh` 通過。
      - 文件：`docs/docker.md`、`docs/cli-reference.md`、`CHANGELOG.md`、`.env.example`、`AGENTS.md` 已更新；08-08 交接文件在「尚未證實」的對應項下加註。該文件驗證清單的兩個相關勾選項都沒有勾：一項同時要求備份、另一項要求在那台主機上重新量測，本次都沒做。
      - 額外發現：`wukong --db X memory snapshot` 這類「全域旗標在子命令之前」的寫法不會報錯，而是把子命令當成 prompt 跑一個真的回合。驗證過程中我自己踩到一次，已記入 `AGENTS.md` 並以 `a_global_flag_before_a_subcommand_turns_it_into_a_prompt` 釘住。
-9. ✅ **審查退回的修正**（SCN-002、SCN-003、SCN-006、SCN-007、SCN-008、SCN-010；相依：步驟 1 至 8）
+9. ✅ **審查退回的修正（第一輪）**（SCN-002、SCN-003、SCN-006、SCN-007、SCN-008、SCN-010；相依：步驟 1 至 8）
    - 產出：對 [review-6037672.md](./review-6037672.md) 各項發現的修正與證據。
    - 完成判準：兩項 MUST FIX 各有先紅後綠的測試；採納的 SHOULD FIX 各有測試或實測；未採納的項目有理由；全量檢查通過。
    - 完成證據（2026-10-01）：
@@ -169,6 +169,18 @@
      - **真實容器重驗**：以最終版 entrypoint 與在 Debian bookworm 容器內重新編譯的最終版 `wukong`，掛進 v0.21.11 映像啟動。資料庫被寫鎖時：`outcome=failed ... database is locked`、警告後 server 健康、檔案維持 454,656 bytes。正常啟動：`outcome=reclaimed before_bytes=454656 after_bytes=294912`，freelist 39／111 → 0／72，`integrity_check` 為 ok；資料庫目錄與容器的 `/var/tmp` 都沒有殘留暫存檔。步驟 8 記錄的「容器驗證用的是精煉前的 binary」這項限制因此解除。
      - **仍然成立的限制**：SCN-002 的續接沒有以真實模型回合驗證；樹狀保護沒有在真實 opencode 的舊資料上演練（樣本裡沒有夠舊的子 session），由單元測試承擔；容器用的是 gnu binary 而非 release 的 musl binary。
      - **全量檢查**：`cargo test` 39 個套件、592 項通過、0 失敗；`cargo clippy --all-targets -- -D warnings` 無警告；`cargo fmt --all -- --check` 通過；`scripts/test-docker-runtime.sh` 通過。
+10. ✅ **審查退回的修正（第二輪）**（SCN-008、SCN-010；相依：步驟 9）
+   - 產出：對 [review-46cd815.md](./review-46cd815.md) 各項發現的修正與證據。
+   - 完成判準：同步驟 9。
+   - 完成證據（2026-10-01）：
+     - **M-1（SCN-010 的說明在 schedulerd 路徑沒有實作）**：schedulerd 在記憶庫對不上時，於摘要行之後另寫一行 `warning:`，內容含原因與所用的記憶庫。`cargo test -p wukong-schedulerd session_retention`，紅燈：日誌行尚未實作時 `a_memory_that_does_not_match_the_server_is_explained_in_the_log` 與 `a_normal_run_logs_its_summary_and_each_failed_delete` 失敗；綠燈後 6 項全過。日誌只由這個函式產生，沒有第二條輸出路徑。`anchored` 欄位的意義已寫進 `docs/docker.md`。這條路徑沒有以真正的 schedulerd 觀察（要等一個 6 小時的間隔）；審查者在第二輪以 3 秒間隔的複本確認過迴圈會呼叫清理，那是修正前的版本。
+     - **M-2（兩份記憶庫共用一個 server）**：不加新的防護（那會改變 SCN-010，需使用者決定），更正說法並揭露。`docs/docker.md` 原本把「主機上的 `wukong` 指向容器的 server」寫成有防護的例子，與審查者的實測相反，已改為獨立一類並寫明防護擋不住、處置是保留天數設 0；`.env.example`、`CHANGELOG.md`、`AGENTS.md` 與 README 的 TBD-5 同步。這一項沒有測試：它是已知不防護的情況。
+     - **S-1（`--new` 在 CLI backend 仍不刪）**：屬實，CLI backend 的 `delete_session` 是空實作。`CHANGELOG.md` 改為註明 server backend，並列入已知限制；README 記為 TBD-6，待使用者決定是否另案實作。
+     - **S-2（四個行為沒有測試會紅燈）**：各補一個測試，並以變異確認會轉紅。延後首輪：`the_first_run_waits_a_full_interval`（暫停時鐘），把 `ticker()` 改回立即觸發後失敗。`prune` 的第一行與結束碼：新增 `crates/wukong-cli/tests/opencode_prune.rs`，執行真正的 binary 對假 server，涵蓋成功（0）、有刪除失敗（1）、記憶庫對不上（1）、空 server（0）；拿掉記憶庫那一行並讓結束碼恆為 0 後，4 項中 3 項失敗。父不在清單的子 session：`a_child_whose_parent_is_not_listed_is_never_deleted_on_its_own`，把這類子 session 當成根的變異下失敗（期望 `["old_orphan"]`，得到 `["old_orphan", "stray"]`）。另補成環的 fixture。這些測試除空 server 一項外都是先綠的——行為在上一輪就已存在，所以以變異取代紅燈。
+     - **S-3（截斷時被截掉的受保護子 session）**：不修，記為 README 的 TBD-7。審查者建議的最小修法（截斷且有受保護 id 不在清單時整輪不刪）會讓超過 10,000 個 session、又有任何一筆失效對應的部署永遠不清理，而那正是最需要清理的情況。
+     - **N-1**：寫進 `docs/docker.md` 與 `CHANGELOG.md`，README 記為 TBD-8。**N-2**：server 上沒有任何 session 時不再視為對不上；紅燈 `an_empty_server_is_not_a_mismatch`，綠燈後通過，binary 測試確認結束碼為 0。**N-3**：entrypoint 的 `SQLITE_TMPDIR` 改取資料庫所在目錄；以替身指令執行 entrypoint 片段：預設為 `/home/wukong/.local/share/opencode`，`WUKONG_OPENCODE_DB=/mnt/other/opencode.db` 時為 `/mnt/other`，回收失敗時印警告後繼續。這個改動沒有在真實容器重跑。**N-4**、**N-6**：文字已更正。**N-5**：不動，審查判定可接受。
+     - **審查者未查證的兩項**：GitNexus 影響分析——`AiBackend`（HIGH，已事先告知）、兩個 `main` 與 `Command`（LOW）在動手前跑過；這次 PR 新增的符號不在索引內（索引停在 2026-08-06）。每次提交前都跑了 `detect_changes`。server 的 project id 改變後舊 session 是否還會被列出，我也沒有查證。
+     - **全量檢查**：`cargo test` 40 個套件、602 項通過、0 失敗；`cargo clippy --all-targets -- -D warnings` 無警告；`cargo fmt --all -- --check` 通過；`scripts/test-docker-runtime.sh` 通過。
 
 ## 測試策略
 
@@ -183,7 +195,7 @@
 | SCN-007 | 步驟 8 的容器重啟驗證 | 步驟 6 | |
 | SCN-008 | 步驟 7、9 的 binary 層級測試 | 同層合併 | 執行真正的 `wukong`，對記錄請求的假 server 斷言 |
 | SCN-009 | 步驟 4 | 同層合併 | |
-| SCN-010 | 步驟 9 的真實 opencode 驗證 | 步驟 9 的 runtime 測試 | |
+| SCN-010 | 步驟 9 的真實 opencode 驗證；步驟 10 的 `prune` binary 測試 | 步驟 9 的 runtime 測試；步驟 10 的 schedulerd 日誌測試 | `prune` 與 schedulerd 兩條路徑各有證據 |
 
 斷言一律指名被刪與被留的 id，不只比對數量。驗證命令沿用 `AGENTS.md` 的 `cargo test -p <crate>` 與 `cargo clippy --all-targets -- -D warnings`。
 
