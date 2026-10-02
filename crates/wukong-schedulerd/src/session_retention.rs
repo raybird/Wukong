@@ -7,20 +7,35 @@ use wukong_runtime::session_retention::{
 use wukong_runtime::util::now_unix;
 
 /// 清理間隔。刪除很快（實測 484 個 session 共 4.43 秒），間隔只需要比保留期的
-/// 單位「天」細得多，沒有人要求它可調，所以不做成環境變數。
+/// 單位「天」細得多，沒有人要求它可調，所以不做成設定。唯一的例外是下方只存在
+/// 於 debug 建置的測試鉤子。
 pub const INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 /// 一輪清理的時間上限。正常情況幾秒內結束；上限是為了 server 掛住的時候。
 const RUN_BUDGET: Duration = Duration::from_secs(5 * 60);
 
-/// 這個行程實際使用的間隔。`WUKONG_TEST_OPENCODE_RETENTION_INTERVAL_SECS` 只給
-/// `tests/retention_daemon.rs` 用：要看到真正的 daemon 跑完一輪，不能等六小時。它
-/// 刻意不寫進文件——間隔不是給部署調整的設定。
+/// 這個行程實際使用的間隔：正式建置一律是 [`INTERVAL`]。
 pub fn interval() -> Duration {
-    std::env::var("WUKONG_TEST_OPENCODE_RETENTION_INTERVAL_SECS")
-        .ok()
-        .and_then(|secs| secs.parse::<u64>().ok())
-        .filter(|secs| *secs > 0)
-        .map_or(INTERVAL, Duration::from_secs)
+    #[cfg(debug_assertions)]
+    if let Some(shortened) = test_interval(
+        std::env::var("WUKONG_TEST_OPENCODE_RETENTION_INTERVAL_SECS")
+            .ok()
+            .as_deref(),
+    ) {
+        return shortened;
+    }
+    INTERVAL
+}
+
+/// `tests/retention_daemon.rs` 要看到真正的 daemon 跑完一輪，不能等六小時，所以
+/// debug 建置認得一個縮短間隔的環境變數。它不是設定：release 建置根本不編譯這段，
+/// 映像檔裡的 binary 不會讀它，文件也不提它。只接受比正式間隔短的正整數——放大
+/// 沒有測試用途，而過大的值會讓計時器在啟動時溢位。
+#[cfg(debug_assertions)]
+fn test_interval(raw: Option<&str>) -> Option<Duration> {
+    let secs = raw?.parse::<u64>().ok()?;
+    (1..INTERVAL.as_secs())
+        .contains(&secs)
+        .then(|| Duration::from_secs(secs))
 }
 
 /// 第一輪在啟動後隔一個完整間隔才跑，不在啟動當下。升級後有這段時間可以先用
@@ -161,6 +176,31 @@ mod tests {
                     .to_string(),
             ]
         );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn the_test_hook_only_ever_shortens_the_interval() {
+        assert_eq!(test_interval(Some("1")), Some(Duration::from_secs(1)));
+        assert_eq!(
+            test_interval(Some("21599")),
+            Some(Duration::from_secs(21599))
+        );
+        // 其餘一律當作沒設定：0 會讓計時器 panic，過大的值會在啟動時溢位。
+        for ignored in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("-5"),
+            Some("abc"),
+            Some(" 1 "),
+            Some("21600"),
+            Some("9223372036854775807"),
+            Some("18446744073709551615"),
+            Some("99999999999999999999999"),
+        ] {
+            assert_eq!(test_interval(ignored), None, "{ignored:?}");
+        }
     }
 
     #[tokio::test(start_paused = true)]

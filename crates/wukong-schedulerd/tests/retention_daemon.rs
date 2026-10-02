@@ -3,6 +3,11 @@
 //! 清理的內容由 `wukong-runtime` 的測試釘住；這裡釘的是 daemon 這一段接線——迴圈
 //! 真的呼叫了清理、結果真的寫進日誌、傳進去的真的是它在用的那份記憶庫。這三件事
 //! 拿掉任何一件，函式層級的測試都還是綠的。
+//!
+//! 間隔靠一個只存在於 debug 建置的測試鉤子縮短，所以 `cargo test --release` 不跑這個檔案：
+//! release 的 daemon 不讀那個變數，會照正式的六小時等下去。
+
+#![cfg(debug_assertions)]
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;

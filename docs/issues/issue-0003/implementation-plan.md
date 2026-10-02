@@ -89,7 +89,7 @@
 |---|---|---|
 | `WUKONG_OPENCODE_SESSION_RETENTION_DAYS` | 保留天數；`0` 停用清理 | `30` |
 
-清理間隔、每輪上限與回收門檻是程式內的固定值（見步驟 1 的定案），沒有人要求調整它們，不另開環境變數。
+清理間隔、每輪上限與回收門檻是程式內的固定值（見步驟 1 的定案），沒有人要求調整它們，不另開環境變數。（步驟 11、12：為了讓測試看得到真正的 daemon 跑完一輪，debug 建置認得一個縮短間隔的測試鉤子；release 建置不編譯它。）
 
 ### 可觀測性
 
@@ -131,7 +131,7 @@
 5. ✅ **掛進 schedulerd 與設定**（SCN-003、SCN-006；相依：步驟 4）
    - 產出：schedulerd 的定期清理、環境變數解析、compose 與 `.env.example` 的對應項。
    - 完成判準：設定解析的測試涵蓋預設、停用與無效值；清理回傳錯誤時 schedulerd 迴圈繼續；compose 兩份檔案都傳入新變數。
-   - 完成證據（2026-10-01）：`cargo test -p wukong-schedulerd session_retention`。紅燈：`active_policy` 為空實作時，停用與 CLI backend 兩種情況都回傳 `Some`；`run_once` 為空實作時對連不上的 server 回傳 `Ok`。綠燈：實作後 2 項全過。迴圈以與 memory maintenance 相同的方式記錄錯誤後繼續。compose 一致性由 `scripts/test-docker-runtime.sh` 檢查，並確認它抓得到缺項：從 release compose 拿掉該行後腳本回報 `missing pattern`。設定只有 `WUKONG_OPENCODE_SESSION_RETENTION_DAYS` 一項。`--once` 模式不跑清理。
+   - 完成證據（2026-10-01）：`cargo test -p wukong-schedulerd session_retention`。紅燈：`active_policy` 為空實作時，停用與 CLI backend 兩種情況都回傳 `Some`；`run_once` 為空實作時對連不上的 server 回傳 `Ok`。綠燈：實作後 2 項全過。迴圈以與 memory maintenance 相同的方式記錄錯誤後繼續。compose 一致性由 `scripts/test-docker-runtime.sh` 檢查，並確認它抓得到缺項：從 release compose 拿掉該行後腳本回報 `missing pattern`。設定只有 `WUKONG_OPENCODE_SESSION_RETENTION_DAYS` 一項（步驟 11 加入的測試鉤子不是設定，見步驟 12）。`--once` 模式不跑清理。
 6. ✅ **啟動前空間回收**（SCN-007；相依：步驟 1 定出門檻）
    - 產出：`wukong` 的空間回收子命令；entrypoint 在 `opencode serve` 前呼叫。
    - 完成判準：測試在暫存 SQLite 檔上斷言超過門檻時檔案變小、未達門檻時不動、檔案被鎖時回傳錯誤；entrypoint 在回收失敗時仍 `exec` server。
@@ -194,7 +194,17 @@
      - **未處理**：N-5（`scripts/test-docker-runtime.sh` 對 entrypoint 仍只比對字串）——行為由步驟 8、9 的真實容器驗證與審查者的替身指令執行承擔。
      - **審查者留下的未查證項**：opencode 是否接受 `limit=10000`——在真實 opencode 1.18.29 的拋棄式容器上建立 1,500 個 session：不帶參數回 100 筆、`limit=1000` 回 1,000 筆、`limit=10000` 回 1,500 筆，沒有發現 server 另設上限；沒有測到 10,000 筆。server 的 project 改變後舊 session 是否還會被列出，仍未查證；S-1 修正後，這種情況若導致清單為空，會被回報為對不上。
      - **全量檢查**：`cargo test` 41 個套件、607 項通過、0 失敗；`cargo clippy --all-targets -- -D warnings` 無警告；`cargo fmt --all -- --check` 通過；`scripts/test-docker-runtime.sh` 通過。
-     - **限制**：這一輪的改動沒有在真實 opencode 或真實容器上重跑；改到的是空清單的判定、錯誤訊息文字、compose 的預設值寫法與測試用的間隔，步驟 8、9 的真實環境證據所涵蓋的路徑沒有變。
+     - **限制**：這一輪的程式改動（不含上面那次 `limit` 的量測）沒有在真實 opencode 或真實容器上重跑；改到的是空清單的判定、錯誤訊息文字、compose 的預設值寫法與測試用的間隔，步驟 8、9 的真實環境證據所涵蓋的路徑沒有變。
+12. ✅ **第四輪審查後的修正**（SCN-003；相依：步驟 11）
+   - 產出：對 [review-8020271.md](./review-8020271.md)（判定 PASS）S-1 的修正。使用者於 2026-10-02 決定現在修。
+   - 完成判準：測試鉤子不存在於 release 建置；debug 建置下它只能縮短間隔、任何值都不會讓 daemon 啟動失敗；有測試釘住；相矛盾的文字已更正。
+   - 完成證據（2026-10-02）：
+     - **S-1（測試用的間隔會被正式 binary 讀取，極大值讓 daemon 啟動即 panic）**：讀取環境變數的那一段改以 `#[cfg(debug_assertions)]` 編譯，並只接受 1 到 21,599 之間的整數。`cargo test -p wukong-schedulerd`，紅燈：解析函式為空實作時 `the_test_hook_only_ever_shortens_the_interval` 失敗（期望 `Some(1s)`，得到 `None`）；綠燈後 22 項全過，daemon 測試 2 項 1.07 秒通過。
+     - **問產物**：分別編譯 release 與 debug 的 `wukong-schedulerd` 後直接執行。release：變數設為 `1`、`0`、`9223372036854775807`、`18446744073709551615`，啟動日誌一律是 `first_run_in_secs=21600 interval_secs=21600`，沒有 panic；`strings` 在 release binary 裡找不到這個變數名（debug binary 有 1 處）。debug：`1` 得到 `first_run_in_secs=1`；`21600`、`0` 與兩個極大值都是 21600，沒有 panic。
+     - **`cargo test --release -p wukong-schedulerd`**：單元測試 21 項通過（鉤子的那一項隨鉤子一起不編譯），`tests/retention_daemon.rs` 以 `#![cfg(debug_assertions)]` 整檔略過、0 項。
+     - **文字**：`INTERVAL` 的註解、README 的 TBD-1、本檔「設定」一節與步驟 5 都補上這個例外。另更正 review-8020271 N-4 指出的紀錄：SCN-008 的狀態改回 `已核准`；Timeline 的「三項小建議」改為與步驟 11 一致；步驟 11 的限制補上與 `limit` 量測的區別；TBD-6 的理由補上 compose `cli` profile 的情況。
+     - **未處理**（review-8020271 的 NICE TO HAVE，使用者沒有要求）：N-1 保留天數只傳進 schedulerd 容器，在其他容器執行 `prune` 會用 30 天——文件的範例已指定 schedulerd 容器；N-2 回應不是合法 JSON 時既有的共用函式仍寫出整個 body，以及兩句錯誤訊息的措辭；N-3 daemon 測試在測試行程被訊號終止時會留下子行程、沿用呼叫端的 proxy 設定、不釘住第一輪的時間點。
+     - **全量檢查**：`cargo test` 41 個套件、608 項通過、0 失敗；`cargo clippy --all-targets -- -D warnings` 無警告；`cargo fmt --all -- --check` 通過；`scripts/test-docker-runtime.sh` 通過。
 
 ## 測試策略
 
