@@ -44,3 +44,14 @@ Wukong 持有 scope、memory、orchestration 與 lifecycle；OpenCode 為 execut
 真實 OpenCode 1.18.31 的 permission 對照：明確 deny 時 bash 不在可用工具中、檔案副作用不存在；ask 加既有部署旗標時工具成功且檔案內容為 `CLI_PERMISSION_PROBE`；ask 不帶旗標時 tool state 為 error、stderr 明確 auto-reject、沒有檔案且正常退出。三者都有 exit 0，故不能只用 exit code 判定工具權限成功。可重跑的探針與四入口證據見 implementation-plan.md。
 
 程式盤點發現的 EOF deadline、drop child 與 CLI 串流入口丟棄 fallback 已依 Task 1.2／1.3 重現並最小修補。CLI question 回覆與 server 工具／session 管理差異保留，沒有藉本 issue 重設 adapter。
+
+## 互動要求與控制通道查核（2026-10-03）
+
+使用者明確要求「Cli 也要支援互動問答才行」，因此非互動降級不是交付方案。以下查核固定 OpenCode `v1.18.31` 官方原始碼，尚未取得新路徑的真實問答證據。
+
+- [run.ts](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/opencode/src/cli/cmd/run.ts)：非互動 session 建立時加入 question deny；stdin 讀至 EOF 後才執行。`--interactive` 宣告未用於 handler 的互動判定；實際 mini 模式要求 TTY 且不允許 JSON 格式。`--port` 不能據此推論 run 暴露 HTTP 回覆端點，local SDK 使用 in-process fetch。
+- [ACP event.ts](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/opencode/src/acp/event.ts)：轉送 message 及 permission 事件，沒有 question 事件分支。ACP stdio 的 requestPermission 不能直接替代多問題／多選／自訂文字的 question reply。
+- [ACP registry.ts](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/opencode/src/tool/registry.ts)：question 工具的預設啟用 client 清單未包含 acp；另有旗標可啟用，但不能因此宣稱已有 reply 通道。
+- [ACP command](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/opencode/src/cli/cmd/acp.ts)：啟動 HTTP listener 並建立 SDK，再處理 stdio ACP；故它也不是完全沒有本機 HTTP 的程序。尚未實測其 HTTP 問答與生命週期，不採用名稱作為等價證據。
+
+2026-10-03 已提出兩種有實質維護差異的方向：每回合管理本機控制程序，或維護純 run 的 OpenCode 修改版。前者避免常駐獨立服務，但仍使用本機控制 API；後者要修改第三方協定與出貨版本。執行路徑決策待 README 的 TBD-2，不先更動 Gateway 或部署。

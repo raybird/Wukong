@@ -19,7 +19,7 @@
 | 一般程序 | 未設 server URL 即使用 CLI | 維持 |
 | Docker Web／Telegram／Scheduler | URL 與 depends_on 預設要求 server | 證據成立後預設 CLI |
 | server adapter | 支援互動 question／permission 回覆與 session 管理 | 保留顯式啟用 |
-| CLI 互動策略 | 無回覆通道 | 等待 TBD-1 決定 |
+| CLI 互動策略 | 無回覆通道 | 必須支援互動問答；控制通道待 TBD-2 決定 |
 
 ## 涉及檔案
 
@@ -107,12 +107,22 @@ Feature: 可驗證的 CLI-first execution
     Given 完整交付版本
     When 執行 cargo test 與 cargo clippy --all-targets -- -D warnings
     Then 所有測試通過且沒有 lint 警告
+
+  @SCN-010
+  Scenario: CLI backend 保留互動問答
+    Given 使用者從互動入口執行 CLI backend 回合
+    When Agent 提出 question
+    Then 使用者可看到問題並回答或取消
+    And 回覆送回原回合且 Agent 能繼續完成
+    And 不同回合的問題與答案不交叉
 ```
 
 ## Gherkin 核准紀錄
 
 - **核准 commit**: 9935708
-- **核准來源**: 2026-10-03 使用者 `/dev-cycle issue:7` 指向既有 issue 範圍；引用 issue 原文：「server backend 暫時保留為 optional / fallback」、「僅在上述證據成立後」切換預設。SCN-004 與 SCN-007 的策略相依尚未核准，不能實作切換。
+- **核准來源**: 2026-10-03 使用者 `/dev-cycle issue:7` 指向既有 issue 範圍；引用 issue 原文：「server backend 暫時保留為 optional / fallback」、「僅在上述證據成立後」切換預設。
+- **SCN-010 修訂核准 commit**: 待提交。
+- **SCN-010 核准來源**: 2026-10-03 使用者明確要求：「Cli 也要支援互動問答才行」。不接受以非互動降級作為 CLI 等價證據。SCN-004／007 的控制通道相依待 TBD-2 決定。
 
 | Scenario | 核准日期 | 狀態 |
 |---|---|---|
@@ -125,6 +135,7 @@ Feature: 可驗證的 CLI-first execution
 | SCN-007 | - | 待核准 |
 | SCN-008 | 2026-10-03 | 已核准 |
 | SCN-009 | 2026-10-03 | 已核准 |
+| SCN-010 | 2026-10-03 | 已核准 |
 
 ## 風險與首要驗證
 
@@ -138,16 +149,18 @@ Feature: 可驗證的 CLI-first execution
 
 | 編號 | 事項 | 狀態 | 影響 |
 |---|---|---|---|
-| TBD-1 | CLI 沒有 question／permission 回覆通道。2026-10-03 已詢問是否接受 CLI 非互動、保留 deny，互動需求顯式使用 server | 待確認 | SCN-004／007；未回答前不切預設或擴大自動允許權限 |
+| TBD-1 | 2026-10-03 使用者要求 CLI 也支援互動問答，非互動降級方案不採用 | 已解決 | 新增 SCN-010；切換前必須取得互動證據 |
+| TBD-2 | OpenCode 1.18.31 的 run 禁止 question；ACP 未轉送 question。2026-10-03 已提出每回合本機控制程序或維護純 run 的 OpenCode 修改版兩個方案，等待執行路徑與維護責任決策 | 待確認 | SCN-004／007／010；保留既有部署，先完成可用通道契約驗證 |
 
 ## Timeline
 
 | 日期 | 異動 | 負責人 |
 |---|---|---|
 | 2026-10-03 | 從 issue 7 建立範圍與計畫；確認 server-only 互動需決策 | Codex |
+| 2026-10-03 | 使用者要求 CLI 保留互動問答；新增 SCN-010，查核固定版本 run／ACP 控制通道 | Codex |
 
 ---
 **建立日期**: 2026-10-03
 **分級**: Large — 四入口與部署跨模組驗證
 **風險**: High
-**狀態**: CLI 能力驗證完成；等待互動策略決策，尚未切換部署
+**狀態**: 非互動能力驗證完成；互動問答為必要條件，控制通道方案待決定，尚未切換部署

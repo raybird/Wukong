@@ -4,7 +4,7 @@
 
 ## 設計與使用方式
 
-維持 `AiBackend` 與 runtime 公開契約；以 CLI 現有 JSON stream 支援 scope session／progress，最小修補經重現的程序收尾問題。部署切換僅移除預設 server 依賴，保留非空 URL 的 server 路徑。權限與 question 策略尚未決定，不先實作新的允許策略。
+維持 `AiBackend` 與 runtime 公開契約；既有 JSON stream 的非互動證據保留。2026-10-03 使用者要求 CLI 也支援互動問答，因此需先驗證新的雙向控制通道；不以現有純文字測試宣稱互動等價。部署切換依完整互動證據，保留非空 URL 的 server 路徑。
 
 ## Phase 1 — 基線與 CLI 能力證據
 
@@ -53,9 +53,19 @@
   - `cargo clippy -p wukong-gateway -p wukong-runtime -p wukong-scheduler --all-targets -- -D warnings`、`cargo fmt --all -- --check`、`git diff --check` exit 0。
   - code-simplify：production 改動已為 builder 開關與既有 deadline 共用，no-op；沒有為此重構無關模組。取消測試保障直接 agent child，未宣稱涵蓋任意工具自行 daemonize 的孫程序。
 
-## Phase 2 — 條件式 CLI-first 切換
+## Phase 2 — 互動能力與條件式 CLI-first 切換
 
-SCN-004、SCN-007 尚待 TBD-1；不建立可執行 Task。取得決策後在本節補非互動策略驗證與兩份 Compose／entrypoint／env／操作文件切換 Task；相依為 Phase 1 必要證據全數成立。
+### Task 2.1 — CLI 雙向問答契約與整合
+
+- 產出與範圍：固定版本官方控制通道查核、真實 question／reply／cancel 探針；方案成立後才修改 Gateway 與互動入口。
+- 相依：SCN-010 規格提交；涉及執行路徑的實作相依 TBD-2 決策。
+- 驗收編號：SCN-010。
+- 完成判準：CLI、Web、Telegram 的問題可回答或取消，回覆不跨回合；具真實 OpenCode 工具執行結果，不能只測偽造 question 事件。
+- 驗證：先查外部契約，再跑隔離資料的真實工具問答與各入口；對照回答、取消與錯誤／逾時清理。Scheduler 權限由後續 SCN-004 Task 負責。
+- 狀態：⏳ 進行中（2026-10-03；唯讀契約查核已完成，尚未實作）。
+- 證據：requirement-analysis.md「互動要求與控制通道查核」。run 禁止 question，ACP 未轉送 question；尚無可直接採用的完整純 stdio 通道，不將原始碼查核寫成真實問答通過。
+
+SCN-004、SCN-007 的控制通道仍待 TBD-2；不建立其可執行 Task。決策成立後補 Scheduler Reject／AllowOnce 與一般 question 的有界處置驗證，以及兩份 Compose／entrypoint／env／操作文件切換 Task；部署相依 Phase 1 與 Task 2.1 必要證據成立。
 
 ## Phase 3 — 相容與交付驗證
 
@@ -70,14 +80,14 @@ SCN-004、SCN-007 尚待 TBD-1；不建立可執行 Task。取得決策後在本
 
 ## 檢查清單
 
-- [x] SCN-001／002／003／005／006／008／009 各有唯一責任 Task；待核准 SCN 不派可執行 Task。
+- [x] SCN-001／002／003／005／006／008／009／010 各有唯一責任 Task；待核准 SCN 不派可執行 Task。
 - [x] 先查權限與 adapter 契約，再做入口切片與條件式切換。
-- [ ] 所有必要證據成立、TBD-1 已決定。
+- [ ] 所有必要證據成立、TBD-2 已決定（TBD-1 已於 2026-10-03 決定必須保留互動）。
 - [ ] 交付文件、commit、PR 與獨立 review 使用同一固定範圍。
 
 ## 工作區交付檢查（2026-10-03）
 
-Task 1.1／1.2／1.3 已完成；Phase 2 尚待 TBD-1。SCN-008 的顯式 server 選擇仍維持原程式，部署 opt-in 與全量交付有效性由 Task 3.1 在切換後驗證。
+Task 1.1／1.2／1.3 已完成；2026-10-03 新增的 Task 2.1 尚未完成，Phase 2 切換尚待 TBD-2。SCN-008 的顯式 server 選擇仍維持原程式，部署 opt-in 與全量交付有效性由 Task 3.1 在切換後驗證。
 
 - 最終 production code 與新增測試：`cargo test` exit 0，全部 workspace 測試通過；`cargo clippy --all-targets -- -D warnings` 首輪指出新 CLI 測試不必要的右側參照，改成等價比較後 exit 0。此修改只有比較表達式，CLI 整合 2 項另重跑；其餘全量結果可重用。
 - 已保存的 `python3 docs/issues/issue-0007/probe-opencode.py` exit 0；permission 3 組、session 3 回合對照與真實 OpenCode 四入口共 5 項均通過。最終續接 session 為 `ses_efe5a176affeQr3vl0lvWd5Ofc`；新 session 對照為 `ses_efe5a0b07ffec2ThOuHhsL22We`。
