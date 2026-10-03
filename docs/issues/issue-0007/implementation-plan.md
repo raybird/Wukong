@@ -62,9 +62,9 @@
 - 驗收編號：SCN-010。
 - 完成判準：CLI、Web、Telegram 的問題可回答或取消，回覆不跨回合；具真實 OpenCode 工具執行結果，不能只測偽造 question 事件。
 - 驗證：先查外部契約，再跑隔離資料的真實工具問答與各入口；對照回答、取消與錯誤／逾時清理。Scheduler 權限由後續 SCN-004 Task 負責。
-- 狀態：⏳ 進行中（2026-10-03；唯讀契約查核已完成，尚未實作）。
-- 證據：requirement-analysis.md「互動要求與控制通道查核」。run 禁止 question，ACP 未轉送 question；尚無可直接採用的完整純 stdio 通道，不將原始碼查核寫成真實問答通過。
-- 規格提交：2026-10-03 `c25fb47`；新增 SCN-010 已依使用者原話核准。文件核對 Scenario 與表格集合一致、SCN-010 唯一責任 Task 為 2.1，`git diff --check` 通過；本次未修改產品程式，不重跑程式測試。
+- 狀態：✅ 已完成（2026-10-04）。
+- 證據：[verification.md](verification.md)「真實 OpenCode 四入口」及紅綠紀錄；1.18.31 的 CLI／Web／Telegram 真實工具問答、回答／取消、多選、自訂、非串流、EOF、跨程序 provider 歷史、並行路由與 drop 清理皆通過。官方控制通道與方案比較見 technical-analysis.md。
+- 規格提交：2026-10-03 `335f987`（涵蓋使用者互動與按需控制程序要求）；在產品切換前已提交。SCN-010 唯一責任 Task 為 2.1。
 
 ### Task 2.2 — 無人值守處置
 
@@ -73,7 +73,8 @@
 - 驗收編號：SCN-004。
 - 完成判準：Reject 無工具副作用、AllowOnce 可執行且不永久授權、一般 question 拒絕；回覆失敗與逾時不留程序。
 - 驗證：真實 OpenCode 許可工具對照與 executor 整合，測試實際副作用及退出，不只看回傳碼。
-- 狀態：📝 待實作。
+- 狀態：✅ 已完成（2026-10-04）。
+- 證據：[verification.md](verification.md)「真實 OpenCode 四入口」：Reject／AllowOnce 各兩回合工具副作用對照、每回合新的權限 request，一般 question 在兩種策略下都以 que_ 路由拒絕；既有回覆失敗重試／中止 regression 隨全量通過。
 
 ### Task 2.3 — 部署改為閒置無控制程序
 
@@ -82,7 +83,8 @@
 - 驗收編號：SCN-007。
 - 完成判準：容器真實回合含問答可完成、續接 session；收尾後 PID 與埠消失，閒置沒有 opencode 控制程序；服務限制承擔本機執行成本。
 - 驗證：Compose 展開加 Docker 真實程序／session／問答測試、錯誤及逾時回收；不以配置文字宣稱資源已釋放。
-- 狀態：📝 待實作。
+- 狀態：✅ 已完成（2026-10-04）。
+- 證據：[verification.md](verification.md)「Docker 真實 binary 驗證」「Compose 與升級」：5 個 CLI、2 個 REPL、逾時與 2 個 server opt-in 回合；19 程序退出、控制埠關閉。預設三入口無 server 相依，init／限制與 Memoria 掛載生效；舊 profile 容器須 stop 的實測及 installer 紅綠已保存。
 
 ## Phase 3 — 相容與交付驗證
 
@@ -93,16 +95,17 @@
 - 驗收編號：SCN-008、SCN-009。
 - 完成判準：非空 URL 仍選 server；部署 opt-in 可用；cargo test、cargo clippy --all-targets -- -D warnings、format 與 Docker runtime 檢查通過。
 - 驗證：backend 選擇與 Compose 展開／啟動分別驗證；交付 HEAD 全量測試。依 code-simplify 審查本次變更一次，no-op 時記理由。
-- 狀態：📝 待實作。
+- 狀態：✅ 已完成（2026-10-04）。
+- 證據：[verification.md](verification.md)：全量 618 passed／0 failed／9 ignored，9 個 ignored 真實 fixture 已另跑全綠；clippy／format／shell／Docker runtime／installer 全綠；非空 URL 對不可執行 agent command 的真實回合仍選 server。code-simplify no-op 與限制明列。
 
 ## 檢查清單
 
 - [x] SCN-001 至 SCN-010 各有唯一責任 Task。
 - [x] 先查權限與 adapter 契約，再做入口切片與條件式切換。
-- [ ] 所有必要證據成立（TBD-1／2 已於 2026-10-03 解決）。
+- [x] 所有必要證據成立（TBD-1／2 已於 2026-10-03 解決）。
 - [ ] 交付文件、commit、PR 與獨立 review 使用同一固定範圍。
 
-## 工作區交付檢查（2026-10-03）
+## Phase 1 歷史交付檢查（2026-10-03）
 
 Task 1.1／1.2／1.3 已完成；2026-10-03 Task 2.1／2.2／2.3 尚未完成。SCN-008 的顯式 server 選擇仍維持原程式，部署 opt-in 與全量交付有效性由 Task 3.1 在切換後驗證。
 
@@ -112,3 +115,9 @@ Task 1.1／1.2／1.3 已完成；2026-10-03 Task 2.1／2.2／2.3 尚未完成。
 - 精煉：Web 測試刪除無作用的區塊；production code 保留最小修補。保存探針只做 AST 相同的排版，再實際重跑全套真實探針通過。
 
 尚未建立 PR、未執行獨立審查、未合併；不以能力證據宣稱 CLI-first 完成。
+
+## 最終交付檢查（2026-10-04）
+
+Task 2.1／2.2／2.3／3.1 的完成證據保存於 verification.md，Phase 1 原證據保留。SCN-001 至 SCN-010 全部核准且責任映射未變；常青部署／入口文件與技術取捨已對齊。未做瀏覽器 UI、外部 Telegram 傳輸、真實 cron 等候、完整 release image 重建或長期壓力；不以這些未執行項目宣稱通過。
+
+目前完成實作與交付驗證；提交、PR 與獨立 review 由 dev-cycle 接續，不自行合併。

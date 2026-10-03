@@ -1,13 +1,17 @@
 # Release deployment template. Packaging replaces __WUKONG_VERSION__ with the product tag.
 services:
   wukong:
+    init: true
     profiles: ["cli"]
     image: ghcr.io/raybird/wukong:__WUKONG_VERSION__
     container_name: wukong-cli
     environment:
       - USER_ID=${USER_ID:-1000}
       - GROUP_ID=${GROUP_ID:-1000}
-      - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run --dangerously-skip-permissions}
+      - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run}
+      - WUKONG_AGENT_SERVER_URL=${WUKONG_AGENT_SERVER_URL:-}
+      - WUKONG_AGENT_SERVER_FILE_MODE=${WUKONG_AGENT_SERVER_FILE_MODE:-shared}
+      - WUKONG_AGENT_SERVER_WORKSPACE=${WUKONG_AGENT_SERVER_WORKSPACE:-/workspace}
       - WUKONG_AGENT_TIMEOUT_SECS=${WUKONG_AGENT_TIMEOUT_SECS:-1200}
       - WUKONG_WORKSPACE=/workspace
       - WUKONG_MEMORY_DB=sqlite:///data/memory.db
@@ -25,14 +29,13 @@ services:
     stdin_open: true
     tty: true
     command: ["wukong"]
-    # This profile has no WUKONG_AGENT_SERVER_URL, so it runs `opencode run` inside
-    # its OWN container rather than talking to opencode-server. It therefore needs
-    # agent-sized limits, not the smaller client-side ones the other services get.
+    # 2026-10-03: local OpenCode control processes run only during execution.
     cpus: "${WUKONG_OPENCODE_CPUS:-1.5}"
     mem_limit: "${WUKONG_OPENCODE_MEM:-2g}"
     pids_limit: ${WUKONG_OPENCODE_PIDS:-256}
 
   opencode-server:
+    profiles: ["server"]
     image: ghcr.io/raybird/wukong:__WUKONG_VERSION__
     container_name: wukong-opencode-server
     environment:
@@ -75,8 +78,7 @@ services:
     pids_limit: ${WUKONG_OPENCODE_PIDS:-256}
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:4096/global/health || exit 1"]
-      # Three services wait for this container to report healthy before they start,
-      # so the first probe must stay fast — that is what start_interval is for.
+      # 2026-10-03: the optional server uses fast startup health probes.
       # Steady-state probing relaxes
       # to 30s: at 2s this forked a shell+curl inside this container's cgroup ~43k
       # times a day, and that CPU lands in `docker stats` where it reads as opencode's
@@ -88,13 +90,14 @@ services:
       start_interval: 2s
 
   wukong-telegram:
+    init: true
     image: ghcr.io/raybird/wukong:__WUKONG_VERSION__
     container_name: wukong-telegram
     environment:
       - USER_ID=${USER_ID:-1000}
       - GROUP_ID=${GROUP_ID:-1000}
-      - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run --dangerously-skip-permissions}
-      - WUKONG_AGENT_SERVER_URL=${WUKONG_AGENT_SERVER_URL:-http://opencode-server:4096}
+      - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run}
+      - WUKONG_AGENT_SERVER_URL=${WUKONG_AGENT_SERVER_URL:-}
       - WUKONG_OPENCODE_SESSION_RETENTION_DAYS=${WUKONG_OPENCODE_SESSION_RETENTION_DAYS-30}
       - WUKONG_AGENT_TIMEOUT_SECS=${WUKONG_AGENT_TIMEOUT_SECS:-1200}
       - WUKONG_WORKSPACE=/workspace
@@ -112,16 +115,14 @@ services:
       - gh-config:/home/wukong/.config/gh
       - wukong-data:/data
     command: ["wukong-telegram"]
-    depends_on:
-      opencode-server:
-        condition: service_healthy
     restart: unless-stopped
-    # Talks to opencode-server over HTTP, so the heavy work happens there, not here.
-    cpus: "${WUKONG_SVC_CPUS:-0.5}"
-    mem_limit: "${WUKONG_SVC_MEM:-768m}"
-    pids_limit: ${WUKONG_SVC_PIDS:-128}
+    # 2026-10-03: local agent work uses this container's resource limits.
+    cpus: "${WUKONG_SVC_CPUS:-1.5}"
+    mem_limit: "${WUKONG_SVC_MEM:-2g}"
+    pids_limit: ${WUKONG_SVC_PIDS:-256}
 
   wukong-web:
+    init: true
     image: ghcr.io/raybird/wukong:__WUKONG_VERSION__
     container_name: wukong-web
     ports:
@@ -129,8 +130,8 @@ services:
     environment:
       - USER_ID=${USER_ID:-1000}
       - GROUP_ID=${GROUP_ID:-1000}
-      - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run --dangerously-skip-permissions}
-      - WUKONG_AGENT_SERVER_URL=${WUKONG_AGENT_SERVER_URL:-http://opencode-server:4096}
+      - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run}
+      - WUKONG_AGENT_SERVER_URL=${WUKONG_AGENT_SERVER_URL:-}
       - WUKONG_OPENCODE_SESSION_RETENTION_DAYS=${WUKONG_OPENCODE_SESSION_RETENTION_DAYS-30}
       - WUKONG_AGENT_TIMEOUT_SECS=${WUKONG_AGENT_TIMEOUT_SECS:-1200}
       - WUKONG_WORKSPACE=/workspace
@@ -149,14 +150,11 @@ services:
       - gh-config:/home/wukong/.config/gh
       - wukong-data:/data
     command: ["wukong-web"]
-    depends_on:
-      opencode-server:
-        condition: service_healthy
     restart: unless-stopped
-    # Talks to opencode-server over HTTP, so the heavy work happens there, not here.
-    cpus: "${WUKONG_SVC_CPUS:-0.5}"
-    mem_limit: "${WUKONG_SVC_MEM:-768m}"
-    pids_limit: ${WUKONG_SVC_PIDS:-128}
+    # 2026-10-03: local agent work uses this container's resource limits.
+    cpus: "${WUKONG_SVC_CPUS:-1.5}"
+    mem_limit: "${WUKONG_SVC_MEM:-2g}"
+    pids_limit: ${WUKONG_SVC_PIDS:-256}
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8787/healthz || exit 1"]
       interval: 30s
@@ -165,13 +163,14 @@ services:
       start_period: 10s
 
   wukong-schedulerd:
+    init: true
     image: ghcr.io/raybird/wukong:__WUKONG_VERSION__
     container_name: wukong-schedulerd
     environment:
       - USER_ID=${USER_ID:-1000}
       - GROUP_ID=${GROUP_ID:-1000}
-      - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run --dangerously-skip-permissions}
-      - WUKONG_AGENT_SERVER_URL=${WUKONG_AGENT_SERVER_URL:-http://opencode-server:4096}
+      - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run}
+      - WUKONG_AGENT_SERVER_URL=${WUKONG_AGENT_SERVER_URL:-}
       - WUKONG_AGENT_TIMEOUT_SECS=${WUKONG_AGENT_TIMEOUT_SECS:-1200}
       - WUKONG_WORKSPACE=/workspace
       - WUKONG_MEMORY_DB=sqlite:///data/memory.db
@@ -196,16 +195,13 @@ services:
       - gh-config:/home/wukong/.config/gh
       - wukong-data:/data
     command: ["wukong-schedulerd"]
-    depends_on:
-      opencode-server:
-        condition: service_healthy
     restart: unless-stopped
-    # Talks to opencode-server over HTTP, but also runs memory maintenance locally.
+    # 2026-10-03: agent turns and memory maintenance both run locally.
     # Raise WUKONG_SVC_MEM if you turn on WUKONG_EMBED=1 here — the local embedding
-    # model is loaded in this process, not in opencode-server.
-    cpus: "${WUKONG_SVC_CPUS:-0.5}"
-    mem_limit: "${WUKONG_SVC_MEM:-768m}"
-    pids_limit: ${WUKONG_SVC_PIDS:-128}
+    # model is loaded in this process.
+    cpus: "${WUKONG_SVC_CPUS:-1.5}"
+    mem_limit: "${WUKONG_SVC_MEM:-2g}"
+    pids_limit: ${WUKONG_SVC_PIDS:-256}
 
 volumes:
   opencode-config:

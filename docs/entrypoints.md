@@ -4,7 +4,7 @@
 
 ## opencode session 控制
 
-- **Session 接續**：預設以**每 scope 持久的 opencode session** 接續對話（透過 `-s <id>` 顯式指定並從 JSON 擷取），並預設帶入 `--thinking` 思考過程。
+- **Session 接續**：預設以**每 scope 持久的 opencode session** 接續對話（本機／server 以 session API，純 CLI 以 `-s <id>`），並預設帶入 `--thinking` 思考過程。
 - **清除上下文 (`/new`)**：在 REPL、Telegram 或 Web 輸入 `/new` 可以清空該 scope 的 session 以開啟全新對話；一次性 CLI 則可使用 `wukong --new "…"`。
 - **會話壓縮 (`/compact`)**：支援將 `/compact` passthrough 給當前 session（適用於 REPL、Telegram 與 Web）。
 - **停用思考過程**：使用 `--no-thinking` 參數或設定環境變數 `WUKONG_THINKING=0` 可關閉思考過程顯示。
@@ -14,14 +14,15 @@
   - **Web**：以可折疊的「💭 思考過程」區塊呈現。
   - *注意：此功能僅在模型輸出明文推理時生效（例如 OpenAI 系推理模型的推理過程如為加密傳輸則無法顯示）。*
 
-### 兩種 agent backend 的串流行為差異
+### Agent backend 與問答（2026-10-04）
 
-Wukong 有兩條底層 agent 路徑，回答文字的串流方式**刻意不同**：
+預設 `WUKONG_AGENT_CMD="opencode run"` 且沒有非空 `WUKONG_AGENT_SERVER_URL` 時，每次執行啟動監聽 loopback 可用埠的 OpenCode 控制程序，收尾後退出。session 保存在 OpenCode 資料庫，可跨程序接續；CLI／REPL、Web 與 Telegram 都能回答或取消工具問答。
 
-- **CLI backend（`opencode run`，預設）**：逐字（token）串流回答文字，`StreamEvent::Text` 即時吐出。
-- **Server backend（`opencode serve`，設 `WUKONG_AGENT_SERVER_URL`）**：**不**串流回答文字的增量；只即時串流 `reasoning`／`tool`／`step` 活動。最終回答文字在該回合結束時，經 `list_messages` 一次性取回（`opencode_server.rs::extract_latest_assistant_text`）。這是刻意設計——server 事件流的 `text` part 若也逐段吐出，會與收尾的整段抓取**重複渲染**。
+CLI 顯示選項編號，輸入編號或選項文字回答；多選用逗號分隔，允許自訂答案時可直接輸入文字。`/cancel` 或 stdin EOF 取消問題，`--no-stream` 也保留問答。REPL 的問題與對話共用同一個 stdin reader。
 
-因此在 server backend 下，使用者會即時看到「思考過程／工具活動」，但**完整答案於收尾一次顯示**（非逐字浮現）。此為預期行為，非缺陷。
+本機控制程序與顯式 server backend 共用事件轉接：即時顯示 reasoning／tool／step 活動，完整回答於回合結束時取回並顯示一次。任意自訂 CLI 命令或帶額外 run 旗標的命令沿用 subprocess backend，依命令的 JSON Text 事件輸出，沒有問題回覆控制通道。模型旗標由 Wukong 設定解析後隨每次請求傳入。
+
+設定非空 `WUKONG_AGENT_SERVER_URL` 會選用既有 server adapter；預設本機模式不會建立永久背景 daemon。
 
 ## Telegram bot（選用）
 
@@ -31,7 +32,7 @@ Wukong 有兩條底層 agent 路徑，回答文字的串流方式**刻意不同*
 - **格式渲染**：最終答案會經由 `wukong-render` 渲染為 Telegram 支援的 HTML 格式（支援粗體、程式碼區塊、表格自動降級呈現）。
 - **上傳與接續操作**：支援 Telegram `document`／`photo`（單檔 25 MiB、每則最多 5 份）。第一次上傳會把文字與 file part 一起送入目前 OpenCode session；後續可直接文字追問。回覆先前的檔案訊息會重新帶入該附件；上傳新檔並回覆舊檔可比較兩份。
 - **原檔、工作副本、回傳產物分離**：原始檔保存於 `.wukong/uploads`，OpenCode 實際操作 `.wukong/workfiles` 的副本；要求「修改後傳回」時，成品寫入該回合專屬 `.wukong/artifacts`，Wukong 再以 Telegram document 回傳。
-- **權限互動**：server backend 收到 OpenCode `permission.asked` 時會顯示「允許一次／本次工作階段總是允許／拒絕」按鈕；取消或逾時會拒絕該請求。
+- **權限互動**：本機／server backend 收到 OpenCode `permission.asked` 時會顯示「允許一次／本次工作階段總是允許／拒絕」按鈕；取消或逾時會拒絕該請求。
 - **建立並回送排程**：可直接用自然語言請助手建立定時任務（見 [CLI 參考 — 用自然語言建立排程](cli-reference.md#用自然語言建立排程telegram--對話)）；之後 `wukong-schedulerd` 觸發時，會把該回合結果主動推回原聊天室。傳輸層由共用的 `wukong-tg-client` crate 提供，daemon 與 bot 共用同一個 `WUKONG_TG_TOKEN`。
 
 沒有共享檔案系統的遠端 `opencode serve` 可設 `WUKONG_AGENT_SERVER_FILE_MODE=inline`，附件會以 data URL 傳送且單檔限制 10 MiB；遠端 inline 模式無法由 OpenCode 寫回本機 artifact 目錄，因此不提供自動檔案回傳。

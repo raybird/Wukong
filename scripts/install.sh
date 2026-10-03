@@ -583,6 +583,17 @@ PY
     write_binary_metadata "$components_json" "$services_json" "$current_backup" "$(metadata_product_tag)" "$installed_at"
 }
 
+# 2026-10-03：停用 profile 不會停止舊容器；只停止同 project 未啟用的 server。
+activate_docker_services() {
+    local active available
+    active="$(docker compose -p "$DOCKER_PROJECT_NAME" config --services)" || return
+    available="$(docker compose -p "$DOCKER_PROJECT_NAME" --profile server config --services)" || return
+    if ! grep -Fxq opencode-server <<< "$active" && grep -Fxq opencode-server <<< "$available"; then
+        docker compose -p "$DOCKER_PROJECT_NAME" --profile server stop opencode-server || return
+    fi
+    docker compose -p "$DOCKER_PROJECT_NAME" up -d --force-recreate
+}
+
 install_docker() {
     skip_current_upgrade
     command -v docker >/dev/null 2>&1 || abort "Docker is required"
@@ -616,11 +627,11 @@ install_docker() {
     [[ "$actual" == "$expected" ]] || abort "pulled image digest does not match release manifest"
     for file in "${DOCKER_RELEASE_OWNED[@]}"; do mkdir -p "$(dirname "$file")"; cp "$stage/wukong-docker/$file" "$file"; done
     [[ -f .env ]] || cp .env.example .env
-    if ! docker compose -p "$DOCKER_PROJECT_NAME" up -d --force-recreate || ! docker compose -p "$DOCKER_PROJECT_NAME" ps >/dev/null; then
+    if ! activate_docker_services || ! docker compose -p "$DOCKER_PROJECT_NAME" ps >/dev/null; then
         # A failed recreation must not leave release-owned files or metadata advanced.
         if [[ -n "$backup" ]]; then
             for file in "${DOCKER_RELEASE_OWNED[@]}"; do [[ ! -f "$backup/$file" ]] || cp -p "$backup/$file" "$file"; done
-            docker compose -p "$DOCKER_PROJECT_NAME" up -d --force-recreate || true
+            activate_docker_services || true
         else
             for file in "${DOCKER_RELEASE_OWNED[@]}"; do rm -f "$file"; done
         fi
@@ -650,7 +661,7 @@ PY
     current_backup=".wukong-backups/${version}-rollback-$(date +%s)"; mkdir -p "$current_backup"
     for file in "${DOCKER_RELEASE_OWNED[@]}"; do [[ ! -f "$file" ]] || { mkdir -p "$current_backup/$(dirname "$file")"; cp -p "$file" "$current_backup/$file"; }; [[ ! -f "$backup/$file" ]] || cp -p "$backup/$file" "$file"; done
     docker compose -p "$DOCKER_PROJECT_NAME" pull
-    docker compose -p "$DOCKER_PROJECT_NAME" up -d --force-recreate
+    activate_docker_services
     docker compose -p "$DOCKER_PROJECT_NAME" ps >/dev/null
     write_json_atomically .wukong-release "$(python3 - "$version" "$digest" "$current_backup" "$current_version" "$current_digest" "$DOCKER_PROJECT_NAME" <<'PY'
 import json,sys

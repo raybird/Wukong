@@ -10,13 +10,15 @@
 - [implementation-plan.md](implementation-plan.md)：唯一任務來源與驗證證據。
 - [probe-opencode.py](probe-opencode.py)：隔離真實 OpenCode 契約與四入口探針。
 
-尚未建立 technical-analysis.md：方案尚未決定；若互動策略產生實質取捨，決定後補記。
+- [technical-analysis.md](technical-analysis.md)：按需本機控制程序的決策與邊界。
+- [verification.md](verification.md)：2026-10-04 交付驗證與限制。
+- [probe-managed.py](probe-managed.py)：真實 OpenCode 問答、入口與 Docker 探針。
 
 ## 關鍵差異
 
 | 項目 | 現況 | 目標 |
 |---|---|---|
-| 一般程序 | 未設 server URL 即使用 CLI | 維持 |
+| 一般程序 | 未設 server URL 即使用 CLI | 一般 opencode run 按需啟動控制程序；自訂命令維持純 CLI |
 | Docker Web／Telegram／Scheduler | URL 與 depends_on 預設要求 server | 證據成立後預設 CLI |
 | server adapter | 支援互動 question／permission 回覆與 session 管理 | 保留顯式啟用 |
 | 本機執行互動策略 | 純 run 無回覆通道 | 每回合啟動本機 server API 控制程序，結束後回收 |
@@ -27,15 +29,19 @@
 crates/
 ├── wukong-cli/src/main.rs             # 完全沒有串流文字時輸出 runtime fallback
 ├── wukong-cli/tests/cli_backend.rs    # 真正 binary、scope 與記憶驗證
-├── wukong-gateway/src/backend.rs       # CLI 程序生命週期與測試
+├── wukong-gateway/src/backend.rs       # backend 選擇與 CLI 程序生命週期
+├── wukong-gateway/src/local_process.rs # 按需控制程序與問答路由
+├── wukong-gateway/src/opencode_server.rs # 本機 adapter 的設定與官方 question endpoint
 ├── wukong-runtime/                    # CLI session／記憶／末棒整合驗證
 ├── wukong-web/                        # 真實 HTTP／SSE 入口驗證
 ├── wukong-telegram/                   # 訊息 dispatch 入口驗證
 └── wukong-scheduler/                  # 無人值守入口驗證
 docker-compose{,.release}.yml          # 條件成立後調整預設與 server opt-in
-scripts/docker-entrypoint.sh           # 必要的 CLI 權限與啟動設定
+docker-compose.memoria.yml             # runtime 掛到真正執行 agent 的各入口
+scripts/install.sh                     # 停止同 project 已停用的 server
 scripts/test-docker-runtime.sh         # 部署行為驗證
-scripts/test-support/cli_backend.rs     # 四入口共用的 subprocess fixture
+scripts/test-support/{cli_backend,managed_actual}.rs # 四入口共用 fixture
+scripts/test-installer-upgrade.sh       # profile 停用與 opt-in 升級對照
 .env.example                          # 部署參數
 docs/{docker,entrypoints}.md           # 使用與相容路徑
 docs/issues/issue-0007/                # 範圍與證據
@@ -122,7 +128,7 @@ Feature: 可驗證的 CLI-first execution
 
 ## Gherkin 核准紀錄
 
-- **核准 commit**: 待提交
+- **核准 commit**: 335f987
 - **核准來源**: 2026-10-03 使用者 `/dev-cycle issue:7` 指向既有 issue 範圍；引用 issue 原文：「server backend 暫時保留為 optional / fallback」、「僅在上述證據成立後」切換預設。
 - **SCN-004／007／010 核准來源**: 2026-10-03 使用者要求「Cli 也要支援互動問答才行」，查詢 Docker 每回合方案後說明「主要原本是一直啟用一個 server 會直接佔用資源」。依此採每回合本機 server API 程序，保留互動與既有排程權限策略，閒置回收；不是純 run 支援問答，也不新增自動放行權限。
 
@@ -152,7 +158,7 @@ Feature: 可驗證的 CLI-first execution
 | 編號 | 事項 | 狀態 | 影響 |
 |---|---|---|---|
 | TBD-1 | 2026-10-03 使用者要求 CLI 也支援互動問答，非互動降級方案不採用 | 已解決 | 新增 SCN-010；切換前必須取得互動證據 |
-| TBD-2 | 2026-10-03 使用者指出核心目的是避免常駐 server 佔用资源，採容器內每回合啟動本機 server API 程序、結束回收；不維護第三方修改版 | 已解決 | SCN-004／007／010；先驗證問答、續接與程序收尾，再切部署 |
+| TBD-2 | 2026-10-03 使用者指出核心目的是避免常駐 server 佔用資源，採容器內每回合啟動本機 server API 程序、結束回收；不維護第三方修改版 | 已解決 | SCN-004／007／010；先驗證問答、續接與程序收尾，再切部署 |
 
 ## Timeline
 
@@ -161,9 +167,10 @@ Feature: 可驗證的 CLI-first execution
 | 2026-10-03 | 從 issue 7 建立範圍與計畫；確認 server-only 互動需決策 | Codex |
 | 2026-10-03 | 使用者要求 CLI 保留互動問答；新增 SCN-010，查核固定版本 run／ACP 控制通道 | Codex |
 | 2026-10-03 | 使用者確認核心問題為常駐 server 資源佔用；規格改為每回合啟停本機控制程序 | Codex |
+| 2026-10-04 | 按需控制程序、CLI 問答與部署預設完成；真實四入口、Docker 及全量驗證通過，證據保存於 verification.md | Codex |
 
 ---
 **建立日期**: 2026-10-03
 **分級**: Large — 四入口與部署跨模組驗證
 **風險**: High
-**狀態**: 實作每回合本機控制程序；互動與資源回收待驗證，尚未切換部署
+**狀態**: 實作與交付驗證完成；準備 PR 與獨立審查

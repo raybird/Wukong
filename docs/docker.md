@@ -9,8 +9,8 @@
 - **opencode 設定與 session 隔離**：`~/.config/opencode` 與 `~/.local/share/opencode` 都存放在 Docker volume 中，不污染 host，且可跨容器升級保留 session
 - **UID/GID 對齊**：runtime user 與 host 一致，避免檔案權限問題
 - **預設 Web + Telegram + Scheduler**：`docker compose up -d` 會啟動 Web Console、Telegram Bot 與排程 daemon；CLI / REPL 透過被動 `run` 使用
-- **非互動權限處理**：Wukong 驅動 `opencode run` 時 stdin 永遠為空（CLI/Web/Telegram/Scheduler 皆然），opencode 無法回應互動式權限詢問。因此容器內 `WUKONG_AGENT_CMD` 預設帶 `--dangerously-skip-permissions`（自動核准詢問），並由 entrypoint 在缺檔時 seed 一份 `~/.config/opencode/opencode.json`：該旗標仍尊重 `deny` 規則，故內含一組黑名單擋下對絕對路徑的毀滅性遞迴刪除（`rm -rf /…`、`sudo rm`、家目錄等變形），同時放行 `/workspace` 內的刪除。這是 **防呆/防幻覺護欄而非資安牆**（glob 字串比對擋不住 `find -delete`、變數展開等繞法），真正的隔離邊界仍是 container 本身與 host 掛載目錄的範圍。要自訂規則，直接把你的 `opencode.json` 放進 `opencode-config` volume 即可覆蓋（缺檔才會 seed）。
-  - ⚠️ **該旗標只作用於 CLI backend**。Compose 預設走 `opencode serve`（見下節），而 `serve` 沒有對等旗標，所以對 Web／Telegram／Scheduler 而言 **`opencode.json` 是唯一的權限控制**。baseline 因此明確放行 `/tmp`（`external_directory` 預設為 `ask`，無人值守排程會卡在沒人回答的詢問上直到 stream deadline）。要放行其他路徑請逐項加入，不要改成整包 `"external_directory": "allow"`——它會套用到所有 path-based 工具。事故脈絡見 `docs/2026-08-06-docker-runtime-handover.md`。
+- **按需執行與互動（2026-10-04）**：預設每次執行在入口容器內啟動 OpenCode 控制程序，監聽 loopback 可用埠，完成、錯誤、逾時或取消後回收。CLI／REPL、Web、Telegram 都支援問答，排程依 Reject／AllowOnce 處理權限，一般問題一律拒絕。
+- **權限設定**：entrypoint 的 baseline 保留 destructive-rm denylist 與 `/tmp` 放行；自訂 allow／ask／deny 寫入 `user.json`。它是防呆護欄，隔離邊界仍是容器及 host 掛載目錄。
 
 ### opencode 設定分層（baseline / user）
 
@@ -28,19 +28,29 @@
 - **首次升級遷移**：若既有 `opencode.json` 是舊版 seed 出來的（沒有 `.wukong-baseline` 標記），entrypoint 會備份成 `opencode.json.pre-baseline.bak`，並把內容複製到 `user.json`，避免手改過的規則消失。想回到純預設，刪掉 `user.json` 再重啟即可。
 - **注意合併順序**：opencode 以「最後符合的規則勝出」解析權限，而兩個 rule 物件合併後，你的鍵落在順序中的哪個位置沒有保證。自訂規則請寫得具體、自足，不要依賴它與 baseline 規則的相對順序。
 
-## Docker 低延遲 opencode serve 模式
+## 按需執行與選用共用 server（2026-10-04）
 
-Docker 常駐服務預設會啟動 `opencode-server`，並讓 `wukong-web`、`wukong-telegram`、`wukong-schedulerd` 透過 `WUKONG_AGENT_SERVER_URL=http://opencode-server:4096` 呼叫同一個長壽命 `opencode serve` process。
+預設 `WUKONG_AGENT_CMD=opencode run`、`WUKONG_AGENT_SERVER_URL` 留空。Wukong 在需要執行時啟動本機 `opencode serve`，回合結束就停止；閒置時沒有 OpenCode 控制程序。session 與設定仍在既有 volumes 中，跨程序、容器升級都能續接。這個方案使用本機 HTTP 控制 API，並非純 `opencode run` 的 stdin 問答。
 
-這個模式保留 Wukong 的 scope-level session 管理，但避免每次回合都重新啟動 `opencode run`，可降低 Web、Telegram、Scheduler 等常駐入口的延遲感。
+`docker compose run --rm wukong` 可使用 REPL；問題輸入選項編號或文字，多選以逗號分隔，`/cancel` 或 EOF 取消。Web／Telegram 維持原問答介面。各入口現在自行執行 agent，預設上限為 1.5 CPU、2 GiB、256 PIDs；同時執行多個入口會累加資源需求，每次啟動也會增加延遲。
 
-Compose 中各服務與 `opencode-server` 共用 `/workspace`，所以附件預設以 OpenCode file part 的 `file:///workspace/...` 傳送。`WUKONG_AGENT_SERVER_FILE_MODE=shared` 會先確認附件 canonical path 仍位於 `WUKONG_WORKSPACE`，再依 `WUKONG_AGENT_SERVER_WORKSPACE` 映射 server 路徑。真正連到沒有共享目錄的遠端 server 時可改為 `inline`，以 Base64 data URL 傳送（單檔上限 10 MiB）；`disabled` 則明確停用 server 附件輸入。
+需要較低啟動延遲時，可在 `.env` 明確開啟共用 server：
 
-Server backend 也會把 OpenCode 權限要求送到 Telegram inline keyboard。Docker 預設 seed 的權限規則多數為 allow，因此只有自訂 `opencode.json` 將操作設為 `ask` 時才會看到確認按鈕。
+```dotenv
+COMPOSE_PROFILES=server
+WUKONG_AGENT_SERVER_URL=http://opencode-server:4096
+```
 
-Binary 模式第一版不自動啟動或管理 `opencode serve`。在一般本機 CLI 使用情境，Wukong 仍預設透過 `opencode run` 執行，以避免背景 daemon、port、跨專案工作目錄與清理策略帶來額外複雜度。進階使用者若自行啟動 `opencode serve`，可手動設定 `WUKONG_AGENT_SERVER_URL` 使用同一 backend。 若把 Wukong 接到一個自行啟動、你自己也在用的 `opencode serve`，請先讀下方「opencode session 的保留期清理」：這種用法要把 `WUKONG_OPENCODE_SESSION_RETENTION_DAYS` 設為 `0`。
+再執行 `docker compose up -d`。啟用 profile 與 URL 是兩個必要設定；連接自行管理的遠端 server 則只設定 URL。共用 `/workspace` 時附件用 `shared`，沒有共享檔案系統的遠端可改用 `inline`（單檔 10 MiB）。本機程序固定使用入口的工作目錄與共享檔案，不套用遠端路徑映射。
 
-若要回到舊的 Docker CLI subprocess 模式，移除服務環境中的 `WUKONG_AGENT_SERVER_URL`，Wukong 會使用 `WUKONG_AGENT_CMD`，預設為 `opencode run --dangerously-skip-permissions`。
+升級到按需模式時，移除 `.env` 的 `COMPOSE_PROFILES=server` 與非空 URL，將舊的 `WUKONG_AGENT_CMD=opencode run --dangerously-skip-permissions` 改為 `opencode run`。額外 run 旗標會保留純 CLI 路徑，沒有問答回覆通道。installer 會停止同一 project 已停用的 `opencode-server`；手動更新 Compose 時先執行以下命令，因為 profile 停用與 `--remove-orphans` 不會停止舊的 profile 容器：
+
+```bash
+docker compose --profile server stop opencode-server
+docker compose up -d
+```
+
+本機模式不啟用週期性 server 重啟、session 保留期刪除或啟動前 vacuum；這些功能僅適用於明確啟用的共用 server。輔助回合與 `/new` 的 session 清理仍執行。
 
 **快速開始：**
 
@@ -180,8 +190,8 @@ services:
 | :--- | :--- | :--- |
 | `USER_ID` / `GROUP_ID` | 與 host 對齊的 UID/GID，避免 volume 權限問題 | `1000` |
 | `WUKONG_HOST_WORKSPACE` | Host 工作目錄路徑（opencode workspace） | `./workspace` |
-| `WUKONG_AGENT_CMD` | AI agent 指令（容器內預設帶 `--dangerously-skip-permissions`，見上方說明） | `opencode run --dangerously-skip-permissions` |
-| `WUKONG_AGENT_SERVER_URL` | opencode serve backend URL；Docker 常駐服務預設使用，未設定時回到 `WUKONG_AGENT_CMD` | `http://opencode-server:4096` |
+| `WUKONG_AGENT_CMD` | 預設選按需本機控制程序；額外 run 旗標與任意命令走純 CLI | `opencode run` |
+| `WUKONG_AGENT_SERVER_URL` | 非空時選既有共用 server adapter；空值使用本機執行 | 空值 |
 | `WUKONG_AGENT_SERVER_FILE_MODE` | server backend 附件模式：共享工作區 `shared`、Base64 `inline`、停用 `disabled` | `shared` |
 | `WUKONG_AGENT_SERVER_WORKSPACE` | `shared` 模式中 OpenCode server 看見的 workspace 絕對路徑 | `/workspace` |
 | `WUKONG_TG_TOKEN` | Telegram Bot Token（選用；可由 Web `/settings` 設定，env 優先） | — |
@@ -209,9 +219,9 @@ services:
 | `WUKONG_OPENCODE_IDLE_QUIET_SECS` | 「閒置」須持續多久才動手（無 session 更新、`opencode.db` 無寫入） | `300` |
 | `WUKONG_OPENCODE_CONN_GRACE_SECS` | 對外埠仍有 `ESTABLISHED` 連線時，最多再等多久才視為閒置的 keep-alive 並放行。`0` 表示不等待 | `1800`（30m） |
 | `WUKONG_OPENCODE_CPUS` / `_MEM` / `_PIDS` | `opencode-server` 與 `cli` profile 的 cgroup 上限（agent 實際幹活的容器）。溫度壓不下來就調降 CPU；回合明顯變慢且溫度尚可再往上加 | `1.5` / `2g` / `256` |
-| `WUKONG_SVC_CPUS` / `_MEM` / `_PIDS` | `wukong-web`／`wukong-telegram`／`wukong-schedulerd` 的 cgroup 上限。重活都在 opencode-server，這層只是 HTTP client；schedulerd 開 `WUKONG_EMBED=1` 時要調高 MEM（embedding 模型載在該程序內） | `0.5` / `768m` / `128` |
+| `WUKONG_SVC_CPUS` / `_MEM` / `_PIDS` | `wukong-web`／`wukong-telegram`／`wukong-schedulerd` 的 cgroup 上限。2026-10-04：預設也執行本機 agent；開 embedding 時另留模型空間 | `1.5` / `2g` / `256` |
 
-**關於 opencode session 的保留期清理：** opencode 把每個 session 的訊息、片段與事件歷史存在 `opencode.db`，不會自己刪。Wukong 只在輔助棒跑完、session 輪替與 `/new` 時刪除 session，其餘（回合失敗留下的、人工探測建立的）會一直留著。`wukong-schedulerd` 因此在啟動 6 小時後第一次、之後每 6 小時，刪除超過 `WUKONG_OPENCODE_SESSION_RETENTION_DAYS` 天、且沒有任何 scope 指向的 session，每輪最多 500 個、最長 5 分鐘。**仍被 scope 指向的 session 不論多舊都保留**（scope 指向子 session 時，整棵 session 樹都保留），所以對話延續不受影響；Wukong 自己另存對話，不讀舊的 opencode session。讀不到 scope 對應或列不出 session 時整輪不刪。只在 server backend 生效：CLI 模式的 `opencode.db` 與你自己的 opencode 使用共用，不自動清掃。
+**關於 opencode session 的保留期清理：** opencode 把每個 session 的訊息、片段與事件歷史存在 `opencode.db`，不會自己刪。Wukong 只在輔助棒跑完、session 輪替與 `/new` 時刪除 session，其餘（回合失敗留下的、人工探測建立的）會一直留著。`wukong-schedulerd` 因此在啟動 6 小時後第一次、之後每 6 小時，刪除超過 `WUKONG_OPENCODE_SESSION_RETENTION_DAYS` 天、且沒有任何 scope 指向的 session，每輪最多 500 個、最長 5 分鐘。**仍被 scope 指向的 session 不論多舊都保留**（scope 指向子 session 時，整棵 session 樹都保留），所以對話延續不受影響；Wukong 自己另存對話，不讀舊的 opencode session。讀不到 scope 對應或列不出 session 時整輪不刪。只在顯式共用 server backend 生效：按需本機／純 CLI 模式的 `opencode.db` 與你自己的 opencode 使用共用，不自動清掃。
 
 **這項清理假設 server 上的 session 都屬於這一套 Wukong、而且只有一份記憶庫在用它。** compose 部署成立，因為 `opencode-state` 與 `wukong-data` 兩個 volume 都是專屬的。三種情況不成立：
 
@@ -231,7 +241,7 @@ docker compose exec -u wukong wukong-schedulerd wukong opencode prune --dry-run
 
 這項清理刪不到**長壽的 scope session**——一個用了幾個月的聊天 scope，它的 session 會持續累積歷史，而它正是被保護的對象。如果 `opencode.db` 仍然很大，先用預覽看可刪的佔多少。
 
-**關於 opencode server 的週期性重啟：** `opencode serve` 常駐不死，每回合的殘留（heap、快取、DB handle）全部留存，idle CPU 會隨累積工作量上升；CLI 模式沒有這個問題，因為 `opencode run` 每回合退出，等於免費獲得重置。容器內因此常駐一個 supervisor，在 `WUKONG_OPENCODE_RESTART_WINDOW` 的窗口內、且判定閒置時讓 server 自行退出，由 `restart: unless-stopped` 拉起。閒置的判準是：無近期 session 更新、`opencode.db` 已停止寫入（後者用來涵蓋 compaction 等背景工作）。
+**關於選用 opencode server 的週期性重啟（2026-10-04）：** `opencode serve` 常駐不死，每回合的殘留（heap、快取、DB handle）全部留存，idle CPU 會隨累積工作量上升；CLI 模式沒有這個問題，因為 `opencode run` 每回合退出，等於免費獲得重置。容器內因此常駐一個 supervisor，在 `WUKONG_OPENCODE_RESTART_WINDOW` 的窗口內、且判定閒置時讓 server 自行退出，由 `restart: unless-stopped` 拉起。閒置的判準是：無近期 session 更新、`opencode.db` 已停止寫入（後者用來涵蓋 compaction 等背景工作）。
 
 對外埠的 `ESTABLISHED` 連線**不是**否決條件，而是一段有上限的等待（`WUKONG_OPENCODE_CONN_GRACE_SECS`，預設 30 分鐘）。原因是連線數不等於有工作進行中：`wukong-schedulerd` 對 server 保有長生命週期的 HTTP 連線、閒置時也不斷開，早期版本把它當成活躍工作，於是條件永遠湊不齊、重啟從未發生。但這個訊號也不能丟掉——一個安靜超過 `WUKONG_OPENCODE_IDLE_QUIET_SECS` 的長工具呼叫期間，session 與 `opencode.db` 都可能毫無寫入，那時連線是唯一還在說「有人接著」的東西。預設的 30 分鐘刻意大於 `WUKONG_AGENT_TIMEOUT_SECS`（1200 秒）：撐過那個時間的回合，gateway 自己也已經放棄了。
 

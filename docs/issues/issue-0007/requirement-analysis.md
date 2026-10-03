@@ -55,3 +55,7 @@ Wukong 持有 scope、memory、orchestration 與 lifecycle；OpenCode 為 execut
 - [ACP command](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/opencode/src/cli/cmd/acp.ts)：啟動 HTTP listener 並建立 SDK，再處理 stdio ACP；故它也不是完全沒有本機 HTTP 的程序。尚未實測其 HTTP 問答與生命週期，不採用名稱作為等價證據。
 
 2026-10-03 已提出兩種有實質維護差異的方向：每回合管理本機控制程序，或維護純 run 的 OpenCode 修改版。前者避免常駐獨立服務，但仍使用本機控制 API；後者要修改第三方協定與出貨版本。執行路徑決策待 README 的 TBD-2，不先更動 Gateway 或部署。
+
+## 執行路徑決策（2026-10-04）
+
+2026-10-03 使用者指出常駐 server 佔用資源，接受每次執行啟動本機控制程序；TBD-1／2 已解決，核准規格提交為 `335f987`。按需 `serve` 的官方 question API、續接與程序回收已由真實 OpenCode 1.18.31 探針取得，不使用 fork 或 ACP 補造協定。詳細比較與限制見 [technical-analysis.md](technical-analysis.md)，完成證據以 implementation-plan.md 為準；上方「待決策／尚未實作」描述保留為前期查核紀錄。

@@ -36,7 +36,7 @@ make_release() {
     rm -f "$RELEASES"/*
     for name in wukong wukong-telegram wukong-web wukong-schedulerd; do make_binary "$name" "$target"; done
     mkdir -p "$docker_stage/scripts"
-    printf 'services:\n  wukong:\n    image: ghcr.io/raybird/wukong:%s\n' "$tag" > "$docker_stage/docker-compose.yml"
+    printf 'services:\n  wukong:\n    image: ghcr.io/raybird/wukong:%s\n  opencode-server:\n    profiles: [server]\n    image: ghcr.io/raybird/wukong:%s\n' "$tag" "$tag" > "$docker_stage/docker-compose.yml"
     printf 'EXAMPLE=1\n' > "$docker_stage/.env.example"
     printf 'MIT\n' > "$docker_stage/LICENSE"
     printf '%s\n' '{"affectedState":[],"backupRequired":false,"instructionsUrl":null,"irreversibleMigration":false,"rollbackSafeTo":"v0.17.1","schemaVersion":1}' > "$docker_stage/data-compatibility.json"
@@ -86,6 +86,11 @@ if [[ "$1" == compose && "$2" == version ]]; then exit 0; fi
 if [[ "${WUKONG_REQUIRE_STAGED_PULL:-}" == 1 && "$1" == compose && "${*: -1}" == pull && " $* " != *" -f "* ]]; then
     printf "pull used deployment compose\n" >> "$WUKONG_TEST_LOG"
     exit 42
+fi
+if [[ "$1" == compose && "${*: -2}" == 'config --services' ]]; then
+    printf 'wukong\n'
+    if grep -Fq '  opencode-server:' docker-compose.yml && [[ " $* " == *' --profile server '* || "${FIXTURE_SERVER_ACTIVE:-0}" == 1 ]]; then printf 'opencode-server\n'; fi
+    exit 0
 fi
 if [[ "$1" == inspect ]]; then
     name="${@: -1}"
@@ -197,12 +202,16 @@ test_docker() {
     assert_file "$DEPLOYMENT/.wukong-release"
     assert_contains "$LOG" ' pull'
     assert_contains "$LOG" 'docker compose -p wukong up -d --force-recreate'
+    assert_contains "$LOG" 'docker compose -p wukong --profile server stop opencode-server'
     assert_not_contains "$LOG" 'build'
     assert_not_contains "$LOG" ' down'
     assert_contains "$DEPLOYMENT/.env" 'USER_SECRET=preserve'
     assert_contains "$DEPLOYMENT/.env" 'WUKONG_OPENCODE_CPUS=1.0'
     assert_contains "$DEPLOYMENT/compose.override.yml" 'keep'
     assert_contains "$DEPLOYMENT/workspace/custom" 'state'
+    : > "$LOG"
+    FIXTURE_SERVER_ACTIVE=1 run_installer '' --mode docker --version v9.9.9 >/dev/null
+    assert_not_contains "$LOG" ' stop opencode-server'
 }
 
 test_metadata() {

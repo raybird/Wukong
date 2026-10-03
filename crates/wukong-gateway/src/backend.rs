@@ -232,6 +232,7 @@ pub struct AgentCliBackend {
 
 pub enum AgentBackend {
     Cli(AgentCliBackend),
+    Local(crate::local_process::LocalProcessBackend),
     Server(crate::opencode_server::OpencodeServerBackend),
 }
 
@@ -240,6 +241,15 @@ pub fn build_backend_from_env(command: Vec<String>, workspace: Option<PathBuf>) 
         Ok(url) if !url.trim().is_empty() => AgentBackend::Server(
             crate::opencode_server::OpencodeServerBackend::from_env(url, workspace),
         ),
+        _ if is_opencode(&command)
+            && command.get(1).map(String::as_str) == Some("run")
+            && strip_model_args(&command).len() == 2 =>
+        {
+            AgentBackend::Local(crate::local_process::LocalProcessBackend::new(
+                opencode_binary(&command).into(),
+                workspace,
+            ))
+        }
         _ => AgentBackend::Cli(AgentCliBackend { command, workspace }),
     }
 }
@@ -285,7 +295,7 @@ pub fn question_reject_route(request_id: &str) -> QuestionReplyRoute<'_> {
 impl AgentBackend {
     pub async fn check_ready(&self) -> Result<(), GatewayError> {
         match self {
-            AgentBackend::Cli(_) => Ok(()),
+            AgentBackend::Cli(_) | AgentBackend::Local(_) => Ok(()),
             AgentBackend::Server(backend) => backend.health_check().await,
         }
     }
@@ -298,6 +308,9 @@ impl AgentBackend {
         request_id: &str,
         answers: Vec<Vec<String>>,
     ) -> Result<(), GatewayError> {
+        if let AgentBackend::Local(backend) = self {
+            return backend.reply(session_id, request_id, Some(answers)).await;
+        }
         let backend = self.question_backend("回答")?;
         match question_reply_route(request_id, &answers)? {
             QuestionReplyRoute::Permission { id, reply } => {
@@ -317,6 +330,9 @@ impl AgentBackend {
         session_id: &str,
         request_id: &str,
     ) -> Result<(), GatewayError> {
+        if let AgentBackend::Local(backend) = self {
+            return backend.reply(session_id, request_id, None).await;
+        }
         let backend = self.question_backend("取消")?;
         match question_reject_route(request_id) {
             QuestionReplyRoute::Permission { id, reply } => {
@@ -332,7 +348,7 @@ impl AgentBackend {
     ) -> Result<&crate::opencode_server::OpencodeServerBackend, GatewayError> {
         match self {
             AgentBackend::Server(backend) => Ok(backend),
-            AgentBackend::Cli(_) => Err(GatewayError::AgentFailed {
+            AgentBackend::Cli(_) | AgentBackend::Local(_) => Err(GatewayError::AgentFailed {
                 code: None,
                 stderr: format!("目前只有 opencode server backend 支援 question {action}。"),
             }),
@@ -344,6 +360,7 @@ impl AiBackend for AgentBackend {
     async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
         match self {
             AgentBackend::Cli(backend) => backend.run(req).await,
+            AgentBackend::Local(backend) => backend.run(req).await,
             AgentBackend::Server(backend) => backend.run(req).await,
         }
     }
@@ -355,6 +372,7 @@ impl AiBackend for AgentBackend {
     ) -> Result<AgentResponse, GatewayError> {
         match self {
             AgentBackend::Cli(backend) => backend.run_streaming(req, on_event).await,
+            AgentBackend::Local(backend) => backend.run_streaming(req, on_event).await,
             AgentBackend::Server(backend) => backend.run_streaming(req, on_event).await,
         }
     }
@@ -362,6 +380,7 @@ impl AiBackend for AgentBackend {
     async fn delete_session(&self, session_id: &str) -> Result<(), GatewayError> {
         match self {
             AgentBackend::Cli(backend) => backend.delete_session(session_id).await,
+            AgentBackend::Local(backend) => backend.delete_session(session_id).await,
             AgentBackend::Server(backend) => backend.delete_session(session_id).await,
         }
     }
@@ -369,6 +388,7 @@ impl AiBackend for AgentBackend {
     async fn list_sessions(&self) -> Result<SessionListing, GatewayError> {
         match self {
             AgentBackend::Cli(backend) => backend.list_sessions().await,
+            AgentBackend::Local(backend) => backend.list_sessions().await,
             AgentBackend::Server(backend) => backend.list_sessions().await,
         }
     }
@@ -380,6 +400,7 @@ impl AiBackend for AgentBackend {
     ) -> Result<AgentResponse, GatewayError> {
         match self {
             AgentBackend::Cli(backend) => backend.compact_session(session_id, model).await,
+            AgentBackend::Local(backend) => backend.compact_session(session_id, model).await,
             AgentBackend::Server(backend) => backend.compact_session(session_id, model).await,
         }
     }
@@ -387,6 +408,7 @@ impl AiBackend for AgentBackend {
     async fn run_ephemeral(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
         match self {
             AgentBackend::Cli(backend) => backend.run_ephemeral(req).await,
+            AgentBackend::Local(backend) => backend.run_ephemeral(req).await,
             AgentBackend::Server(backend) => backend.run_ephemeral(req).await,
         }
     }
@@ -398,6 +420,7 @@ impl AiBackend for AgentBackend {
     ) -> Result<AgentResponse, GatewayError> {
         match self {
             AgentBackend::Cli(backend) => backend.run_streaming_ephemeral(req, on_event).await,
+            AgentBackend::Local(backend) => backend.run_streaming_ephemeral(req, on_event).await,
             AgentBackend::Server(backend) => backend.run_streaming_ephemeral(req, on_event).await,
         }
     }
@@ -930,13 +953,38 @@ mod tests {
         std::env::remove_var("WUKONG_AGENT_SERVER_URL");
 
         let backend = build_backend_from_env(vec!["opencode".to_string(), "run".to_string()], None);
+        let custom = build_backend_from_env(
+            vec![
+                "opencode".into(),
+                "run".into(),
+                "--agent".into(),
+                "custom".into(),
+            ],
+            None,
+        );
+        let model = build_backend_from_env(
+            vec![
+                "opencode".into(),
+                "run".into(),
+                "--model".into(),
+                "probe/probe".into(),
+            ],
+            None,
+        );
+        let arbitrary = build_backend_from_env(vec!["printf".into(), "fixer".into()], None);
+        std::env::set_var("WUKONG_AGENT_SERVER_URL", "http://127.0.0.1:1");
+        let remote = build_backend_from_env(vec!["command-that-must-not-run".into()], None);
 
         match previous {
             Some(value) => std::env::set_var("WUKONG_AGENT_SERVER_URL", value),
             None => std::env::remove_var("WUKONG_AGENT_SERVER_URL"),
         }
 
-        assert!(matches!(backend, AgentBackend::Cli(_)));
+        assert!(matches!(backend, AgentBackend::Local(_)));
+        assert!(matches!(custom, AgentBackend::Cli(_)));
+        assert!(matches!(model, AgentBackend::Local(_)));
+        assert!(matches!(arbitrary, AgentBackend::Cli(_)));
+        assert!(matches!(remote, AgentBackend::Server(_)));
     }
 
     #[test]

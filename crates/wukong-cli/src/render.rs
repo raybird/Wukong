@@ -34,8 +34,6 @@ impl<'a> StreamRenderer<'a> {
                     let _ = self.err.flush();
                 }
             }
-            // CLI 尚無互動回覆通道；至少要讓詢問可見，否則使用者只會看到
-            // 畫面停住，直到 stream deadline 才知道發生什麼事。
             StreamEvent::QuestionRequest(request) => {
                 for question in &request.questions {
                     let _ = writeln!(self.err, "  {}", question.header);
@@ -43,10 +41,7 @@ impl<'a> StreamRenderer<'a> {
                         let _ = writeln!(self.err, "     {line}");
                     }
                 }
-                let _ = writeln!(
-                    self.err,
-                    "     ↳ CLI 無法回覆此詢問，請改用 Web Console 或 Telegram，否則本回合會等到逾時。"
-                );
+                let _ = writeln!(self.err, "     ↳ 請依選項回答，輸入 /cancel 可取消。");
                 let _ = self.err.flush();
             }
             StreamEvent::StepStart | StreamEvent::StepFinish => {}
@@ -83,7 +78,7 @@ mod tests {
         assert!(err_s.contains("🔐 權限確認"), "{err_s}");
         assert!(err_s.contains("external_directory"), "{err_s}");
         assert!(err_s.contains("/tmp/*"), "{err_s}");
-        assert!(err_s.contains("CLI 無法回覆"), "{err_s}");
+        assert!(err_s.contains("/cancel"), "{err_s}");
         // 詢問屬於活動訊息，不能混進 stdout 的助理輸出。
         assert!(out.is_empty());
     }
