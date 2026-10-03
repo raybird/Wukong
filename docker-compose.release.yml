@@ -95,6 +95,7 @@ services:
       - GROUP_ID=${GROUP_ID:-1000}
       - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run --dangerously-skip-permissions}
       - WUKONG_AGENT_SERVER_URL=${WUKONG_AGENT_SERVER_URL:-http://opencode-server:4096}
+      - WUKONG_OPENCODE_SESSION_RETENTION_DAYS=${WUKONG_OPENCODE_SESSION_RETENTION_DAYS-30}
       - WUKONG_AGENT_TIMEOUT_SECS=${WUKONG_AGENT_TIMEOUT_SECS:-1200}
       - WUKONG_WORKSPACE=/workspace
       - WUKONG_MEMORY_DB=sqlite:///data/memory.db
@@ -130,6 +131,7 @@ services:
       - GROUP_ID=${GROUP_ID:-1000}
       - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run --dangerously-skip-permissions}
       - WUKONG_AGENT_SERVER_URL=${WUKONG_AGENT_SERVER_URL:-http://opencode-server:4096}
+      - WUKONG_OPENCODE_SESSION_RETENTION_DAYS=${WUKONG_OPENCODE_SESSION_RETENTION_DAYS-30}
       - WUKONG_AGENT_TIMEOUT_SECS=${WUKONG_AGENT_TIMEOUT_SECS:-1200}
       - WUKONG_WORKSPACE=/workspace
       - WUKONG_MEMORY_DB=sqlite:///data/memory.db

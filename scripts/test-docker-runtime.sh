@@ -200,13 +200,30 @@ done
 require_in_file "WUKONG_OPENCODE_CPUS" .env.example \
     "resource knobs must be documented where operators actually look"
 
-# ── opencode session 保留期（issue-0003）──
-# compose 逐項把環境變數傳進服務，沒有 env_file：少寫一行，.env 裡的設定就靜靜失效，
-# schedulerd 照預設值跑。兩份 compose 都要有。
-for cf in "$compose_file" "$release_compose"; do
-    require_in_file 'WUKONG_OPENCODE_SESSION_RETENTION_DAYS=${WUKONG_OPENCODE_SESSION_RETENTION_DAYS-30}' "$cf" \
-        "$cf must pass the opencode session retention setting to wukong-schedulerd"
-done
+# ── opencode session 保留期（issue-0005，2026-10-03）──
+# AC-1、AC-2：逐服務檢查，避免只找到 schedulerd 的設定就放行其他容器遺漏。
+python3 - "$compose_file" "$release_compose" <<'PY_RETENTION'
+import sys
+import yaml
+
+key = "WUKONG_OPENCODE_SESSION_RETENTION_DAYS"
+expected = "${WUKONG_OPENCODE_SESSION_RETENTION_DAYS-30}"
+failed = False
+for path in sys.argv[1:]:
+    with open(path) as fh:
+        services = yaml.safe_load(fh)["services"]
+    for name in ("wukong-web", "wukong-telegram", "wukong-schedulerd"):
+        env = services.get(name, {}).get("environment", [])
+        if isinstance(env, list):
+            env = dict(str(item).split("=", 1) if "=" in str(item)
+                       else (str(item), None) for item in env)
+        actual = env.get(key)
+        if actual != expected:
+            print(f"FAIL: {path} service {name} must pass {key}={expected}; "
+                  f"got {actual!r}", file=sys.stderr)
+            failed = True
+sys.exit(1 if failed else 0)
+PY_RETENTION
 require_in_file "WUKONG_OPENCODE_SESSION_RETENTION_DAYS" .env.example \
     "the retention knob must be documented where operators actually look"
 require_in_file 'SQLITE_TMPDIR="$(dirname "$opencode_db")"' "$entrypoint" \
