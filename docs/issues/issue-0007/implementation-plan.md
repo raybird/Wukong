@@ -103,7 +103,7 @@
 - [x] SCN-001 至 SCN-010 各有唯一責任 Task。
 - [x] 先查權限與 adapter 契約，再做入口切片與條件式切換。
 - [x] 所有必要證據成立（TBD-1／2 已於 2026-10-03 解決）。
-- [ ] 交付文件、commit、PR 與獨立 review 使用同一固定範圍。
+- [x] 交付文件、commit、PR 與獨立 review 使用同一固定範圍；報告記錄實際 Reviewed BASE／HEAD，report-only 後繼依 review-evidence 規則驗證。
 
 ## Phase 1 歷史交付檢查（2026-10-03）
 
@@ -120,4 +120,4 @@ Task 1.1／1.2／1.3 已完成；2026-10-03 Task 2.1／2.2／2.3 尚未完成。
 
 Task 2.1／2.2／2.3／3.1 的完成證據保存於 verification.md，Phase 1 原證據保留。SCN-001 至 SCN-010 全部核准且責任映射未變；常青部署／入口文件與技術取捨已對齊。未做瀏覽器 UI、外部 Telegram 傳輸、真實 cron 等候、完整 release image 重建或長期壓力；不以這些未執行項目宣稱通過。
 
-目前完成實作與交付驗證；提交、PR 與獨立 review 由 dev-cycle 接續，不自行合併。
+目前完成實作與交付驗證並建立 [PR #8](https://github.com/raybird/Wukong/pull/8)。固定來源範圍的獨立 review 報告為審查判定來源；缺報告或有 MUST FIX 時不得視為審查通過，不自行合併。

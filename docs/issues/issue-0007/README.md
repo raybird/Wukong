@@ -12,6 +12,7 @@
 
 - [technical-analysis.md](technical-analysis.md)：按需本機控制程序的決策與邊界。
 - [verification.md](verification.md)：2026-10-04 交付驗證與限制。
+- [PR #8](https://github.com/raybird/Wukong/pull/8)：交付分支；獨立報告存為 `review-{Reviewed HEAD 前 7 碼}.md`，有效性依 [review-evidence](../../agents/review-evidence.md)。
 - [probe-managed.py](probe-managed.py)：真實 OpenCode 問答、入口與 Docker 探針。
 
 ## 關鍵差異
@@ -168,9 +169,10 @@ Feature: 可驗證的 CLI-first execution
 | 2026-10-03 | 使用者要求 CLI 保留互動問答；新增 SCN-010，查核固定版本 run／ACP 控制通道 | Codex |
 | 2026-10-03 | 使用者確認核心問題為常駐 server 資源佔用；規格改為每回合啟停本機控制程序 | Codex |
 | 2026-10-04 | 按需控制程序、CLI 問答與部署預設完成；真實四入口、Docker 及全量驗證通過，證據保存於 verification.md | Codex |
+| 2026-10-04 | 建立 PR #8，交付來源固定後由獨立 reviewer 審查；尚未合併 | Codex |
 
 ---
 **建立日期**: 2026-10-03
 **分級**: Large — 四入口與部署跨模組驗證
 **風險**: High
-**狀態**: 實作與交付驗證完成；準備 PR 與獨立審查
+**狀態**: 已交付 PR；獨立審查判定以本目錄固定版本 review 報告為準，尚未合併
