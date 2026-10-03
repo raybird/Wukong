@@ -4,6 +4,7 @@ pub mod backend;
 pub mod cli;
 pub mod config;
 pub mod error;
+pub mod local_process;
 pub mod opencode_server;
 pub mod prompt;
 pub mod stream;

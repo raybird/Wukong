@@ -90,8 +90,6 @@ require_in_file 'WUKONG_WEB_BIND:-127.0.0.1' "$release_compose" \
     "release Compose must retain the loopback web default"
 require_in_file 'curl -fsS http://localhost:4096/global/health || exit 1' "$release_compose" \
     "release Compose must retain the OpenCode healthcheck"
-require_count_in_file "condition: service_healthy" 3 "$release_compose" \
-    "release services must retain server dependencies"
 require_in_file 'IMAGE_SKILLS="/usr/local/share/wukong/skills/superpowers"' "$entrypoint" \
     "entrypoint must define image skill asset source"
 require_in_file 'WORKSPACE_SKILLS="$WUKONG_WORKSPACE/.wukong/skills/superpowers"' "$entrypoint" \
@@ -120,8 +118,21 @@ require_in_file '"*rm -rf /*": "deny"' "$entrypoint" \
     "baseline must retain the destructive-rm denylist"
 require_in_file "curl -fsS http://localhost:4096/global/health || exit 1" "$compose_file" \
     "opencode server must expose a Compose healthcheck"
-require_count_in_file "condition: service_healthy" 3 "$compose_file" \
-    "web, telegram, and scheduler must wait for a healthy opencode server"
+# SCN-007／008（2026-10-03）：預設本機回合、獨立 server 顯式啟用。
+python3 - "$compose_file" "$release_compose" <<'PY_LOCAL'
+import sys
+import yaml
+for path in sys.argv[1:]:
+    services = yaml.safe_load(open(path))["services"]
+    assert services["opencode-server"].get("profiles") == ["server"], path
+    for name in ("wukong-web", "wukong-telegram", "wukong-schedulerd"):
+        service = services[name]
+        assert "opencode-server" not in service.get("depends_on", {}), (path, name)
+        env = dict(item.split("=", 1) if "=" in item else (item, None) for item in service["environment"])
+        assert env["WUKONG_AGENT_SERVER_URL"] == "${WUKONG_AGENT_SERVER_URL:-}", (path, name)
+        assert env["WUKONG_AGENT_CMD"] == "${WUKONG_AGENT_CMD:-opencode run}", (path, name)
+        assert service["mem_limit"] == "${WUKONG_SVC_MEM:-2g}", (path, name)
+PY_LOCAL
 # The point is which files the installer replaces, not how the array is typed.
 # Pinning the single-line literal made a formatting change look like a contract
 # break, and — worse — it silently stopped asserting anything the moment the real

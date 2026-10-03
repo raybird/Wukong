@@ -232,6 +232,7 @@ pub struct AgentCliBackend {
 
 pub enum AgentBackend {
     Cli(AgentCliBackend),
+    Local(crate::local_process::LocalProcessBackend),
     Server(crate::opencode_server::OpencodeServerBackend),
 }
 
@@ -240,6 +241,15 @@ pub fn build_backend_from_env(command: Vec<String>, workspace: Option<PathBuf>) 
         Ok(url) if !url.trim().is_empty() => AgentBackend::Server(
             crate::opencode_server::OpencodeServerBackend::from_env(url, workspace),
         ),
+        _ if is_opencode(&command)
+            && command.get(1).map(String::as_str) == Some("run")
+            && strip_model_args(&command).len() == 2 =>
+        {
+            AgentBackend::Local(crate::local_process::LocalProcessBackend::new(
+                opencode_binary(&command).into(),
+                workspace,
+            ))
+        }
         _ => AgentBackend::Cli(AgentCliBackend { command, workspace }),
     }
 }
@@ -285,7 +295,7 @@ pub fn question_reject_route(request_id: &str) -> QuestionReplyRoute<'_> {
 impl AgentBackend {
     pub async fn check_ready(&self) -> Result<(), GatewayError> {
         match self {
-            AgentBackend::Cli(_) => Ok(()),
+            AgentBackend::Cli(_) | AgentBackend::Local(_) => Ok(()),
             AgentBackend::Server(backend) => backend.health_check().await,
         }
     }
@@ -298,6 +308,9 @@ impl AgentBackend {
         request_id: &str,
         answers: Vec<Vec<String>>,
     ) -> Result<(), GatewayError> {
+        if let AgentBackend::Local(backend) = self {
+            return backend.reply(session_id, request_id, Some(answers)).await;
+        }
         let backend = self.question_backend("回答")?;
         match question_reply_route(request_id, &answers)? {
             QuestionReplyRoute::Permission { id, reply } => {
@@ -317,6 +330,9 @@ impl AgentBackend {
         session_id: &str,
         request_id: &str,
     ) -> Result<(), GatewayError> {
+        if let AgentBackend::Local(backend) = self {
+            return backend.reply(session_id, request_id, None).await;
+        }
         let backend = self.question_backend("取消")?;
         match question_reject_route(request_id) {
             QuestionReplyRoute::Permission { id, reply } => {
@@ -332,7 +348,7 @@ impl AgentBackend {
     ) -> Result<&crate::opencode_server::OpencodeServerBackend, GatewayError> {
         match self {
             AgentBackend::Server(backend) => Ok(backend),
-            AgentBackend::Cli(_) => Err(GatewayError::AgentFailed {
+            AgentBackend::Cli(_) | AgentBackend::Local(_) => Err(GatewayError::AgentFailed {
                 code: None,
                 stderr: format!("目前只有 opencode server backend 支援 question {action}。"),
             }),
@@ -344,6 +360,7 @@ impl AiBackend for AgentBackend {
     async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
         match self {
             AgentBackend::Cli(backend) => backend.run(req).await,
+            AgentBackend::Local(backend) => backend.run(req).await,
             AgentBackend::Server(backend) => backend.run(req).await,
         }
     }
@@ -355,6 +372,7 @@ impl AiBackend for AgentBackend {
     ) -> Result<AgentResponse, GatewayError> {
         match self {
             AgentBackend::Cli(backend) => backend.run_streaming(req, on_event).await,
+            AgentBackend::Local(backend) => backend.run_streaming(req, on_event).await,
             AgentBackend::Server(backend) => backend.run_streaming(req, on_event).await,
         }
     }
@@ -362,6 +380,7 @@ impl AiBackend for AgentBackend {
     async fn delete_session(&self, session_id: &str) -> Result<(), GatewayError> {
         match self {
             AgentBackend::Cli(backend) => backend.delete_session(session_id).await,
+            AgentBackend::Local(backend) => backend.delete_session(session_id).await,
             AgentBackend::Server(backend) => backend.delete_session(session_id).await,
         }
     }
@@ -369,6 +388,7 @@ impl AiBackend for AgentBackend {
     async fn list_sessions(&self) -> Result<SessionListing, GatewayError> {
         match self {
             AgentBackend::Cli(backend) => backend.list_sessions().await,
+            AgentBackend::Local(backend) => backend.list_sessions().await,
             AgentBackend::Server(backend) => backend.list_sessions().await,
         }
     }
@@ -380,6 +400,7 @@ impl AiBackend for AgentBackend {
     ) -> Result<AgentResponse, GatewayError> {
         match self {
             AgentBackend::Cli(backend) => backend.compact_session(session_id, model).await,
+            AgentBackend::Local(backend) => backend.compact_session(session_id, model).await,
             AgentBackend::Server(backend) => backend.compact_session(session_id, model).await,
         }
     }
@@ -387,6 +408,7 @@ impl AiBackend for AgentBackend {
     async fn run_ephemeral(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
         match self {
             AgentBackend::Cli(backend) => backend.run_ephemeral(req).await,
+            AgentBackend::Local(backend) => backend.run_ephemeral(req).await,
             AgentBackend::Server(backend) => backend.run_ephemeral(req).await,
         }
     }
@@ -398,6 +420,7 @@ impl AiBackend for AgentBackend {
     ) -> Result<AgentResponse, GatewayError> {
         match self {
             AgentBackend::Cli(backend) => backend.run_streaming_ephemeral(req, on_event).await,
+            AgentBackend::Local(backend) => backend.run_streaming_ephemeral(req, on_event).await,
             AgentBackend::Server(backend) => backend.run_streaming_ephemeral(req, on_event).await,
         }
     }
@@ -446,6 +469,7 @@ impl AiBackend for AgentCliBackend {
         );
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..])
+            .kill_on_drop(true)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -514,6 +538,7 @@ impl AiBackend for AgentCliBackend {
 
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..])
+            .kill_on_drop(true)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -584,7 +609,15 @@ impl AiBackend for AgentCliBackend {
             on_event(StreamEvent::Text(clean));
         }
 
-        let status = child.wait().await?;
+        let status = tokio::select! {
+            status = child.wait() => status?,
+            _ = &mut deadline => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                stderr_task.abort();
+                return Err(agent_timeout_error(""));
+            }
+        };
         let stderr_buf = stderr_task.await.unwrap_or_default();
         if !status.success() {
             return Err(GatewayError::AgentFailed {
@@ -920,13 +953,38 @@ mod tests {
         std::env::remove_var("WUKONG_AGENT_SERVER_URL");
 
         let backend = build_backend_from_env(vec!["opencode".to_string(), "run".to_string()], None);
+        let custom = build_backend_from_env(
+            vec![
+                "opencode".into(),
+                "run".into(),
+                "--agent".into(),
+                "custom".into(),
+            ],
+            None,
+        );
+        let model = build_backend_from_env(
+            vec![
+                "opencode".into(),
+                "run".into(),
+                "--model".into(),
+                "probe/probe".into(),
+            ],
+            None,
+        );
+        let arbitrary = build_backend_from_env(vec!["printf".into(), "fixer".into()], None);
+        std::env::set_var("WUKONG_AGENT_SERVER_URL", "http://127.0.0.1:1");
+        let remote = build_backend_from_env(vec!["command-that-must-not-run".into()], None);
 
         match previous {
             Some(value) => std::env::set_var("WUKONG_AGENT_SERVER_URL", value),
             None => std::env::remove_var("WUKONG_AGENT_SERVER_URL"),
         }
 
-        assert!(matches!(backend, AgentBackend::Cli(_)));
+        assert!(matches!(backend, AgentBackend::Local(_)));
+        assert!(matches!(custom, AgentBackend::Cli(_)));
+        assert!(matches!(model, AgentBackend::Local(_)));
+        assert!(matches!(arbitrary, AgentBackend::Cli(_)));
+        assert!(matches!(remote, AgentBackend::Server(_)));
     }
 
     #[test]
@@ -1421,6 +1479,117 @@ mod tests {
 
         assert_eq!(resp.text, "before\nafter");
         assert_eq!(events, vec![StreamEvent::Text("before\nafter".to_string())]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn agent_cli_streaming_deadline_covers_wait_after_stdout_closes() {
+        let _guard = AGENT_TIMEOUT_ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        std::env::set_var("WUKONG_AGENT_TIMEOUT_SECS", "1");
+        let backend = AgentCliBackend {
+            command: vec![
+                "sh".into(),
+                "-c".into(),
+                "echo $$ > \"$1\"; exec 1>&- 2>&-; exec sleep 30".into(),
+                "probe".into(),
+                pid_file.to_string_lossy().into_owned(),
+            ],
+            workspace: None,
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            backend.run_streaming(
+                AgentRequest {
+                    prompt: "ignored".into(),
+                    session_id: None,
+                    thinking: false,
+                    model: None,
+                    agent: None,
+                    tool_overrides: BTreeMap::new(),
+                    attachments: Vec::new(),
+                },
+                &mut |_| {},
+            ),
+        )
+        .await;
+        std::env::remove_var("WUKONG_AGENT_TIMEOUT_SECS");
+        let pid = std::fs::read_to_string(pid_file).unwrap();
+        let alive = std::path::Path::new(&format!("/proc/{}", pid.trim())).exists();
+        if alive {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", pid.trim()])
+                .status();
+        }
+        let error = result
+            .expect("deadline must also cover child.wait after EOF")
+            .unwrap_err();
+        assert!(error.to_string().contains("處理逾時"), "{error}");
+        assert!(!alive, "timed-out agent must be reaped");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn agent_cli_cancelled_futures_stop_plain_and_streaming_children() {
+        let mut survivors = Vec::new();
+        for streaming in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let pid_file = dir.path().join("pid");
+            let backend = AgentCliBackend {
+                command: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "echo $$ > \"$1\"; exec sleep 30".into(),
+                    "probe".into(),
+                    pid_file.to_string_lossy().into_owned(),
+                ],
+                workspace: None,
+            };
+            let mut future = Box::pin(async {
+                let req = AgentRequest {
+                    prompt: "ignored".into(),
+                    session_id: None,
+                    thinking: false,
+                    model: None,
+                    agent: None,
+                    tool_overrides: BTreeMap::new(),
+                    attachments: Vec::new(),
+                };
+                if streaming {
+                    backend.run_streaming(req, &mut |_| {}).await
+                } else {
+                    backend.run(req).await
+                }
+            });
+            tokio::select! {
+                result = &mut future => panic!("agent exited before cancellation: {result:?}"),
+                ready = tokio::time::timeout(Duration::from_secs(3), async {
+                    while !pid_file.exists() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }) => ready.expect("agent should publish its PID"),
+            }
+            let pid = std::fs::read_to_string(pid_file).unwrap();
+            let process = PathBuf::from(format!("/proc/{}", pid.trim()));
+            drop(future);
+            let stopped = tokio::time::timeout(Duration::from_secs(1), async {
+                while process.exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            if stopped.is_err() {
+                survivors.push(streaming);
+                let _ = std::process::Command::new("kill")
+                    .args(["-KILL", pid.trim()])
+                    .status();
+            }
+        }
+        assert!(
+            survivors.is_empty(),
+            "cancelled modes left children: {survivors:?}"
+        );
     }
 
     #[tokio::test]

@@ -109,20 +109,33 @@ async fn main() {
     }
 
     let prompt = cli.prompt_text();
+    let (stdin_tx, mut stdin_lines) = tokio::sync::mpsc::unbounded_channel();
+    // 2026-10-03：REPL 與 question 共用一個 reader，避免互相預讀答案；
+    // 使用獨立 thread，回合逾時不會等待 Tokio 的 blocking stdin 工作。
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            match line {
+                Ok(line) => {
+                    if stdin_tx.send(line).is_err() {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+    });
 
     if prompt.is_empty() {
         // No prompt => interactive REPL over real stdin.
         eprintln!("🐵 悟空 REPL。輸入 /exit 或 Ctrl-D 離開。");
-        let stdin = std::io::stdin();
         let mut cfg_repl = cfg.clone();
         loop {
             eprint!("悟空 › ");
             let _ = std::io::stderr().flush();
-            let mut line = String::new();
-            if stdin.lock().read_line(&mut line).unwrap_or(0) == 0 {
+            let Some(line) = stdin_lines.recv().await else {
                 eprintln!();
                 break; // EOF (Ctrl-D)
-            }
+            };
             match classify_line(&line) {
                 LineAction::Exit => break,
                 LineAction::Skip => continue,
@@ -153,7 +166,9 @@ async fn main() {
                         wukong_settings::load_settings(&wukong_settings::default_settings_path())
                             .unwrap_or_default();
                     apply_settings_to_config(&mut cfg_turn, &settings);
-                    if let Err(e) = run_one(&memory, &backend, &cfg_turn, &input).await {
+                    if let Err(e) =
+                        run_one(&memory, &backend, &cfg_turn, &input, &mut stdin_lines).await
+                    {
                         eprintln!("error: {e}");
                     }
                 }
@@ -163,7 +178,7 @@ async fn main() {
     }
 
     // Single shot.
-    if let Err(e) = run_one(&memory, &backend, &cfg, &prompt).await {
+    if let Err(e) = run_one(&memory, &backend, &cfg, &prompt, &mut stdin_lines).await {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
@@ -378,26 +393,123 @@ async fn run_one(
     backend: &AgentBackend,
     cfg: &GatewayConfig,
     input: &str,
+    stdin_lines: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
 ) -> Result<(), wukong_cli::WukongError> {
-    if cfg.stream {
-        let mut out = std::io::stdout();
-        let mut err = std::io::stderr();
-        let mut renderer = wukong_cli::render::StreamRenderer::new(&mut out, &mut err);
-        let mut sink = |ev: StreamEvent| renderer.on_event(&ev);
+    let mut out = std::io::stdout();
+    let mut err = std::io::stderr();
+    let mut renderer = wukong_cli::render::StreamRenderer::new(&mut out, &mut err);
+    let mut has_text = false;
+    let (questions_tx, mut questions_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut sink = |ev: StreamEvent| {
+        if let StreamEvent::QuestionRequest(question) = &ev {
+            let _ = questions_tx.send(question.clone());
+            renderer.on_event(&ev);
+            return;
+        }
+        if let StreamEvent::Text(text) = &ev {
+            has_text |= !text.trim().is_empty();
+        }
+        if cfg.stream {
+            renderer.on_event(&ev);
+        }
+    };
+    let turn = async {
         run_turn(memory, backend, cfg, input, &mut sink, &mut |role| {
             eprintln!("🐵 悟空·{}", role.name());
         })
-        .await?;
+        .await
+    };
+    let replies = async {
+        while let Some(question) = questions_rx.recv().await {
+            answer_terminal_question(backend, &question, stdin_lines).await?;
+        }
+        Ok::<(), wukong_cli::WukongError>(())
+    };
+    let res = tokio::select! {
+        result = turn => result?,
+        result = replies => { result?; return Err(to_wukong_error_string("問答通道提前結束".into())); }
+    };
+    if cfg.stream && has_text {
         println!(); // newline after streamed text
-        Ok(())
     } else {
-        let res = run_turn(memory, backend, cfg, input, &mut |_| {}, &mut |role| {
-            eprintln!("🐵 悟空·{}", role.name());
-        })
-        .await?;
         println!("{}", res.text);
-        Ok(())
     }
+    Ok(())
+}
+
+async fn answer_terminal_question(
+    backend: &AgentBackend,
+    request: &wukong_gateway::stream::QuestionRequest,
+    stdin_lines: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+) -> Result<(), wukong_cli::WukongError> {
+    let mut answers = Vec::new();
+    for question in &request.questions {
+        for (index, option) in question.options.iter().enumerate() {
+            eprintln!("  {}. {} — {}", index + 1, option.label, option.description);
+        }
+        loop {
+            eprint!(
+                "回答{}{}（/cancel 取消） › ",
+                if question.multiple {
+                    "，多選以逗號分隔"
+                } else {
+                    ""
+                },
+                if question.custom {
+                    "，可輸入自訂文字"
+                } else {
+                    ""
+                }
+            );
+            let _ = std::io::stderr().flush();
+            let line = stdin_lines.recv().await;
+            let Some(line) = line.filter(|line| line.trim() != "/cancel") else {
+                backend
+                    .cancel_question(&request.session_id, &request.request_id)
+                    .await?;
+                return Ok(());
+            };
+            let values = if question.multiple {
+                line.trim().split(',').map(str::trim).collect::<Vec<_>>()
+            } else {
+                vec![line.trim()]
+            };
+            let mut selected = Vec::new();
+            let mut valid = true;
+            for value in values {
+                let option = value
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|i| i.checked_sub(1))
+                    .and_then(|i| question.options.get(i))
+                    .or_else(|| question.options.iter().find(|option| option.label == value));
+                if let Some(option) = option {
+                    selected.push(option.label.clone());
+                } else if question.custom && !value.is_empty() {
+                    selected.push(value.into());
+                } else {
+                    valid = false;
+                    break;
+                }
+            }
+            if valid {
+                answers.push(selected);
+                break;
+            }
+            eprintln!(
+                "請輸入有效選項{}。",
+                if question.custom {
+                    "或自訂文字"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
+    backend
+        .answer_question(&request.session_id, &request.request_id, answers)
+        .await?;
+    Ok(())
 }
 
 fn apply_settings_to_config(cfg: &mut GatewayConfig, settings: &wukong_settings::Settings) {
