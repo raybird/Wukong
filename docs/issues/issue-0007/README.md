@@ -8,6 +8,7 @@
 
 - [requirement-analysis.md](requirement-analysis.md)：依程式盤點契約與差異。
 - [implementation-plan.md](implementation-plan.md)：唯一任務來源與驗證證據。
+- [probe-opencode.py](probe-opencode.py)：隔離真實 OpenCode 契約與四入口探針。
 
 尚未建立 technical-analysis.md：方案尚未決定；若互動策略產生實質取捨，決定後補記。
 
@@ -24,6 +25,8 @@
 
 ```text
 crates/
+├── wukong-cli/src/main.rs             # 完全沒有串流文字時輸出 runtime fallback
+├── wukong-cli/tests/cli_backend.rs    # 真正 binary、scope 與記憶驗證
 ├── wukong-gateway/src/backend.rs       # CLI 程序生命週期與測試
 ├── wukong-runtime/                    # CLI session／記憶／末棒整合驗證
 ├── wukong-web/                        # 真實 HTTP／SSE 入口驗證
@@ -32,6 +35,7 @@ crates/
 docker-compose{,.release}.yml          # 條件成立後調整預設與 server opt-in
 scripts/docker-entrypoint.sh           # 必要的 CLI 權限與啟動設定
 scripts/test-docker-runtime.sh         # 部署行為驗證
+scripts/test-support/cli_backend.rs     # 四入口共用的 subprocess fixture
 .env.example                          # 部署參數
 docs/{docker,entrypoints}.md           # 使用與相容路徑
 docs/issues/issue-0007/                # 範圍與證據
@@ -107,7 +111,7 @@ Feature: 可驗證的 CLI-first execution
 
 ## Gherkin 核准紀錄
 
-- **核准 commit**: 待提交
+- **核准 commit**: 9935708
 - **核准來源**: 2026-10-03 使用者 `/dev-cycle issue:7` 指向既有 issue 範圍；引用 issue 原文：「server backend 暫時保留為 optional / fallback」、「僅在上述證據成立後」切換預設。SCN-004 與 SCN-007 的策略相依尚未核准，不能實作切換。
 
 | Scenario | 核准日期 | 狀態 |
@@ -143,7 +147,7 @@ Feature: 可驗證的 CLI-first execution
 | 2026-10-03 | 從 issue 7 建立範圍與計畫；確認 server-only 互動需決策 | Codex |
 
 ---
-**建立日期**: 2026-10-03  
-**分級**: Large — 四入口與部署跨模組驗證  
-**風險**: High  
-**狀態**: 基線驗證中；互動策略待確認
+**建立日期**: 2026-10-03
+**分級**: Large — 四入口與部署跨模組驗證
+**風險**: High
+**狀態**: CLI 能力驗證完成；等待互動策略決策，尚未切換部署

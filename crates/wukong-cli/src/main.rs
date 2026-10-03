@@ -383,12 +383,22 @@ async fn run_one(
         let mut out = std::io::stdout();
         let mut err = std::io::stderr();
         let mut renderer = wukong_cli::render::StreamRenderer::new(&mut out, &mut err);
-        let mut sink = |ev: StreamEvent| renderer.on_event(&ev);
-        run_turn(memory, backend, cfg, input, &mut sink, &mut |role| {
+        let mut has_text = false;
+        let mut sink = |ev: StreamEvent| {
+            if let StreamEvent::Text(text) = &ev {
+                has_text |= !text.trim().is_empty();
+            }
+            renderer.on_event(&ev);
+        };
+        let res = run_turn(memory, backend, cfg, input, &mut sink, &mut |role| {
             eprintln!("🐵 悟空·{}", role.name());
         })
         .await?;
-        println!(); // newline after streamed text
+        if has_text {
+            println!(); // newline after streamed text
+        } else {
+            println!("{}", res.text);
+        }
         Ok(())
     } else {
         let res = run_turn(memory, backend, cfg, input, &mut |_| {}, &mut |role| {

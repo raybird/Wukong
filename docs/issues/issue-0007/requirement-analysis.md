@@ -38,3 +38,9 @@ Wukong 持有 scope、memory、orchestration 與 lifecycle；OpenCode 為 execut
 
 - 2026-10-03 隔離 XDG 目錄實際執行 `opencode run --dangerously-skip-permissions --format json "reply only probe"`（model 設為 `missing/nope`）：exit 1，收到帶 sessionID 的結構化 error。證明該旗標未阻止啟動；因無效模型未執行工具，不構成權限成功證據。
 - 2026-10-03 `cargo test -p wukong-gateway -p wukong-runtime -p wukong-scheduler`：exit 0，125／69／27 項測試通過（合計 221）。其中 `cli_backend_cannot_answer_questions` 明確驗證 CLI responder 不支援回覆；不是四入口 CLI 等價驗證。
+
+## 實測結論（2026-10-03）
+
+真實 OpenCode 1.18.31 的 permission 對照：明確 deny 時 bash 不在可用工具中、檔案副作用不存在；ask 加既有部署旗標時工具成功且檔案內容為 `CLI_PERMISSION_PROBE`；ask 不帶旗標時 tool state 為 error、stderr 明確 auto-reject、沒有檔案且正常退出。三者都有 exit 0，故不能只用 exit code 判定工具權限成功。可重跑的探針與四入口證據見 implementation-plan.md。
+
+程式盤點發現的 EOF deadline、drop child 與 CLI 串流入口丟棄 fallback 已依 Task 1.2／1.3 重現並最小修補。CLI question 回覆與 server 工具／session 管理差異保留，沒有藉本 issue 重設 adapter。

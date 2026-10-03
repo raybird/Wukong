@@ -446,6 +446,7 @@ impl AiBackend for AgentCliBackend {
         );
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..])
+            .kill_on_drop(true)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -514,6 +515,7 @@ impl AiBackend for AgentCliBackend {
 
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..])
+            .kill_on_drop(true)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -584,7 +586,15 @@ impl AiBackend for AgentCliBackend {
             on_event(StreamEvent::Text(clean));
         }
 
-        let status = child.wait().await?;
+        let status = tokio::select! {
+            status = child.wait() => status?,
+            _ = &mut deadline => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                stderr_task.abort();
+                return Err(agent_timeout_error(""));
+            }
+        };
         let stderr_buf = stderr_task.await.unwrap_or_default();
         if !status.success() {
             return Err(GatewayError::AgentFailed {
@@ -1421,6 +1431,117 @@ mod tests {
 
         assert_eq!(resp.text, "before\nafter");
         assert_eq!(events, vec![StreamEvent::Text("before\nafter".to_string())]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn agent_cli_streaming_deadline_covers_wait_after_stdout_closes() {
+        let _guard = AGENT_TIMEOUT_ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        std::env::set_var("WUKONG_AGENT_TIMEOUT_SECS", "1");
+        let backend = AgentCliBackend {
+            command: vec![
+                "sh".into(),
+                "-c".into(),
+                "echo $$ > \"$1\"; exec 1>&- 2>&-; exec sleep 30".into(),
+                "probe".into(),
+                pid_file.to_string_lossy().into_owned(),
+            ],
+            workspace: None,
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            backend.run_streaming(
+                AgentRequest {
+                    prompt: "ignored".into(),
+                    session_id: None,
+                    thinking: false,
+                    model: None,
+                    agent: None,
+                    tool_overrides: BTreeMap::new(),
+                    attachments: Vec::new(),
+                },
+                &mut |_| {},
+            ),
+        )
+        .await;
+        std::env::remove_var("WUKONG_AGENT_TIMEOUT_SECS");
+        let pid = std::fs::read_to_string(pid_file).unwrap();
+        let alive = std::path::Path::new(&format!("/proc/{}", pid.trim())).exists();
+        if alive {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", pid.trim()])
+                .status();
+        }
+        let error = result
+            .expect("deadline must also cover child.wait after EOF")
+            .unwrap_err();
+        assert!(error.to_string().contains("處理逾時"), "{error}");
+        assert!(!alive, "timed-out agent must be reaped");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn agent_cli_cancelled_futures_stop_plain_and_streaming_children() {
+        let mut survivors = Vec::new();
+        for streaming in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let pid_file = dir.path().join("pid");
+            let backend = AgentCliBackend {
+                command: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "echo $$ > \"$1\"; exec sleep 30".into(),
+                    "probe".into(),
+                    pid_file.to_string_lossy().into_owned(),
+                ],
+                workspace: None,
+            };
+            let mut future = Box::pin(async {
+                let req = AgentRequest {
+                    prompt: "ignored".into(),
+                    session_id: None,
+                    thinking: false,
+                    model: None,
+                    agent: None,
+                    tool_overrides: BTreeMap::new(),
+                    attachments: Vec::new(),
+                };
+                if streaming {
+                    backend.run_streaming(req, &mut |_| {}).await
+                } else {
+                    backend.run(req).await
+                }
+            });
+            tokio::select! {
+                result = &mut future => panic!("agent exited before cancellation: {result:?}"),
+                ready = tokio::time::timeout(Duration::from_secs(3), async {
+                    while !pid_file.exists() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }) => ready.expect("agent should publish its PID"),
+            }
+            let pid = std::fs::read_to_string(pid_file).unwrap();
+            let process = PathBuf::from(format!("/proc/{}", pid.trim()));
+            drop(future);
+            let stopped = tokio::time::timeout(Duration::from_secs(1), async {
+                while process.exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            if stopped.is_err() {
+                survivors.push(streaming);
+                let _ = std::process::Command::new("kill")
+                    .args(["-KILL", pid.trim()])
+                    .status();
+            }
+        }
+        assert!(
+            survivors.is_empty(),
+            "cancelled modes left children: {survivors:?}"
+        );
     }
 
     #[tokio::test]
