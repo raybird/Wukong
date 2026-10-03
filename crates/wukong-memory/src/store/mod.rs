@@ -498,6 +498,19 @@ impl Store {
         Ok(row.map(row_to_agent_session_state))
     }
 
+    /// Every opencode session id any scope still points at, across both the
+    /// legacy `agent_sessions` table and `agent_session_state`.
+    pub async fn referenced_session_ids(&self) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT session_id FROM agent_sessions
+             UNION
+             SELECT session_id FROM agent_session_state WHERE session_id IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.get("session_id")).collect())
+    }
+
     /// Upsert the opencode session id for a scope.
     pub async fn set_agent_session(&self, scope: &str, session_id: &str, now: i64) -> Result<()> {
         let mut tx = self.pool.begin().await?;
@@ -1301,6 +1314,29 @@ mod tests {
         // Leak the temp file handle so it lives for the whole test process.
         std::mem::forget(file);
         Store::open(&url).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn referenced_session_ids_cover_both_session_tables() {
+        let store = test_store().await;
+        store
+            .set_agent_session("user:a", "ses_both", 10)
+            .await
+            .unwrap();
+        for sql in [
+            "INSERT INTO agent_sessions(scope, session_id, updated_at)
+             VALUES ('legacy', 'ses_legacy_only', 1)",
+            "INSERT INTO agent_session_state(scope, session_id, updated_at)
+             VALUES ('state', 'ses_state_only', 1)",
+            "INSERT INTO agent_session_state(scope, session_id, updated_at)
+             VALUES ('rotating', NULL, 1)",
+        ] {
+            sqlx::query(sql).execute(&store.pool).await.unwrap();
+        }
+
+        let mut ids = store.referenced_session_ids().await.unwrap();
+        ids.sort();
+        assert_eq!(ids, ["ses_both", "ses_legacy_only", "ses_state_only"]);
     }
 
     #[tokio::test]

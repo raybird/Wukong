@@ -20,5 +20,6 @@ wukong-skills = { path = "../wukong-skills" }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+sqlx = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }

@@ -1,7 +1,9 @@
 mod event_map;
 mod sse;
 
-use crate::backend::{agent_timeout, AgentRequest, AgentResponse, AiBackend};
+use crate::backend::{
+    agent_timeout, AgentRequest, AgentResponse, AiBackend, SessionListing, SessionSummary,
+};
 use crate::error::GatewayError;
 use crate::stream::StreamEvent;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -15,6 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 const INLINE_ATTACHMENT_MAX_BYTES: u64 = 10 * 1024 * 1024;
+/// 列表一次取回的上限。回傳筆數達到它就視為被截斷。
+const SESSION_LIST_LIMIT: usize = 10_000;
 
 pub struct OpencodeServerBackend {
     pub base_url: String,
@@ -717,6 +721,17 @@ impl AiBackend for OpencodeServerBackend {
         Ok(())
     }
 
+    async fn list_sessions(&self) -> Result<SessionListing, GatewayError> {
+        // opencode 沒有「早於某時間」的過濾（`start` 是下界），所以整批取回再由
+        // 呼叫端挑。不帶 limit 時它只回最新的 100 筆。子 session 也要：呼叫端靠它們
+        // 判斷哪個根 session 底下還有人接著。
+        let url = format!("{}/session?limit={SESSION_LIST_LIMIT}", self.base_url);
+        let value = self
+            .send_json("list_sessions", self.client.get(url))
+            .await?;
+        parse_session_listing(&value, SESSION_LIST_LIMIT)
+    }
+
     async fn run_ephemeral(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
         self.health_check().await?;
         let session_id = self.create_session().await?;
@@ -868,6 +883,46 @@ fn extract_message_error(value: &Value) -> Option<crate::upstream_error::Upstrea
     containers.into_iter().find_map(|message| {
         let info = message.get("info").unwrap_or(message);
         crate::upstream_error::parse_error_field(info)
+    })
+}
+
+/// 任何一筆看不懂就整份失敗：這份清單決定哪些 session 會被刪，寧可這一輪不清，
+/// 也不要拿一份殘缺的清單去比對。
+fn parse_session_listing(value: &Value, limit: usize) -> Result<SessionListing, GatewayError> {
+    let malformed = |detail: String| GatewayError::AgentFailed {
+        code: None,
+        stderr: format!("opencode server list_sessions returned an unexpected payload: {detail}"),
+    };
+    let items = value.as_array().ok_or_else(|| {
+        let shown: String = value.to_string().chars().take(200).collect();
+        malformed(format!("not an array: {shown}"))
+    })?;
+    let sessions = items
+        .iter()
+        .map(|item| {
+            let id = item.get("id").and_then(Value::as_str);
+            let updated_ms = item
+                .get("time")
+                .and_then(|time| time.get("updated"))
+                .and_then(Value::as_i64);
+            match (id, updated_ms) {
+                (Some(id), Some(updated_ms)) => Ok(SessionSummary {
+                    id: id.to_string(),
+                    updated_ms,
+                    parent_id: item
+                        .get("parentID")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                }),
+                // 只說得出是哪一筆就好：整筆 session 帶著標題，不該進日誌。
+                (Some(id), None) => Err(malformed(format!("session {id} has no time.updated"))),
+                (None, _) => Err(malformed("a session has no id".to_string())),
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(SessionListing {
+        truncated: sessions.len() >= limit,
+        sessions,
     })
 }
 
@@ -1495,6 +1550,157 @@ mod tests {
         assert!(seen
             .iter()
             .any(|request| request == "DELETE /session/ses_1"));
+    }
+
+    /// Answers every request with the same status and body, recording what was asked.
+    async fn canned_server(
+        hits: std::sync::Arc<Mutex<Vec<String>>>,
+        status: &'static str,
+        body: &'static str,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 1024];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match socket.read(&mut tmp).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                let head = String::from_utf8_lossy(&buf);
+                let mut words = head.split_whitespace();
+                let method = words.next().unwrap_or_default();
+                let path = words.next().unwrap_or_default();
+                hits.lock().unwrap().push(format!("{method} {path}"));
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    async fn list_sessions_against(
+        status: &'static str,
+        body: &'static str,
+    ) -> (Result<SessionListing, GatewayError>, Vec<String>) {
+        let hits = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let backend =
+            OpencodeServerBackend::from_env(canned_server(hits.clone(), status, body).await, None);
+        let result = backend.list_sessions().await;
+        let seen = hits.lock().unwrap().clone();
+        (result, seen)
+    }
+
+    #[tokio::test]
+    async fn list_sessions_asks_for_every_session_with_an_explicit_limit() {
+        let (result, seen) = list_sessions_against(
+            "200 OK",
+            r#"[
+                {"id":"ses_new","time":{"created":5,"updated":3000}},
+                {"id":"ses_child","parentID":"ses_new","time":{"created":4,"updated":2000}},
+                {"id":"ses_old","time":{"created":1,"updated":1000}}
+            ]"#,
+        )
+        .await;
+
+        // opencode 不帶 limit 時只回 100 筆，而且由新到舊排：被截掉的正是最舊、
+        // 最該被清理的那些。所以這個請求的形狀本身就是行為的一部分。不帶 roots：
+        // 呼叫端要看得到子 session，才知道哪個根 session 底下還有人接著。
+        assert_eq!(seen, ["GET /session?limit=10000"]);
+        assert_eq!(
+            result.unwrap(),
+            SessionListing {
+                sessions: vec![
+                    SessionSummary {
+                        id: "ses_new".to_string(),
+                        updated_ms: 3000,
+                        parent_id: None,
+                    },
+                    SessionSummary {
+                        id: "ses_child".to_string(),
+                        updated_ms: 2000,
+                        parent_id: Some("ses_new".to_string()),
+                    },
+                    SessionSummary {
+                        id: "ses_old".to_string(),
+                        updated_ms: 1000,
+                        parent_id: None,
+                    },
+                ],
+                truncated: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn list_sessions_fails_instead_of_returning_a_partial_list() {
+        // 清理靠這份清單決定刪誰；任何看不懂的回應都必須是錯誤，不能是「沒有 session」。
+        for (status, body) in [
+            ("200 OK", r#"{"name":"UnknownError"}"#),
+            ("200 OK", r#"[{"id":"ses_1"}]"#),
+            ("200 OK", r#"[{"time":{"updated":1}}]"#),
+            (
+                "200 OK",
+                r#"[{"id":"ses_1","time":{"updated":1}},{"id":"ses_2","time":{}}]"#,
+            ),
+        ] {
+            let (result, _) = list_sessions_against(status, body).await;
+            let stderr = agent_failed_stderr(result.unwrap_err());
+            assert!(stderr.contains("list_sessions"), "{body}: {stderr}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_listing_is_reported_without_dumping_its_contents() {
+        // 這些錯誤每一輪都會進 schedulerd 的日誌。session 物件帶著標題，整份回應
+        // 可能有幾 MB——錯誤訊息只需要說得出是哪一筆、哪裡不對。
+        let missing_time = json!([{"id":"ses_1","title":"quarterly salary review"}]);
+        let stderr = agent_failed_stderr(parse_session_listing(&missing_time, 10).unwrap_err());
+        assert!(stderr.contains("ses_1"), "{stderr}");
+        assert!(!stderr.contains("quarterly salary review"), "{stderr}");
+
+        let missing_id = json!([{"title":"quarterly salary review","time":{"updated":1}}]);
+        let stderr = agent_failed_stderr(parse_session_listing(&missing_id, 10).unwrap_err());
+        assert!(!stderr.contains("quarterly salary review"), "{stderr}");
+
+        // serde_json 依鍵名排序輸出，所以把大欄位放在 name 之後。
+        let not_a_list = json!({"name":"UnknownError","stack":"x".repeat(5000)});
+        let stderr = agent_failed_stderr(parse_session_listing(&not_a_list, 10).unwrap_err());
+        assert!(stderr.contains("UnknownError"), "{stderr}");
+        assert!(stderr.len() < 500, "{} bytes", stderr.len());
+    }
+
+    #[test]
+    fn a_full_page_is_reported_as_truncated() {
+        let page = json!([
+            {"id":"ses_2","time":{"updated":2}},
+            {"id":"ses_1","time":{"updated":1}}
+        ]);
+        assert!(parse_session_listing(&page, 2).unwrap().truncated);
+        assert!(!parse_session_listing(&page, 3).unwrap().truncated);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_surfaces_the_upstream_error_body() {
+        // 實測：一筆 directory 不是絕對路徑的資料列就會讓整個列表回 500，而且每一輪
+        // 都一樣。錯誤要帶著上游回應，才看得出是同一個原因在重複。
+        let (result, _) = list_sessions_against(
+            "500 Internal Server Error",
+            r#"{"name":"UnknownError","data":{"ref":"err_717b5ac3"}}"#,
+        )
+        .await;
+        let stderr = agent_failed_stderr(result.unwrap_err());
+        assert!(stderr.contains("500"), "{stderr}");
+        assert!(stderr.contains("err_717b5ac3"), "{stderr}");
     }
 
     #[tokio::test]

@@ -44,6 +44,24 @@ pub struct AgentResponse {
     pub session_id: Option<String>,
 }
 
+/// One session as a backend lists it: just enough to decide whether it expired.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub id: String,
+    /// Last update, in milliseconds since the Unix epoch.
+    pub updated_ms: i64,
+    /// Set for child sessions, which live and die with their parent.
+    pub parent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionListing {
+    pub sessions: Vec<SessionSummary>,
+    /// The backend returned as many rows as were asked for, so the oldest
+    /// sessions — the ones retention cares about — may be missing.
+    pub truncated: bool,
+}
+
 /// Pluggable AI backend. v1 ships `AgentCliBackend`.
 #[allow(async_fn_in_trait)]
 pub trait AiBackend {
@@ -63,6 +81,16 @@ pub trait AiBackend {
 
     async fn delete_session(&self, _session_id: &str) -> Result<(), GatewayError> {
         Ok(())
+    }
+
+    /// List the sessions this backend owns. Only the opencode server backend
+    /// can: the CLI backend shares `opencode.db` with the user's own opencode
+    /// use, so it cannot tell which sessions are Wukong's.
+    async fn list_sessions(&self) -> Result<SessionListing, GatewayError> {
+        Err(GatewayError::AgentFailed {
+            code: None,
+            stderr: "目前只有 opencode server backend 支援列出 session。".to_string(),
+        })
     }
 
     async fn compact_session(
@@ -335,6 +363,13 @@ impl AiBackend for AgentBackend {
         match self {
             AgentBackend::Cli(backend) => backend.delete_session(session_id).await,
             AgentBackend::Server(backend) => backend.delete_session(session_id).await,
+        }
+    }
+
+    async fn list_sessions(&self) -> Result<SessionListing, GatewayError> {
+        match self {
+            AgentBackend::Cli(backend) => backend.list_sessions().await,
+            AgentBackend::Server(backend) => backend.list_sessions().await,
         }
     }
 
@@ -832,6 +867,18 @@ mod tests {
 
         assert!(reply.to_string().contains("question 回答"), "{reply}");
         assert!(cancel.to_string().contains("question 取消"), "{cancel}");
+    }
+
+    #[tokio::test]
+    async fn cli_backend_cannot_list_sessions() {
+        // CLI 模式的 opencode.db 與使用者自己的 opencode 使用共用，列得出來也分不出
+        // 哪些是 Wukong 建的，所以這條路必須是錯誤而不是空清單。
+        let backend = AgentBackend::Cli(AgentCliBackend {
+            command: vec!["command-that-must-not-run".to_string()],
+            workspace: None,
+        });
+        let err = backend.list_sessions().await.unwrap_err();
+        assert!(err.to_string().contains("列出 session"), "{err}");
     }
 
     #[tokio::test]

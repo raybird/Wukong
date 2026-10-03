@@ -2,13 +2,16 @@ use clap::Parser;
 use std::io::{BufRead, Write};
 use wukong_cli::repl::{classify_line, LineAction};
 use wukong_cli::run_turn;
-use wukong_gateway::backend::{build_backend_from_env, AgentBackend};
-use wukong_gateway::cli::{Cli, Command, MemoryOp, ScheduleMaintenanceTaskArg, ScheduleOp};
+use wukong_gateway::backend::{build_backend_from_env, AgentBackend, AiBackend};
+use wukong_gateway::cli::{
+    Cli, Command, MemoryOp, OpencodeOp, ScheduleMaintenanceTaskArg, ScheduleOp,
+};
 use wukong_gateway::config::GatewayConfig;
 use wukong_gateway::workspace_dir;
 use wukong_gateway::StreamEvent;
 use wukong_memory::Memory;
 use wukong_runtime::maintenance::{memory_consolidate, memory_prune, memory_snapshot};
+use wukong_runtime::session_retention::{prune_opencode_sessions, render_report, RetentionPolicy};
 use wukong_runtime::util::now_unix;
 use wukong_scheduler::{
     ExecutionContext, Job, JobKind, MaintenanceTask, NewJob, PermissionPolicy, SchedulerStore,
@@ -17,6 +20,22 @@ use wukong_scheduler::{
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    if let Some(Command::Opencode {
+        op: OpencodeOp::Vacuum,
+    }) = &cli.command
+    {
+        // 在開記憶庫之前處理：這個子命令由 opencode-server 容器在啟動 server 前
+        // 呼叫，那個容器不該順手建立或開啟 memory.db。
+        match wukong_cli::opencode_db::run().await {
+            Ok(line) => eprintln!("{line}"),
+            Err(line) => {
+                eprintln!("{line}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     let mut cfg = GatewayConfig::resolve(&cli);
     let settings_path = wukong_settings::default_settings_path();
     let settings = wukong_settings::load_settings(&settings_path).unwrap_or_default();
@@ -33,6 +52,18 @@ async fn main() {
     let backend = build_backend_from_env(cfg.agent_command.clone(), workspace_dir());
 
     if cli.new_session {
+        // 先刪 opencode 那邊的 session，否則它會永遠留在 opencode.db。刪不掉也照樣
+        // 清對應：--new 的承諾是這一回合不帶舊 context，留下的無主 session 之後由
+        // 保留期清理收掉。
+        match memory.agent_session(&cfg.scope).await {
+            Ok(Some(session_id)) => {
+                if let Err(e) = backend.delete_session(&session_id).await {
+                    eprintln!("warning: failed to delete session {session_id}: {e}");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("warning: failed to read session: {e}"),
+        }
         if let Err(e) = memory.clear_agent_session(&cfg.scope).await {
             eprintln!("warning: failed to reset session: {e}");
         }
@@ -50,6 +81,29 @@ async fn main() {
         if let Err(e) = run_schedule_op(&memory, &backend, &cfg, op).await {
             eprintln!("error: {e}");
             std::process::exit(1);
+        }
+        return;
+    }
+
+    if let Some(Command::Opencode {
+        op: OpencodeOp::Prune { dry_run },
+    }) = &cli.command
+    {
+        let policy = RetentionPolicy::from_env();
+        // 清理的對錯取決於這份記憶庫是不是 server 實際在用的那一份，所以把它印出來。
+        println!("記憶庫：{}", cfg.db_url);
+        match prune_opencode_sessions(&memory, &backend, policy, now_unix() * 1000, *dry_run).await
+        {
+            Ok(report) => {
+                println!("{}", render_report(&report, policy));
+                if policy.enabled() && (!report.anchored || !report.failed.is_empty()) {
+                    std::process::exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
         }
         return;
     }

@@ -329,6 +329,9 @@ Wukong 的 session lease 只會保護同一個 scope：
 - 主機是否有 BIOS、電源、記憶體、APU 或 kernel driver 層面的問題。
 - OpenCode session delete 是否會完整 cascade 清除所有對應 event/part；清理前必須先在
   備份或副本驗證。
+  **2026-10-01 追記**：已在副本上以 opencode 1.18.29 驗證會完整清除，P2 的 session
+  retention 也已實作，見 `docs/issues/issue-0003/`。本文記錄的那份 1.33 GiB 資料庫
+  本身尚未重新量測。
 - 1.18.15 是否修復此 CPU 行為。版本存在，但未在本次調查中宣稱有相關修復。
 
 ## 2026-08-08 追記：對照實驗結果

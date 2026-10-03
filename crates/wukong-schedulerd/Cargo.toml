@@ -24,6 +24,8 @@ wukong-chat-history = { path = "../wukong-chat-history" }
 # Enables MockTgClient (defined in wukong-tg-client) for notify tests.
 wukong-tg-client = { path = "../wukong-tg-client", features = ["mock"] }
 tempfile = { workspace = true }
+# start_paused / time::advance for the retention ticker test.
+tokio = { workspace = true, features = ["test-util"] }
 
 [features]
 embed = ["wukong-memory/embed", "wukong-runtime/embed"]

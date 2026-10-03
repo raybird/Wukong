@@ -38,7 +38,7 @@ Compose 中各服務與 `opencode-server` 共用 `/workspace`，所以附件預�
 
 Server backend 也會把 OpenCode 權限要求送到 Telegram inline keyboard。Docker 預設 seed 的權限規則多數為 allow，因此只有自訂 `opencode.json` 將操作設為 `ask` 時才會看到確認按鈕。
 
-Binary 模式第一版不自動啟動或管理 `opencode serve`。在一般本機 CLI 使用情境，Wukong 仍預設透過 `opencode run` 執行，以避免背景 daemon、port、跨專案工作目錄與清理策略帶來額外複雜度。進階使用者若自行啟動 `opencode serve`，可手動設定 `WUKONG_AGENT_SERVER_URL` 使用同一 backend。
+Binary 模式第一版不自動啟動或管理 `opencode serve`。在一般本機 CLI 使用情境，Wukong 仍預設透過 `opencode run` 執行，以避免背景 daemon、port、跨專案工作目錄與清理策略帶來額外複雜度。進階使用者若自行啟動 `opencode serve`，可手動設定 `WUKONG_AGENT_SERVER_URL` 使用同一 backend。 若把 Wukong 接到一個自行啟動、你自己也在用的 `opencode serve`，請先讀下方「opencode session 的保留期清理」：這種用法要把 `WUKONG_OPENCODE_SESSION_RETENTION_DAYS` 設為 `0`。
 
 若要回到舊的 Docker CLI subprocess 模式，移除服務環境中的 `WUKONG_AGENT_SERVER_URL`，Wukong 會使用 `WUKONG_AGENT_CMD`，預設為 `opencode run --dangerously-skip-permissions`。
 
@@ -199,6 +199,7 @@ services:
 | `WUKONG_MEMORY_AUTO_MAINTENANCE` | schedulerd 是否啟用安全的 all-scope consolidation（只刪除已折疊來源） | `1` |
 | `WUKONG_MEMORY_MAINTENANCE_INTERVAL_SECS` | schedulerd 自動 memory maintenance 間隔秒數 | `900` |
 | `WUKONG_MEMORY_CONSOLIDATE_THRESHOLD` | 單一 scope 觸發自動 consolidation 的候選數 | `40` |
+| `WUKONG_OPENCODE_SESSION_RETENTION_DAYS` | opencode session 保留天數。schedulerd 啟動 6 小時後第一次、之後每 6 小時，刪除超過此天數、且沒有任何 scope 指向的 session；設 `0` 停用；在 `.env` 留空或寫了無法解析的值也視為停用 | `30` |
 | `WUKONG_BIN` | 注入排程能力提示詞時使用的 `wukong` 指令路徑（agent 自行建排程時用） | `wukong` |
 | `WUKONG_SCHED_NOTIFY` | schedulerd 是否把排程結果回送 Telegram（`0` 關閉） | `1` |
 | `WUKONG_SCHED_PERMISSION` | 無人值守排程遇到 opencode 權限詢問時的處置；`allow` 才自動允許一次，其餘一律拒絕 | `reject` |
@@ -209,6 +210,26 @@ services:
 | `WUKONG_OPENCODE_CONN_GRACE_SECS` | 對外埠仍有 `ESTABLISHED` 連線時，最多再等多久才視為閒置的 keep-alive 並放行。`0` 表示不等待 | `1800`（30m） |
 | `WUKONG_OPENCODE_CPUS` / `_MEM` / `_PIDS` | `opencode-server` 與 `cli` profile 的 cgroup 上限（agent 實際幹活的容器）。溫度壓不下來就調降 CPU；回合明顯變慢且溫度尚可再往上加 | `1.5` / `2g` / `256` |
 | `WUKONG_SVC_CPUS` / `_MEM` / `_PIDS` | `wukong-web`／`wukong-telegram`／`wukong-schedulerd` 的 cgroup 上限。重活都在 opencode-server，這層只是 HTTP client；schedulerd 開 `WUKONG_EMBED=1` 時要調高 MEM（embedding 模型載在該程序內） | `0.5` / `768m` / `128` |
+
+**關於 opencode session 的保留期清理：** opencode 把每個 session 的訊息、片段與事件歷史存在 `opencode.db`，不會自己刪。Wukong 只在輔助棒跑完、session 輪替與 `/new` 時刪除 session，其餘（回合失敗留下的、人工探測建立的）會一直留著。`wukong-schedulerd` 因此在啟動 6 小時後第一次、之後每 6 小時，刪除超過 `WUKONG_OPENCODE_SESSION_RETENTION_DAYS` 天、且沒有任何 scope 指向的 session，每輪最多 500 個、最長 5 分鐘。**仍被 scope 指向的 session 不論多舊都保留**（scope 指向子 session 時，整棵 session 樹都保留），所以對話延續不受影響；Wukong 自己另存對話，不讀舊的 opencode session。讀不到 scope 對應或列不出 session 時整輪不刪。只在 server backend 生效：CLI 模式的 `opencode.db` 與你自己的 opencode 使用共用，不自動清掃。
+
+**這項清理假設 server 上的 session 都屬於這一套 Wukong、而且只有一份記憶庫在用它。** compose 部署成立，因為 `opencode-state` 與 `wukong-data` 兩個 volume 都是專屬的。三種情況不成立：
+
+- **記憶庫與 server 完全對不上**（`WUKONG_MEMORY_DB` 打錯而開出空的記憶庫、或指到另一套部署的記憶庫）。這時 server 上還有人接著的 session 會被看成無主。防護：記憶庫指向的 session 若沒有任何一個出現在 server 的清單裡，整輪不刪，並在輸出與 schedulerd 日誌寫出原因與所用的記憶庫。全新的記憶庫因此要先跑過一個回合才會開始清理。唯一的例外是兩邊都是空的全新部署：那不算對不上，只是沒東西可清。
+- **一個 server 被兩份記憶庫共用**（主機上的 `wukong` 與容器內的服務各用各的記憶庫卻指向同一個 server，或兩套部署共用一個 server）。**上面那道防護擋不住這種情況**：只要兩邊都在這個 server 上跑過回合，各自都「對得上」，而每一份記憶庫都會把對方還在續接的舊 session 看成無主——容器的 schedulerd 會自動刪掉主機那份指向的，主機上手動 `prune` 也會刪掉容器那份指向的。**一個 opencode server 只能對應一份記憶庫**；做不到時把 `WUKONG_OPENCODE_SESSION_RETENTION_DAYS` 設為 `0`，主機上也不要對它執行 `wukong opencode prune`。
+- **把 Wukong 接到你自己也在用的 `opencode serve`**。只要 Wukong 在上面跑過回合，上述防護就會放行，而你自己超過保留期的 session 在 Wukong 看來就是無主的，會被刪除。**這種用法請把 `WUKONG_OPENCODE_SESSION_RETENTION_DAYS` 設為 `0`。**
+
+套用前可先預覽，`exec` 預設是 root，要指定使用者：
+
+```bash
+docker compose exec -u wukong wukong-schedulerd wukong opencode prune --dry-run
+```
+
+輸出第一行是所用的記憶庫位置，接著列出將被刪除與受保護的 session。升級後 schedulerd 不會在啟動當下清理，有 6 小時可以先看這份預覽。反過來說，上次清理的時間沒有被保存：schedulerd 若每次都在 6 小時內重啟，清理就永遠不會執行，這時請手動執行 `wukong opencode prune`。受保護清單中「已超過保留期」的數量是被棄置 scope 的規模：它們不會被清理。同樣的數字每輪也會出現在 schedulerd 日誌的 `opencode_session_retention` 那一行。該行的 `anchored=false` 表示記憶庫與 server 對不上、這一輪沒有清理，下一行 `warning:` 會寫出原因與所用的記憶庫；`truncated=true` 表示 session 超過一次取回的上限（10,000 個），最舊的沒被看到。這時有一個已知的邊界：若某個 scope 指向的是一個被截掉的子 session，它的根 session 可能被當成無主而刪除。server backend 自己建立的對應一定指向根 session，所以只有 CLI backend 留下的對應會遇到。
+
+刪除只把空間還給 SQLite 重用，檔案不會變小。`opencode-server` 容器每次啟動、在 server 開啟資料庫之前，會在可回收空間達 25% 且剩餘磁碟不小於資料庫 2 倍時執行 `VACUUM`；既有的離峰重啟讓這大約每天發生一次。`VACUUM` 的暫存複本寫在資料庫旁邊（entrypoint 設了 `SQLITE_TMPDIR`），不佔容器的根檔案系統。回收失敗（例如資料庫被鎖）只記一行警告，不影響 server 啟動。日誌關鍵字是 `opencode_db_vacuum`。
+
+這項清理刪不到**長壽的 scope session**——一個用了幾個月的聊天 scope，它的 session 會持續累積歷史，而它正是被保護的對象。如果 `opencode.db` 仍然很大，先用預覽看可刪的佔多少。
 
 **關於 opencode server 的週期性重啟：** `opencode serve` 常駐不死，每回合的殘留（heap、快取、DB handle）全部留存，idle CPU 會隨累積工作量上升；CLI 模式沒有這個問題，因為 `opencode run` 每回合退出，等於免費獲得重置。容器內因此常駐一個 supervisor，在 `WUKONG_OPENCODE_RESTART_WINDOW` 的窗口內、且判定閒置時讓 server 自行退出，由 `restart: unless-stopped` 拉起。閒置的判準是：無近期 session 更新、`opencode.db` 已停止寫入（後者用來涵蓋 compaction 等背景工作）。
 

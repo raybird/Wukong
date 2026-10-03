@@ -41,6 +41,10 @@ wukong memory consolidate --scope project:X  # 用 opencode 把零碎 event 聚�
 wukong memory prune --dry-run                # 預覽將刪的低價值/已摘要記憶
 wukong memory export --dir ./mem-md          # 依 DB 全量重建 markdown 鏡像
 
+# opencode 狀態維護（prune 需要 opencode server backend）
+wukong opencode prune --dry-run              # 預覽將刪的過期 opencode session 與受保護清單
+wukong opencode vacuum                       # 可回收空間夠多時 VACUUM opencode.db
+
 # 排程（Docker 模式會預設啟動 wukong-schedulerd，自動按 cron 執行）
 wukong schedule add-turn \
   --name "daily project check" \
@@ -75,6 +79,15 @@ wukong-schedulerd
 | `memory consolidate [--scope X] [--dry-run]` | 把該 scope 的零碎 event/note 聚合成 `Summary`（經 opencode 摘要），來源標記為已摘要；`--dry-run` 只列批次 |
 | `memory prune [--scope X] [--dry-run]` | 刪除「已被摘要」或「老舊+未取用+低重要度」的記憶；`Decision`/`Skill`/`Summary` 永不刪；`--dry-run` 只列清單 |
 | `memory export [--dir D]` | 依 DB 全量重建 markdown 鏡像（DB 為唯一真相來源，markdown 單向衍生） |
+
+## opencode 維護子命令
+
+子命令之前不能帶 `--db`、`--scope` 這類全域旗標：帶了之後，後面的字會被當成 prompt 送去跑一個回合。要指定資料庫請用環境變數 `WUKONG_MEMORY_DB`。
+
+| 子命令 | 說明 |
+| :--- | :--- |
+| `opencode prune [--dry-run]` | 刪除超過 `WUKONG_OPENCODE_SESSION_RETENTION_DAYS`（預設 30）天、且沒有任何 scope 指向的 opencode session；`--dry-run` 只列出將刪除與受保護的清單。只支援 opencode server backend。輸出第一行是所用的記憶庫；記憶庫指向的 session 沒有任何一個在 server 上時拒絕清理（記憶庫與 server 都是空的不算）。拒絕清理或有刪除失敗時結束碼為 1 |
+| `opencode vacuum` | `opencode.db` 的可回收空間達 25% 且磁碟放得下時執行 `VACUUM`。資料庫位置取 `WUKONG_OPENCODE_DB`，否則用 opencode 的預設位置。容器啟動 `opencode serve` 前會自動呼叫 |
 
 ## 排程子命令
 

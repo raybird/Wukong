@@ -276,6 +276,30 @@ case "${1:-}" in
         # put that reset back. It is a sibling process, not a wrapper, so opencode
         # stays PID 1 and its own signal handling is untouched.
         if [[ "${1:-}" == "opencode" && "${2:-}" == "serve" ]]; then
+            # Deleting sessions only returns pages to SQLite's freelist; the file
+            # shrinks only on VACUUM. Do it here, before the server opens the
+            # database — the idle restart brings this moment around about daily.
+            # It skips itself unless enough of the file is reclaimable and the
+            # disk can hold the rewrite. A failure is logged and never blocks the
+            # server from starting (docs/issues/issue-0003).
+            #
+            # Ask the binary whether it knows the subcommand first. A `wukong` that
+            # predates it does not reject `opencode vacuum` — it takes the words as
+            # a prompt and runs an agent turn with them. This script and the binary
+            # normally ship together, but a local `docker build` pairs this script
+            # with whatever release the Dockerfile's VERSION arg downloads.
+            #
+            # SQLITE_TMPDIR: VACUUM writes a full temporary copy, by default under
+            # /var/tmp — the container's overlay root filesystem, which the disk
+            # check (made against the database's own filesystem) knows nothing
+            # about. Keep the copy next to the database so the check covers it.
+            if wukong opencode --help 2>/dev/null | grep -q 'vacuum'; then
+                opencode_db="${WUKONG_OPENCODE_DB:-$OPENCODE_STATE/opencode.db}"
+                WUKONG_OPENCODE_DB="$opencode_db" \
+                    SQLITE_TMPDIR="$(dirname "$opencode_db")" \
+                    gosu wukong wukong opencode vacuum \
+                    || echo "[wukong] WARNING: opencode.db vacuum failed; starting the server anyway." >&2
+            fi
             # Say so out loud when the script is missing. v0.20.0 shipped an image
             # without it (the release build uses Dockerfile.release with a curated
             # context that had not been updated), and because this is launched in
