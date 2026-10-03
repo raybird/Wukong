@@ -97,6 +97,27 @@ struct PermissionReplyBody<'a> {
 }
 
 impl OpencodeServerBackend {
+    pub(crate) fn for_local_process(base_url: String, workspace: Option<PathBuf>) -> Self {
+        let mut backend = Self::from_env(base_url, workspace.clone());
+        backend.file_mode = FileTransportMode::Shared;
+        backend.server_workspace = workspace;
+        backend
+    }
+
+    pub(crate) async fn reply_local_question(
+        &self,
+        request_id: &str,
+        answers: Option<Vec<Vec<String>>>,
+    ) -> Result<(), GatewayError> {
+        let action = if answers.is_some() { "reply" } else { "reject" };
+        let url = format!("{}/question/{request_id}/{action}", self.base_url);
+        let mut request = self.client.post(url);
+        if let Some(answers) = answers {
+            request = request.json(&question_reply_body(answers));
+        }
+        self.send_empty("question_reply", request).await
+    }
+
     pub fn from_env(base_url: String, workspace: Option<PathBuf>) -> Self {
         let file_mode = FileTransportMode::from_env();
         let server_workspace = std::env::var("WUKONG_AGENT_SERVER_WORKSPACE")

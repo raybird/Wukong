@@ -27,6 +27,32 @@
 # the runtime image serialises those calls (MEMORIA_VECTOR_MAX_CONCURRENCY,
 # default 1), so the ceiling is one helper on top of opencode itself — hence the
 # raised default below. Increase both together or not at all.
+# 2026-10-04: local agents run in each entrance; the same runtime is available in all of them.
+x-memoria-agent: &memoria-agent
+  depends_on:
+    memoria-runtime:
+      condition: service_completed_successfully
+  volumes:
+    - memoria-runtime:/opt/memoria:ro
+    - memoria-data:/memoria
+  environment:
+    # Prepending to PATH means restating it: compose replaces the image's ENV
+    # rather than extending it.
+    - PATH=/opt/memoria/bin:/home/wukong/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+    # Deliberately NOT the host's ~/.memoria. Container memories stay separate,
+    # matching how the TeleNexus deployment keeps its own Memoria volume.
+    - WUKONG_MEMORIA_HINT=${WUKONG_MEMORIA_HINT:-1}
+    - MEMORIA_HOME=/memoria
+    - LIBSQL_URL=file:/memoria/.memory/vectors.db
+    - MEMORIA_EMBED_PROVIDER=${WUKONG_MEMORIA_EMBED_PROVIDER:-local}
+    - MEMORIA_VECTOR_RECALL_CMD=/opt/memoria/lib/node_modules/@raybird.chen/memoria/skills/memoria-vector/vector-recall.mjs
+    # Host measurement: ~1s warm spawn. The container shares 1.5 cores with
+    # opencode, so cold starts run longer than they do on the host.
+    - MEMORIA_VECTOR_TIMEOUT_MS=${WUKONG_MEMORIA_VECTOR_TIMEOUT_MS:-20000}
+    - MEMORIA_VECTOR_MAX_CONCURRENCY=${WUKONG_MEMORIA_VECTOR_MAX_CONCURRENCY:-1}
+  mem_limit: "${WUKONG_OPENCODE_MEM_MEMORIA:-3g}"
+
+
 services:
   memoria-runtime:
     # Publishes the runtime into the shared volume, then exits. Not a service
@@ -59,53 +85,15 @@ services:
     restart: "no"
 
   opencode-server:
-    # The agent's shell runs here, so this is the only container that needs the
-    # CLI. Memoria's HTTP API would not do: `brief` has no endpoint, and the host
-    # workflow opens with it. (`feedback` does have one — POST
-    # /v1/recall/:id/outcome — the CLI and HTTP names just differ.)
-    depends_on:
-      memoria-runtime:
-        condition: service_completed_successfully
-    volumes:
-      - memoria-runtime:/opt/memoria:ro
-      - memoria-data:/memoria
-    environment:
-      # Prepending to PATH means restating it: compose replaces the image's ENV
-      # rather than extending it.
-      - PATH=/opt/memoria/bin:/home/wukong/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
-      # Deliberately NOT the host's ~/.memoria. Container memories stay separate,
-      # matching how the TeleNexus deployment keeps its own Memoria volume.
-      - MEMORIA_HOME=/memoria
-      - LIBSQL_URL=file:/memoria/.memory/vectors.db
-      - MEMORIA_EMBED_PROVIDER=${WUKONG_MEMORIA_EMBED_PROVIDER:-local}
-      - MEMORIA_VECTOR_RECALL_CMD=/opt/memoria/lib/node_modules/@raybird.chen/memoria/skills/memoria-vector/vector-recall.mjs
-      # Host measurement: ~1s warm spawn. The container shares 1.5 cores with
-      # opencode, so cold starts run longer than they do on the host.
-      - MEMORIA_VECTOR_TIMEOUT_MS=${WUKONG_MEMORIA_VECTOR_TIMEOUT_MS:-20000}
-      - MEMORIA_VECTOR_MAX_CONCURRENCY=${WUKONG_MEMORIA_VECTOR_MAX_CONCURRENCY:-1}
-    mem_limit: "${WUKONG_OPENCODE_MEM_MEMORIA:-3g}"
-
-  # The three services below get no Memoria wiring of their own — the CLI lives
-  # in opencode-server, which is where the agent's shell runs. What they need is
-  # the one flag that makes run_turn tell the agent the CLI exists.
-  #
-  # Splitting it this way is not incidental: the prompt is built HERE, the CLI
-  # runs THERE. Before this flag, the overlay wired the environment and stopped,
-  # so the agent was never told and the container's store stayed empty for four
-  # days. Availability is not discoverability.
-  #
-  # The flag has to be explicit rather than auto-detected, because these
-  # containers cannot see opencode-server's PATH; probing their own environment
-  # would answer the wrong question.
+    <<: *memoria-agent
+  wukong:
+    <<: *memoria-agent
   wukong-web:
-    environment:
-      - WUKONG_MEMORIA_HINT=${WUKONG_MEMORIA_HINT:-1}
+    <<: *memoria-agent
   wukong-telegram:
-    environment:
-      - WUKONG_MEMORIA_HINT=${WUKONG_MEMORIA_HINT:-1}
+    <<: *memoria-agent
   wukong-schedulerd:
-    environment:
-      - WUKONG_MEMORIA_HINT=${WUKONG_MEMORIA_HINT:-1}
+    <<: *memoria-agent
 
 volumes:
   memoria-runtime:
