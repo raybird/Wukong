@@ -64,6 +64,7 @@
 - 驗證：先查外部契約，再跑隔離資料的真實工具問答與各入口；對照回答、取消與錯誤／逾時清理。Scheduler 權限由後續 SCN-004 Task 負責。
 - 狀態：⏳ 進行中（2026-10-03；唯讀契約查核已完成，尚未實作）。
 - 證據：requirement-analysis.md「互動要求與控制通道查核」。run 禁止 question，ACP 未轉送 question；尚無可直接採用的完整純 stdio 通道，不將原始碼查核寫成真實問答通過。
+- 規格提交：2026-10-03 `c25fb47`；新增 SCN-010 已依使用者原話核准。文件核對 Scenario 與表格集合一致、SCN-010 唯一責任 Task 為 2.1，`git diff --check` 通過；本次未修改產品程式，不重跑程式測試。
 
 SCN-004、SCN-007 的控制通道仍待 TBD-2；不建立其可執行 Task。決策成立後補 Scheduler Reject／AllowOnce 與一般 question 的有界處置驗證，以及兩份 Compose／entrypoint／env／操作文件切換 Task；部署相依 Phase 1 與 Task 2.1 必要證據成立。
 

@@ -119,9 +119,8 @@ Feature: 可驗證的 CLI-first execution
 
 ## Gherkin 核准紀錄
 
-- **核准 commit**: 9935708
+- **核准 commit**: c25fb47a80416e79bafe4774690aa3ff4f5af95c
 - **核准來源**: 2026-10-03 使用者 `/dev-cycle issue:7` 指向既有 issue 範圍；引用 issue 原文：「server backend 暫時保留為 optional / fallback」、「僅在上述證據成立後」切換預設。
-- **SCN-010 修訂核准 commit**: 待提交。
 - **SCN-010 核准來源**: 2026-10-03 使用者明確要求：「Cli 也要支援互動問答才行」。不接受以非互動降級作為 CLI 等價證據。SCN-004／007 的控制通道相依待 TBD-2 決定。
 
 | Scenario | 核准日期 | 狀態 |
