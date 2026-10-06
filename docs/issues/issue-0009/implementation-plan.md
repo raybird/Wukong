@@ -58,7 +58,12 @@
    - 層級說明：SCN-007 的 When 是自動維護；自動維護把 `consolidate` 的錯誤交給步驟 1 的 scope 隔離（已由 `auto_maintenance_isolates_a_failing_scope` 證明會保留來源並繼續），所以只在 `consolidate` 這一層補紅燈，沒有遺漏另一層保障。
    - 下游與靜態檢查：`cargo test -p wukong-memory -p wukong-runtime` 與 `cargo test -p wukong-scheduler -p wukong-schedulerd` 全綠；`cargo clippy -p wukong-memory -p wukong-runtime -p wukong-scheduler -p wukong-schedulerd --all-targets -- -D warnings` 通過；`cargo fmt --all -- --check` 通過。
    - code-simplify：no-op，一個空白檢查已是最小改動。
-3. ⏳ **SCN-008：按需模式 schedulerd 真實合併** — 產出：真實程序的驗證腳本或 ignored 整合測試，以及執行紀錄。相依：步驟 1。完成判準：紀錄中有非空摘要、被刪除的來源筆數，以及結束後沒有 OpenCode 程序；若揭露其他失敗，回報後再決定處理方式。
+3. ✅ **SCN-008：按需模式 schedulerd 真實合併** — 產出：真實程序的驗證腳本或 ignored 整合測試，以及執行紀錄。相依：步驟 1。完成判準：紀錄中有非空摘要、被刪除的來源筆數，以及結束後沒有 OpenCode 程序；若揭露其他失敗，回報後再決定處理方式。
+   - 探針：[probe-consolidate.py](./probe-consolidate.py)。真正的 `target/debug/wukong-schedulerd --once`（被測提交 `03f9d14`）、`WUKONG_AGENT_CMD=opencode run`、未設 server URL、OpenCode 1.18.31，模型為本機假的 OpenAI 相容 server，不呼叫外部 LLM。隔離 XDG、HOME 與資料庫，以包裝腳本記錄每個 opencode PID。需要有 sqlite3 模組的 Python（pyenv 3.11.11 沒有，使用 `/usr/bin/python3`）。
+   - 結果（2026-10-06）：`/usr/bin/python3 docs/issues/issue-0009/probe-consolidate.py` exit 0，約 4 秒。40 筆 `event` 變成 2 筆 `summary`，內容皆為 `PROBE_SUMMARY sources=20`（假模型在 prompt 裡實際數到的來源數）；日誌 `memory_consolidated scope=user:tg-probe summaries=2 pruned=40`；啟動 2 個 OpenCode、結束後殘留 0 個；兩個臨時 session 都有 `session_deleted`。
+   - 判準反向自檢：合併沒發生時資料表仍是 40 筆 `event`；摘要不是模型產生的時內容不會是 `sources=20`；程序沒收尾時 `leftover_pids` 非空。三者都會讓探針失敗。
+   - 對照組（同時是 SCN-007 的真實程序證據）：`PROBE_BLANK=1 /usr/bin/python3 docs/issues/issue-0009/probe-consolidate.py` exit 0。假模型回空白，第一批後該 scope 停止（1 次摘要呼叫），40 筆 `event` 原封不動，日誌 `memory_consolidate_failed scope=user:tg-probe error=memory error: summarizer returned a blank summary for 20 source memories in user:tg-probe`，殘留程序 0 個。也證明按需 backend 確實會把空白回覆原樣交給摘要器。
+   - 未涵蓋：真實外部 LLM 的摘要品質、容器內執行（本機程序，與 issue 7 的 Docker 證據分開）。
 4. ⏳ **SCN-005：注入長度上限** — 產出：`compose_prompt` 截斷與測試。相依：無。完成判準：超長記憶的測試先紅後綠，斷言用字面期望值，資料庫內容不變。
 5. ⏳ **SCN-002、SCN-003：最後一棒只注入相關記憶** — 產出：新的召回模式、相關度門檻、`run_turn` 最後一棒改用它，以及測試。相依：步驟 4。完成判準：以假 backend 擷取最後一棒的 prompt，「只有不相關的最新記憶」時沒有 `[相關記憶]`，「有相關舊記憶」時含該筆；兩者先紅後綠。斷言檢查命中來源（`source_signals`），不只檢查筆數。
 6. ⏳ **SCN-004：輔助棒取得最近一個回合** — 產出：輔助棒的注入組合與測試。相依：步驟 5。完成判準：多棒回合中輔助棒 prompt 含上一回合、不含更早的不相關回合，先紅後綠。
