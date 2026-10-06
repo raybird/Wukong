@@ -462,6 +462,13 @@ impl Memory {
             let texts: Vec<String> = batch.iter().map(|r| r.text.clone()).collect();
             let importance = batch.iter().map(|r| r.importance).fold(0.0_f64, f64::max);
             let summary_text = summarizer.summarize(&texts)?;
+            // 2026-10-06：空白摘要若照寫，來源會被標記並在下一輪刪除，內容就此遺失。
+            if summary_text.trim().is_empty() {
+                return Err(MemoryError::Other(format!(
+                    "summarizer returned a blank summary for {} source memories in {scope}",
+                    texts.len()
+                )));
+            }
             let (summary_id, _) = self
                 .store
                 .insert_memory(
@@ -748,6 +755,38 @@ mod tests {
         assert!(recent
             .iter()
             .any(|c| c.kind == MemoryKind::Summary && c.text == "SUMMARY(2)"));
+    }
+
+    struct BlankSummarizer;
+
+    impl consolidate::Summarizer for BlankSummarizer {
+        fn summarize(&self, _texts: &[String]) -> Result<String> {
+            Ok(" \n".to_string())
+        }
+    }
+
+    // SCN-007: a blank summary must not replace (and later delete) its sources.
+    #[tokio::test]
+    async fn consolidate_keeps_sources_when_summary_is_blank() {
+        let mem = open_mem().await;
+        remember_event(&mem, "project:X", "did A").await;
+        remember_event(&mem, "project:X", "did B").await;
+        let policy = ConsolidatePolicy { batch_size: 20 };
+
+        let result = mem
+            .consolidate("project:X", &policy, &BlankSummarizer)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "blank summary must be reported as a failure"
+        );
+        let after = mem.plan_consolidation("project:X", &policy).await.unwrap();
+        assert_eq!(after.batches.len(), 1);
+        assert_eq!(after.batches[0].len(), 2);
+        let recent = mem.store.recent_candidates(10, None).await.unwrap();
+        assert!(recent.iter().all(|c| c.kind != MemoryKind::Summary));
+        assert_eq!(mem.prune_consolidated(Some("project:X")).await.unwrap(), 0);
     }
 
     #[tokio::test]

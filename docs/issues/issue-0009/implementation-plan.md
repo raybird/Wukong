@@ -51,7 +51,13 @@
    - 單迴圈合併：被測行為就是 `memory_auto_maintenance` 對外的報表與資料結果，整合測試（真實 SQLite＋假 backend）已涵蓋，沒有另一層底層責任。
    - 下游與靜態檢查：`cargo test -p wukong-runtime -p wukong-schedulerd` 全綠（70／22／2／0 passed）；`cargo clippy -p wukong-runtime -p wukong-schedulerd --all-targets -- -D warnings` 通過；`cargo fmt --all -- --check` 通過（rustfmt 只調整換行）。
    - code-simplify：no-op，抽出函式與錯誤隔離已是最小改動，綠燈即最終狀態證據。
-2. ⏳ **SCN-007：空白摘要不刪原始記憶** — 產出：`Memory::consolidate` 的空白檢查與測試。相依：步驟 1。完成判準：空白摘要的測試先紅後綠，來源記憶未被標記。
+2. ✅ **SCN-007：空白摘要不刪原始記憶** — 產出：`Memory::consolidate` 的空白檢查與測試。相依：步驟 1。完成判準：空白摘要的測試先紅後綠，來源記憶未被標記。
+   - 影響分析（2026-10-06）：`gitnexus_impact(Memory.consolidate, upstream)` 為 HIGH，直接呼叫者為自動維護、手動 `memory_consolidate`（`wukong memory consolidate`）與兩個既有測試，另經 scheduler executor 的合併 job。只改變「摘要為空白」時的結果：由寫入空摘要改為回傳錯誤，三個呼叫端都已會呈現錯誤。
+   - 紅燈：`cargo test -p wukong-memory --lib consolidate_keeps_sources` exit 101，`consolidate_keeps_sources_when_summary_is_blank` 失敗於 `blank summary must be reported as a failure`，即摘要回傳 `" \n"` 時仍成功寫入。
+   - 綠燈：摘要 `trim()` 為空時回傳 `MemoryError::Other`，不寫摘要、不標記來源。同命令 exit 0；斷言來源仍是同一批 2 筆候選、沒有 summary 記憶、`prune_consolidated` 刪除 0 筆。
+   - 層級說明：SCN-007 的 When 是自動維護；自動維護把 `consolidate` 的錯誤交給步驟 1 的 scope 隔離（已由 `auto_maintenance_isolates_a_failing_scope` 證明會保留來源並繼續），所以只在 `consolidate` 這一層補紅燈，沒有遺漏另一層保障。
+   - 下游與靜態檢查：`cargo test -p wukong-memory -p wukong-runtime` 與 `cargo test -p wukong-scheduler -p wukong-schedulerd` 全綠；`cargo clippy -p wukong-memory -p wukong-runtime -p wukong-scheduler -p wukong-schedulerd --all-targets -- -D warnings` 通過；`cargo fmt --all -- --check` 通過。
+   - code-simplify：no-op，一個空白檢查已是最小改動。
 3. ⏳ **SCN-008：按需模式 schedulerd 真實合併** — 產出：真實程序的驗證腳本或 ignored 整合測試，以及執行紀錄。相依：步驟 1。完成判準：紀錄中有非空摘要、被刪除的來源筆數，以及結束後沒有 OpenCode 程序；若揭露其他失敗，回報後再決定處理方式。
 4. ⏳ **SCN-005：注入長度上限** — 產出：`compose_prompt` 截斷與測試。相依：無。完成判準：超長記憶的測試先紅後綠，斷言用字面期望值，資料庫內容不變。
 5. ⏳ **SCN-002、SCN-003：最後一棒只注入相關記憶** — 產出：新的召回模式、相關度門檻、`run_turn` 最後一棒改用它，以及測試。相依：步驟 4。完成判準：以假 backend 擷取最後一棒的 prompt，「只有不相關的最新記憶」時沒有 `[相關記憶]`，「有相關舊記憶」時含該筆；兩者先紅後綠。斷言檢查命中來源（`source_signals`），不只檢查筆數。
