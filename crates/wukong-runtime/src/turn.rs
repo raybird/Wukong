@@ -1651,4 +1651,35 @@ mod tests {
             .iter()
             .all(|r| r.session_id.as_deref() == Some("ses_new")));
     }
+
+    // SCN-002 (review-cc78101): same-language turns share stopwords and the
+    // `User:`/`Assistant:` labels with any input; neither is relevance.
+    #[tokio::test]
+    async fn final_step_ignores_stopword_and_role_label_matches() {
+        let mem = open_memory().await;
+        remember_turn(
+            &mem,
+            "project:T",
+            "what is the weather today",
+            "It is sunny in the city",
+        )
+        .await;
+        let backend = MockBackend::new(&["fixer", "answer"]);
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "deploy the server for this user",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        let prompts = backend.prompts.lock().unwrap();
+        let final_prompt = prompts.last().unwrap();
+        assert!(!final_prompt.contains("[相關記憶]"));
+        assert!(!final_prompt.contains("weather"));
+        assert!(!final_prompt.contains("sunny"));
+    }
 }

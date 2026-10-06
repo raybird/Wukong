@@ -32,7 +32,7 @@ pub use scoring::Weights;
 use embed::embedding_to_blob;
 use recall::{
     apply_vector_sims, build_vector_candidates, contains_cjk, filter_by_scope, fts_match_string,
-    is_trivial, merge_candidates, rank, sources_for_mode,
+    is_trivial, merge_candidates, rank, relevant_match_string, sources_for_mode,
 };
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -311,7 +311,12 @@ impl Memory {
         let now = now_unix();
 
         let keyword = if use_keyword {
-            match fts_match_string(&query.query) {
+            let expr = if query.mode == RecallMode::Relevant {
+                relevant_match_string(&query.query)
+            } else {
+                fts_match_string(&query.query)
+            };
+            match expr {
                 Some(expr) => {
                     let hits = self
                         .store

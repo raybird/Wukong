@@ -107,7 +107,13 @@
 
 ## 實作步驟（審查退回後追加）
 
-9. ⏳ **SCN-002（退回修正）：同語言輸入不因停用詞或角色標籤命中** — 產出：`Relevant` 查詢排除 `STOPWORDS` 與 `user`／`assistant`，同語言的 runtime 測試。相依：步驟 5。完成判準：英文記憶（含 `User:`／`Assistant:` 與 the、is）配同語言但無實質共同詞的輸入時，最後一棒沒有 `[相關記憶]`，先紅後綠；SCN-003 仍綠。
+9. ✅ **SCN-002（退回修正）：同語言輸入不因停用詞或角色標籤命中** — 產出：`Relevant` 查詢排除 `STOPWORDS` 與 `user`／`assistant`，同語言的 runtime 測試。相依：步驟 5。完成判準：英文記憶（含 `User:`／`Assistant:` 與 the、is）配同語言但無實質共同詞的輸入時，最後一棒沒有 `[相關記憶]`，先紅後綠；SCN-003 仍綠。
+   - 影響分析（2026-10-06）：`fts_match_string` 為 CRITICAL（唯一呼叫者 `Memory::recall`）；行為不變，只把組字串抽成 `or_match` 共用。新過濾只在 `Relevant` 生效。
+   - 紅燈：`final_step_ignores_stopword_and_role_label_matches` 先寫（記憶 `User: what is the weather today`／`Assistant: It is sunny in the city`，輸入 `deploy the server for this user`，同語言、只共用 the 與 user），`cargo test -p wukong-runtime --lib final_step_ignores` exit 101，失敗於 `!final_prompt.contains("[相關記憶]")`，重現審查 MUST FIX。
+   - 綠燈：新增 `relevant_match_string`（排除 `STOPWORDS` 與 `TURN_ROLE_LABELS`＝user／assistant，全排除時回 None），`Relevant` 模式改用它。`cargo test -p wukong-runtime --lib final_step_` exit 0，SCN-002 兩個測試與 SCN-003 皆綠。
+   - 單元守門：`relevant_match_string_drops_stopwords_and_turn_labels` 以字面值鎖定 `"deploy" OR "server" OR "this"`、全排除時 None、`fts_match_string` 原樣不變。此測試寫在實作之後，未取得紅燈，作為回歸守門；紅燈由上面的 runtime 測試提供。
+   - 回歸與靜態檢查：`cargo test --workspace` passed=628 failed=0 ignored=9；`cargo clippy --all-targets -- -D warnings`、`cargo fmt --all -- --check` 通過。
+   - code-simplify：抽出 `or_match` 讓兩種模式共用組字串，無其他改動。
 10. ⏳ **SCN-009：Telegram 規則文字不進入記憶與召回** — 產出：runtime 規則標頭常數與切分函式、`dispatch.rs` 改用常數、測試。相依：步驟 9。完成判準：附規則的輸入跑完回合後，`User:` 記憶只含原文；過去附規則的記憶不因規則文字被召回；最後一棒 prompt 仍含規則；先紅後綠。
 11. ⏳ **退回項目收尾** — 產出：SCN-004 改為三棒鏈逐棒斷言；`docs/memory.md` 召回模式與防重複說明更新；AGENTS.md「防重複」措辭；CHANGELOG 已知限制補 TBD-3、無 session 後端與 session 輪替那一回合失去近期脈絡；全量檢查；新的獨立審查。相依：步驟 9、10。完成判準：文件與實作一致，全量命令全綠。
 
