@@ -44,7 +44,13 @@
 
 ## 實作步驟
 
-1. ⏳ **SCN-006：合併的 scope 失敗隔離** — 產出：`maintenance.rs` 的隔離與報表、以兩個 scope 一成一敗的測試。相依：無。完成判準：測試先因第二個 scope 未合併而失敗，修改後通過，且失敗 scope 的原始記憶數不變。
+1. ✅ **SCN-006：合併的 scope 失敗隔離** — 產出：`maintenance.rs` 的隔離與報表、以兩個 scope 一成一敗的測試。相依：無。完成判準：測試先因第二個 scope 未合併而失敗，修改後通過，且失敗 scope 的原始記憶數不變。
+   - 影響分析（2026-10-06）：`gitnexus_impact(memory_auto_maintenance, upstream)` 為 HIGH，直接呼叫者為 schedulerd `run_once` 與既有測試，經 `run_memory_maintenance` 到 `run`；改動只限錯誤處理與報表欄位，成功路徑不變。
+   - 紅燈：先只加 `AutoMaintenanceReport::scopes_failed` 欄位、不改行為，`cargo test -p wukong-runtime --lib maintenance::` exit 101；`auto_maintenance_isolates_a_failing_scope` 失敗於 `one failing scope must not abort the whole pass: Memory(Other("summarizer backend failed: … model unavailable"))`，即 project:A 的摘要失敗讓整輪回傳錯誤、project:B 未處理。
+   - 綠燈：每個 scope 的處理移入 `maintain_scope`，錯誤時記 `memory_consolidate_failed scope=… error=…` 並計入 `scopes_failed` 後繼續。同命令 exit 0，4 passed。測試以字面值斷言：A 的兩筆原文保留、B 只剩 `summary`、`scopes_failed=1`、`memories_pruned=2`。
+   - 單迴圈合併：被測行為就是 `memory_auto_maintenance` 對外的報表與資料結果，整合測試（真實 SQLite＋假 backend）已涵蓋，沒有另一層底層責任。
+   - 下游與靜態檢查：`cargo test -p wukong-runtime -p wukong-schedulerd` 全綠（70／22／2／0 passed）；`cargo clippy -p wukong-runtime -p wukong-schedulerd --all-targets -- -D warnings` 通過；`cargo fmt --all -- --check` 通過（rustfmt 只調整換行）。
+   - code-simplify：no-op，抽出函式與錯誤隔離已是最小改動，綠燈即最終狀態證據。
 2. ⏳ **SCN-007：空白摘要不刪原始記憶** — 產出：`Memory::consolidate` 的空白檢查與測試。相依：步驟 1。完成判準：空白摘要的測試先紅後綠，來源記憶未被標記。
 3. ⏳ **SCN-008：按需模式 schedulerd 真實合併** — 產出：真實程序的驗證腳本或 ignored 整合測試，以及執行紀錄。相依：步驟 1。完成判準：紀錄中有非空摘要、被刪除的來源筆數，以及結束後沒有 OpenCode 程序；若揭露其他失敗，回報後再決定處理方式。
 4. ⏳ **SCN-005：注入長度上限** — 產出：`compose_prompt` 截斷與測試。相依：無。完成判準：超長記憶的測試先紅後綠，斷言用字面期望值，資料庫內容不變。
