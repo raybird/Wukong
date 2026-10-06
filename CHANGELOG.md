@@ -11,7 +11,52 @@
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-10-06
+
+### ⚠️ 升級注意（Breaking）
+
+- **Docker 部署預設不再常駐 `opencode-server`。** Web、Telegram、schedulerd 改為每回合在
+  自己的容器內啟動 OpenCode 控制程序，回合結束就回收，閒置時不佔資源。
+  `opencode-server` 移到 `server` profile，`WUKONG_AGENT_SERVER_URL` 預設改為空值。
+  `install.sh --upgrade` 會保留你的 `.env`，所以升級後請檢查兩件事：
+  - 舊版 `.env.example` 的 `WUKONG_AGENT_CMD=opencode run --dangerously-skip-permissions`
+    在新版會走純 CLI 路徑：可以執行，但**沒有互動問答**。要使用按需模式請改成：
+
+    ```dotenv
+    WUKONG_AGENT_CMD=opencode run
+    ```
+
+  - 想維持常駐共用 server（啟動延遲較低），在 `.env` **同時**設定這兩行，缺一不可：
+
+    ```dotenv
+    COMPOSE_PROFILES=server
+    WUKONG_AGENT_SERVER_URL=http://opencode-server:4096
+    ```
+
+  installer 會停止同一 project 已停用的 `opencode-server`。手動更新 Compose 的話，
+  profile 停用與 `--remove-orphans` 都不會停止舊容器，要自己執行：
+
+  ```bash
+  docker compose --profile server stop opencode-server
+  docker compose up -d
+  ```
+
+- **入口服務的資源上限調高。** agent 現在在各入口容器內執行，`WUKONG_SVC_CPUS` /
+  `_MEM` / `_PIDS` 的預設從 `0.5` / `768m` / `128` 改為 `1.5` / `2g` / `256`。多個入口
+  同時執行回合時，資源需求會疊加；主機吃緊時請在 `.env` 調低。
+- **session 保留期清理、server 週期性重啟、啟動前 vacuum 只在共用 server 模式運作。**
+  按需模式下的 `opencode.db` 可能和你自己的 opencode 共用，所以不會自動清掃；輔助棒
+  與 `/new` 的 session 刪除照常執行。詳見 `docs/docker.md`。
+
 ### Added
+
+- **按需啟停 OpenCode。** `WUKONG_AGENT_CMD=opencode run` 且未設定
+  `WUKONG_AGENT_SERVER_URL` 時，每次執行都在 loopback 的可用埠啟動 OpenCode 控制程序，
+  完成、錯誤、逾時或取消後回收。session 存在 OpenCode 資料庫，跨程序與容器升級都能
+  續接。自訂命令或帶額外旗標的 `opencode run` 維持原本的純 CLI 路徑。
+- **CLI／REPL 支援工具問答。** 顯示選項編號，可輸入編號或選項文字，多選用逗號分隔；
+  `/cancel` 或 stdin EOF 取消，`--no-stream` 也能問答。Web 與 Telegram 沿用原本的問答
+  介面，排程依 `WUKONG_SCHED_PERMISSION` 處置。
 
 - **opencode session 保留期清理。** `opencode.db` 過去只增不減：Wukong 只在輔助棒跑完、
   session 輪替與 `/new` 時刪除 session，回合失敗留下的與人工探測建立的 session 會永久
@@ -19,14 +64,24 @@
   `WUKONG_OPENCODE_SESSION_RETENTION_DAYS`（預設 30；`0`、留空或無法解析的值都是停用）
   天、且沒有任何 scope 指向的 session；第一輪在啟動 6 小時後。仍被 scope 指向的不論多舊都保留；讀不到
   scope 對應、列不出 session、或記憶庫指向的 session 沒有任何一個在 server 上時，
-  整輪不刪。只在 server backend 生效。
+  整輪不刪。只在明確啟用的共用 server 生效。
 - `wukong opencode prune [--dry-run]`：手動清理，或先預覽會刪哪些、哪些受保護。
-- `wukong opencode vacuum`：`opencode-server` 容器在啟動 server 前自動呼叫，於可回收
+- `wukong opencode vacuum`：共用 server 模式下，`opencode-server` 容器在啟動 server 前自動呼叫，於可回收
   空間達 25% 且磁碟放得下時回收檔案空間。失敗只記警告，不影響啟動。
+
+### Changed
+
+- `docker-compose.memoria.yml` 改把 Memoria CLI 掛到 Web、Telegram、schedulerd 與 CLI
+  入口，因為 agent 的 shell 現在在這些容器內執行；`WUKONG_OPENCODE_MEM_MEMORIA` 也套用
+  到這些入口。
 
 ### Fixed
 
-- **`wukong --new` 不再留下舊 session（server backend）。** 它過去只清除 scope 的對應、不刪 opencode
+- **Web 與 Telegram 容器的 `wukong opencode prune` 會讀取保留期設定。** 過去兩份
+  Compose 只把 `WUKONG_OPENCODE_SESSION_RETENTION_DAYS` 傳給 schedulerd，在這兩個容器
+  手動 prune 時一律用預設 30 天，`.env` 裡的停用或自訂天數都被忽略。
+  `scripts/test-docker-runtime.sh` 改為逐服務檢查。
+- **`wukong --new` 不再留下舊 session（共用 server 與按需模式）。** 它過去只清除 scope 的對應、不刪 opencode
   那邊的 session；現在會先刪除。刪除失敗時仍清除對應，這一回合照樣從新 context 開始。
 
 ### 已知限制
@@ -36,8 +91,8 @@
   `wukong` 與容器內的服務）共用同一個 server 時，請把
   `WUKONG_OPENCODE_SESSION_RETENTION_DAYS` 設為 `0`，否則對方超過保留期的 session
   會被刪除。內建的防護只擋得住「記憶庫與 server 完全對不上」。compose 部署不受影響。
-- `wukong --new` 與 `/new` 的刪除只在 opencode server backend 有作用；CLI backend
-  （`opencode run`）沒有實作刪除，舊 session 仍留在你的 `opencode.db`。
+- `wukong --new` 與 `/new` 的刪除在純 CLI 路徑（自訂命令或帶額外旗標的
+  `opencode run`）沒有作用，舊 session 仍留在你的 `opencode.db`。
 - schedulerd 不保存上次清理的時間：若它每次都在 6 小時內重啟，清理不會執行。
 - session 超過 10,000 個時列表會被截斷（日誌標示 `truncated=true`）。此時若某個 scope
   指向的是被截掉的子 session，它的根 session 可能被當成無主而刪除；只有 CLI backend
@@ -45,6 +100,10 @@
 - 這項清理刪不到長壽的 scope session。一個長期使用的聊天 scope 會持續累積歷史，而它
   正是被保護的對象；`opencode.db` 若仍然很大，用 `wukong opencode prune --dry-run`
   看可刪的佔多少。見 `docs/issues/issue-0003/`。
+- 按需模式每次執行都要啟動 OpenCode，回合開始前會多一段啟動延遲；在意延遲時改用
+  共用 server。
+- 共用 server 的一般問題路由沒有改動，本版的問答驗證只涵蓋按需模式；程序回收只在
+  Linux 與 Docker 驗證過。見 `docs/issues/issue-0007/verification.md`。
 
 ## [0.21.11] - 2026-09-08
 
@@ -854,7 +913,8 @@ server 模式補回那個 CLI 免費獲得的週期性重置，同時保留暖�
   不安全綁定（`0.0.0.0` + 空 token）啟動即拒絕（fail-closed，可用
   `WUKONG_WEB_ALLOW_INSECURE=1` 覆寫）；Telegram callback 加白名單檢查。
 
-[Unreleased]: https://github.com/raybird/Wukong/compare/v0.21.11...HEAD
+[Unreleased]: https://github.com/raybird/Wukong/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/raybird/Wukong/compare/v0.21.11...v0.22.0
 [0.21.11]: https://github.com/raybird/Wukong/compare/v0.21.10...v0.21.11
 [0.21.10]: https://github.com/raybird/Wukong/compare/v0.21.9...v0.21.10
 [0.21.9]: https://github.com/raybird/Wukong/compare/v0.21.8...v0.21.9
