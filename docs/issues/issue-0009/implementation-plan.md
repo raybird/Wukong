@@ -122,7 +122,11 @@
    - 既有資料：修正前已寫入、含規則文字的舊記憶仍在，但查詢不再帶規則文字，不會因此被召回。
    - 回歸與靜態檢查：`cargo test --workspace` passed=629 failed=0 ignored=9；`cargo clippy --all-targets -- -D warnings`、`cargo fmt --all -- --check` 通過。
    - code-simplify：no-op。
-11. ⏳ **退回項目收尾** — 產出：SCN-004 改為三棒鏈逐棒斷言；`docs/memory.md` 召回模式與防重複說明更新；AGENTS.md「防重複」措辭；CHANGELOG 已知限制補 TBD-3、無 session 後端與 session 輪替那一回合失去近期脈絡；全量檢查；新的獨立審查。相依：步驟 9、10。完成判準：文件與實作一致，全量命令全綠。
+11. ✅ **退回項目收尾** — 產出：SCN-004 改為三棒鏈逐棒斷言；`docs/memory.md` 召回模式與防重複說明更新；AGENTS.md「防重複」措辭；CHANGELOG 已知限制補 TBD-3、無 session 後端與 session 輪替那一回合失去近期脈絡；全量檢查；新的獨立審查。相依：步驟 9、10。完成判準：文件與實作一致，全量命令全綠。
+   - SCN-004 證據加強：`helper_steps_receive_only_the_previous_turn` 改為 explorer→oracle→fixer 三棒，`prompts.len() == 4`，兩個輔助棒逐一斷言含上一回合、不含更早回合，最後一棒不含。屬既有行為的守門加強，未改產品程式，不另取紅燈。
+   - 文件：`docs/memory.md` 更新防重複說明與召回模式（新增 `relevant`、最後一棒／輔助棒的注入、memoryd 可選 `relevant`）；README 記憶層模式清單補 `relevant`；AGENTS.md「防重複」改為「每回合一個識別碼，不再以 session 去重；檔案互動規則不寫入」；CHANGELOG `[Unreleased]` 補 Telegram 規則文字修正、停用詞與角色標籤說明、memoryd 可選 `relevant`，已知限制改列 TBD-3、無 session 後端與 session 輪替那一回合、合併後輔助棒拿不到上一回合，並移除已修正的 Telegram 規則文字限制。以人工逐句對照實作確認一致。
+   - 全量檢查（2026-10-06，程式碼為步驟 10 之後加上本步驟的測試修改）：`cargo test --workspace` passed=629 failed=0 ignored=9；`cargo clippy --all-targets -- -D warnings`、`cargo fmt --all -- --check` 通過；`/usr/bin/python3 docs/issues/issue-0009/probe-consolidate.py` 與 `PROBE_BLANK=1` 對照組皆通過。
+   - 新的獨立審查：提交後進行。
 
 ## 測試策略
 

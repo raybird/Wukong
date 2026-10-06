@@ -1589,7 +1589,7 @@ mod tests {
         let mem = open_memory().await;
         remember_turn(&mem, "project:T", "舊問題", "舊回答").await;
         remember_turn(&mem, "project:T", "晚餐吃什麼", "吃拉麵").await;
-        let backend = MockBackend::new(&["explorer, fixer", "e1", "f1"]);
+        let backend = MockBackend::new(&["explorer, oracle, fixer", "e1", "o1", "f1"]);
         run_turn(
             &mem,
             &backend,
@@ -1602,13 +1602,14 @@ mod tests {
         .unwrap();
 
         let prompts = backend.prompts.lock().unwrap();
-        assert_eq!(prompts.len(), 3);
-        let helper = &prompts[1];
-        assert!(helper.contains("User: 晚餐吃什麼"));
-        assert!(helper.contains("Assistant: 吃拉麵"));
-        assert!(!helper.contains("舊問題"));
-        assert!(!helper.contains("舊回答"));
-        let final_prompt = &prompts[2];
+        assert_eq!(prompts.len(), 4);
+        for helper in &prompts[1..3] {
+            assert!(helper.contains("User: 晚餐吃什麼"));
+            assert!(helper.contains("Assistant: 吃拉麵"));
+            assert!(!helper.contains("舊問題"));
+            assert!(!helper.contains("舊回答"));
+        }
+        let final_prompt = &prompts[3];
         assert!(!final_prompt.contains("晚餐吃什麼"));
         assert!(!final_prompt.contains("吃拉麵"));
     }
