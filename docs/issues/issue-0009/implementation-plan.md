@@ -28,7 +28,7 @@
 +  輔助棒注入 relevant ＋ last_turn（去重）
 ```
 
-- 新增一個 `RecallMode` 變體，只給 `run_turn` 使用；既有 `Hybrid` 行為不變。
+- 新增一個 `RecallMode` 變體給 `run_turn` 使用；既有 `Hybrid` 行為不變。（2026-10-06 更正：memoryd 直接反序列化 `RecallQuery`，所以 `"mode":"relevant"` 對外也可用；Web 記憶 API 只接受 `hybrid`。）
 - 相關度判斷採結構訊號：命中來自 `keyword`、`cjk_fallback`，或向量相似度達門檻（TBD-2）。只靠 `recent` 入選的不算。
 - 最近一個回合用既有的 `recent_candidates` 取得，限本 scope、最多 2 筆。
 
@@ -73,7 +73,7 @@
    - 回歸與靜態檢查：`cargo test -p wukong-gateway -p wukong-runtime` 全綠（131／70 passed，5 ignored 為既有的真實 OpenCode 測試）；`cargo clippy -p wukong-gateway -p wukong-runtime --all-targets -- -D warnings` 通過；`cargo fmt --all` 只調整本檔換行。
    - code-simplify：no-op。
 5. ✅ **SCN-002、SCN-003：最後一棒只注入相關記憶** — 產出：新的召回模式、相關度門檻、`run_turn` 最後一棒改用它，以及測試。相依：步驟 4。完成判準：以假 backend 擷取最後一棒的 prompt，「只有不相關的最新記憶」時沒有 `[相關記憶]`，「有相關舊記憶」時含該筆；兩者先紅後綠。斷言檢查命中來源（`source_signals`），不只檢查筆數。
-   - 影響分析（2026-10-06）：`sources_for_mode` 與 `run_turn_traced_with_attachments` 皆為 CRITICAL（`Memory::recall` 被 Web 預覽、Telegram、REPL 與所有回合使用；`run_turn_traced_with_attachments` 是四個入口共用的回合主流程）。已告知使用者。控制方式：新增 `RecallMode::Relevant` 只給 `run_turn` 用，Keyword／Tree／Hybrid 行為不變；Web 記憶 API 只接受 `hybrid`，外部無法選到新模式。
+   - 影響分析（2026-10-06）：`sources_for_mode` 與 `run_turn_traced_with_attachments` 皆為 CRITICAL（`Memory::recall` 被 Web 預覽、Telegram、REPL 與所有回合使用；`run_turn_traced_with_attachments` 是四個入口共用的回合主流程）。已告知使用者。控制方式：新增 `RecallMode::Relevant` 只給 `run_turn` 用，Keyword／Tree／Hybrid 行為不變；Web 記憶 API 只接受 `hybrid`。（2026-10-06 更正：memoryd 可以選到 `relevant`，見設計段落。）
    - 紅燈：先寫 `final_step_omits_memories_selected_only_by_recency`、`final_step_keeps_older_relevant_memory`，`cargo test -p wukong-runtime --lib final_step_` exit 101。前者在 `!final_prompt.contains("[相關記憶]")` 失敗（三筆中文、與英文輸入無共同詞的記憶因「最近」來源被注入）；後者含相關的 `deploy port is 8787`，但在 `晚餐吃拉麵 leaked into the final step` 失敗。
    - 綠燈：新增 `RecallMode::Relevant`（關鍵字＋向量、無最近來源；向量命中須 cosine ≥ `MIN_RELEVANT_VECTOR_SIM` 0.4），`run_turn` 改用它。同命令 exit 0。
    - 向量門檻（embedding 開啟時）：`wukong-memory/tests/integration.rs` 的 `relevant_mode_requires_vector_similarity_floor` 以 stub embedder 讓兩筆記憶對查詢的 cosine 為 0.9 與 0.1，期望只回 `["near memory"]`。紅燈取得方式：測試寫在實作之後，因此暫時把 retain 條件改為恆真再跑，`left: ["near memory", "far memory"]`、exit 101；還原後 exit 0（`git diff` 確認還原為原實作）。
@@ -99,6 +99,17 @@
    - 常青文件（2026-10-06）：AGENTS.md「一回合資料流」改寫召回、注入與寫入三點；CHANGELOG `[Unreleased]` 新增 Changed（最後一棒只注入相關記憶、800 字上限）、Fixed（寫入 key、scope 隔離、空白摘要）與已知限制。純文件，以人工逐句對照實作（`RecallMode::Relevant`、`MAX_MEMORY_CHARS`、`with_previous_turn`、`turn_key`、`maintain_scope`）確認一致。
    - 全量檢查：程式碼自步驟 7（`20edf32`）後未再變動，沿用該次結果：`cargo test --workspace` passed=626 failed=0 ignored=9、`cargo clippy --all-targets -- -D warnings`、`cargo fmt --all -- --check` 皆通過；SCN-008 探針結果見步驟 3。
    - `gitnexus_detect_changes`：每次提交前執行（步驟 2 為提交後補跑，已於該步記錄）；本步驟只有文件。
+
+### 審查退回後的修正（2026-10-06，review-cc78101）
+
+- **查詢端排除無鑑別力的詞**：`Relevant` 模式組 FTS 查詢時排除既有 `STOPWORDS` 與回合記憶固定帶的角色標籤 `user`／`assistant`；全部被排除時不做關鍵字召回。`Hybrid` 不變。
+- **規則文字不進記憶（SCN-009）**：runtime 定義檔案互動規則區塊的標頭常數，Telegram 改用它組輸入；`run_turn` 以標頭切出使用者原文，召回查詢與 `User:` 記憶只用原文，planner 與各棒 prompt 仍用完整輸入。
+
+## 實作步驟（審查退回後追加）
+
+9. ⏳ **SCN-002（退回修正）：同語言輸入不因停用詞或角色標籤命中** — 產出：`Relevant` 查詢排除 `STOPWORDS` 與 `user`／`assistant`，同語言的 runtime 測試。相依：步驟 5。完成判準：英文記憶（含 `User:`／`Assistant:` 與 the、is）配同語言但無實質共同詞的輸入時，最後一棒沒有 `[相關記憶]`，先紅後綠；SCN-003 仍綠。
+10. ⏳ **SCN-009：Telegram 規則文字不進入記憶與召回** — 產出：runtime 規則標頭常數與切分函式、`dispatch.rs` 改用常數、測試。相依：步驟 9。完成判準：附規則的輸入跑完回合後，`User:` 記憶只含原文；過去附規則的記憶不因規則文字被召回；最後一棒 prompt 仍含規則；先紅後綠。
+11. ⏳ **退回項目收尾** — 產出：SCN-004 改為三棒鏈逐棒斷言；`docs/memory.md` 召回模式與防重複說明更新；AGENTS.md「防重複」措辭；CHANGELOG 已知限制補 TBD-3、無 session 後端與 session 輪替那一回合失去近期脈絡；全量檢查；新的獨立審查。相依：步驟 9、10。完成判準：文件與實作一致，全量命令全綠。
 
 ## 測試策略
 
