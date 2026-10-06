@@ -64,7 +64,14 @@
    - 判準反向自檢：合併沒發生時資料表仍是 40 筆 `event`；摘要不是模型產生的時內容不會是 `sources=20`；程序沒收尾時 `leftover_pids` 非空。三者都會讓探針失敗。
    - 對照組（同時是 SCN-007 的真實程序證據）：`PROBE_BLANK=1 /usr/bin/python3 docs/issues/issue-0009/probe-consolidate.py` exit 0。假模型回空白，第一批後該 scope 停止（1 次摘要呼叫），40 筆 `event` 原封不動，日誌 `memory_consolidate_failed scope=user:tg-probe error=memory error: summarizer returned a blank summary for 20 source memories in user:tg-probe`，殘留程序 0 個。也證明按需 backend 確實會把空白回覆原樣交給摘要器。
    - 未涵蓋：真實外部 LLM 的摘要品質、容器內執行（本機程序，與 issue 7 的 Docker 證據分開）。
-4. ⏳ **SCN-005：注入長度上限** — 產出：`compose_prompt` 截斷與測試。相依：無。完成判準：超長記憶的測試先紅後綠，斷言用字面期望值，資料庫內容不變。
+4. ✅ **SCN-005：注入長度上限** — 產出：`compose_prompt` 截斷與測試。相依：無。完成判準：超長記憶的測試先紅後綠，斷言用字面期望值，資料庫內容不變。
+   - 影響分析（2026-10-06）：`gitnexus_impact(compose_prompt, upstream)` 為 CRITICAL，所有回合的每一棒都經過它（`persona::build_prompt`／`build_prompt_with_skill` → `run_turn`）。已告知使用者；控制方式是只改超過上限的記憶，短記憶輸出逐字不變，並跑 gateway＋runtime 全部既有測試。
+   - 紅燈：`cargo test -p wukong-gateway --lib prompt::` exit 101，`long_memory_is_truncated_and_marked` 的 `assert_eq!` 失敗（801 字原文照樣注入）。
+   - 綠燈：`MAX_MEMORY_CHARS = 800`，以 `char_indices().nth(800)` 找切點，超過時輸出前 800 字＋`…（已截斷）`。同命令 exit 0，3 passed。期望值為字面組成：恰好 800 字的「記」原樣保留，801 字的切成 800 字加標示，以字元而非位元組計算。
+   - 資料庫不變：`compose_prompt` 只接收 `&[RecallHit]` 唯讀切片、不持有記憶庫，結構上無法改寫原始記憶。
+   - 單迴圈合併：截斷是 `compose_prompt` 這個純函式的輸出行為，單元測試即是對外可觀察層級。
+   - 回歸與靜態檢查：`cargo test -p wukong-gateway -p wukong-runtime` 全綠（131／70 passed，5 ignored 為既有的真實 OpenCode 測試）；`cargo clippy -p wukong-gateway -p wukong-runtime --all-targets -- -D warnings` 通過；`cargo fmt --all` 只調整本檔換行。
+   - code-simplify：no-op。
 5. ⏳ **SCN-002、SCN-003：最後一棒只注入相關記憶** — 產出：新的召回模式、相關度門檻、`run_turn` 最後一棒改用它，以及測試。相依：步驟 4。完成判準：以假 backend 擷取最後一棒的 prompt，「只有不相關的最新記憶」時沒有 `[相關記憶]`，「有相關舊記憶」時含該筆；兩者先紅後綠。斷言檢查命中來源（`source_signals`），不只檢查筆數。
 6. ⏳ **SCN-004：輔助棒取得最近一個回合** — 產出：輔助棒的注入組合與測試。相依：步驟 5。完成判準：多棒回合中輔助棒 prompt 含上一回合、不含更早的不相關回合，先紅後綠。
 7. ⏳ **SCN-001：每個回合都寫入記憶** — 產出：回合識別碼與 key 修改、連續兩回合的測試。相依：步驟 1、3、5、6（先讓召回與合併準備好，再啟動寫入）。完成判準：同 session 連續兩回合（含相同輸入）後有四筆，測試先紅後綠。
