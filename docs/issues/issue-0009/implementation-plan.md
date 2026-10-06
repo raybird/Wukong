@@ -95,7 +95,10 @@
    - 「同一回合只寫一次」：`run_turn` 每回合只呼叫一次 `remember`，第一回合後恰為 2 筆。
    - 回歸與靜態檢查：`cargo test --workspace` passed=626 failed=0 ignored=9；`cargo clippy --all-targets -- -D warnings` 通過；`cargo fmt --all -- --check` 通過。
    - code-simplify：no-op。
-8. ⏳ **收尾** — 產出：AGENTS.md「一回合資料流」更新、CHANGELOG `[Unreleased]`、全量 `cargo test`、`cargo clippy --all-targets -- -D warnings`、`gitnexus_detect_changes`。相依：步驟 1～7。完成判準：命令全綠，文件描述與實作一致。
+8. ✅ **收尾** — 產出：AGENTS.md「一回合資料流」更新、CHANGELOG `[Unreleased]`、全量 `cargo test`、`cargo clippy --all-targets -- -D warnings`、`gitnexus_detect_changes`。相依：步驟 1～7。完成判準：命令全綠，文件描述與實作一致。
+   - 常青文件（2026-10-06）：AGENTS.md「一回合資料流」改寫召回、注入與寫入三點；CHANGELOG `[Unreleased]` 新增 Changed（最後一棒只注入相關記憶、800 字上限）、Fixed（寫入 key、scope 隔離、空白摘要）與已知限制。純文件，以人工逐句對照實作（`RecallMode::Relevant`、`MAX_MEMORY_CHARS`、`with_previous_turn`、`turn_key`、`maintain_scope`）確認一致。
+   - 全量檢查：程式碼自步驟 7（`20edf32`）後未再變動，沿用該次結果：`cargo test --workspace` passed=626 failed=0 ignored=9、`cargo clippy --all-targets -- -D warnings`、`cargo fmt --all -- --check` 皆通過；SCN-008 探針結果見步驟 3。
+   - `gitnexus_detect_changes`：每次提交前執行（步驟 2 為提交後補跑，已於該步記錄）；本步驟只有文件。
 
 ## 測試策略
 
@@ -120,7 +123,7 @@ SCN-002～006 的外迴圈與內迴圈都在同一個整合層級，可依 verif
 
 ## 檢查清單
 
-- [ ] 每個 production 改動前執行 `gitnexus_impact` 並回報影響範圍
-- [ ] 紅燈原因與目標行為相關，期望值不由實作重算
-- [ ] 不改 `RecallMode::Hybrid` 的既有行為與 schema
-- [ ] 提交前 `gitnexus_detect_changes()`
+- [x] 每個 production 改動前執行 `gitnexus_impact` 並回報影響範圍
+- [x] 紅燈原因與目標行為相關，期望值不由實作重算
+- [x] 不改 `RecallMode::Hybrid` 的既有行為與 schema
+- [x] 提交前 `gitnexus_detect_changes()`（步驟 2 為提交後補跑）
