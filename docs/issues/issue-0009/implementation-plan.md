@@ -81,7 +81,13 @@
    - 回歸與靜態檢查：`cargo test --workspace` passed=623 failed=0 ignored=9（新增整合測試前）；之後 `cargo test -p wukong-memory` passed=99 failed=0；`cargo clippy --all-targets -- -D warnings` 通過；`cargo fmt --all -- --check` 通過。`cargo check -p wukong-memory --features embed` 因本機缺 `openssl-sys` 建置環境失敗，改動前的基準版本同樣失敗，與本次無關；向量門檻程式不在 feature 條件內，已由預設建置編譯並由 stub 測試執行。
    - 中間狀態：本步驟後輔助棒也只拿到相關記憶，失去最近一回合；由步驟 6 補上。
    - code-simplify：no-op。
-6. ⏳ **SCN-004：輔助棒取得最近一個回合** — 產出：輔助棒的注入組合與測試。相依：步驟 5。完成判準：多棒回合中輔助棒 prompt 含上一回合、不含更早的不相關回合，先紅後綠。
+6. ✅ **SCN-004：輔助棒取得最近一個回合** — 產出：輔助棒的注入組合與測試。相依：步驟 5。完成判準：多棒回合中輔助棒 prompt 含上一回合、不含更早的不相關回合，先紅後綠。
+   - 影響分析：與步驟 5 同為 `run_turn_traced_with_attachments`（CRITICAL，已告知）。本步驟只改輔助棒的注入內容，最後一棒仍用步驟 5 的相關記憶。
+   - 紅燈：`helper_steps_receive_only_the_previous_turn` 先寫，`cargo test -p wukong-runtime --lib helper_steps_receive` exit 101，失敗於 `helper.contains("User: 晚餐吃什麼")`（步驟 5 後輔助棒拿不到上一回合）。
+   - 綠燈：新增 `with_previous_turn`，以 `Memory::records(scope, Event, 2)`（`created_at DESC, id DESC`）取該 scope 最新兩筆回合記憶，轉成 `source_signals = ["previous_turn"]` 的命中、依時間由舊到新、與相關記憶去重後只給輔助棒；因此也套用步驟 4 的 800 字上限。`cargo test -p wukong-runtime --lib` exit 0，73 passed。測試以字面值斷言：輔助棒含 `User: 晚餐吃什麼`／`Assistant: 吃拉麵`，不含更早的 `舊問題`／`舊回答`；最後一棒不含上一回合。
+   - 時序：`run_turn` 在回合結束才寫入記憶，所以取最新兩筆時本回合尚未寫入，取到的是上一回合。
+   - 回歸與靜態檢查：`cargo test --workspace` passed=625 failed=0 ignored=9；`cargo clippy --all-targets -- -D warnings` 通過；`cargo fmt --all -- --check` 通過。
+   - code-simplify：no-op。
 7. ⏳ **SCN-001：每個回合都寫入記憶** — 產出：回合識別碼與 key 修改、連續兩回合的測試。相依：步驟 1、3、5、6（先讓召回與合併準備好，再啟動寫入）。完成判準：同 session 連續兩回合（含相同輸入）後有四筆，測試先紅後綠。
 8. ⏳ **收尾** — 產出：AGENTS.md「一回合資料流」更新、CHANGELOG `[Unreleased]`、全量 `cargo test`、`cargo clippy --all-targets -- -D warnings`、`gitnexus_detect_changes`。相依：步驟 1～7。完成判準：命令全綠，文件描述與實作一致。
 

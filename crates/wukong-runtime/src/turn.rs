@@ -2,7 +2,10 @@ use crate::persona;
 use thiserror::Error;
 use wukong_gateway::backend::{AgentAttachment, AgentRequest, AiBackend};
 use wukong_gateway::config::GatewayConfig;
-use wukong_memory::{Memory, MemoryItem, MemoryKind, RecallMode, RecallQuery, RememberInput};
+use wukong_memory::{
+    Memory, MemoryItem, MemoryKind, RecallExplanation, RecallHit, RecallMode, RecallQuery,
+    RememberInput,
+};
 use wukong_orchestrator::{PlannerPreferenceHint, Role};
 use wukong_skills::{find as find_skill, route_options};
 
@@ -169,6 +172,8 @@ pub async fn run_turn_traced_with_attachments(
             mode: RecallMode::Relevant,
         })
         .await?;
+    // 輔助棒沒有 session，額外帶上一回合（最新兩筆回合記憶），讓「剛剛那個」之類的指代看得懂。
+    let helper_hits = with_previous_turn(memory, &cfg.scope, &recall.data).await?;
 
     let preference_hint = planner_preference_hint(cfg);
     let steps = wukong_orchestrator::plan_skill_chain_with_preferences(
@@ -201,8 +206,9 @@ pub async fn run_turn_traced_with_attachments(
         let skill = step.skill_name.as_deref().and_then(find_skill);
         let augmented = format!("{input}{}", wukong_orchestrator::chain_context(&prior));
         let is_final = i + 1 == n_steps;
+        let hits = if is_final { &recall.data } else { &helper_hits };
         let mut prompt =
-            persona::build_prompt_with_skill(role, skill, &skill_root, &recall.data, &augmented);
+            persona::build_prompt_with_skill(role, skill, &skill_root, hits, &augmented);
         // Advertise the scheduling capability only on the user-facing final step,
         // so stateless helper steps never take a side-effecting schedule action.
         if is_final {
@@ -445,6 +451,45 @@ fn planner_preference_hint(cfg: &GatewayConfig) -> Option<PlannerPreferenceHint>
             preferred_skills,
         })
     }
+}
+
+/// `hits` plus the scope's previous turn (its two newest turn memories), oldest
+/// first, skipping any already present. Called before this turn is remembered.
+async fn with_previous_turn(
+    memory: &Memory,
+    scope: &str,
+    hits: &[RecallHit],
+) -> Result<Vec<RecallHit>, WukongError> {
+    let mut out = hits.to_vec();
+    let mut previous = memory
+        .records(Some(scope), Some(MemoryKind::Event), 2)
+        .await?
+        .records;
+    previous.reverse();
+    for record in previous {
+        if out.iter().any(|hit| hit.id == record.id) {
+            continue;
+        }
+        out.push(RecallHit {
+            id: record.id,
+            scope: record.scope,
+            kind: record.kind,
+            text: record.text,
+            score: 0.0,
+            explanation: RecallExplanation {
+                lexical: 0.0,
+                semantic: 0.0,
+                relevance: 0.0,
+                decay: 0.0,
+                importance: record.importance,
+                recall_bonus: 0.0,
+                age_seconds: 0,
+                recall_count: record.recall_count,
+                source_signals: vec!["previous_turn".to_string()],
+            },
+        });
+    }
+    Ok(out)
 }
 
 /// Send a raw `/compact` message to a specific opencode session (no planner,
@@ -1513,5 +1558,53 @@ mod tests {
                 "{text} leaked into the final step"
             );
         }
+    }
+
+    async fn remember_turn(mem: &Memory, scope: &str, user: &str, assistant: &str) {
+        for text in [format!("User: {user}"), format!("Assistant: {assistant}")] {
+            mem.remember(RememberInput {
+                scope: scope.to_string(),
+                session_id: None,
+                items: vec![MemoryItem {
+                    kind: MemoryKind::Event,
+                    text,
+                    importance: None,
+                    dedupe_key: None,
+                }],
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    // SCN-004: stateless helper steps see the previous turn; older unrelated
+    // turns and the session-backed final step do not get it.
+    #[tokio::test]
+    async fn helper_steps_receive_only_the_previous_turn() {
+        let mem = open_memory().await;
+        remember_turn(&mem, "project:T", "舊問題", "舊回答").await;
+        remember_turn(&mem, "project:T", "晚餐吃什麼", "吃拉麵").await;
+        let backend = MockBackend::new(&["explorer, fixer", "e1", "f1"]);
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "deploy the server",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        let prompts = backend.prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 3);
+        let helper = &prompts[1];
+        assert!(helper.contains("User: 晚餐吃什麼"));
+        assert!(helper.contains("Assistant: 吃拉麵"));
+        assert!(!helper.contains("舊問題"));
+        assert!(!helper.contains("舊回答"));
+        let final_prompt = &prompts[2];
+        assert!(!final_prompt.contains("晚餐吃什麼"));
+        assert!(!final_prompt.contains("吃拉麵"));
     }
 }
