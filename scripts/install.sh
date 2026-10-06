@@ -594,6 +594,44 @@ activate_docker_services() {
     docker compose -p "$DOCKER_PROJECT_NAME" up -d --force-recreate
 }
 
+# 2026-10-06：v0.22.0 起預設按需本機模式，但 .env 屬於使用者、升級時保留。
+# 只改寫舊範本的原始預設值；明確指向內建 server 者補 profile，維持原本選擇。
+# 有改動時先備份到 $1，並印出備份路徑；沒改動則不輸出。
+migrate_docker_env() {
+    python3 - .env "$1" <<'PY'
+import os, re, shutil, sys
+path, backup_dir = sys.argv[1], sys.argv[2]
+text = open(path).read()
+lines = text.splitlines(keepends=True)
+def assigned(name):
+    values = [m.group(1) for m in (re.match(r'\s*' + name + r'\s*=(.*)$', l.rstrip('\n')) for l in lines) if m]
+    return values[-1].strip().strip('"\'') if values else None
+old_cmd = re.compile(r'''\s*WUKONG_AGENT_CMD\s*=\s*(["']?)opencode run --dangerously-skip-permissions\1\s*$''')
+changes = []
+for i, line in enumerate(lines):
+    if old_cmd.match(line.rstrip('\n')):
+        lines[i] = 'WUKONG_AGENT_CMD=opencode run\n'
+        changes.append('WUKONG_AGENT_CMD: old default -> opencode run (on-demand OpenCode)')
+url, profiles = assigned('WUKONG_AGENT_SERVER_URL'), assigned('COMPOSE_PROFILES')
+if url and re.fullmatch(r'https?://opencode-server(:\d+)?/?', url):
+    if profiles is None:
+        if lines and not lines[-1].endswith('\n'):
+            lines[-1] += '\n'
+        lines.append('COMPOSE_PROFILES=server\n')
+        changes.append('added COMPOSE_PROFILES=server to keep the shared opencode-server')
+    elif 'server' not in [p.strip() for p in profiles.split(',')]:
+        print('warning: WUKONG_AGENT_SERVER_URL targets opencode-server but COMPOSE_PROFILES does not include server; edit .env')
+if changes:
+    os.makedirs(backup_dir, exist_ok=True)
+    shutil.copy2(path, os.path.join(backup_dir, '.env'))
+    with open(path, 'w') as f:
+        f.write(''.join(lines))
+    for change in changes:
+        print('.env: ' + change)
+    print('.env: backup ' + os.path.join(backup_dir, '.env'))
+PY
+}
+
 install_docker() {
     skip_current_upgrade
     command -v docker >/dev/null 2>&1 || abort "Docker is required"
@@ -604,7 +642,7 @@ install_docker() {
         return
     fi
     prepare_release_metadata
-    local archive stage expected actual file previous_version="" previous_digest="" backup=""
+    local archive stage expected actual file previous_version="" previous_digest="" backup="" env_backup env_report line
     if [[ -f .wukong-release ]]; then
         read -r previous_version previous_digest < <(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["productTag"], d["imageDigest"])' .wukong-release) || abort "invalid Docker release metadata"
         backup=".wukong-backups/${previous_version}-$(date +%s)"; mkdir -p "$backup"
@@ -627,8 +665,12 @@ install_docker() {
     [[ "$actual" == "$expected" ]] || abort "pulled image digest does not match release manifest"
     for file in "${DOCKER_RELEASE_OWNED[@]}"; do mkdir -p "$(dirname "$file")"; cp "$stage/wukong-docker/$file" "$file"; done
     [[ -f .env ]] || cp .env.example .env
+    env_backup="${backup:-.wukong-backups/env-$(date +%s)}"
+    env_report="$(migrate_docker_env "$env_backup")" || env_report="warning: could not migrate .env; check it against .env.example"
+    [[ -z "$env_report" ]] || while IFS= read -r line; do info "$line"; done <<< "$env_report"
     if ! activate_docker_services || ! docker compose -p "$DOCKER_PROJECT_NAME" ps >/dev/null; then
         # A failed recreation must not leave release-owned files or metadata advanced.
+        [[ "$env_report" != *'.env: backup '* ]] || cp -p "$env_backup/.env" .env
         if [[ -n "$backup" ]]; then
             for file in "${DOCKER_RELEASE_OWNED[@]}"; do [[ ! -f "$backup/$file" ]] || cp -p "$backup/$file" "$file"; done
             activate_docker_services || true

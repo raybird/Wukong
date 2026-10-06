@@ -11,6 +11,16 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Docker 安裝與升級會自動遷移 `.env`。** 舊範本原封未動的
+  `WUKONG_AGENT_CMD=opencode run --dangerously-skip-permissions` 改寫成 `opencode run`；
+  `WUKONG_AGENT_SERVER_URL` 指向內建 `opencode-server` 而沒有設定 `COMPOSE_PROFILES` 時，
+  補上 `COMPOSE_PROFILES=server`，維持原本的共用 server。改動前先備份到
+  `.wukong-backups/`，啟動失敗時連同 `.env` 一起還原；其他自訂值不動。
+  `COMPOSE_PROFILES` 已設定但不含 `server` 時只印警告。已經升到 v0.22.0 的部署，
+  加上 `--upgrade --force` 重跑一次 installer 就會遷移。
+
 ## [0.22.0] - 2026-10-06
 
 ### ⚠️ 升級注意（Breaking）

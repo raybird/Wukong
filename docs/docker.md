@@ -43,7 +43,7 @@ WUKONG_AGENT_SERVER_URL=http://opencode-server:4096
 
 再執行 `docker compose up -d`。啟用 profile 與 URL 是兩個必要設定；連接自行管理的遠端 server 則只設定 URL。共用 `/workspace` 時附件用 `shared`，沒有共享檔案系統的遠端可改用 `inline`（單檔 10 MiB）。本機程序固定使用入口的工作目錄與共享檔案，不套用遠端路徑映射。
 
-升級到按需模式時，移除 `.env` 的 `COMPOSE_PROFILES=server` 與非空 URL，將舊的 `WUKONG_AGENT_CMD=opencode run --dangerously-skip-permissions` 改為 `opencode run`。額外 run 旗標會保留純 CLI 路徑，沒有問答回覆通道。installer 會停止同一 project 已停用的 `opencode-server`；手動更新 Compose 時先執行以下命令，因為 profile 停用與 `--remove-orphans` 不會停止舊的 profile 容器：
+升級到按需模式時，移除 `.env` 的 `COMPOSE_PROFILES=server` 與非空 URL，將舊的 `WUKONG_AGENT_CMD=opencode run --dangerously-skip-permissions` 改為 `opencode run`。額外 run 旗標會保留純 CLI 路徑，沒有問答回覆通道。2026-10-06 起 installer 安裝或升級時會自動處理兩件事：把舊範本原封未動的這行改成 `opencode run`；`WUKONG_AGENT_SERVER_URL` 指向內建 `opencode-server` 而沒有 `COMPOSE_PROFILES` 時補上 `COMPOSE_PROFILES=server`。改動前先備份到 `.wukong-backups/`，其他自訂值不動；`COMPOSE_PROFILES` 已設定但不含 `server` 時只印警告。installer 會停止同一 project 已停用的 `opencode-server`；手動更新 Compose 時先執行以下命令，因為 profile 停用與 `--remove-orphans` 不會停止舊的 profile 容器：
 
 ```bash
 docker compose --profile server stop opencode-server

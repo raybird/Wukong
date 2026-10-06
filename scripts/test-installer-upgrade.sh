@@ -214,6 +214,54 @@ test_docker() {
     assert_not_contains "$LOG" ' stop opencode-server'
 }
 
+test_docker_env_migration() {
+    prepare
+    # v0.22.0 moved the default off the shared server; .env is user-owned and kept
+    # across upgrades, so only the old template's literal default may be rewritten.
+    printf '%s\n' 'USER_SECRET=preserve' \
+        'WUKONG_AGENT_CMD=opencode run --dangerously-skip-permissions' \
+        '# WUKONG_AGENT_CMD=opencode run --dangerously-skip-permissions' \
+        'WUKONG_AGENT_SERVER_URL=http://opencode-server:4096' > "$DEPLOYMENT/.env"
+    cp "$DEPLOYMENT/.env" "$TMP/env-original"
+    run_installer '' --mode docker --version v9.9.9 > "$TMP/env-out"
+    printf '%s\n' 'USER_SECRET=preserve' \
+        'WUKONG_AGENT_CMD=opencode run' \
+        '# WUKONG_AGENT_CMD=opencode run --dangerously-skip-permissions' \
+        'WUKONG_AGENT_SERVER_URL=http://opencode-server:4096' \
+        'COMPOSE_PROFILES=server' > "$TMP/env-expected"
+    assert_same "$TMP/env-expected" "$DEPLOYMENT/.env"
+    assert_contains "$TMP/env-out" 'WUKONG_AGENT_CMD'
+    assert_contains "$TMP/env-out" 'COMPOSE_PROFILES=server'
+    [[ "$(find "$DEPLOYMENT/.wukong-backups" -name .env | wc -l)" == 1 ]] || fail "expected one .env backup"
+    assert_same "$TMP/env-original" "$(find "$DEPLOYMENT/.wukong-backups" -name .env)"
+    FIXTURE_TAG=v9.9.8 make_release
+    run_installer '' --mode docker --upgrade --version v9.9.8 >/dev/null
+    assert_same "$TMP/env-expected" "$DEPLOYMENT/.env"
+    [[ "$(find "$DEPLOYMENT/.wukong-backups" -name .env | wc -l)" == 1 ]] || fail "unchanged .env was backed up again"
+
+    prepare
+    printf '%s\n' 'WUKONG_AGENT_CMD="opencode run --dangerously-skip-permissions"' \
+        'WUKONG_AGENT_SERVER_URL=http://10.0.0.5:4096' > "$DEPLOYMENT/.env"
+    run_installer '' --mode docker --version v9.9.9 >/dev/null
+    printf '%s\n' 'WUKONG_AGENT_CMD=opencode run' 'WUKONG_AGENT_SERVER_URL=http://10.0.0.5:4096' > "$TMP/env-expected"
+    assert_same "$TMP/env-expected" "$DEPLOYMENT/.env"
+
+    prepare
+    printf '%s\n' 'WUKONG_AGENT_CMD=opencode run --dangerously-skip-permissions --model x/y' \
+        'COMPOSE_PROFILES=cli' \
+        'WUKONG_AGENT_SERVER_URL=http://opencode-server:4096' > "$DEPLOYMENT/.env"
+    cp "$DEPLOYMENT/.env" "$TMP/env-original"
+    run_installer '' --mode docker --version v9.9.9 > "$TMP/env-out"
+    assert_same "$TMP/env-original" "$DEPLOYMENT/.env"
+    assert_contains "$TMP/env-out" 'COMPOSE_PROFILES does not include server'
+
+    prepare
+    printf '%s\n' 'WUKONG_AGENT_CMD=opencode run --dangerously-skip-permissions' > "$DEPLOYMENT/.env"
+    cp "$DEPLOYMENT/.env" "$TMP/env-original"
+    ! FIXTURE_DOCKER_PS_EXIT=1 run_installer '' --mode docker --version v9.9.9 >/dev/null 2>&1 || fail "unhealthy Docker install succeeded"
+    assert_same "$TMP/env-original" "$DEPLOYMENT/.env"
+}
+
 test_metadata() {
     prepare
     run_installer '1\nn\n\n\n\n\n' --mode binary --version v9.9.9 >/dev/null
@@ -533,6 +581,7 @@ case "$CASE" in
     parsing) test_parsing ;;
     verification) test_verification ;;
     docker) test_docker ;;
+    docker-env-migration) test_docker_env_migration ;;
     docker-forward-compat) test_docker_forward_compatible_bundle ;;
     docker-missing-entry) test_docker_bundle_missing_required_entry ;;
     docker-self-replace) test_docker_installer_replaces_itself_mid_run ;;
@@ -552,7 +601,7 @@ case "$CASE" in
     docker-project) test_docker_project_resolution ;;
     docker-project-conflicts) test_docker_project_conflicts ;;
     docker-project-persistence) test_docker_project_persistence ;;
-    all) test_parsing; test_verification; test_docker; test_docker_forward_compatible_bundle; test_docker_bundle_missing_required_entry; test_docker_installer_replaces_itself_mid_run; test_stdin_installer; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_docker_compose_repair; test_docker_project_resolution; test_docker_project_conflicts; test_docker_project_persistence; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
+    all) test_parsing; test_verification; test_docker; test_docker_env_migration; test_docker_forward_compatible_bundle; test_docker_bundle_missing_required_entry; test_docker_installer_replaces_itself_mid_run; test_stdin_installer; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_docker_compose_repair; test_docker_project_resolution; test_docker_project_conflicts; test_docker_project_persistence; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
     *) fail "unknown test case: $CASE" ;;
 esac
 
