@@ -18,6 +18,7 @@ wukong-gateway = { path = "../wukong-gateway" }
 wukong-orchestrator = { path = "../wukong-orchestrator" }
 wukong-skills = { path = "../wukong-skills" }
 thiserror = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 sqlx = { workspace = true }

@@ -88,7 +88,13 @@
    - 時序：`run_turn` 在回合結束才寫入記憶，所以取最新兩筆時本回合尚未寫入，取到的是上一回合。
    - 回歸與靜態檢查：`cargo test --workspace` passed=625 failed=0 ignored=9；`cargo clippy --all-targets -- -D warnings` 通過；`cargo fmt --all -- --check` 通過。
    - code-simplify：no-op。
-7. ⏳ **SCN-001：每個回合都寫入記憶** — 產出：回合識別碼與 key 修改、連續兩回合的測試。相依：步驟 1、3、5、6（先讓召回與合併準備好，再啟動寫入）。完成判準：同 session 連續兩回合（含相同輸入）後有四筆，測試先紅後綠。
+7. ✅ **SCN-001：每個回合都寫入記憶** — 產出：回合識別碼與 key 修改、連續兩回合的測試。相依：步驟 1、3、5、6（先讓召回與合併準備好，再啟動寫入）。完成判準：同 session 連續兩回合（含相同輸入）後有四筆，測試先紅後綠。
+   - 影響分析：`run_turn_traced_with_attachments`（CRITICAL，已告知）；只改寫入的 dedupe key。`uuid`（v4）為既有 workspace 依賴，`wukong-runtime/Cargo.toml` 加入引用，`Cargo.lock` 只多一行依賴關係。
+   - 紅燈：`every_turn_in_a_reused_session_is_remembered` 先寫，`cargo test -p wukong-runtime --lib every_turn_in_a_reused` exit 101，第二回合後 `left: 2, right: 4`。與 RunWuKong 實測相同：同一 session 的第二回合沒有寫入。
+   - 綠燈：`turn_key` 改為 `scope:{scope}:turn:{uuid v4}`，每次 `run_turn` 一個。`cargo test -p wukong-runtime --lib` exit 0，74 passed。斷言以字面值檢查：兩回合輸入相同，第一回合後 2 筆、第二回合後 4 筆，內容為兩筆 `User: same question` 與 `Assistant: first answer`／`Assistant: second answer`，session 都是 `ses_new`。
+   - 「同一回合只寫一次」：`run_turn` 每回合只呼叫一次 `remember`，第一回合後恰為 2 筆。
+   - 回歸與靜態檢查：`cargo test --workspace` passed=626 failed=0 ignored=9；`cargo clippy --all-targets -- -D warnings` 通過；`cargo fmt --all -- --check` 通過。
+   - code-simplify：no-op。
 8. ⏳ **收尾** — 產出：AGENTS.md「一回合資料流」更新、CHANGELOG `[Unreleased]`、全量 `cargo test`、`cargo clippy --all-targets -- -D warnings`、`gitnexus_detect_changes`。相依：步驟 1～7。完成判準：命令全綠，文件描述與實作一致。
 
 ## 測試策略

@@ -4016,6 +4016,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "uuid",
  "wukong-gateway",
  "wukong-memory",
  "wukong-orchestrator",

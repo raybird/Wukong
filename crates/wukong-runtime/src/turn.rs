@@ -336,10 +336,9 @@ pub async fn run_turn_traced_with_attachments(
         last
     };
 
-    let turn_key = captured_session
-        .clone()
-        .or_else(|| stored.clone())
-        .unwrap_or_else(|| format!("scope:{}:input:{}", cfg.scope, input));
+    // 2026-10-06：session 會跨回合沿用，不能當防重複 key（否則只有第一回合被記住）；
+    // 每次 run_turn 產生自己的識別碼，同一回合只寫一次。
+    let turn_key = format!("scope:{}:turn:{}", cfg.scope, uuid::Uuid::new_v4());
 
     memory
         .remember(RememberInput {
@@ -1606,5 +1605,50 @@ mod tests {
         let final_prompt = &prompts[2];
         assert!(!final_prompt.contains("晚餐吃什麼"));
         assert!(!final_prompt.contains("吃拉麵"));
+    }
+
+    // SCN-001: the session is reused across turns, so it cannot be the dedupe
+    // key; every turn is remembered, even one repeating the previous input.
+    #[tokio::test]
+    async fn every_turn_in_a_reused_session_is_remembered() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["fixer", "first answer", "fixer", "second answer"]);
+        for expected in [2, 4] {
+            run_turn(
+                &mem,
+                &backend,
+                &test_cfg("project:T"),
+                "same question",
+                &mut |_| {},
+                &mut |_| {},
+            )
+            .await
+            .unwrap();
+            let records = mem
+                .records(Some("project:T"), Some(MemoryKind::Event), 10)
+                .await
+                .unwrap();
+            assert_eq!(records.records.len(), expected);
+        }
+
+        let records = mem
+            .records(Some("project:T"), Some(MemoryKind::Event), 10)
+            .await
+            .unwrap();
+        let mut texts: Vec<&str> = records.records.iter().map(|r| r.text.as_str()).collect();
+        texts.sort();
+        assert_eq!(
+            texts,
+            [
+                "Assistant: first answer",
+                "Assistant: second answer",
+                "User: same question",
+                "User: same question",
+            ]
+        );
+        assert!(records
+            .records
+            .iter()
+            .all(|r| r.session_id.as_deref() == Some("ses_new")));
     }
 }
