@@ -66,6 +66,10 @@ pub enum RecallMode {
     Tree,
     #[default]
     Hybrid,
+    /// Keyword + vector only: no recency source, and vector hits must clear a
+    /// similarity floor. For callers that already carry recent context (a
+    /// resumed agent session) and only want memories related to the input.
+    Relevant,
 }
 
 impl RecallMode {
@@ -75,6 +79,7 @@ impl RecallMode {
             RecallMode::Keyword => "keyword",
             RecallMode::Tree => "tree",
             RecallMode::Hybrid => "hybrid",
+            RecallMode::Relevant => "relevant",
         }
     }
 }

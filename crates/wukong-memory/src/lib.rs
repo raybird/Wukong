@@ -340,6 +340,7 @@ impl Memory {
             RecallMode::Keyword => keyword,
             RecallMode::Tree => recent,
             RecallMode::Hybrid => merge_candidates(keyword, recent),
+            RecallMode::Relevant => keyword,
         };
 
         // Vector source: only when enabled by mode AND an embedder is attached.
@@ -355,8 +356,12 @@ impl Memory {
                         .store
                         .embedded_candidates(MAX_VECTOR_SCAN, allowed_scopes)
                         .await?;
-                    let vector_cands =
+                    let mut vector_cands =
                         build_vector_candidates(&qvec, embedded, query.top_k.max(5) * 4);
+                    if query.mode == RecallMode::Relevant {
+                        vector_cands
+                            .retain(|c| c.vector_sim.unwrap_or(0.0) >= MIN_RELEVANT_VECTOR_SIM);
+                    }
                     apply_vector_sims(merged, vector_cands)
                 }
                 None => merged,
@@ -589,6 +594,9 @@ impl Memory {
 /// Upper bound on embedded rows scored per vector recall. Beyond this the oldest
 /// rows are skipped; sized well above a typical personal store so it rarely bites.
 const MAX_VECTOR_SCAN: i64 = 10_000;
+/// 2026-10-06：`RecallMode::Relevant` 的向量相似度門檻（cosine）。沒有啟用
+/// embedding 的部署不受影響；值未經真實語料校準，見 issue 9 的 TBD-2。
+const MIN_RELEVANT_VECTOR_SIM: f64 = 0.4;
 
 /// Run a synchronous, CPU-bound embedding off the async executor so it never
 /// blocks a tokio worker (ONNX inference can take tens of ms).

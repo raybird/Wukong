@@ -72,7 +72,15 @@
    - 單迴圈合併：截斷是 `compose_prompt` 這個純函式的輸出行為，單元測試即是對外可觀察層級。
    - 回歸與靜態檢查：`cargo test -p wukong-gateway -p wukong-runtime` 全綠（131／70 passed，5 ignored 為既有的真實 OpenCode 測試）；`cargo clippy -p wukong-gateway -p wukong-runtime --all-targets -- -D warnings` 通過；`cargo fmt --all` 只調整本檔換行。
    - code-simplify：no-op。
-5. ⏳ **SCN-002、SCN-003：最後一棒只注入相關記憶** — 產出：新的召回模式、相關度門檻、`run_turn` 最後一棒改用它，以及測試。相依：步驟 4。完成判準：以假 backend 擷取最後一棒的 prompt，「只有不相關的最新記憶」時沒有 `[相關記憶]`，「有相關舊記憶」時含該筆；兩者先紅後綠。斷言檢查命中來源（`source_signals`），不只檢查筆數。
+5. ✅ **SCN-002、SCN-003：最後一棒只注入相關記憶** — 產出：新的召回模式、相關度門檻、`run_turn` 最後一棒改用它，以及測試。相依：步驟 4。完成判準：以假 backend 擷取最後一棒的 prompt，「只有不相關的最新記憶」時沒有 `[相關記憶]`，「有相關舊記憶」時含該筆；兩者先紅後綠。斷言檢查命中來源（`source_signals`），不只檢查筆數。
+   - 影響分析（2026-10-06）：`sources_for_mode` 與 `run_turn_traced_with_attachments` 皆為 CRITICAL（`Memory::recall` 被 Web 預覽、Telegram、REPL 與所有回合使用；`run_turn_traced_with_attachments` 是四個入口共用的回合主流程）。已告知使用者。控制方式：新增 `RecallMode::Relevant` 只給 `run_turn` 用，Keyword／Tree／Hybrid 行為不變；Web 記憶 API 只接受 `hybrid`，外部無法選到新模式。
+   - 紅燈：先寫 `final_step_omits_memories_selected_only_by_recency`、`final_step_keeps_older_relevant_memory`，`cargo test -p wukong-runtime --lib final_step_` exit 101。前者在 `!final_prompt.contains("[相關記憶]")` 失敗（三筆中文、與英文輸入無共同詞的記憶因「最近」來源被注入）；後者含相關的 `deploy port is 8787`，但在 `晚餐吃拉麵 leaked into the final step` 失敗。
+   - 綠燈：新增 `RecallMode::Relevant`（關鍵字＋向量、無最近來源；向量命中須 cosine ≥ `MIN_RELEVANT_VECTOR_SIM` 0.4），`run_turn` 改用它。同命令 exit 0。
+   - 向量門檻（embedding 開啟時）：`wukong-memory/tests/integration.rs` 的 `relevant_mode_requires_vector_similarity_floor` 以 stub embedder 讓兩筆記憶對查詢的 cosine 為 0.9 與 0.1，期望只回 `["near memory"]`。紅燈取得方式：測試寫在實作之後，因此暫時把 retain 條件改為恆真再跑，`left: ["near memory", "far memory"]`、exit 101；還原後 exit 0（`git diff` 確認還原為原實作）。
+   - 斷言以「哪些文字出現在 prompt」判定來源，沒有只檢查筆數；不相關記憶刻意與輸入沒有共同詞，排除了關鍵字命中。
+   - 回歸與靜態檢查：`cargo test --workspace` passed=623 failed=0 ignored=9（新增整合測試前）；之後 `cargo test -p wukong-memory` passed=99 failed=0；`cargo clippy --all-targets -- -D warnings` 通過；`cargo fmt --all -- --check` 通過。`cargo check -p wukong-memory --features embed` 因本機缺 `openssl-sys` 建置環境失敗，改動前的基準版本同樣失敗，與本次無關；向量門檻程式不在 feature 條件內，已由預設建置編譯並由 stub 測試執行。
+   - 中間狀態：本步驟後輔助棒也只拿到相關記憶，失去最近一回合；由步驟 6 補上。
+   - code-simplify：no-op。
 6. ⏳ **SCN-004：輔助棒取得最近一個回合** — 產出：輔助棒的注入組合與測試。相依：步驟 5。完成判準：多棒回合中輔助棒 prompt 含上一回合、不含更早的不相關回合，先紅後綠。
 7. ⏳ **SCN-001：每個回合都寫入記憶** — 產出：回合識別碼與 key 修改、連續兩回合的測試。相依：步驟 1、3、5、6（先讓召回與合併準備好，再啟動寫入）。完成判準：同 session 連續兩回合（含相同輸入）後有四筆，測試先紅後綠。
 8. ⏳ **收尾** — 產出：AGENTS.md「一回合資料流」更新、CHANGELOG `[Unreleased]`、全量 `cargo test`、`cargo clippy --all-targets -- -D warnings`、`gitnexus_detect_changes`。相依：步驟 1～7。完成判準：命令全綠，文件描述與實作一致。

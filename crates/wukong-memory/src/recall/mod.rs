@@ -276,6 +276,7 @@ pub fn sources_for_mode(mode: RecallMode) -> (bool, bool, bool) {
         RecallMode::Keyword => (true, false, false),
         RecallMode::Tree => (false, true, false),
         RecallMode::Hybrid => (true, true, true),
+        RecallMode::Relevant => (true, false, true),
     }
 }
 

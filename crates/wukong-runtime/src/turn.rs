@@ -160,12 +160,13 @@ pub async fn run_turn_traced_with_attachments(
     on_role: &mut dyn FnMut(Role),
     on_step: &mut dyn FnMut(ObservedStep<'_>),
 ) -> Result<TurnOutput, WukongError> {
+    // 2026-10-06：最後一棒會接續 session，最近的對話已在其中；只注入與輸入相關的記憶。
     let recall = memory
         .recall(RecallQuery {
             query: input.to_string(),
             top_k: cfg.recall_top_k,
             scope: Some(cfg.scope.clone()),
-            mode: RecallMode::Hybrid,
+            mode: RecallMode::Relevant,
         })
         .await?;
 
@@ -1434,5 +1435,83 @@ mod tests {
         assert_eq!(prompts.len(), 3);
         assert!(!prompts[1].contains("[輸出要求]"));
         assert!(prompts[2].contains("[輸出要求]"));
+    }
+
+    async fn remember_note(mem: &Memory, scope: &str, text: &str) {
+        mem.remember(RememberInput {
+            scope: scope.to_string(),
+            session_id: None,
+            items: vec![MemoryItem {
+                kind: MemoryKind::Note,
+                text: text.to_string(),
+                importance: None,
+                dedupe_key: None,
+            }],
+        })
+        .await
+        .unwrap();
+    }
+
+    const UNRELATED: [&str; 3] = ["晚餐吃拉麵", "天氣晴朗", "週末去爬山"];
+
+    // SCN-002: the final step resumes its session; recency alone is not relevance.
+    #[tokio::test]
+    async fn final_step_omits_memories_selected_only_by_recency() {
+        let mem = open_memory().await;
+        for text in UNRELATED {
+            remember_note(&mem, "project:T", text).await;
+        }
+        let backend = MockBackend::new(&["fixer", "answer"]);
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "deploy the server",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        let prompts = backend.prompts.lock().unwrap();
+        let final_prompt = prompts.last().unwrap();
+        assert!(!final_prompt.contains("[相關記憶]"));
+        for text in UNRELATED {
+            assert!(
+                !final_prompt.contains(text),
+                "{text} leaked into the final step"
+            );
+        }
+    }
+
+    // SCN-003: an older memory that matches the input still reaches the final step.
+    #[tokio::test]
+    async fn final_step_keeps_older_relevant_memory() {
+        let mem = open_memory().await;
+        remember_note(&mem, "project:T", "deploy port is 8787").await;
+        for text in UNRELATED {
+            remember_note(&mem, "project:T", text).await;
+        }
+        let backend = MockBackend::new(&["fixer", "answer"]);
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "which deploy port",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        let prompts = backend.prompts.lock().unwrap();
+        let final_prompt = prompts.last().unwrap();
+        assert!(final_prompt.contains("(project:T) deploy port is 8787"));
+        for text in UNRELATED {
+            assert!(
+                !final_prompt.contains(text),
+                "{text} leaked into the final step"
+            );
+        }
     }
 }
