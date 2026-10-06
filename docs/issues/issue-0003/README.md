@@ -184,9 +184,10 @@ Feature: opencode session 的保留期清理
 | 2026-10-01 | 規格修訂：SCN-008 限定為 opencode server backend，依使用者對 review-a09b2ad S-3 的選擇核准；使用者另決定修正 S-1、為 schedulerd 補 binary 層級測試、處理三類小建議（N-1、N-3，以及文件類的 N-2 與 N-4） | - |
 | 2026-10-01 | 獨立審查 review-8020271 判定 PASS（無 MUST FIX，一項 SHOULD FIX） | - |
 | 2026-10-02 | 使用者決定修正 review-8020271 的 S-1：測試用的間隔鉤子不得進入 release 建置 | - |
+| 2026-10-03 | PR #4 以 squash 合併進 main（`198e092`，合併時 PR head 為 `4ccc7f1`，含最終審查 review-755c739 PASS） | 使用者 |
 
 ---
 **建立日期**: 2026-10-01  
 **分級**: Medium（跨五個 crate，但沿既有相依方向、邏輯直觀，不涉及 schema 或架構變更）  
 **風險**: High\
-**狀態**: 實作完成，待審查
+**狀態**: 已完成（PR #4 已於 2026-10-03 合併）
