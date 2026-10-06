@@ -163,10 +163,16 @@ pub async fn run_turn_traced_with_attachments(
     on_role: &mut dyn FnMut(Role),
     on_step: &mut dyn FnMut(ObservedStep<'_>),
 ) -> Result<TurnOutput, WukongError> {
+    // 2026-10-06：入口附加的檔案互動規則只給 agent；召回與記憶只用使用者原文，
+    // 否則每則輸入都會因為共用規則文字而「關聯」到所有過去的記憶。
+    let user_text = input
+        .split(&format!("\n\n{}", persona::FILE_RULES_HEADER))
+        .next()
+        .unwrap_or(input);
     // 2026-10-06：最後一棒會接續 session，最近的對話已在其中；只注入與輸入相關的記憶。
     let recall = memory
         .recall(RecallQuery {
-            query: input.to_string(),
+            query: user_text.to_string(),
             top_k: cfg.recall_top_k,
             scope: Some(cfg.scope.clone()),
             mode: RecallMode::Relevant,
@@ -347,7 +353,7 @@ pub async fn run_turn_traced_with_attachments(
             items: vec![
                 MemoryItem {
                     kind: MemoryKind::Event,
-                    text: format!("User: {input}"),
+                    text: format!("User: {user_text}"),
                     importance: None,
                     dedupe_key: Some(format!("runtime:{turn_key}:user")),
                 },
@@ -1681,5 +1687,46 @@ mod tests {
         assert!(!final_prompt.contains("[相關記憶]"));
         assert!(!final_prompt.contains("weather"));
         assert!(!final_prompt.contains("sunny"));
+    }
+
+    // SCN-009: the Telegram file rules ride along to the agent but stay out of
+    // recall and out of the stored user memory.
+    #[tokio::test]
+    async fn file_rules_reach_the_prompt_but_not_memory_or_recall() {
+        let rules = format!(
+            "\n\n{}\n上傳附件已是可修改的工作副本，請將成品寫入此目錄：/workspace/out。",
+            persona::FILE_RULES_HEADER
+        );
+        let mem = open_memory().await;
+        remember_note(&mem, "project:T", &format!("User: 晚餐吃拉麵{rules}")).await;
+        let backend = MockBackend::new(&["fixer", "answer"]);
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            &format!("部署伺服器的步驟{rules}"),
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        {
+            let prompts = backend.prompts.lock().unwrap();
+            let final_prompt = prompts.last().unwrap();
+            assert!(final_prompt.contains("[Wukong 檔案互動規則]"));
+            assert!(!final_prompt.contains("晚餐吃拉麵"));
+        }
+        let events = mem
+            .records(Some("project:T"), Some(MemoryKind::Event), 10)
+            .await
+            .unwrap();
+        let users: Vec<&str> = events
+            .records
+            .iter()
+            .map(|r| r.text.as_str())
+            .filter(|t| t.starts_with("User:"))
+            .collect();
+        assert_eq!(users, ["User: 部署伺服器的步驟"]);
     }
 }

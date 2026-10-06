@@ -37,6 +37,10 @@ pub fn build_prompt_with_skill(
     prompt
 }
 
+/// 2026-10-06：入口附加給 agent 的檔案互動規則區塊標頭。`run_turn` 以它切出
+/// 使用者原文，規則只進 prompt，不進記憶與召回查詢。
+pub const FILE_RULES_HEADER: &str = "[Wukong 檔案互動規則]";
+
 /// A directive appended to the final step instructing the agent to always
 /// produce a textual summary — even when its work was done entirely via tool
 /// calls — so an executor role never finishes silently and leaves the user

@@ -770,8 +770,10 @@ fn agent_visible_path(path: &Path) -> Result<PathBuf, String> {
 
 fn prompt_with_artifact_instruction(input: &str, artifact_dir: &Path) -> Result<String, String> {
     let visible_dir = agent_visible_path(artifact_dir)?;
+    // 標頭用 runtime 的常數：run_turn 靠它把規則切出記憶與召回。
     Ok(format!(
-        "{input}\n\n[Wukong 檔案互動規則]\n上傳附件已是可修改的工作副本，不要修改 .wukong/uploads 內的原始檔。若使用者要求建立、轉換、修改或回傳檔案，請將每個最終成品直接寫入此目錄：{}。只把要回傳給使用者的成品放入該目錄。",
+        "{input}\n\n{}\n上傳附件已是可修改的工作副本，不要修改 .wukong/uploads 內的原始檔。若使用者要求建立、轉換、修改或回傳檔案，請將每個最終成品直接寫入此目錄：{}。只把要回傳給使用者的成品放入該目錄。",
+        wukong_runtime::persona::FILE_RULES_HEADER,
         visible_dir.display()
     ))
 }

@@ -114,7 +114,14 @@
    - 單元守門：`relevant_match_string_drops_stopwords_and_turn_labels` 以字面值鎖定 `"deploy" OR "server" OR "this"`、全排除時 None、`fts_match_string` 原樣不變。此測試寫在實作之後，未取得紅燈，作為回歸守門；紅燈由上面的 runtime 測試提供。
    - 回歸與靜態檢查：`cargo test --workspace` passed=628 failed=0 ignored=9；`cargo clippy --all-targets -- -D warnings`、`cargo fmt --all -- --check` 通過。
    - code-simplify：抽出 `or_match` 讓兩種模式共用組字串，無其他改動。
-10. ⏳ **SCN-009：Telegram 規則文字不進入記憶與召回** — 產出：runtime 規則標頭常數與切分函式、`dispatch.rs` 改用常數、測試。相依：步驟 9。完成判準：附規則的輸入跑完回合後，`User:` 記憶只含原文；過去附規則的記憶不因規則文字被召回；最後一棒 prompt 仍含規則；先紅後綠。
+10. ✅ **SCN-009：Telegram 規則文字不進入記憶與召回** — 產出：runtime 規則標頭常數與切分函式、`dispatch.rs` 改用常數、測試。相依：步驟 9。完成判準：附規則的輸入跑完回合後，`User:` 記憶只含原文；過去附規則的記憶不因規則文字被召回；最後一棒 prompt 仍含規則；先紅後綠。
+   - 影響分析（2026-10-06）：`run_turn_traced_with_attachments`（CRITICAL，已告知）；`prompt_with_artifact_instruction`（CRITICAL，Telegram 所有訊息的必經路徑，已告知），只把字面標頭換成常數，輸出逐字不變。
+   - 紅燈：先只加 `persona::FILE_RULES_HEADER` 常數（不改行為），再寫 `file_rules_reach_the_prompt_but_not_memory_or_recall`（過去記憶 `User: 晚餐吃拉麵`＋規則、輸入 `部署伺服器的步驟`＋規則）。`cargo test -p wukong-runtime --lib file_rules_reach` exit 101，失敗於 `!final_prompt.contains("晚餐吃拉麵")`：舊記憶只因共用規則文字被召回。
+   - 綠燈：`run_turn` 以 `"\n\n" + FILE_RULES_HEADER` 切出 `user_text`，召回查詢與 `User:` 記憶改用它；planner 與各棒 prompt 仍用完整輸入。`dispatch.rs` 改用同一常數。`cargo test -p wukong-runtime --lib` exit 0，76 passed。字面值斷言：最後一棒含 `[Wukong 檔案互動規則]`、不含 `晚餐吃拉麵`，寫入的 User 記憶恰為 `["User: 部署伺服器的步驟"]`。
+   - 層級說明：Telegram 端只負責以常數組字串，標頭一致由同一常數保證；切分與記憶行為在 runtime 整合測試驗證，沒有另寫 Telegram 端對端測試。`cargo test -p wukong-telegram` 全綠（33／3／1 passed）。
+   - 既有資料：修正前已寫入、含規則文字的舊記憶仍在，但查詢不再帶規則文字，不會因此被召回。
+   - 回歸與靜態檢查：`cargo test --workspace` passed=629 failed=0 ignored=9；`cargo clippy --all-targets -- -D warnings`、`cargo fmt --all -- --check` 通過。
+   - code-simplify：no-op。
 11. ⏳ **退回項目收尾** — 產出：SCN-004 改為三棒鏈逐棒斷言；`docs/memory.md` 召回模式與防重複說明更新；AGENTS.md「防重複」措辭；CHANGELOG 已知限制補 TBD-3、無 session 後端與 session 輪替那一回合失去近期脈絡；全量檢查；新的獨立審查。相依：步驟 9、10。完成判準：文件與實作一致，全量命令全綠。
 
 ## 測試策略
