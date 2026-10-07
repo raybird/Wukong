@@ -2,7 +2,10 @@ use crate::persona;
 use thiserror::Error;
 use wukong_gateway::backend::{AgentAttachment, AgentRequest, AiBackend};
 use wukong_gateway::config::GatewayConfig;
-use wukong_memory::{Memory, MemoryItem, MemoryKind, RecallMode, RecallQuery, RememberInput};
+use wukong_memory::{
+    Memory, MemoryItem, MemoryKind, RecallExplanation, RecallHit, RecallMode, RecallQuery,
+    RememberInput,
+};
 use wukong_orchestrator::{PlannerPreferenceHint, Role};
 use wukong_skills::{find as find_skill, route_options};
 
@@ -160,14 +163,23 @@ pub async fn run_turn_traced_with_attachments(
     on_role: &mut dyn FnMut(Role),
     on_step: &mut dyn FnMut(ObservedStep<'_>),
 ) -> Result<TurnOutput, WukongError> {
+    // 2026-10-06：入口附加的檔案互動規則只給 agent；召回與記憶只用使用者原文，
+    // 否則每則輸入都會因為共用規則文字而「關聯」到所有過去的記憶。
+    let user_text = input
+        .split(&format!("\n\n{}", persona::FILE_RULES_HEADER))
+        .next()
+        .unwrap_or(input);
+    // 2026-10-06：最後一棒會接續 session，最近的對話已在其中；只注入與輸入相關的記憶。
     let recall = memory
         .recall(RecallQuery {
-            query: input.to_string(),
+            query: user_text.to_string(),
             top_k: cfg.recall_top_k,
             scope: Some(cfg.scope.clone()),
-            mode: RecallMode::Hybrid,
+            mode: RecallMode::Relevant,
         })
         .await?;
+    // 輔助棒沒有 session，額外帶上一回合（最新兩筆回合記憶），讓「剛剛那個」之類的指代看得懂。
+    let helper_hits = with_previous_turn(memory, &cfg.scope, &recall.data).await?;
 
     let preference_hint = planner_preference_hint(cfg);
     let steps = wukong_orchestrator::plan_skill_chain_with_preferences(
@@ -200,8 +212,9 @@ pub async fn run_turn_traced_with_attachments(
         let skill = step.skill_name.as_deref().and_then(find_skill);
         let augmented = format!("{input}{}", wukong_orchestrator::chain_context(&prior));
         let is_final = i + 1 == n_steps;
+        let hits = if is_final { &recall.data } else { &helper_hits };
         let mut prompt =
-            persona::build_prompt_with_skill(role, skill, &skill_root, &recall.data, &augmented);
+            persona::build_prompt_with_skill(role, skill, &skill_root, hits, &augmented);
         // Advertise the scheduling capability only on the user-facing final step,
         // so stateless helper steps never take a side-effecting schedule action.
         if is_final {
@@ -329,10 +342,9 @@ pub async fn run_turn_traced_with_attachments(
         last
     };
 
-    let turn_key = captured_session
-        .clone()
-        .or_else(|| stored.clone())
-        .unwrap_or_else(|| format!("scope:{}:input:{}", cfg.scope, input));
+    // 2026-10-06：session 會跨回合沿用，不能當防重複 key（否則只有第一回合被記住）；
+    // 每次 run_turn 產生自己的識別碼，同一回合只寫一次。
+    let turn_key = format!("scope:{}:turn:{}", cfg.scope, uuid::Uuid::new_v4());
 
     memory
         .remember(RememberInput {
@@ -341,7 +353,7 @@ pub async fn run_turn_traced_with_attachments(
             items: vec![
                 MemoryItem {
                     kind: MemoryKind::Event,
-                    text: format!("User: {input}"),
+                    text: format!("User: {user_text}"),
                     importance: None,
                     dedupe_key: Some(format!("runtime:{turn_key}:user")),
                 },
@@ -444,6 +456,45 @@ fn planner_preference_hint(cfg: &GatewayConfig) -> Option<PlannerPreferenceHint>
             preferred_skills,
         })
     }
+}
+
+/// `hits` plus the scope's previous turn (its two newest turn memories), oldest
+/// first, skipping any already present. Called before this turn is remembered.
+async fn with_previous_turn(
+    memory: &Memory,
+    scope: &str,
+    hits: &[RecallHit],
+) -> Result<Vec<RecallHit>, WukongError> {
+    let mut out = hits.to_vec();
+    let mut previous = memory
+        .records(Some(scope), Some(MemoryKind::Event), 2)
+        .await?
+        .records;
+    previous.reverse();
+    for record in previous {
+        if out.iter().any(|hit| hit.id == record.id) {
+            continue;
+        }
+        out.push(RecallHit {
+            id: record.id,
+            scope: record.scope,
+            kind: record.kind,
+            text: record.text,
+            score: 0.0,
+            explanation: RecallExplanation {
+                lexical: 0.0,
+                semantic: 0.0,
+                relevance: 0.0,
+                decay: 0.0,
+                importance: record.importance,
+                recall_bonus: 0.0,
+                age_seconds: 0,
+                recall_count: record.recall_count,
+                source_signals: vec!["previous_turn".to_string()],
+            },
+        });
+    }
+    Ok(out)
 }
 
 /// Send a raw `/compact` message to a specific opencode session (no planner,
@@ -1434,5 +1485,249 @@ mod tests {
         assert_eq!(prompts.len(), 3);
         assert!(!prompts[1].contains("[輸出要求]"));
         assert!(prompts[2].contains("[輸出要求]"));
+    }
+
+    async fn remember_note(mem: &Memory, scope: &str, text: &str) {
+        mem.remember(RememberInput {
+            scope: scope.to_string(),
+            session_id: None,
+            items: vec![MemoryItem {
+                kind: MemoryKind::Note,
+                text: text.to_string(),
+                importance: None,
+                dedupe_key: None,
+            }],
+        })
+        .await
+        .unwrap();
+    }
+
+    const UNRELATED: [&str; 3] = ["晚餐吃拉麵", "天氣晴朗", "週末去爬山"];
+
+    // SCN-002: the final step resumes its session; recency alone is not relevance.
+    #[tokio::test]
+    async fn final_step_omits_memories_selected_only_by_recency() {
+        let mem = open_memory().await;
+        for text in UNRELATED {
+            remember_note(&mem, "project:T", text).await;
+        }
+        let backend = MockBackend::new(&["fixer", "answer"]);
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "deploy the server",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        let prompts = backend.prompts.lock().unwrap();
+        let final_prompt = prompts.last().unwrap();
+        assert!(!final_prompt.contains("[相關記憶]"));
+        for text in UNRELATED {
+            assert!(
+                !final_prompt.contains(text),
+                "{text} leaked into the final step"
+            );
+        }
+    }
+
+    // SCN-003: an older memory that matches the input still reaches the final step.
+    #[tokio::test]
+    async fn final_step_keeps_older_relevant_memory() {
+        let mem = open_memory().await;
+        remember_note(&mem, "project:T", "deploy port is 8787").await;
+        for text in UNRELATED {
+            remember_note(&mem, "project:T", text).await;
+        }
+        let backend = MockBackend::new(&["fixer", "answer"]);
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "which deploy port",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        let prompts = backend.prompts.lock().unwrap();
+        let final_prompt = prompts.last().unwrap();
+        assert!(final_prompt.contains("(project:T) deploy port is 8787"));
+        for text in UNRELATED {
+            assert!(
+                !final_prompt.contains(text),
+                "{text} leaked into the final step"
+            );
+        }
+    }
+
+    async fn remember_turn(mem: &Memory, scope: &str, user: &str, assistant: &str) {
+        for text in [format!("User: {user}"), format!("Assistant: {assistant}")] {
+            mem.remember(RememberInput {
+                scope: scope.to_string(),
+                session_id: None,
+                items: vec![MemoryItem {
+                    kind: MemoryKind::Event,
+                    text,
+                    importance: None,
+                    dedupe_key: None,
+                }],
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    // SCN-004: stateless helper steps see the previous turn; older unrelated
+    // turns and the session-backed final step do not get it.
+    #[tokio::test]
+    async fn helper_steps_receive_only_the_previous_turn() {
+        let mem = open_memory().await;
+        remember_turn(&mem, "project:T", "舊問題", "舊回答").await;
+        remember_turn(&mem, "project:T", "晚餐吃什麼", "吃拉麵").await;
+        let backend = MockBackend::new(&["explorer, oracle, fixer", "e1", "o1", "f1"]);
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "deploy the server",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        let prompts = backend.prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 4);
+        for helper in &prompts[1..3] {
+            assert!(helper.contains("User: 晚餐吃什麼"));
+            assert!(helper.contains("Assistant: 吃拉麵"));
+            assert!(!helper.contains("舊問題"));
+            assert!(!helper.contains("舊回答"));
+        }
+        let final_prompt = &prompts[3];
+        assert!(!final_prompt.contains("晚餐吃什麼"));
+        assert!(!final_prompt.contains("吃拉麵"));
+    }
+
+    // SCN-001: the session is reused across turns, so it cannot be the dedupe
+    // key; every turn is remembered, even one repeating the previous input.
+    #[tokio::test]
+    async fn every_turn_in_a_reused_session_is_remembered() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["fixer", "first answer", "fixer", "second answer"]);
+        for expected in [2, 4] {
+            run_turn(
+                &mem,
+                &backend,
+                &test_cfg("project:T"),
+                "same question",
+                &mut |_| {},
+                &mut |_| {},
+            )
+            .await
+            .unwrap();
+            let records = mem
+                .records(Some("project:T"), Some(MemoryKind::Event), 10)
+                .await
+                .unwrap();
+            assert_eq!(records.records.len(), expected);
+        }
+
+        let records = mem
+            .records(Some("project:T"), Some(MemoryKind::Event), 10)
+            .await
+            .unwrap();
+        let mut texts: Vec<&str> = records.records.iter().map(|r| r.text.as_str()).collect();
+        texts.sort();
+        assert_eq!(
+            texts,
+            [
+                "Assistant: first answer",
+                "Assistant: second answer",
+                "User: same question",
+                "User: same question",
+            ]
+        );
+        assert!(records
+            .records
+            .iter()
+            .all(|r| r.session_id.as_deref() == Some("ses_new")));
+    }
+
+    // SCN-002 (review-cc78101): same-language turns share stopwords and the
+    // `User:`/`Assistant:` labels with any input; neither is relevance.
+    #[tokio::test]
+    async fn final_step_ignores_stopword_and_role_label_matches() {
+        let mem = open_memory().await;
+        remember_turn(
+            &mem,
+            "project:T",
+            "what is the weather today",
+            "It is sunny in the city",
+        )
+        .await;
+        let backend = MockBackend::new(&["fixer", "answer"]);
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "deploy the server for this user",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        let prompts = backend.prompts.lock().unwrap();
+        let final_prompt = prompts.last().unwrap();
+        assert!(!final_prompt.contains("[相關記憶]"));
+        assert!(!final_prompt.contains("weather"));
+        assert!(!final_prompt.contains("sunny"));
+    }
+
+    // SCN-009: the Telegram file rules ride along to the agent but stay out of
+    // recall and out of the stored user memory.
+    #[tokio::test]
+    async fn file_rules_reach_the_prompt_but_not_memory_or_recall() {
+        let rules = format!(
+            "\n\n{}\n上傳附件已是可修改的工作副本，請將成品寫入此目錄：/workspace/out。",
+            persona::FILE_RULES_HEADER
+        );
+        let mem = open_memory().await;
+        remember_note(&mem, "project:T", &format!("User: 晚餐吃拉麵{rules}")).await;
+        let backend = MockBackend::new(&["fixer", "answer"]);
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            &format!("部署伺服器的步驟{rules}"),
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        {
+            let prompts = backend.prompts.lock().unwrap();
+            let final_prompt = prompts.last().unwrap();
+            assert!(final_prompt.contains("[Wukong 檔案互動規則]"));
+            assert!(!final_prompt.contains("晚餐吃拉麵"));
+        }
+        let events = mem
+            .records(Some("project:T"), Some(MemoryKind::Event), 10)
+            .await
+            .unwrap();
+        let users: Vec<&str> = events
+            .records
+            .iter()
+            .map(|r| r.text.as_str())
+            .filter(|t| t.starts_with("User:"))
+            .collect();
+        assert_eq!(users, ["User: 部署伺服器的步驟"]);
     }
 }

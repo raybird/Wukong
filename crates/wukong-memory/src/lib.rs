@@ -32,7 +32,7 @@ pub use scoring::Weights;
 use embed::embedding_to_blob;
 use recall::{
     apply_vector_sims, build_vector_candidates, contains_cjk, filter_by_scope, fts_match_string,
-    is_trivial, merge_candidates, rank, sources_for_mode,
+    is_trivial, merge_candidates, rank, relevant_match_string, sources_for_mode,
 };
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -311,7 +311,12 @@ impl Memory {
         let now = now_unix();
 
         let keyword = if use_keyword {
-            match fts_match_string(&query.query) {
+            let expr = if query.mode == RecallMode::Relevant {
+                relevant_match_string(&query.query)
+            } else {
+                fts_match_string(&query.query)
+            };
+            match expr {
                 Some(expr) => {
                     let hits = self
                         .store
@@ -340,6 +345,7 @@ impl Memory {
             RecallMode::Keyword => keyword,
             RecallMode::Tree => recent,
             RecallMode::Hybrid => merge_candidates(keyword, recent),
+            RecallMode::Relevant => keyword,
         };
 
         // Vector source: only when enabled by mode AND an embedder is attached.
@@ -355,8 +361,12 @@ impl Memory {
                         .store
                         .embedded_candidates(MAX_VECTOR_SCAN, allowed_scopes)
                         .await?;
-                    let vector_cands =
+                    let mut vector_cands =
                         build_vector_candidates(&qvec, embedded, query.top_k.max(5) * 4);
+                    if query.mode == RecallMode::Relevant {
+                        vector_cands
+                            .retain(|c| c.vector_sim.unwrap_or(0.0) >= MIN_RELEVANT_VECTOR_SIM);
+                    }
                     apply_vector_sims(merged, vector_cands)
                 }
                 None => merged,
@@ -462,6 +472,13 @@ impl Memory {
             let texts: Vec<String> = batch.iter().map(|r| r.text.clone()).collect();
             let importance = batch.iter().map(|r| r.importance).fold(0.0_f64, f64::max);
             let summary_text = summarizer.summarize(&texts)?;
+            // 2026-10-06：空白摘要若照寫，來源會被標記並在下一輪刪除，內容就此遺失。
+            if summary_text.trim().is_empty() {
+                return Err(MemoryError::Other(format!(
+                    "summarizer returned a blank summary for {} source memories in {scope}",
+                    texts.len()
+                )));
+            }
             let (summary_id, _) = self
                 .store
                 .insert_memory(
@@ -582,6 +599,9 @@ impl Memory {
 /// Upper bound on embedded rows scored per vector recall. Beyond this the oldest
 /// rows are skipped; sized well above a typical personal store so it rarely bites.
 const MAX_VECTOR_SCAN: i64 = 10_000;
+/// 2026-10-06：`RecallMode::Relevant` 的向量相似度門檻（cosine）。沒有啟用
+/// embedding 的部署不受影響；值未經真實語料校準，見 issue 9 的 TBD-2。
+const MIN_RELEVANT_VECTOR_SIM: f64 = 0.4;
 
 /// Run a synchronous, CPU-bound embedding off the async executor so it never
 /// blocks a tokio worker (ONNX inference can take tens of ms).
@@ -748,6 +768,38 @@ mod tests {
         assert!(recent
             .iter()
             .any(|c| c.kind == MemoryKind::Summary && c.text == "SUMMARY(2)"));
+    }
+
+    struct BlankSummarizer;
+
+    impl consolidate::Summarizer for BlankSummarizer {
+        fn summarize(&self, _texts: &[String]) -> Result<String> {
+            Ok(" \n".to_string())
+        }
+    }
+
+    // SCN-007: a blank summary must not replace (and later delete) its sources.
+    #[tokio::test]
+    async fn consolidate_keeps_sources_when_summary_is_blank() {
+        let mem = open_mem().await;
+        remember_event(&mem, "project:X", "did A").await;
+        remember_event(&mem, "project:X", "did B").await;
+        let policy = ConsolidatePolicy { batch_size: 20 };
+
+        let result = mem
+            .consolidate("project:X", &policy, &BlankSummarizer)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "blank summary must be reported as a failure"
+        );
+        let after = mem.plan_consolidation("project:X", &policy).await.unwrap();
+        assert_eq!(after.batches.len(), 1);
+        assert_eq!(after.batches[0].len(), 2);
+        let recent = mem.store.recent_candidates(10, None).await.unwrap();
+        assert!(recent.iter().all(|c| c.kind != MemoryKind::Summary));
+        assert_eq!(mem.prune_consolidated(Some("project:X")).await.unwrap(), 0);
     }
 
     #[tokio::test]

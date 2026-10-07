@@ -7,6 +7,7 @@ use wukong_memory::{ConsolidatePolicy, Memory, PrunePolicy};
 pub struct AutoMaintenanceReport {
     pub scopes_checked: usize,
     pub scopes_consolidated: usize,
+    pub scopes_failed: usize,
     pub summaries_created: usize,
     pub memories_pruned: u64,
 }
@@ -24,27 +25,53 @@ pub async fn memory_auto_maintenance<B: AiBackend + Sync>(
     let policy = ConsolidatePolicy::default();
     for scope in memory.scopes().await? {
         report.scopes_checked += 1;
-        let already_folded = memory.prune_consolidated(Some(&scope)).await?;
-        report.memories_pruned += already_folded;
-        let snapshot = memory.snapshot(Some(&scope)).await?;
-        if snapshot.consolidation_candidates < candidate_threshold {
-            continue;
+        // 2026-10-06：一個 scope 失敗（例如摘要模型無法使用）只跳過該 scope，
+        // 否則排在它後面的 scope 每一輪都會被擋住。
+        if let Err(error) = maintain_scope(
+            memory,
+            backend,
+            &scope,
+            candidate_threshold,
+            &policy,
+            &mut report,
+        )
+        .await
+        {
+            report.scopes_failed += 1;
+            eprintln!("memory_consolidate_failed scope={scope} error={error}");
         }
-
-        let summarizer = OpencodeSummarizer::new(backend);
-        let ids = memory.consolidate(&scope, &policy, &summarizer).await?;
-        let deleted = memory.prune_consolidated(Some(&scope)).await?;
-        report.scopes_consolidated += 1;
-        report.summaries_created += ids.len();
-        report.memories_pruned += deleted;
-        eprintln!(
-            "memory_consolidated scope={} summaries={} pruned={}",
-            scope,
-            ids.len(),
-            deleted
-        );
     }
     Ok(report)
+}
+
+async fn maintain_scope<B: AiBackend + Sync>(
+    memory: &Memory,
+    backend: &B,
+    scope: &str,
+    candidate_threshold: i64,
+    policy: &ConsolidatePolicy,
+    report: &mut AutoMaintenanceReport,
+) -> Result<(), WukongError> {
+    let already_folded = memory.prune_consolidated(Some(scope)).await?;
+    report.memories_pruned += already_folded;
+    let snapshot = memory.snapshot(Some(scope)).await?;
+    if snapshot.consolidation_candidates < candidate_threshold {
+        return Ok(());
+    }
+
+    let summarizer = OpencodeSummarizer::new(backend);
+    let ids = memory.consolidate(scope, policy, &summarizer).await?;
+    let deleted = memory.prune_consolidated(Some(scope)).await?;
+    report.scopes_consolidated += 1;
+    report.summaries_created += ids.len();
+    report.memories_pruned += deleted;
+    eprintln!(
+        "memory_consolidated scope={} summaries={} pruned={}",
+        scope,
+        ids.len(),
+        deleted
+    );
+    Ok(())
 }
 
 pub async fn memory_snapshot(memory: &Memory, scope: Option<&str>) -> Result<String, WukongError> {
@@ -215,5 +242,65 @@ mod tests {
             .records
             .iter()
             .any(|record| record.text == "keep decision"));
+    }
+
+    /// Fails the summary call for any batch containing `fail-me`.
+    struct FailingBackend;
+
+    impl AiBackend for FailingBackend {
+        async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+            if req.prompt.contains("fail-me") {
+                return Err(GatewayError::AgentFailed {
+                    code: Some(1),
+                    stderr: "model unavailable".to_string(),
+                });
+            }
+            Ok(AgentResponse {
+                text: "summary".to_string(),
+                session_id: Some("ses_helper".to_string()),
+            })
+        }
+    }
+
+    // SCN-006: project:A sorts first; its failure must not stop project:B.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn auto_maintenance_isolates_a_failing_scope() {
+        let mem = open_memory().await;
+        for (scope, texts) in [
+            ("project:A", ["fail-me 1", "fail-me 2"]),
+            ("project:B", ["b1", "b2"]),
+        ] {
+            for text in texts {
+                mem.remember(RememberInput {
+                    scope: scope.to_string(),
+                    session_id: Some("ses_1".to_string()),
+                    items: vec![MemoryItem {
+                        kind: MemoryKind::Event,
+                        text: text.to_string(),
+                        importance: None,
+                        dedupe_key: None,
+                    }],
+                })
+                .await
+                .unwrap();
+            }
+        }
+
+        let report = memory_auto_maintenance(&mem, &FailingBackend, 2)
+            .await
+            .expect("one failing scope must not abort the whole pass");
+
+        assert_eq!(report.scopes_checked, 2);
+        assert_eq!(report.scopes_failed, 1);
+        assert_eq!(report.scopes_consolidated, 1);
+        assert_eq!(report.summaries_created, 1);
+        assert_eq!(report.memories_pruned, 2);
+        let a = mem.records(Some("project:A"), None, 20).await.unwrap();
+        let mut a_texts: Vec<&str> = a.records.iter().map(|r| r.text.as_str()).collect();
+        a_texts.sort();
+        assert_eq!(a_texts, ["fail-me 1", "fail-me 2"]);
+        let b = mem.records(Some("project:B"), None, 20).await.unwrap();
+        let b_texts: Vec<&str> = b.records.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(b_texts, ["summary"]);
     }
 }

@@ -513,3 +513,57 @@ async fn records_report_embedding_coverage() {
     assert_eq!(page.records.len(), 1);
     assert!(page.records[0].has_embedding);
 }
+
+// Issue 9 SCN-002 (embedding enabled): in Relevant mode a vector hit must clear
+// the similarity floor; recency alone never qualifies.
+#[tokio::test]
+async fn relevant_mode_requires_vector_similarity_floor() {
+    use std::sync::Arc;
+    use wukong_memory::{Embedder, Result};
+
+    struct StubEmbedder;
+    impl Embedder for StubEmbedder {
+        fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            // Cosine to the query: near = 0.9, far = 0.1 (unit vectors).
+            Ok(match text {
+                t if t.contains("near") => vec![0.9, 0.435_889_9],
+                t if t.contains("far") => vec![0.1, 0.994_987_4],
+                _ => vec![1.0, 0.0],
+            })
+        }
+        fn dim(&self) -> usize {
+            2
+        }
+        fn model_id(&self) -> &str {
+            "stub"
+        }
+    }
+
+    let file = NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", file.path().display());
+    std::mem::forget(file);
+    let mem = Memory::open(&url)
+        .await
+        .unwrap()
+        .with_embedder(Arc::new(StubEmbedder));
+    mem.remember(RememberInput {
+        scope: "global".into(),
+        session_id: None,
+        items: vec![item("near memory"), item("far memory")],
+    })
+    .await
+    .unwrap();
+
+    let hits = mem
+        .recall(RecallQuery {
+            query: "probe".into(),
+            top_k: 5,
+            scope: Some("global".into()),
+            mode: RecallMode::Relevant,
+        })
+        .await
+        .unwrap();
+
+    let texts: Vec<&str> = hits.data.iter().map(|h| h.text.as_str()).collect();
+    assert_eq!(texts, ["near memory"]);
+}

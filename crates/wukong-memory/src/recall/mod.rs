@@ -8,6 +8,10 @@ const STOPWORDS: &[&str] = &[
     "the", "a", "an", "is", "of", "to", "and", "it", "in", "on", "for",
 ];
 
+/// 2026-10-06：`run_turn` 寫入的每筆回合記憶都以這兩個標籤開頭，任何提到
+/// user 的輸入都會命中它們，對相關度沒有意義。
+const TURN_ROLE_LABELS: &[&str] = &["user", "assistant"];
+
 const LOW_INFORMATION_CJK: &[&str] = &["好", "嗯", "可以", "謝謝", "谢谢", "了解", "收到"];
 
 fn is_cjk_char(ch: char) -> bool {
@@ -129,7 +133,21 @@ pub fn tokenize(query: &str) -> Vec<String> {
 /// indexed text. Skipping it here would leave Chinese queries as one token
 /// again, matching nothing.
 pub fn fts_match_string(query: &str) -> Option<String> {
-    let tokens = tokenize(&cjk_expand(query));
+    or_match(&tokenize(&cjk_expand(query)))
+}
+
+/// `fts_match_string` for `RecallMode::Relevant`: stopwords and turn role
+/// labels are dropped, since sharing them says nothing about relevance.
+/// None when nothing discriminating is left.
+pub fn relevant_match_string(query: &str) -> Option<String> {
+    let tokens: Vec<String> = tokenize(&cjk_expand(query))
+        .into_iter()
+        .filter(|t| !STOPWORDS.contains(&t.as_str()) && !TURN_ROLE_LABELS.contains(&t.as_str()))
+        .collect();
+    or_match(&tokens)
+}
+
+fn or_match(tokens: &[String]) -> Option<String> {
     if tokens.is_empty() {
         return None;
     }
@@ -276,6 +294,7 @@ pub fn sources_for_mode(mode: RecallMode) -> (bool, bool, bool) {
         RecallMode::Keyword => (true, false, false),
         RecallMode::Tree => (false, true, false),
         RecallMode::Hybrid => (true, true, true),
+        RecallMode::Relevant => (true, false, true),
     }
 }
 
@@ -514,5 +533,19 @@ mod tests {
         assert_eq!(merged.len(), 2);
         let one = merged.iter().find(|c| c.id == 1).unwrap();
         assert!(one.bm25.is_some() && one.vector_sim == Some(0.8)); // both signals
+    }
+
+    #[test]
+    fn relevant_match_string_drops_stopwords_and_turn_labels() {
+        assert_eq!(
+            relevant_match_string("Deploy the server for this User").as_deref(),
+            Some("\"deploy\" OR \"server\" OR \"this\"")
+        );
+        assert_eq!(relevant_match_string("the user and the assistant"), None);
+        // Hybrid keeps its original expression.
+        assert_eq!(
+            fts_match_string("the user").as_deref(),
+            Some("\"the\" OR \"user\"")
+        );
     }
 }

@@ -4,8 +4,8 @@
 
 ## 記憶模型
 
-- **儲存**：SQLite + FTS5（BM25 關鍵字檢索），啟用 WAL。 FTS5 的關鍵字匹配會將輸入的 token 以 `OR` 連接查詢；系統產生的 turn 記憶會帶 `dedupe_key`，重試時以同一列 id 回傳，避免重複寫入。
-- **召回模式**：`keyword`（FTS5）、`tree`（依 scope 階層取近期）、`hybrid`（合併重排，預設）。
+- **儲存**：SQLite + FTS5（BM25 關鍵字檢索），啟用 WAL。 FTS5 的關鍵字匹配會將輸入的 token 以 `OR` 連接查詢；系統產生的 turn 記憶會帶 `dedupe_key`；2026-10-06 起每個回合各自一個識別碼，同一 session 的每個回合都會寫入（過去綁 session，只有第一回合被記住）。
+- **召回模式**：`keyword`（FTS5）、`tree`（依 scope 階層取近期）、`hybrid`（合併重排，預設）、`relevant`（2026-10-06 新增：只取關鍵字與向量命中，不含近期來源；查詢排除停用詞與 `user`／`assistant` 標籤，向量命中須 cosine ≥ 0.4）。回合（`run_turn`）的最後一棒用 `relevant`，因為近期對話已由 session 接續；輔助棒另帶上一回合；每筆注入上限 800 字。memoryd 的 `/v1/recall` 可指定 `"mode":"relevant"`，Web 記憶查詢只接受 `hybrid`。
 - **排序**：採用混合正規化計分：
   - **Min-Max 正規化**：因 BM25（越小越好）與 Cosine 語意相似度（越大越好）量綱不同，排序前會先對所有候選人進行 Min-Max 正規化至 $[0, 1]$ 區間。
   - **權重公式**：
