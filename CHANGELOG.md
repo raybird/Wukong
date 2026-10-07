@@ -11,6 +11,8 @@
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-10-07
+
 ### Changed
 
 - **Docker 安裝與升級會自動遷移 `.env`。** 舊範本原封未動的
@@ -955,7 +957,8 @@ server 模式補回那個 CLI 免費獲得的週期性重置，同時保留暖�
   不安全綁定（`0.0.0.0` + 空 token）啟動即拒絕（fail-closed，可用
   `WUKONG_WEB_ALLOW_INSECURE=1` 覆寫）；Telegram callback 加白名單檢查。
 
-[Unreleased]: https://github.com/raybird/Wukong/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/raybird/Wukong/compare/v0.22.1...HEAD
+[0.22.1]: https://github.com/raybird/Wukong/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/raybird/Wukong/compare/v0.21.11...v0.22.0
 [0.21.11]: https://github.com/raybird/Wukong/compare/v0.21.10...v0.21.11
 [0.21.10]: https://github.com/raybird/Wukong/compare/v0.21.9...v0.21.10
