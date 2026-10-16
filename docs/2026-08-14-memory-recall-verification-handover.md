@@ -105,6 +105,9 @@ Wukong 多一層問題：到 `WUKONG_MEMORY_CONSOLIDATE_THRESHOLD` 之後這些�
 選項大致是「排程 turn 預設用獨立 scope」（召回的 ancestry 過濾就會自動把它排除在使用者
 scope 之外）或「維持現狀但讓排程摘要可 prune」。這是產品判斷，尚未拍板。
 
+> 追補（2026-10-16）：本節的決策改由 [#14](https://github.com/raybird/Wukong/issues/14)
+> 追蹤，該 issue 另附 2026-10-16 的正式部署記憶庫現況。
+
 ---
 
 ## 3. 未來若要加記憶健康檢查：連線不可 pool
