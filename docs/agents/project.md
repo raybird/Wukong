@@ -15,7 +15,8 @@
 - **分支與 PR**：issue 走 `issue-<四位編號>-<英文描述>`（例：`issue-0009-memory-turn-key`），PR base 為 `main`，squash 合併，標題帶 `(#PR)`。文件、設定、規則檔類提交直接放 `main`。
 - **遠端**：GitHub `raybird/Wukong`，SSH remote 加 `gh` CLI 認證，不需要 token。PR 合併後 GitHub 會自動刪除 head 分支；清理前先 `git fetch --prune origin` 確認遠端實況。
 - **push 與發版**：push 等使用者開口；發版只在使用者明說要發布時用 `scripts/release.sh vX.Y.Z`（流程見 `wukong-release` skill），版本號來自 git tag。
-- **平台 issue 查詢**（唯讀）：`gh issue list --state open --json number,title,createdAt`。issue 文件放 `docs/issues/issue-<四位補零的 GitHub 編號>/`。
+- **平台 issue 查詢**（唯讀）：`gh issue list --state all --limit 100 --json number,title,state,closedAt,createdAt`；懸置掃描要靠 `state` 做平台／README 雙向比對，所以一律帶已關閉的 issue，不用 `--state open`。issue 文件放 `docs/issues/issue-<四位補零的 GitHub 編號>/`，掃描起點為全部展開。
+- **合併判定**（唯讀）：`gh pr list --state all --limit 20 --json number,state,mergedAt,title` 的 `mergedAt`，對照 README 狀態欄記載的 PR 編號與日期；取得到 `mergedAt` 即為確定，不必退回 Git merge commit 推測。
 
 ## 常青文件更新責任
 
