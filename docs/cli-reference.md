@@ -96,7 +96,7 @@ wukong-schedulerd
 | 子命令 | 說明 |
 | :--- | :--- |
 | `schedule list` | 列出所有排程 job |
-| `schedule add-turn --name N --cron C --scope S --prompt P` | 新增定時 Wukong turn，執行時沿用既有 planner 自動選 role/skill |
+| `schedule add-turn --name N --cron C --scope S --prompt P` | 新增定時 Wukong turn，執行時沿用既有 planner 自動選 role/skill；`--scope` 是擁有者（見下方排程語意） |
 | `schedule add-maintenance --name N --cron C --task snapshot\|consolidate\|prune [--scope S]` | 新增定時記憶維護 job |
 | `schedule rm --id ID` | 刪除排程 job |
 | `schedule enable --id ID` / `schedule disable --id ID` | 啟用或停用排程 job |
@@ -108,6 +108,7 @@ wukong-schedulerd
 - Cron 使用 5 欄格式：`minute hour day-of-month month day-of-week`。
 - V1 以 UTC 評估 cron，避免容器與 host timezone 不一致。
 - 多個 daemon 同時執行時會用 DB lease claim job，避免同一輪 due job 被重複執行。
+- Turn job 的 `--scope` 是擁有者：Telegram 回送與聊天紀錄依它決定。回合本身的記憶、召回與 opencode session 在 `agent:schedule-<job id>`，同一個排程的多次觸發共用、不同排程互不相通，也不讀寫擁有者的記憶。要看排程回報過什麼，用 `schedule runs --id ID`。
 - Scheduled turn 需要底層 OpenCode provider/auth 已設定；Docker 模式會使用共用的 `opencode-config` volume。
 
 Docker 模式下 schedulerd 預設會隨 `docker compose up -d` 啟動，讓排程功能安裝後即可運作。若你不想執行排程 daemon，可手動停止該 service：`docker compose stop wukong-schedulerd`。

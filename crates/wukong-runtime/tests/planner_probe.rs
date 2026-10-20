@@ -159,3 +159,77 @@ async fn real_followup_turns() {
         }
     }
 }
+
+// issue-0014：排程改用自己的 scope 後，planner 看到的上一回合是同一個排程上一次的
+// 同一題與答案。比較第一次觸發（WUKONG_PLANNER_PROBE_BASELINE=1，沒有上一回合）與
+// 第二次觸發，看 planner 會不會把重複的排程題當成已回答的追問而縮小調查。
+// 附加文字取自 wukong-scheduler executor.rs 的 SCHEDULED_TURN_AUTONOMY_HINT。
+const SCHEDULED_HINT: &str = "\n\n[無人值守排程]\n這是由 scheduler 觸發的無人值守任務。不得呼叫 question 或要求使用者確認；如果流程、技能或工具規則需要使用者選擇，請直接自動採用推薦選項，並繼續完成任務。";
+
+const SCHEDULED_CASES: [(&str, &str, &str); 2] = [
+    (
+        "S-progress",
+        "整理今天專案的進度：列出新完成的工作、進行中的項目與阻塞。",
+        "今天的進度：完成登入頁改版與 API 文件更新；進行中為報表匯出；阻塞是測試環境資料庫連線逾時。",
+    ),
+    (
+        "S-health",
+        "檢查 https://status.example.com 服務是否正常，回報 HTTP 狀態碼與回應時間。",
+        "服務正常：HTTP 200，回應時間 320 ms。",
+    ),
+];
+
+#[tokio::test]
+#[ignore = "calls a real model through OpenCode"]
+async fn scheduled_repeat_plan_distribution() {
+    let model = probe_model();
+    let samples: usize = std::env::var("WUKONG_PLANNER_PROBE_SAMPLES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+    let workspace = tempfile::tempdir().unwrap();
+    let backend = AgentCliBackend {
+        command: vec![
+            "opencode".into(),
+            "run".into(),
+            "--model".into(),
+            model.clone(),
+        ],
+        workspace: Some(workspace.path().to_path_buf()),
+    };
+    let baseline = std::env::var("WUKONG_PLANNER_PROBE_BASELINE").is_ok_and(|v| v == "1");
+    println!("model={model} samples={samples} baseline={baseline}");
+    for (case, prompt, answer) in SCHEDULED_CASES {
+        let input = format!("{prompt}{SCHEDULED_HINT}");
+        let previous = format!("User: {input}\nAssistant: {answer}");
+        let previous_turn = (!baseline).then_some(previous.as_str());
+        for sample in 1..=samples {
+            let started = Instant::now();
+            let steps = plan_skill_chain_with_preferences(
+                &backend,
+                &input,
+                &route_options(),
+                None,
+                previous_turn,
+            )
+            .await
+            .unwrap();
+            let plan = steps
+                .iter()
+                .map(|s| {
+                    format!(
+                        "{}|{}",
+                        s.role.name(),
+                        s.skill_name.as_deref().unwrap_or("none")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            println!(
+                "case={case} sample={sample} steps={} plan={plan} secs={:.1}",
+                steps.len(),
+                started.elapsed().as_secs_f64()
+            );
+        }
+    }
+}

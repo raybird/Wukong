@@ -34,7 +34,13 @@ async fn scheduler_executor_completes_cli_turn_and_resumes() {
             .unwrap();
         assert!(out.success, "{}", out.message);
         assert!(out.message.contains("CLI_INTEGRATION_OK"));
-        let captured = memory.agent_session(&cfg.scope).await.unwrap().unwrap();
+        // issue-0014：排程回合的 session 在排程自己的 scope，擁有者的 scope 不動。
+        let captured = memory
+            .agent_session("agent:schedule-issue7")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(memory.agent_session(&cfg.scope).await.unwrap(), None);
         if let Some(id) = &session {
             assert_eq!(&captured, id);
         }
