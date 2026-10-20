@@ -25,7 +25,8 @@ job 的 `scope` 改稱「擁有者 scope」，只用來決定回送對象與聊�
 ## 涉及檔案
 - `crates/wukong-scheduler/src/executor.rs` - Turn job 執行時改用衍生 scope。
 - `crates/wukong-runtime/src/persona.rs` - 排程能力提示補上查詢執行結果的指令，並說明 `--scope` 是擁有者。
-- `crates/wukong-schedulerd/src/notify.rs` - 預期不修改；以測試確認回送仍依擁有者 scope。
+- `crates/wukong-scheduler/tests/cli_backend.rs` - 整合測試改讀排程自己的 scope 的 session。
+- 2026-10-20 實作後確認：`crates/wukong-schedulerd/src/notify.rs` 不需修改，既有測試已鎖住回送依擁有者 scope。
 
 ## 文件清單
 - [implementation-plan.md](./implementation-plan.md)
@@ -113,6 +114,6 @@ Feature: 排程回合使用獨立的記憶 scope，排程產出不再寫入使�
 **建立日期**: 2026-10-20  
 **分級**: Medium — 跨 wukong-scheduler 與 wukong-runtime 兩個 crate，沿既有相依方向，沒有 schema 變更  
 **風險**: Medium  
-**狀態**: 待實作
+**狀態**: 實作中
 
 GitHub：https://github.com/raybird/Wukong/issues/14
