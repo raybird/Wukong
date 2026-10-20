@@ -3,8 +3,8 @@ use thiserror::Error;
 use wukong_gateway::backend::{AgentAttachment, AgentRequest, AiBackend};
 use wukong_gateway::config::GatewayConfig;
 use wukong_memory::{
-    Memory, MemoryItem, MemoryKind, RecallExplanation, RecallHit, RecallMode, RecallQuery,
-    RememberInput,
+    Memory, MemoryItem, MemoryKind, MemoryRecord, RecallExplanation, RecallHit, RecallMode,
+    RecallQuery, RememberInput,
 };
 use wukong_orchestrator::{PlannerPreferenceHint, Role};
 use wukong_skills::{find as find_skill, route_options};
@@ -179,7 +179,10 @@ pub async fn run_turn_traced_with_attachments(
         })
         .await?;
     // 輔助棒沒有 session，額外帶上一回合（最新兩筆回合記憶），讓「剛剛那個」之類的指代看得懂。
-    let helper_hits = with_previous_turn(memory, &cfg.scope, &recall.data).await?;
+    let previous_turn = previous_turn_records(memory, &cfg.scope).await?;
+    let helper_hits = with_previous_turn(&previous_turn, &recall.data);
+    // 2026-10-20（issue-0011）：planner 也帶上一回合，才分得出追問與新任務。
+    let planner_context = planner_previous_turn(&previous_turn);
 
     let preference_hint = planner_preference_hint(cfg);
     let steps = wukong_orchestrator::plan_skill_chain_with_preferences(
@@ -187,6 +190,7 @@ pub async fn run_turn_traced_with_attachments(
         input,
         &route_options(),
         preference_hint.as_ref(),
+        planner_context.as_deref(),
     )
     .await?;
 
@@ -458,28 +462,45 @@ fn planner_preference_hint(cfg: &GatewayConfig) -> Option<PlannerPreferenceHint>
     }
 }
 
-/// `hits` plus the scope's previous turn (its two newest turn memories), oldest
-/// first, skipping any already present. Called before this turn is remembered.
-async fn with_previous_turn(
+/// The scope's previous turn (its two newest turn memories), oldest first.
+/// Called before this turn is remembered.
+async fn previous_turn_records(
     memory: &Memory,
     scope: &str,
-    hits: &[RecallHit],
-) -> Result<Vec<RecallHit>, WukongError> {
-    let mut out = hits.to_vec();
+) -> Result<Vec<MemoryRecord>, WukongError> {
     let mut previous = memory
         .records(Some(scope), Some(MemoryKind::Event), 2)
         .await?
         .records;
     previous.reverse();
+    Ok(previous)
+}
+
+/// 每筆截到 800 字元，與注入記憶的上限一致；沒有上一回合時回 `None`。
+fn planner_previous_turn(previous: &[MemoryRecord]) -> Option<String> {
+    const MAX_CHARS: usize = 800;
+    let lines: Vec<String> = previous
+        .iter()
+        .map(|record| match record.text.char_indices().nth(MAX_CHARS) {
+            Some((cut, _)) => format!("{}…（已截斷）", &record.text[..cut]),
+            None => record.text.clone(),
+        })
+        .collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// `hits` plus the previous turn, skipping any already present.
+fn with_previous_turn(previous: &[MemoryRecord], hits: &[RecallHit]) -> Vec<RecallHit> {
+    let mut out = hits.to_vec();
     for record in previous {
         if out.iter().any(|hit| hit.id == record.id) {
             continue;
         }
         out.push(RecallHit {
             id: record.id,
-            scope: record.scope,
+            scope: record.scope.clone(),
             kind: record.kind,
-            text: record.text,
+            text: record.text.clone(),
             score: 0.0,
             explanation: RecallExplanation {
                 lexical: 0.0,
@@ -494,7 +515,7 @@ async fn with_previous_turn(
             },
         });
     }
-    Ok(out)
+    out
 }
 
 /// Send a raw `/compact` message to a specific opencode session (no planner,
@@ -1612,6 +1633,56 @@ mod tests {
         let final_prompt = &prompts[3];
         assert!(!final_prompt.contains("晚餐吃什麼"));
         assert!(!final_prompt.contains("吃拉麵"));
+    }
+
+    // issue-0011 SCN-001: the planner sees the previous turn (each memory cut
+    // to 800 chars, like injected memories) so a follow-up reads as one.
+    #[tokio::test]
+    async fn planner_receives_the_previous_turn_truncated() {
+        let mem = open_memory().await;
+        remember_turn(&mem, "project:T", "舊問題", "舊回答").await;
+        let long_answer = format!("沒有。{}", "細".repeat(900));
+        remember_turn(&mem, "project:T", "run #869 成功了嗎", &long_answer).await;
+        let backend = MockBackend::new(&["fixer", "done"]);
+
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "所以沒辦法跑成功嗎",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        let prompts = backend.prompts.lock().unwrap();
+        let planner = &prompts[0];
+        assert!(planner.contains("[Previous Turn]\nUser: run #869 成功了嗎\n"));
+        // "Assistant: 沒有。" is 14 chars, leaving 786 of the 900 細.
+        assert!(planner.contains(&format!("Assistant: 沒有。{}…（已截斷）", "細".repeat(786))));
+        assert!(!planner.contains(&"細".repeat(787)));
+        assert!(!planner.contains("舊問題"));
+        assert!(!planner.contains("舊回答"));
+    }
+
+    #[tokio::test]
+    async fn planner_without_previous_turn_gets_no_context_block() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["fixer", "done"]);
+
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "所以沒辦法跑成功嗎",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert!(!backend.prompts.lock().unwrap()[0].contains("[Previous Turn]"));
     }
 
     // SCN-001: the session is reused across turns, so it cannot be the dedupe

@@ -153,13 +153,14 @@ pub fn parse_skill_chain(response: &str) -> Vec<PlannedStep> {
 }
 
 pub fn skill_planning_prompt(task: &str, skills: &[SkillRouteOption]) -> String {
-    skill_planning_prompt_with_preferences(task, skills, None)
+    skill_planning_prompt_with_preferences(task, skills, None, None)
 }
 
 pub fn skill_planning_prompt_with_preferences(
     task: &str,
     skills: &[SkillRouteOption],
     preferences: Option<&PlannerPreferenceHint>,
+    previous_turn: Option<&str>,
 ) -> String {
     let mut s = String::from(
         "You are a planner. Decide which roles should collaborate on the task, \
@@ -205,6 +206,17 @@ pub fn skill_planning_prompt_with_preferences(
             );
         }
     }
+    if let Some(previous_turn) = previous_turn {
+        s.push_str("\n[Previous Turn]\n");
+        s.push_str(previous_turn);
+        s.push_str(
+            "\nThe task may be a follow-up to the previous turn. If the previous turn already answers it \
+             and it asks for no new check or action, plan a single step with skill none. \
+             If it asks to re-check the current state or needs information the previous turn does not have, \
+             plan only the checks it needs, with skill none unless the user asks for a cause or a fix. \
+             If it requests an operation, plan the steps to perform and verify it.\n",
+        );
+    }
     s.push_str(
         "\nReply with ONLY one step per line in this exact format:\n\
          <role>|<skill-or-none>\n\
@@ -220,7 +232,7 @@ pub async fn plan_skill_chain(
     task: &str,
     skills: &[SkillRouteOption],
 ) -> Result<Vec<PlannedStep>, OrchestratorError> {
-    plan_skill_chain_with_preferences(backend, task, skills, None).await
+    plan_skill_chain_with_preferences(backend, task, skills, None, None).await
 }
 
 pub async fn plan_skill_chain_with_preferences(
@@ -228,11 +240,17 @@ pub async fn plan_skill_chain_with_preferences(
     task: &str,
     skills: &[SkillRouteOption],
     preferences: Option<&PlannerPreferenceHint>,
+    previous_turn: Option<&str>,
 ) -> Result<Vec<PlannedStep>, OrchestratorError> {
     let tool_overrides = std::collections::BTreeMap::from([("question".to_string(), false)]);
     let resp = backend
         .run_ephemeral(AgentRequest {
-            prompt: skill_planning_prompt_with_preferences(task, skills, preferences),
+            prompt: skill_planning_prompt_with_preferences(
+                task,
+                skills,
+                preferences,
+                previous_turn,
+            ),
             session_id: None,
             thinking: false,
             model: None,
@@ -423,7 +441,7 @@ mod tests {
 
         assert_eq!(
             skill_planning_prompt("fix it", &skills),
-            skill_planning_prompt_with_preferences("fix it", &skills, None)
+            skill_planning_prompt_with_preferences("fix it", &skills, None, None)
         );
     }
 
@@ -440,7 +458,7 @@ mod tests {
             preferred_skills: vec!["systematic-debugging".to_string()],
         };
 
-        let prompt = skill_planning_prompt_with_preferences("fix it", &skills, Some(&hint));
+        let prompt = skill_planning_prompt_with_preferences("fix it", &skills, Some(&hint), None);
 
         assert!(prompt.contains("[User Preferences]"));
         assert!(prompt.contains("Preferred roles: fixer, oracle"));
@@ -463,9 +481,42 @@ mod tests {
             preferred_skills: vec![],
         };
 
-        let prompt = skill_planning_prompt_with_preferences("fix it", &skills, Some(&hint));
+        let prompt = skill_planning_prompt_with_preferences("fix it", &skills, Some(&hint), None);
 
         assert!(!prompt.contains("[User Preferences]"));
+    }
+
+    // issue-0011 SCN-001～003: a follow-up is only recognizable with the
+    // previous turn in view; the rules keep re-checks and operations planned.
+    #[test]
+    fn skill_planning_prompt_with_previous_turn_adds_context_and_followup_rules() {
+        let previous = "User: run #869 成功了嗎\nAssistant: 沒有，失敗於 session lease unavailable";
+
+        let prompt =
+            skill_planning_prompt_with_preferences("所以沒辦法跑成功嗎", &[], None, Some(previous));
+
+        assert!(prompt.contains(
+            "[Previous Turn]\nUser: run #869 成功了嗎\nAssistant: 沒有，失敗於 session lease unavailable\n"
+        ));
+        assert!(prompt.contains("plan a single step with skill none"));
+        assert!(prompt.contains("asks to re-check the current state"));
+        assert!(prompt.contains(
+            "plan only the checks it needs, with skill none unless the user asks for a cause or a fix"
+        ));
+        assert!(prompt.contains("plan the steps to perform and verify it"));
+        assert!(prompt.find("[Previous Turn]") < prompt.find("[Task]"));
+        assert!(prompt.ends_with("[Task]\n所以沒辦法跑成功嗎"));
+    }
+
+    #[test]
+    fn skill_planning_prompt_without_previous_turn_has_no_followup_block() {
+        let prompt = skill_planning_prompt_with_preferences("fix it", &[], None, None);
+
+        assert!(!prompt.contains("[Previous Turn]"));
+        assert!(!prompt.contains("follow-up"));
+        assert!(prompt.ends_with(
+            "Use a single step for simple tasks; at most three steps. No explanation.\n\n[Task]\nfix it"
+        ));
     }
 
     #[tokio::test]
@@ -487,7 +538,7 @@ mod tests {
         }
 
         let backend = Backend(std::sync::Mutex::new(None));
-        let _ = plan_skill_chain_with_preferences(&backend, "pull updates", &[], None)
+        let _ = plan_skill_chain_with_preferences(&backend, "pull updates", &[], None, None)
             .await
             .unwrap();
 
