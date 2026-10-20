@@ -101,6 +101,25 @@ pub fn memoria_capability_hint() -> &'static str {
      規則：查詢與寫入都由你自行判斷時機，不需要每回合都做，也不要為了做而做。"
 }
 
+/// 2026-10-20（issue-0012）：告訴 agent 還有哪些回合正在同一個工作目錄執行。
+/// `scopes` 是其他持有 session lease 的 scope；排程回合以 `agent:schedule-<id>` 辨認。
+pub fn concurrent_turns_notice(scopes: &[String], bin: &str) -> String {
+    let mut s = String::from(
+        "[其他回合正在執行]\n下列回合與你共用同一個工作目錄，此刻可能正在修改檔案：\n",
+    );
+    for scope in scopes {
+        match scope.strip_prefix("agent:schedule-") {
+            Some(id) => s.push_str(&format!("- 排程 {id}（{scope}）\n")),
+            None => s.push_str(&format!("- 對話 {scope}\n")),
+        }
+    }
+    s.push_str(&format!(
+        "不要修改或提交不是本回合造成的變更；遇到預期外的檔案變動，先說明再處理。\
+         想知道某個排程在做什麼，可以執行 `{bin} schedule list`。"
+    ));
+    s
+}
+
 /// Resolve the `wukong` binary name used inside the scheduling capability hint.
 /// Defaults to `wukong` (assumes it is on PATH in the agent runtime); override
 /// with `WUKONG_BIN` (e.g. an absolute path) when it is not.

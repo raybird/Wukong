@@ -123,6 +123,11 @@ impl Memory {
         self.store.referenced_session_ids().await
     }
 
+    /// Scopes whose session lease is still held, i.e. turns currently executing.
+    pub async fn active_session_leases(&self) -> Result<Vec<String>> {
+        self.store.active_session_leases(now_unix()).await
+    }
+
     /// Set/overwrite the opencode session id for a scope.
     pub async fn set_agent_session(&self, scope: &str, session_id: &str) -> Result<()> {
         self.store
