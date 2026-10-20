@@ -511,6 +511,18 @@ impl Store {
         Ok(rows.into_iter().map(|r| r.get("session_id")).collect())
     }
 
+    /// Scopes whose session lease is still held at `now`, i.e. turns that are
+    /// currently executing (issue-0012).
+    pub async fn active_session_leases(&self, now: i64) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT scope FROM agent_session_state WHERE lease_until > ?1 ORDER BY scope",
+        )
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.get("scope")).collect())
+    }
+
     /// Upsert the opencode session id for a scope.
     pub async fn set_agent_session(&self, scope: &str, session_id: &str, now: i64) -> Result<()> {
         let mut tx = self.pool.begin().await?;
@@ -1667,6 +1679,34 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+    }
+
+    // issue-0012 SCN-003：只列出仍有效的 lease。
+    #[tokio::test]
+    async fn active_session_leases_lists_only_unexpired_leases() {
+        let store = test_store().await;
+        store
+            .acquire_agent_session_lease("user:tg-42", "chat", 100, 10)
+            .await
+            .unwrap();
+        store
+            .acquire_agent_session_lease("agent:schedule-old", "sched", 90, 5)
+            .await
+            .unwrap();
+        store
+            .acquire_agent_session_lease("project:Done", "cli", 100, 10)
+            .await
+            .unwrap();
+        store
+            .release_agent_session_lease("project:Done", "cli", 101)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.active_session_leases(105).await.unwrap(),
+            vec!["user:tg-42".to_string()]
+        );
+        assert!(store.active_session_leases(110).await.unwrap().is_empty());
     }
 
     #[tokio::test]

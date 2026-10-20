@@ -199,6 +199,16 @@ pub async fn run_turn_traced_with_attachments(
     let rotated_from = preparation.rotated_from.clone();
     let session_owner = preparation.owner.clone();
     let session_lease_secs = preparation.lease_secs;
+    // 2026-10-20（issue-0012）：拿到自己的 lease 之後，其他仍持有 lease 的 scope
+    // 就是同時在這個工作目錄執行的回合；告訴每一棒，但不阻擋任何一方。
+    let others: Vec<String> = memory
+        .active_session_leases()
+        .await?
+        .into_iter()
+        .filter(|scope| scope != &cfg.scope)
+        .collect();
+    let concurrent_notice = (!others.is_empty())
+        .then(|| persona::concurrent_turns_notice(&others, &persona::scheduling_bin()));
     let result = async {
     let n_steps = steps.len();
     let mut prior: Vec<wukong_orchestrator::Outcome> = Vec::new();
@@ -236,6 +246,10 @@ pub async fn run_turn_traced_with_attachments(
                 prompt.push_str("\n\n");
                 prompt.push_str(persona::memoria_capability_hint());
             }
+        }
+        if let Some(notice) = &concurrent_notice {
+            prompt.push_str("\n\n");
+            prompt.push_str(notice);
         }
         let session_id = if is_final { stored.clone() } else { None };
         if is_final {
@@ -1664,6 +1678,78 @@ mod tests {
         assert!(!planner.contains(&"細".repeat(787)));
         assert!(!planner.contains("舊問題"));
         assert!(!planner.contains("舊回答"));
+    }
+
+    // issue-0012 SCN-001：另一個回合持有 lease 時，每一棒都被告知，兩個方向都成立。
+    #[tokio::test]
+    async fn other_running_turns_are_announced_to_every_step() {
+        for (own, other, listed) in [
+            (
+                "user:tg-42",
+                "agent:schedule-job-1",
+                "- 排程 job-1（agent:schedule-job-1）\n",
+            ),
+            ("agent:schedule-job-1", "user:tg-42", "- 對話 user:tg-42\n"),
+        ] {
+            let mem = open_memory().await;
+            mem.acquire_agent_session_lease(other, "other-turn", 900)
+                .await
+                .unwrap();
+            let backend = MockBackend::new(&["explorer, fixer", "f1", "f2"]);
+
+            run_turn(
+                &mem,
+                &backend,
+                &test_cfg(own),
+                "改 notes.md",
+                &mut |_| {},
+                &mut |_| {},
+            )
+            .await
+            .unwrap();
+
+            let prompts = backend.prompts.lock().unwrap();
+            for step in &prompts[1..] {
+                assert!(step.contains("[其他回合正在執行]\n"), "{own}: {step}");
+                assert!(step.contains(listed), "{own}: {step}");
+                assert!(step.contains("不要修改或提交不是本回合造成的變更"));
+                assert!(!step.contains(&format!("{own}\n")), "{own} 不該列出自己");
+            }
+        }
+    }
+
+    // issue-0012 SCN-002／003：沒有其他有效 lease（含已釋放的、自己的）時 prompt 不變。
+    #[tokio::test]
+    async fn without_other_running_turns_prompts_are_unchanged() {
+        async fn prompts(mem: &Memory) -> Vec<String> {
+            let backend = MockBackend::new(&["explorer, fixer", "f1", "f2"]);
+            run_turn(
+                mem,
+                &backend,
+                &test_cfg("user:tg-42"),
+                "改 notes.md",
+                &mut |_| {},
+                &mut |_| {},
+            )
+            .await
+            .unwrap();
+            let prompts = backend.prompts.lock().unwrap().clone();
+            prompts
+        }
+        let fresh = open_memory().await;
+        let released = open_memory().await;
+        released
+            .acquire_agent_session_lease("agent:schedule-job-1", "other-turn", 900)
+            .await
+            .unwrap();
+        released
+            .release_agent_session_lease("agent:schedule-job-1", "other-turn")
+            .await
+            .unwrap();
+
+        let fresh = prompts(&fresh).await;
+        assert!(fresh.iter().all(|p| !p.contains("[其他回合正在執行]")));
+        assert_eq!(prompts(&released).await, fresh);
     }
 
     #[tokio::test]
