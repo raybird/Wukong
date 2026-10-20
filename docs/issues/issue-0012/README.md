@@ -121,6 +121,6 @@ Feature: 回合開始執行時，若另有回合正在同一個工作目錄執�
 **建立日期**: 2026-10-08  
 **分級**: Medium — 跨 wukong-memory 與 wukong-runtime，沿既有相依方向，沒有 schema 變更（2026-10-20 由 Large 調降）  
 **風險**: Medium  
-**狀態**: 待實作
+**狀態**: 實作中
 
 GitHub：https://github.com/raybird/Wukong/issues/12
