@@ -179,17 +179,17 @@ async fn execute_job_inner<B: AiBackend + QuestionResponder + Sync>(
     }
 }
 
-/// 跑一個無人值守回合，並在回合進行中即時處置 opencode 送出的詢問。
-///
-/// `run_turn` 的 event callback 是同步的，沒辦法在裡面 await 回覆，所以詢問先
-/// 丟進 channel，再由同一個 task 的 select 迴圈回覆——這樣回覆會與 turn 併行
-/// 發生，opencode 才不會一直等到 stream deadline。
 /// 2026-10-20（issue-0014）：排程回合的記憶、召回與 session 都落在這個 scope，
 /// 不寫進建立排程的使用者 scope；同一個排程的多次觸發共用它。
 fn scheduled_turn_scope(job_id: &str) -> String {
     format!("agent:schedule-{job_id}")
 }
 
+/// 跑一個無人值守回合，並在回合進行中即時處置 opencode 送出的詢問。
+///
+/// `run_turn` 的 event callback 是同步的，沒辦法在裡面 await 回覆，所以詢問先
+/// 丟進 channel，再由同一個 task 的 select 迴圈回覆——這樣回覆會與 turn 併行
+/// 發生，opencode 才不會一直等到 stream deadline。
 async fn run_unattended_turn<B: AiBackend + QuestionResponder + Sync>(
     ctx: &ExecutionContext<'_, B>,
     cfg: &GatewayConfig,
