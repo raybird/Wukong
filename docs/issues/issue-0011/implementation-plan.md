@@ -78,7 +78,7 @@
    - 與本 issue 無關、修改前就存在的模型行為：B 的回答在兩個版本都停在「我會再確認…」，沒有收尾結論（big-pickle 在多次工具呼叫後提早結束）。
    - 副作用：真實回合的 agent 有完整工具權限。B 的 agent 會離開臨時目錄、找到本機 repo，用 cargo 執行唯讀的 `wukong schedule list`。main 對照組的一次執行因此在 `~/.wukong/memory.db` 建了一個空資料庫（2026-10-20 12:07:34 建立，各表 0 列）。之後未再執行真實回合。2026-10-20 經使用者同意已刪除該檔。
 6. ✅ **常青文件與交付** — 根目錄 `AGENTS.md`「一回合資料流」第 2 步補上 planner 帶上一回合；`CHANGELOG.md` `[Unreleased]` 新增 Changed 條目。全量檢查（2026-10-20，程式碼同 `e072870`，只差一處 doc comment）：`cargo fmt --all -- --check`、`cargo clippy --all-targets --locked -- -D warnings` 通過；`cargo test --workspace --locked` passed=633 failed=0 ignored=11。`gitnexus_detect_changes` 的實際改動限於上述三個函式與新測試，其餘列出的符號只是行號位移。
-   - 審查後修正（2026-10-20，`review-1034907.md` 的 SHOULD FIX）：探針改成必須設 `WUKONG_PLANNER_PROBE_MODEL` 才會呼叫模型（原本預設 `opencode/big-pickle`，`cargo test -- --ignored` 就會呼叫真實模型）；檔頭補上實作計畫用的 `XDG_CONFIG_HOME` 隔離、一次只跑一支，以及真實回合的副作用警告。驗證：不設變數跑 `cargo test -p wukong-runtime --test planner_probe -- --ignored`，兩支都在 0.00 秒內以 `set WUKONG_PLANNER_PROBE_MODEL …: NotPresent` 失敗，沒有呼叫模型；不帶 `--ignored` 為 2 ignored；fmt、clippy 通過。上方步驟 1、4、5 的命令改用此變數重跑時需補上它。
+   - 審查後修正（2026-10-20，`review-1034907.md` 的 SHOULD FIX）：探針改成必須設 `WUKONG_PLANNER_PROBE_MODEL` 才會呼叫模型（原本預設 `opencode/big-pickle`，`cargo test -- --ignored` 就會呼叫真實模型）；檔頭補上實作計畫用的 `XDG_CONFIG_HOME` 隔離、一次只跑一支，以及真實回合的副作用警告。驗證：不設變數跑 `cargo test -p wukong-runtime --test planner_probe -- --ignored`，兩支都在 0.00 秒內以 `set WUKONG_PLANNER_PROBE_MODEL …: NotPresent` 失敗，沒有呼叫模型；不帶 `--ignored` 為 2 ignored；fmt、clippy 通過。照上方步驟 1、4、5 的命令重跑時，要補上這個變數與測試名稱（`planner_plan_distribution` 或 `real_followup_turns`），不指定名稱時兩支會並行。
 
 ## 驗收對照
 
