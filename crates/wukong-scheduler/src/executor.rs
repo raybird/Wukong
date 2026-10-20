@@ -161,9 +161,10 @@ async fn execute_job_inner<B: AiBackend + QuestionResponder + Sync>(
     job: &Job,
 ) -> Result<String, WukongError> {
     match &job.kind {
-        JobKind::Turn { scope, prompt } => {
+        // job 的 scope 是擁有者，回送與聊天紀錄用它；回合本身在排程自己的 scope 執行。
+        JobKind::Turn { prompt, .. } => {
             let mut cfg = ctx.base_config.clone();
-            cfg.scope = scope.clone();
+            cfg.scope = scheduled_turn_scope(&job.id);
             let prompt = format!("{prompt}{SCHEDULED_TURN_AUTONOMY_HINT}");
             run_unattended_turn(ctx, &cfg, &prompt).await
         }
@@ -183,6 +184,12 @@ async fn execute_job_inner<B: AiBackend + QuestionResponder + Sync>(
 /// `run_turn` 的 event callback 是同步的，沒辦法在裡面 await 回覆，所以詢問先
 /// 丟進 channel，再由同一個 task 的 select 迴圈回覆——這樣回覆會與 turn 併行
 /// 發生，opencode 才不會一直等到 stream deadline。
+/// 2026-10-20（issue-0014）：排程回合的記憶、召回與 session 都落在這個 scope，
+/// 不寫進建立排程的使用者 scope；同一個排程的多次觸發共用它。
+fn scheduled_turn_scope(job_id: &str) -> String {
+    format!("agent:schedule-{job_id}")
+}
+
 async fn run_unattended_turn<B: AiBackend + QuestionResponder + Sync>(
     ctx: &ExecutionContext<'_, B>,
     cfg: &GatewayConfig,
@@ -342,6 +349,7 @@ mod tests {
     use wukong_gateway::backend::{AgentRequest, AgentResponse};
     use wukong_gateway::stream::QuestionInfo;
     use wukong_gateway::GatewayError;
+    use wukong_memory::{MemoryItem, MemoryKind, RememberInput};
 
     struct MockBackend {
         replies: Mutex<VecDeque<Result<String, GatewayError>>>,
@@ -714,32 +722,140 @@ mod tests {
         assert_eq!(PermissionPolicy::default(), PermissionPolicy::Reject);
     }
 
-    #[tokio::test]
-    async fn turn_job_overrides_scope() {
-        let memory = open_memory().await;
-        let backend = MockBackend::new(vec![Ok("oracle"), Ok("done")]);
+    fn owned_turn_job(id: &str, prompt: &str) -> Job {
+        Job {
+            id: id.to_string(),
+            ..job(JobKind::Turn {
+                scope: "user:tg-42".to_string(),
+                prompt: prompt.to_string(),
+            })
+        }
+    }
+
+    async fn seed_event(memory: &Memory, scope: &str, text: &str) {
+        memory
+            .remember(RememberInput {
+                scope: scope.to_string(),
+                session_id: None,
+                items: vec![MemoryItem {
+                    kind: MemoryKind::Event,
+                    text: text.to_string(),
+                    importance: None,
+                    dedupe_key: None,
+                }],
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn event_texts(memory: &Memory, scope: &str) -> Vec<String> {
+        memory
+            .records(Some(scope), Some(MemoryKind::Event), 100)
+            .await
+            .unwrap()
+            .records
+            .into_iter()
+            .map(|r| r.text)
+            .collect()
+    }
+
+    /// 跑一次 Turn job（planner 一棒 + 執行一棒），回傳 backend 收到的所有 prompt。
+    async fn run_turn_job(memory: &Memory, job: &Job, reply: &str) -> Vec<String> {
+        let backend = MockBackend::new(vec![Ok("oracle"), Ok(reply)]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
-            memory: &memory,
+            memory,
             backend: &backend,
             base_config: &cfg,
             permission_policy: PermissionPolicy::Reject,
         };
-        let job = job(JobKind::Turn {
-            scope: "project:Scheduled".to_string(),
-            prompt: "do it".to_string(),
-        });
+        let out = execute_job(&ctx, job).await;
+        assert!(out.success, "{}", out.message);
+        let prompts = backend.prompts.lock().unwrap().clone();
+        prompts
+    }
 
-        let out = execute_job(&ctx, &job).await;
+    // issue-0014 SCN-001
+    #[tokio::test]
+    async fn turn_job_remembers_in_its_own_scope_not_the_owner_scope() {
+        let memory = open_memory().await;
+        seed_event(&memory, "user:tg-42", "User: 早安").await;
 
-        assert!(out.success);
-        assert_eq!(out.message, "done");
-        assert!(memory
-            .agent_session("project:Scheduled")
+        run_turn_job(
+            &memory,
+            &owned_turn_job("job-1", "summarize atlas progress"),
+            "done",
+        )
+        .await;
+
+        assert_eq!(event_texts(&memory, "user:tg-42").await, vec!["User: 早安"]);
+        let own = event_texts(&memory, "agent:schedule-job-1").await;
+        assert_eq!(own.len(), 2, "{own:?}");
+        assert!(own
+            .iter()
+            .any(|t| t.starts_with("User: summarize atlas progress")));
+        assert!(own.contains(&"Assistant: done".to_string()));
+    }
+
+    // issue-0014 SCN-002
+    #[tokio::test]
+    async fn turn_job_neither_recalls_nor_resumes_the_owner_scope() {
+        let memory = open_memory().await;
+        seed_event(
+            &memory,
+            "user:tg-42",
+            "Assistant: atlas progress reports use tables",
+        )
+        .await;
+        memory
+            .set_agent_session("user:tg-42", "ses_user")
             .await
-            .unwrap()
-            .is_some());
+            .unwrap();
+
+        let prompts = run_turn_job(
+            &memory,
+            &owned_turn_job("job-1", "summarize atlas progress"),
+            "done",
+        )
+        .await;
+
+        assert!(
+            !prompts.iter().any(|p| p.contains("use tables")),
+            "{prompts:?}"
+        );
+        assert_eq!(
+            memory.agent_session("user:tg-42").await.unwrap().as_deref(),
+            Some("ses_user")
+        );
+        assert_eq!(
+            memory
+                .agent_session("agent:schedule-job-1")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("ses_new")
+        );
         assert_eq!(memory.agent_session("project:Base").await.unwrap(), None);
+    }
+
+    // issue-0014 SCN-004
+    #[tokio::test]
+    async fn each_turn_job_continues_only_its_own_scope() {
+        let memory = open_memory().await;
+        let alpha = owned_turn_job("job-1", "alpha report");
+        let beta = owned_turn_job("job-2", "beta report");
+
+        run_turn_job(&memory, &alpha, "alpha-first").await;
+        run_turn_job(&memory, &beta, "beta-first").await;
+        let alpha_second = run_turn_job(&memory, &alpha, "alpha-second")
+            .await
+            .join("\n");
+        let beta_second = run_turn_job(&memory, &beta, "beta-second").await.join("\n");
+
+        assert!(alpha_second.contains("Assistant: alpha-first"));
+        assert!(!alpha_second.contains("beta-first"));
+        assert!(beta_second.contains("Assistant: beta-first"));
+        assert!(!beta_second.contains("alpha-first"));
     }
 
     #[tokio::test]

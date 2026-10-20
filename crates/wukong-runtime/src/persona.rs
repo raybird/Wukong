@@ -114,7 +114,8 @@ pub fn scheduling_bin() -> String {
 
 /// An always-on capability block telling the agent it can create and manage
 /// scheduled (cron) jobs by shelling out to the `wukong schedule` CLI. `scope`
-/// is the current turn's memory scope so scheduled turns land in the same place.
+/// is the current turn's memory scope; it becomes the job's owner, which
+/// receives the results. The scheduled turns themselves run in their own scope.
 pub fn scheduling_capability_hint(scope: &str, bin: &str) -> String {
     format!(
         "[排程能力]\n\
@@ -123,8 +124,11 @@ pub fn scheduling_capability_hint(scope: &str, bin: &str) -> String {
          - 新增定時對話：`{bin} schedule add-turn --name \"<名稱>\" --cron \"<分 時 日 月 週>\" --scope \"{scope}\" --prompt \"<到時要執行的提示詞>\"`\n\
          - 列出所有排程：`{bin} schedule list`\n\
          - 立即觸發一次：`{bin} schedule trigger --id <id>`\n\
+         - 查看排程的執行結果：`{bin} schedule runs --id <id>`\n\
          - 停用／啟用／刪除：`{bin} schedule disable|enable|rm --id <id>`\n\
          規則：cron 為標準 5 欄位（分 時 日 月 週）。除非使用者另外指定 scope，否則一律沿用上面的 `--scope`。\
+         `--scope` 是排程的擁有者，執行結果會回送給它；排程回合本身在獨立的記憶 scope 執行，\
+         所以使用者問起排程回報過什麼時，用上面的查看指令取得，不要憑記憶回答。\
          建立完成後，用一句話回報排程名稱、cron 設定與用途即可。"
     )
 }
@@ -222,6 +226,14 @@ mod tests {
         assert!(hint.contains("schedule add-turn"));
         assert!(hint.contains("--scope \"project:Wukong\""));
         assert!(hint.contains("`wukong schedule list`"));
+    }
+
+    // issue-0014 SCN-005：排程回合不寫進使用者記憶，對話中改用 CLI 查執行結果。
+    #[test]
+    fn scheduling_hint_lists_run_history_and_explains_owner_scope() {
+        let hint = scheduling_capability_hint("user:tg-42", "wukong");
+        assert!(hint.contains("`wukong schedule runs --id <id>`"));
+        assert!(hint.contains("`--scope` 是排程的擁有者"));
     }
 
     #[test]
