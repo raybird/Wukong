@@ -76,7 +76,7 @@
    - SCN-003：B 每次都實際查核。回答主動指出「本機資料庫是空的，可能不是正式環境」，沒有把上一回合的資料當成最新狀態。
    - 第二版規則時的中間結果：B 有 2/3 只讀了 `systematic-debugging` 技能檔就結束，沒有實際查核。第三版修正後消失。
    - 與本 issue 無關、修改前就存在的模型行為：B 的回答在兩個版本都停在「我會再確認…」，沒有收尾結論（big-pickle 在多次工具呼叫後提早結束）。
-   - 副作用：真實回合的 agent 有完整工具權限。B 的 agent 會離開臨時目錄、找到本機 repo，用 cargo 執行唯讀的 `wukong schedule list`。main 對照組的一次執行因此在 `~/.wukong/memory.db` 建了一個空資料庫（2026-10-20 12:07:34 建立，各表 0 列）。之後未再執行真實回合。
+   - 副作用：真實回合的 agent 有完整工具權限。B 的 agent 會離開臨時目錄、找到本機 repo，用 cargo 執行唯讀的 `wukong schedule list`。main 對照組的一次執行因此在 `~/.wukong/memory.db` 建了一個空資料庫（2026-10-20 12:07:34 建立，各表 0 列）。之後未再執行真實回合。2026-10-20 經使用者同意已刪除該檔。
 6. ✅ **常青文件與交付** — 根目錄 `AGENTS.md`「一回合資料流」第 2 步補上 planner 帶上一回合；`CHANGELOG.md` `[Unreleased]` 新增 Changed 條目。全量檢查（2026-10-20，程式碼同 `e072870`，只差一處 doc comment）：`cargo fmt --all -- --check`、`cargo clippy --all-targets --locked -- -D warnings` 通過；`cargo test --workspace --locked` passed=633 failed=0 ignored=11。`gitnexus_detect_changes` 的實際改動限於上述三個函式與新測試，其餘列出的符號只是行號位移。
 
 ## 驗收對照
