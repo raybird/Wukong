@@ -98,10 +98,12 @@ Feature: 排程回合使用獨立的記憶 scope，排程產出不再寫入使�
 | TBD-3 | 排程 Scenario SCN-001～005 的核准 | 已解決 | 2026-10-20 使用者回覆「全部核准」 |
 | TBD-4 | 排程回合內建立的新排程，擁有者會是 `agent:schedule-<job id>`，結果不會回送 Telegram | 不影響本次交付 | 2026-10-20 使用者回覆「TBD-4 照建議」，接受為已知限制。追蹤：無；排程回合再建立排程目前沒有使用情境，出現需求時另開 issue |
 | TBD-5 | 使用者 scope 中既有的排程紀錄 | 不影響本次交付 | 2026-10-20 使用者選 Q4「不在本 issue 處理」。追蹤：無；2026-10-16 正式庫只有 8 筆 event、沒有 summary，分辨哪些由排程寫入需比對提示詞，誤刪風險高於殘留的影響 |
+| TBD-6 | 刪除排程後，`agent:schedule-<job id>` 的 session 指向與記憶留著：保留期清理看到指向就整棵保留，該棵 opencode session 永遠清不掉 | 不影響本次交付 | 2026-10-20 依 `review-3531cce.md` SHOULD FIX 1（`需決策`），使用者選「(a) 本 PR 記為已知限制，另開 issue」。追蹤：#17 |
 
 ## 關聯議題
 - #11（已合併，PR #15）：planner 帶入同 scope 的上一回合；排程改用獨立 scope 後，上一回合不會再是排程產出。
-- #12：聊天與排程共用 scope 造成 session lease 競爭。本 issue 合併後，預設排程不再與聊天共用 session，#12 的 SCN-001 前提只剩「使用者明確指定同一 scope」的情況；共用工作目錄（#12 SCN-003）不受影響。#12 的範圍需在本 issue 合併後重新界定。
+- #12：聊天與排程共用 scope 造成 session lease 競爭。本 issue 合併後，排程回合一律在 `agent:schedule-<job id>` 執行，不論 `--scope` 填什麼，都不再與聊天共用 session，#12 SCN-001 描述的聊天／排程競爭不再發生。審查指出可能剩下同一個排程被併行觸發的競爭（例如 daemon 到期執行時剛好有人跑 `schedule trigger`），尚未查證；共用工作目錄（#12 SCN-003）不受影響。#12 的範圍需在本 issue 合併後重新界定。（2026-10-20 依 `review-3531cce.md` SHOULD FIX 3 更正）
+- #17：刪除排程後，排程 scope 的 session 指向與記憶無法清理（見 TBD-6）。
 
 ## Timeline
 | 日期 | 異動 |

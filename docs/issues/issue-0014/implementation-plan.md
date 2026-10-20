@@ -82,6 +82,20 @@
    - `gitnexus_detect_changes`：實際改動限於 `execute_job_inner`、新函式 `scheduled_turn_scope`、`scheduling_capability_hint` 的文字與上述測試；其餘列出的符號只是行號位移。
    - code-simplify：衍生規則集中在 `scheduled_turn_scope` 一處；測試共用 `owned_turn_job`、`seed_event`、`event_texts`、`run_turn_job`，沒有重複。no-op。
 
+7. ✅ **審查後追加：排程重複觸發時 planner 是否縮小調查**（2026-10-20，`review-3531cce.md` NICE TO HAVE 3，使用者選「現在用真實模型探針實測」）
+   - 疑慮：#11 讓 planner 帶上一回合以分辨追問。排程改用自己的 scope 後，上一回合就是同一個排程上一次的同一題與答案。planner 可能把它當成「已回答、不需新查證的追問」，排成一棒、不掛技能、直接引用舊答案。
+   - 產出：`crates/wukong-runtime/tests/planner_probe.rs` 新增 `scheduled_repeat_plan_distribution`（`#[ignore]`，需設 `WUKONG_PLANNER_PROBE_MODEL`）。輸入是排程提示詞加上 executor 附加的 `[無人值守排程]` 文字；上一回合是同一段輸入與一次虛構的答案。兩個案例：S-progress（整理今天進度）、S-health（檢查服務狀態）。
+   - 執行：`XDG_CONFIG_HOME=<空目錄> WUKONG_PLANNER_PROBE_MODEL=opencode/big-pickle WUKONG_PLANNER_PROBE_SAMPLES=10 cargo test -p wukong-runtime --test planner_probe scheduled_repeat_plan_distribution -- --ignored --nocapture`。對照組另設 `WUKONG_PLANNER_PROBE_BASELINE=1`，模擬第一次觸發、沒有上一回合。OpenCode 1.18.31，兩次都 exit 0。
+
+     | 案例 | 第一次觸發（對照組） | 第二次觸發（帶上一回合） |
+     |---|---|---|
+     | S-progress | 6/10 `librarian\|none`；4/10 `explorer\|none,librarian\|none` | 9/10 `explorer\|none`；1/10 `librarian\|none` |
+     | S-health | 10/10 `explorer\|none` | 10/10 `explorer\|none` |
+
+   - 判讀：沒有一個樣本被排成直接引用舊答案的 `oracle\|none`。S-health 不變。S-progress 帶上一回合後，含查核角色 explorer 的比例從 4/10 升到 9/10，沒有縮小調查。
+   - 審查修正後的全量檢查（2026-10-20）：fmt、clippy 通過；`cargo test --workspace --locked` passed=636 failed=0 ignored=12（多出的 1 個 ignored 是這支探針）。同一批提交也把 `scheduled_turn_scope` 移到 `run_unattended_turn` 的說明註解之前（SHOULD FIX 2）。
+   - 限制：只測 planner 的計畫，沒有測最後一棒的行為。最後一棒會接續排程自己的 session，看得到上一次的答案，是否會沿用舊內容未驗證；這是 SCN-004 要的延續，上線後仍值得留意。只測一個模型、兩個虛構案例，每組 10 個樣本。
+
 ## 驗收對照
 | Scenario | 層級 | 證據 |
 |---|---|---|
