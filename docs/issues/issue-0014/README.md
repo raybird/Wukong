@@ -111,11 +111,13 @@ Feature: 排程回合使用獨立的記憶 scope，排程產出不再寫入使�
 | 2026-10-16 | 在 GitHub 建立 issue，處理方向待決定 |
 | 2026-10-20 | 使用者選 (a)；逐題確認 Q1～Q4；建立 README 與實作計畫 |
 | 2026-10-20 | 使用者核准 SCN-001～005，TBD-4 接受為已知限制 |
+| 2026-10-20 | 審查發現刪除排程後的殘留，使用者決定記為已知限制（TBD-6），另開 #17 |
+| 2026-10-20 | PR #16 於 2026-10-20 17:21（台灣時間）squash 合併為 `5742cb8`，兩輪獨立審查皆 PASS；結案 |
 
 ---
 **建立日期**: 2026-10-20  
 **分級**: Medium — 跨 wukong-scheduler 與 wukong-runtime 兩個 crate，沿既有相依方向，沒有 schema 變更  
 **風險**: Medium  
-**狀態**: 實作中
+**狀態**: 已完成
 
 GitHub：https://github.com/raybird/Wukong/issues/14
