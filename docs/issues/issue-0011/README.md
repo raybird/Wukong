@@ -38,10 +38,10 @@ WHERE thread_id = 'scope:user:tg-915354960' AND created_at >= 1791393535 ORDER B
 不在本 issue 直接全面更換模型、延長逾時或重設架構。測試使用獨立 scope 與臨時工作目錄，不干擾正式任務。三個服務存活不等於任務交付成功。
 
 ## 涉及檔案
-- `crates/wukong-orchestrator/src/router.rs`：候選調查邊界，實作前依根因縮小，不表示全部必須修改。
-- `crates/wukong-runtime/src/turn.rs`：候選調查邊界，實作前依根因縮小，不表示全部必須修改。
-- `crates/wukong-orchestrator/src/lib.rs`：既有鏈上下文與測試的調查入口。
-- Telegram dispatch 僅用於觀測入口；目前未發現需要修改傳輸層的證據。
+- `crates/wukong-orchestrator/src/router.rs`：planner prompt 在有上一回合時加入上下文與分類規則。
+- `crates/wukong-runtime/src/turn.rs`：把上一回合交給 planner。
+- `crates/wukong-runtime/tests/planner_probe.rs`：真實模型探針（`#[ignore]`）。
+- 2026-10-20 實作後確認：`crates/wukong-orchestrator/src/lib.rs` 與 Telegram dispatch 不需修改。
 
 ## 文件清單
 - [implementation-plan.md](./implementation-plan.md)
@@ -72,7 +72,7 @@ Feature: 讓已有足夠資訊的簡單問答能直接收尾，避免後續角�
 ```
 
 ## Gherkin 核准紀錄
-- **核准 commit**: 待提交
+- **核准 commit**: 7bef17e（2026-10-20 恢復後首次提交；內容與 2026-10-08 的 GitHub issue 本文相同）
 - **核准來源**: 2026-10-08，在提出「是否接受方案 A 與上述三項驗收條件？」後，使用者回覆「接受」。此核准涵蓋方案 A 及 SCN-001～003；本次完成 new-issue 文件流程，尚未執行修復或部署。2026-10-20 本機文件已不存在，依 GitHub issue #11 本文（同日發布的核准版本）恢復，驗收內容未變更。
 
 | Scenario | 核准日期 | 狀態 |
