@@ -249,7 +249,7 @@ wukong-orchestrator → wukong-gateway → wukong-memory
 ### 一回合資料流（`run_turn`）
 
 1. `wukong-memory` recall（`relevant` 模式：BM25 + 語意向量，不含「最近」來源，不相關就不注入）
-2. `wukong-orchestrator` plan（LLM 規劃角色 + 技能鏈）
+2. `wukong-orchestrator` plan（LLM 規劃角色 + 技能鏈；另帶上一回合，每筆上限 800 字，用來分辨追問與新任務）
 3. 逐棒 `wukong-gateway` execute（注入人格 + 角色 + 技能規範 + 記憶；每筆記憶上限 800 字。最後一棒靠 session 接續近期對話，只注入相關記憶；輔助棒另帶上一回合）
 4. `wukong-memory` remember（落盤本輪 User + Assistant；每回合一個識別碼，不再以 session 去重；入口附加的檔案互動規則不寫入）
 
