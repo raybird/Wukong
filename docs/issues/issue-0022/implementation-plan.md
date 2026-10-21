@@ -136,11 +136,32 @@
    - `gitnexus_detect_changes`（risk=critical）：diff 除了 `scheduled_turn_scope` 改用常數那一行，其餘都是新增。列出的 `remember`、`interrupt_stale_runs`、`claim_ready_jobs`、`run_unattended_turn` 等，只是和新程式碼相鄰，本體沒有改。
    - code-simplify：`clear_orphan_turn_scopes` 與 #17 的 `clear_scope_if_deleted` 都是「排程不在就清」，但前者要先確認所有候選、查詢出錯就整批不刪，後者只處理單一排程、出錯只記 log，失效方向不同，不合併。no-op。
 
+6. ✅ **審查修正**（`review-1d65567.md`）
+   - 相依：步驟 1～5；D-1、D-2 由使用者決定（README 待確認事項）。
+   - 影響分析（2026-10-21）：`run_claimed_job` 仍是 HIGH（呼叫端 `run_scan`、CLI `trigger_job`），這次只在推進前加上排程種類的條件；`recover_interrupted_runs` 為 LOW，唯一呼叫端是 daemon 的 `run`；`clear_orphan_turn_scopes` 是本 issue 新增的，唯一呼叫端是 daemon 的 `clear_orphan_scopes`。
+   - 修正：
+     - M-1：`clear_orphan_turn_scopes` 只把小寫、有連字號的 UUID 當成排程 id（`Uuid::parse_str(id).is_ok_and(|u| u.hyphenated().to_string() == id)`）。大寫、`{...}`、`urn:uuid:`、不含連字號都能解析成 UUID，但 `get_job` 是精確比對，一定查不到，原本會被當成孤兒刪掉。
+     - S-2／D-2：`run_claimed_job` 只對 `JobKind::Turn` 呼叫 `advance_next_run`。
+     - S-1／D-1：刪掉 daemon 啟動時的 `recover_interrupted_runs` 與測試 `startup_recovery_runs_only_for_daemon_mode`；`run_scan` 每輪的標記在常駐模式第一輪（啟動時立刻執行）與 `--once` 都會做。
+     - S-3：把 `clearing_orphan_scopes_deletes_nothing_when_jobs_cannot_be_read`（刪掉整張表）換成 `clearing_orphan_scopes_deletes_nothing_when_a_job_cannot_be_read`：排在前面的是真正的孤兒，排在後面的排程列被改成種類對不上，讓 `get_job` 出錯；斷言兩個 scope 都沒被刪。
+     - N-1：`scheduled_turn_scope` 的 doc comment 移回函式上。N-4：CHANGELOG 範圍改寫，`issue-0017` 的 TBD-4 標註由 #22 處理。N-5：AGENTS.md 補上兩個執行者同時在跑時的中途顯示。
+     - 不處理：N-2（推進失敗時 run 要等 lease 到期才被標記，訊息寫成行程結束）、N-3（標記出錯時整輪不取得排程）。兩者都是資料庫出錯時才會發生，和 `start_run` 失敗時的既有模式相同。
+   - 紅燈（修正前）：
+     - `clearing_orphan_scopes_keeps_live_and_non_uuid_scopes` 加入存在中排程 id 的四種非正規寫法：`left: 5, right: 1`。
+     - 新測試 `an_interrupted_maintenance_job_is_claimed_again`：維護排程（prune）開始後，由另一條連線拿住記憶庫的寫入鎖讓它卡住，再以 `tokio::time::timeout` 丟掉 future；斷言 run 停在 running 之後，lease 到期再取得：`left: 0, right: 1`。
+     - S-3 的新測試在修正前就是綠的（守著既有行為），用變異 ME 確認。
+   - 綠燈：scheduler lib 50、schedulerd 24 支全過。
+   - 變異（還原後皆確認，每次都確認是哪個斷言紅的）：
+     - M2 `get_job` 出錯當成不存在：新的查詢出錯測試在 `is_err()` 斷言紅燈；
+     - ME 邊查邊刪：同一支測試在「前面那個孤兒仍在」的斷言紅燈；
+     - MS 推進條件改成只對維護排程：維護排程測試（再取得 0 個）與 SCN-001（lease 到期後又取得）紅燈。
+   - 全量檢查（2026-10-21）：fmt、clippy 通過；`cargo test --workspace --locked --no-fail-fast` passed=675 failed=0 ignored=12（新增維護排程測試、刪掉啟動檢查測試，數量不變）。
+
 ## 驗收對照
 | Scenario | 步驟 | 證據 |
 |---|---|---|
-| SCN-001 | 2、3、4 | executor 測試；真實行程 |
+| SCN-001 | 2、3、4、6 | executor 測試；真實行程；維護排程不推進 |
 | SCN-002 | 2、3 | executor 測試（characterization） |
 | SCN-003 | 2、3 | executor 測試（characterization） |
-| SCN-004 | 2、3、4 | daemon 測試；真實行程 |
-| SCN-005 | 1、3、4 | memory 與 executor 測試；真實行程 |
+| SCN-004 | 2、3、4、6 | daemon 測試；真實行程 |
+| SCN-005 | 1、3、4、6 | memory 與 executor 測試；真實行程 |

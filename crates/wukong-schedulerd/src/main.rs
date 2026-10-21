@@ -66,10 +66,6 @@ async fn run(cli: Cli) -> Result<(), String> {
     let store = SchedulerStore::open(&cfg.db_url)
         .await
         .map_err(|e| e.to_string())?;
-    let interrupted = recover_interrupted_runs(&store, cli.once, now_unix()).await?;
-    if interrupted > 0 {
-        eprintln!("recovered {interrupted} interrupted scheduler run(s)");
-    }
     match clear_orphan_scopes(&store, &memory, cli.once).await {
         Ok(0) => {}
         Ok(n) => eprintln!("cleared {n} orphan scheduled-turn scope(s)"),
@@ -170,22 +166,8 @@ async fn run_memory_maintenance(memory: &Memory, backend: &AgentBackend) -> Resu
     Ok(())
 }
 
-async fn recover_interrupted_runs(
-    store: &SchedulerStore,
-    once: bool,
-    now: i64,
-) -> Result<u64, String> {
-    if once {
-        return Ok(0);
-    }
-    store
-        .interrupt_stale_runs(now)
-        .await
-        .map_err(|e| e.to_string())
-}
-
 /// issue-0022：排程在執行中被刪除、行程又在回合結束前結束時，它的 scope 沒有人清。
-/// 和 `recover_interrupted_runs` 一樣只在常駐模式啟動時做一次。
+/// 只在常駐模式啟動時做一次，`--once` 不做。
 async fn clear_orphan_scopes(
     store: &SchedulerStore,
     memory: &Memory,
@@ -227,7 +209,8 @@ async fn run_scan(
     history: Option<&ChatHistoryStore>,
 ) -> Result<(), String> {
     let now = now_unix();
-    // issue-0022：行程在 lease 到期前就重啟時，啟動時的檢查標不到舊 run，所以每輪都檢查。
+    // issue-0022：每輪都檢查，行程在 lease 到期前就重啟時，舊 run 也會在 lease 到期後被標記。
+    // 常駐模式的第一輪在啟動時立刻執行，`--once` 也會標記。
     let interrupted = store
         .interrupt_stale_runs(now)
         .await
@@ -627,30 +610,6 @@ mod tests {
         );
         assert_eq!(memory.agent_session(orphan).await.unwrap(), None);
         assert!(memory.agent_session(&live_scope).await.unwrap().is_some());
-    }
-
-    #[tokio::test]
-    async fn startup_recovery_runs_only_for_daemon_mode() {
-        let (_file, store) = open_store().await;
-        let job = due_job(&store).await;
-        let run = store.start_run(&job.id, 10).await.unwrap();
-
-        assert_eq!(recover_interrupted_runs(&store, true, 20).await.unwrap(), 0);
-        assert_eq!(
-            recover_interrupted_runs(&store, false, 20).await.unwrap(),
-            1
-        );
-        assert_eq!(
-            store
-                .recent_runs(Some(&job.id), 10)
-                .await
-                .unwrap()
-                .into_iter()
-                .find(|item| item.id == run)
-                .unwrap()
-                .status,
-            RunStatus::Interrupted
-        );
     }
 
     #[test]
