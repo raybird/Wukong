@@ -14,7 +14,8 @@ use wukong_runtime::maintenance::{memory_consolidate, memory_prune, memory_snaps
 use wukong_runtime::session_retention::{prune_opencode_sessions, render_report, RetentionPolicy};
 use wukong_runtime::util::now_unix;
 use wukong_scheduler::{
-    ExecutionContext, Job, JobKind, MaintenanceTask, NewJob, PermissionPolicy, SchedulerStore,
+    DeleteJobOutcome, ExecutionContext, Job, JobKind, MaintenanceTask, NewJob, PermissionPolicy,
+    SchedulerStore,
 };
 
 #[tokio::main]
@@ -254,15 +255,10 @@ async fn run_schedule_op(
             );
         }
         ScheduleOp::Rm { id } => {
-            let removed = store.remove_job(id).await.map_err(to_wukong_error)?;
-            println!(
-                "{}",
-                if removed {
-                    "已刪除排程"
-                } else {
-                    "找不到排程"
-                }
-            );
+            let outcome = wukong_scheduler::delete_job(&store, memory, id)
+                .await
+                .map_err(to_wukong_error)?;
+            println!("{}", schedule_rm_message(outcome));
         }
         ScheduleOp::Enable { id } => {
             let changed = store.set_enabled(id, true).await.map_err(to_wukong_error)?;
@@ -333,6 +329,17 @@ fn trigger_unavailable_message(job: Option<&Job>) -> &'static str {
     }
 }
 
+/// `schedule rm` 的訊息（issue-0017）。
+fn schedule_rm_message(outcome: DeleteJobOutcome) -> &'static str {
+    match outcome {
+        DeleteJobOutcome::NotFound => "找不到排程",
+        DeleteJobOutcome::Deleted => "已刪除排程",
+        DeleteJobOutcome::DeletedWhileHeld => {
+            "已刪除排程；排程正在執行，回合結束後才會清掉它的記憶與 session"
+        }
+    }
+}
+
 /// 手動 trigger 的 job lease；回合執行中會持續續租（issue-0013）。
 const MANUAL_TRIGGER_LEASE_SECS: i64 = 300;
 
@@ -354,7 +361,8 @@ async fn trigger_job(
         .await
         .map_err(to_wukong_error)?
     {
-        wukong_scheduler::ClaimedJobOutcome::Completed(output) => {
+        wukong_scheduler::ClaimedJobOutcome::Completed(output)
+        | wukong_scheduler::ClaimedJobOutcome::Deleted(output) => {
             println!("{}", output.message);
             if output.success {
                 Ok(())
@@ -598,6 +606,20 @@ mod tests {
             next_run_at: Some(1),
             last_run_at: None,
         }
+    }
+
+    // issue-0017 SCN-001／003／006：rm 依刪除結果回報；執行中的要說明何時清理。
+    #[test]
+    fn schedule_rm_reports_the_delete_outcome() {
+        assert_eq!(
+            schedule_rm_message(DeleteJobOutcome::NotFound),
+            "找不到排程"
+        );
+        assert_eq!(schedule_rm_message(DeleteJobOutcome::Deleted), "已刪除排程");
+        assert_eq!(
+            schedule_rm_message(DeleteJobOutcome::DeletedWhileHeld),
+            "已刪除排程；排程正在執行，回合結束後才會清掉它的記憶與 session"
+        );
     }
 
     // SCN-007：trigger 拿不到 job 時，依原因回報。

@@ -21,6 +21,8 @@ pub enum SchedulerError {
     UnknownJobKind(String),
     #[error("unknown scheduler run status: {0}")]
     UnknownRunStatus(String),
+    #[error("scheduler memory: {0}")]
+    Memory(#[from] wukong_memory::MemoryError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

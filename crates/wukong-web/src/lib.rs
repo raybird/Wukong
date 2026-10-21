@@ -487,9 +487,9 @@ where
         Ok(store) => store,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    match store.remove_job(&id).await {
-        Ok(true) => StatusCode::OK.into_response(),
-        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+    match wukong_scheduler::delete_job(&store, &state.memory, &id).await {
+        Ok(wukong_scheduler::DeleteJobOutcome::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        Ok(_) => StatusCode::OK.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -2625,6 +2625,74 @@ mod tests {
         assert!(messages
             .iter()
             .any(|m| m.role == "assistant" && m.content == "scoped answer"));
+    }
+
+    // issue-0017 SCN-002：從 Web 刪除排程，也清掉它的 scope，其他 scope 不動。
+    #[tokio::test]
+    async fn deleting_a_schedule_clears_its_scope() {
+        let app_state = state(None, &[]).await;
+        let store = wukong_scheduler::SchedulerStore::open(&app_state.db_url)
+            .await
+            .unwrap();
+        let job = store
+            .add_job(wukong_scheduler::NewJob {
+                name: "reminder".to_string(),
+                kind: wukong_scheduler::JobKind::Turn {
+                    scope: "user:tg-42".to_string(),
+                    prompt: "提醒我".to_string(),
+                },
+                cron: "0 9 * * *".to_string(),
+            })
+            .await
+            .unwrap();
+        let own = format!("agent:schedule-{}", job.id);
+        let memory = app_state.memory.clone();
+        for scope in [own.as_str(), "user:tg-42"] {
+            memory
+                .remember(wukong_memory::RememberInput {
+                    scope: scope.to_string(),
+                    session_id: None,
+                    items: vec![wukong_memory::MemoryItem {
+                        kind: wukong_memory::MemoryKind::Summary,
+                        text: "排程摘要".to_string(),
+                        importance: None,
+                        dedupe_key: None,
+                    }],
+                })
+                .await
+                .unwrap();
+            memory.set_agent_session(scope, "ses-1").await.unwrap();
+        }
+        let app = build_router(app_state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/schedules/{}", job.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(store.get_job(&job.id).await.unwrap().is_none());
+        let left = |scope: String| {
+            let memory = memory.clone();
+            async move {
+                let records = memory.records(Some(&scope), None, 100).await.unwrap();
+                (
+                    records.records.len(),
+                    memory.agent_session(&scope).await.unwrap(),
+                )
+            }
+        };
+        assert_eq!(left(own).await, (0, None));
+        assert_eq!(
+            left("user:tg-42".to_string()).await,
+            (1, Some("ses-1".to_string()))
+        );
     }
 
     #[tokio::test]
