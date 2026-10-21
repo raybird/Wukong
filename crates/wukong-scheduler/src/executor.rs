@@ -127,6 +127,9 @@ pub enum ClaimedJobOutcome {
     /// job still executed (output attached), but this worker did not own the
     /// finish, so it must not reschedule or announce success.
     LeaseLost(ExecutionOutput),
+    /// 2026-10-21（issue-0013）：要開始執行時 lease 已經不在這個 worker 手上——同一批
+    /// 取得的 job 排隊期間 lease 過期，被別人拿去執行了。沒有執行，也沒有 run 紀錄。
+    NotHeld,
 }
 
 /// Run one already-claimed `job` through its full lifecycle: record a run start,
@@ -145,6 +148,14 @@ pub async fn run_claimed_job<B: AiBackend + QuestionResponder + Sync>(
     lease_secs: i64,
 ) -> Result<ClaimedJobOutcome, SchedulerError> {
     let started_at = chrono::Utc::now().timestamp();
+    // 2026-10-21（issue-0013）：同一批取得的 job 排隊時只有正在跑的那個會續租。輪到這個
+    // job 時先續租一次，lease 已經被別人拿走，代表它在等待期間已經被執行過。
+    if !store
+        .renew_job_lease(&job.id, worker_id, started_at, lease_secs)
+        .await?
+    {
+        return Ok(ClaimedJobOutcome::NotHeld);
+    }
     let run_id = store.start_run(&job.id, started_at).await?;
     let output =
         execute_with_heartbeat(store, ctx, job, worker_id, lease_secs, run_id, started_at).await;
@@ -841,6 +852,48 @@ mod tests {
                 .unwrap()
                 > 1
         );
+    }
+
+    // SCN-008：排隊期間 lease 被別人拿走的 job，輪到時不執行、不留 run 紀錄。
+    #[tokio::test]
+    async fn queued_job_whose_lease_was_taken_is_skipped() {
+        let memory = open_memory().await;
+        let store = open_store().await;
+        let backend = MockBackend::new(vec![Ok("oracle"), Ok("不該執行")]);
+        let cfg = cfg("project:Base");
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &backend,
+            base_config: &cfg,
+            permission_policy: PermissionPolicy::Reject,
+        };
+        // lease 0 秒：worker-a 取得後立刻過期，worker-b 接著取得。
+        let job = claimed_turn(&store, 0).await;
+        let now = chrono::Utc::now().timestamp();
+        assert!(store
+            .claim_job(&job.id, now, "worker-b", 300)
+            .await
+            .unwrap()
+            .is_some());
+
+        let outcome = run_claimed_job(&store, &ctx, &job, "worker-a", 300)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, ClaimedJobOutcome::NotHeld);
+        assert!(backend.prompts.lock().unwrap().is_empty());
+        assert!(store
+            .recent_runs(Some(&job.id), 10)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    // SCN-001 的上限：daemon 預設 lease 300 秒，進度仍至少每 30 秒更新。
+    #[test]
+    fn heartbeat_is_capped_at_thirty_seconds() {
+        assert_eq!(heartbeat_every(300), std::time::Duration::from_secs(30));
+        assert_eq!(heartbeat_every(3), std::time::Duration::from_secs(1));
     }
 
     // SCN-001：執行中的 run 訊息顯示目前階段與已執行秒數，同一階段內也會更新。

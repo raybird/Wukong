@@ -265,6 +265,77 @@ mod tests {
         );
     }
 
+    /// 壓縮要跑 3.5 秒，比 2 秒的 lease 久。
+    struct SlowCompaction;
+
+    impl AiBackend for SlowCompaction {
+        async fn run(
+            &self,
+            _req: wukong_gateway::backend::AgentRequest,
+        ) -> Result<wukong_gateway::backend::AgentResponse, GatewayError> {
+            unreachable!("這支測試只會壓縮")
+        }
+
+        async fn compact_session(
+            &self,
+            session_id: &str,
+            _model: Option<&str>,
+        ) -> Result<wukong_gateway::backend::AgentResponse, GatewayError> {
+            tokio::time::sleep(Duration::from_millis(3500)).await;
+            Ok(wukong_gateway::backend::AgentResponse {
+                text: "ok".to_string(),
+                session_id: Some(session_id.to_string()),
+            })
+        }
+    }
+
+    // SCN-003：壓縮呼叫跑得比 lease 久時，也持續持有 lease，壓縮後照常取得 session。
+    #[tokio::test]
+    async fn lease_stays_held_during_a_long_compaction() {
+        let memory = open_memory().await;
+        // 先完成一個回合，turn_count 變成 1，達到下面的壓縮門檻。
+        memory
+            .acquire_agent_session_lease("project:T", "seed", 300)
+            .await
+            .unwrap()
+            .unwrap();
+        memory
+            .finish_agent_session_turn("project:T", "seed", Some("ses_1"))
+            .await
+            .unwrap()
+            .unwrap();
+        let cfg = GatewayConfig {
+            scope: "project:T".to_string(),
+            db_url: String::new(),
+            agent_command: vec![],
+            default_model: None,
+            planner_preferences: None,
+            thinking: true,
+            recall_top_k: 5,
+            stream: true,
+        };
+        let prepare = prepare_final_session_with_policy(
+            &memory,
+            &SlowCompaction,
+            &cfg,
+            SessionPolicy {
+                compact_every_turns: 1,
+                lease_secs: 2,
+            },
+        );
+        let intruder = async {
+            tokio::time::sleep(Duration::from_millis(3000)).await;
+            memory
+                .acquire_agent_session_lease("project:T", "other", 2)
+                .await
+                .unwrap()
+        };
+        let (prepared, stolen) = tokio::join!(prepare, intruder);
+
+        assert!(stolen.is_none(), "壓縮期間 lease 被拿走：{stolen:?}");
+        assert_eq!(prepared.unwrap().session_id.as_deref(), Some("ses_1"));
+    }
+
     // SCN-005：工作被中止（future 被丟掉）後就不再續租，lease 照原本的時間到期。
     #[tokio::test]
     async fn lease_expires_once_the_work_is_dropped() {

@@ -362,6 +362,10 @@ async fn trigger_job(
                 Err(to_wukong_error_string(output.message))
             }
         }
+        wukong_scheduler::ClaimedJobOutcome::NotHeld => {
+            println!("排程正在執行中");
+            Ok(())
+        }
         wukong_scheduler::ClaimedJobOutcome::LeaseLost(_) => Err(to_wukong_error_string(
             "排程 lease 已被其他 worker 接手".to_string(),
         )),

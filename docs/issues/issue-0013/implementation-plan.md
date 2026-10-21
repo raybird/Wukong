@@ -117,13 +117,41 @@
      - session 與 job 各有一個計時迴圈。兩者分屬不同 crate、續租對象不同，合併反而要新增跨 crate 的抽象，所以保留。
      - 進度與續租共用一個計時器。no-op。
 
+6. ✅ **審查修正**（PR #20 審查 `review-fa85833.md`，PASS，2026-10-21）
+   - **D-1 → SCN-008**：daemon 同一次掃描取得的多個 job 中，只有正在跑的那個會續租。審查者的 `rev13/batch-dup.sh` 實測，第二個 job 在排隊時被手動 trigger 跑完之後，daemon 又用舊的 Job 再跑一次（run #3）。使用者選本 PR 小修，新增 SCN-008（核准 commit `a5a0340`）。
+     - 紅燈：`queued_job_whose_lease_was_taken_is_skipped` 在 `assert_eq!(outcome, NotHeld)` 失敗，實際是 `LeaseLost(… "不該執行")`，代表回合真的被執行了。
+     - 實作：`run_claimed_job` 在 `start_run` 前先呼叫一次 `renew_job_lease`，回 false 就回傳新的 `ClaimedJobOutcome::NotHeld`。daemon 遇到時印 warning 並跳過；CLI 遇到時印「排程正在執行中」。
+     - 真實行程複驗：用同一支 `batch-dup.sh`，輸出放在 `repro13/batch-after`。run 只剩 #1 first（daemon）和 #2 second（trigger），daemon 印出 `skipped: lease was taken by another worker while queued`。修正前那 9 行 `scheduler_lease_renew_lost` 也不再出現。
+   - **D-2 → TBD-5**：「規劃中」也涵蓋取得 session lease 與壓縮。使用者選只在文件註明，已寫進 `AGENTS.md` 與 `docs/cli-reference.md`。
+   - **SHOULD FIX 1（串接沒有守門測試）**：PR #20 原本說「環境變數是全行程共用，無法在測試中驗證串接」，這個理由不成立。`tests/` 底下每個檔案是獨立的 test binary。新增兩支測試：
+     - `crates/wukong-runtime/tests/session_lease_renewal.rs`：整個 binary 只有一支測試，`run_turn` 跑一棒 3.5 秒，lease 是 2 秒。
+     - `session.rs` 的 `lease_stays_held_during_a_long_compaction`：直接傳入 `SessionPolicy`。
+
+     這兩支在 HEAD 是綠的，所以改用變異實驗取得紅燈。拿掉 `run_turn` 的包裝，或拿掉壓縮的包裝，對應的測試都會 FAILED。
+
+     我第一版的壓縮測試沒有先完成一個回合，`turn_count` 是 0，根本不會壓縮，測試是假的綠燈；補上前置回合之後，才真的測到壓縮。
+   - **SHOULD FIX 2（30 秒上限沒有測試）**：新增 `heartbeat_is_capped_at_thirty_seconds`。拿掉 `.min(30_000)` 時這支測試 FAILED。
+   - NIT 未處理：
+     - `next_run_at > 1` 這個斷言永遠成立。
+     - lease 設 1 秒時，因為時間以秒截斷，續租可能失效；實務上不會設這麼短。
+     - 結束後清空 role channel 那段在現行流程觸發不到。
+
+     都不影響行為。
+   - 影響分析：本次改動的 `run_claimed_job` 為 HIGH（同步驟 3）。改動只是在開始前多一次續租：lease 還在自己手上時行為不變，由 SCN-006 鎖住。
+   - 全量檢查（2026-10-21）：
+     - fmt、clippy 通過。
+     - `cargo test --workspace --locked --no-fail-fast`：passed=655 failed=0 ignored=12，比步驟 5 多 4 支，分別是 SCN-008、30 秒上限、壓縮續租、`run_turn` 整合測試。
+     - 在這之前，跑了兩次不帶 `--no-fail-fast` 的全量測試，`wukong-gateway` 的 `local_process::tests::invalid_listener_releases_child` 兩次都失敗（`child still alive`），cargo 因此停在那個 crate，後面的 crate 沒跑。那支測試只等子行程結束 1 秒，當時系統 load 約 5。單獨重跑 3 次、用篩選條件跑 3 次、`--no-fail-fast` 全量跑 1 次，都通過。本次沒有改到 gateway，所以判定為既有的時序敏感測試，不在本次範圍。
+   - `gitnexus_detect_changes`（risk=high）：正式程式碼改動只有 `run_claimed_job` 與 `run_scan`；CLI 那處落在 `run_schedule_op` 裡，報告標成相鄰的 `describe_job_kind`。其他列出的都是文件段落與測試模組。
+
 ## 驗收對照
 | Scenario | 層級 | 證據 |
 |---|---|---|
 | SCN-001 | 單元（scheduler，假 backend） | 步驟 2／3 |
 | SCN-002 | 單元（scheduler，假 backend） | 步驟 2／3 |
-| SCN-003 | 單元（runtime）＋重現腳本 | 步驟 1、2／3、4 |
+| SCN-003 | 單元（runtime helper、壓縮、`run_turn` 整合測試）＋重現腳本 | 步驟 1、2／3、4、6 |
 | SCN-004 | 單元（scheduler）＋重現腳本 | 步驟 1、2／3、4 |
 | SCN-005 | 強制終止行程的腳本 | 步驟 4 |
 | SCN-006 | 單元（characterization） | 步驟 2／3 |
 | SCN-007 | 單元（scheduler store、CLI） | 步驟 2／3 |
+| SCN-008 | 單元（scheduler）＋審查者的 `batch-dup.sh` | 步驟 6 |

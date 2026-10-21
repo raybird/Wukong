@@ -221,6 +221,13 @@ async fn run_scan(
                 .map_err(|e| e.to_string())?
             {
                 ClaimedJobOutcome::Completed(output) => output,
+                ClaimedJobOutcome::NotHeld => {
+                    eprintln!(
+                        "warning: job {} skipped: lease was taken by another worker while queued",
+                        job.id
+                    );
+                    continue;
+                }
                 ClaimedJobOutcome::LeaseLost(_) => {
                     eprintln!(
                         "warning: job {} lease was taken by another worker before completion",
