@@ -357,26 +357,35 @@ async fn trigger_job(
         base_config: cfg,
         permission_policy: PermissionPolicy::from_env(),
     };
-    match wukong_scheduler::run_claimed_job(store, &ctx, job, worker_id, MANUAL_TRIGGER_LEASE_SECS)
-        .await
-        .map_err(to_wukong_error)?
-    {
+    let outcome =
+        wukong_scheduler::run_claimed_job(store, &ctx, job, worker_id, MANUAL_TRIGGER_LEASE_SECS)
+            .await
+            .map_err(to_wukong_error)?;
+    let (stdout, error) = trigger_report(outcome);
+    if let Some(stdout) = stdout {
+        println!("{stdout}");
+    }
+    match error {
+        Some(error) => Err(to_wukong_error_string(error)),
+        None => Ok(()),
+    }
+}
+
+/// 手動 trigger 的結果：要印的訊息，以及以錯誤結束時的錯誤訊息。執行中被刪除的回合
+/// 照常回報結果（issue-0017）。
+fn trigger_report(
+    outcome: wukong_scheduler::ClaimedJobOutcome,
+) -> (Option<String>, Option<String>) {
+    match outcome {
         wukong_scheduler::ClaimedJobOutcome::Completed(output)
         | wukong_scheduler::ClaimedJobOutcome::Deleted(output) => {
-            println!("{}", output.message);
-            if output.success {
-                Ok(())
-            } else {
-                Err(to_wukong_error_string(output.message))
-            }
+            let error = (!output.success).then(|| output.message.clone());
+            (Some(output.message), error)
         }
-        wukong_scheduler::ClaimedJobOutcome::NotHeld => {
-            println!("排程正在執行中");
-            Ok(())
+        wukong_scheduler::ClaimedJobOutcome::NotHeld => (Some("排程正在執行中".to_string()), None),
+        wukong_scheduler::ClaimedJobOutcome::LeaseLost(_) => {
+            (None, Some("排程 lease 已被其他 worker 接手".to_string()))
         }
-        wukong_scheduler::ClaimedJobOutcome::LeaseLost(_) => Err(to_wukong_error_string(
-            "排程 lease 已被其他 worker 接手".to_string(),
-        )),
     }
 }
 
@@ -619,6 +628,28 @@ mod tests {
         assert_eq!(
             schedule_rm_message(DeleteJobOutcome::DeletedWhileHeld),
             "已刪除排程；排程正在執行，回合結束後才會清掉它的記憶與 session"
+        );
+    }
+
+    // issue-0017 SCN-004：手動 trigger 的回合在執行中被刪除，照常印出結果，依結果決定成敗。
+    #[test]
+    fn trigger_reports_a_turn_deleted_while_running() {
+        use wukong_scheduler::{ClaimedJobOutcome, ExecutionOutput};
+        let output = |success: bool| ExecutionOutput {
+            success,
+            message: "提醒完成".to_string(),
+        };
+        assert_eq!(
+            trigger_report(ClaimedJobOutcome::Deleted(output(true))),
+            (Some("提醒完成".to_string()), None)
+        );
+        assert_eq!(
+            trigger_report(ClaimedJobOutcome::Deleted(output(false))),
+            (Some("提醒完成".to_string()), Some("提醒完成".to_string()))
+        );
+        assert_eq!(
+            trigger_report(ClaimedJobOutcome::LeaseLost(output(true))),
+            (None, Some("排程 lease 已被其他 worker 接手".to_string()))
         );
     }
 

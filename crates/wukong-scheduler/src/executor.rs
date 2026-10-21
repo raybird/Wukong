@@ -147,8 +147,8 @@ pub enum DeleteJobOutcome {
 }
 
 /// 刪除排程，並清掉 Turn 排程的 scope（`agent:schedule-<id>`）的記憶與 session 指向。
-/// CLI 的 `schedule rm` 與 Web 的刪除共用。執行中的回合結束時要求 session 狀態還在，
-/// 所以被持有的排程只刪 job，scope 由 `run_claimed_job` 事後清理。
+/// CLI 的 `schedule rm` 與 Web 的刪除共用。執行中的回合在結束時才寫入記憶、重建 session
+/// 狀態，提早清也會被寫回去，所以被持有的排程只刪 job，scope 由 `run_claimed_job` 事後清理。
 pub async fn delete_job(
     store: &SchedulerStore,
     memory: &Memory,
@@ -1082,6 +1082,8 @@ mod tests {
         };
         // lease 0 秒：worker-a 取得後立刻過期，worker-b 接著取得。
         let job = claimed_turn(&store, 0).await;
+        let own = scheduled_turn_scope(&job.id);
+        seed_scope(&memory, &own).await;
         let now = chrono::Utc::now().timestamp();
         assert!(store
             .claim_job(&job.id, now, "worker-b", 300)
@@ -1100,6 +1102,11 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+        // issue-0017：排程還在（只是被別人取得），不能清它的 scope。
+        assert_eq!(
+            scope_left(&memory, &own).await,
+            (1, Some(format!("ses-{own}")))
+        );
     }
 
     // SCN-001 的上限：daemon 預設 lease 300 秒，進度仍至少每 30 秒更新。
