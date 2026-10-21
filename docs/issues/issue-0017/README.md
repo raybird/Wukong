@@ -156,11 +156,14 @@ Feature: 刪除排程時清掉它的 scope
 | 2026-10-21 | 使用者核准 SCN-001～006 |
 | 2026-10-21 | 實作完成；真實行程對照 main：執行中自我刪除的排程，回合成功、scope 清空、照常嘗試送通知 |
 | 2026-10-21 | PR #21 審查 PASS（`review-94a5682.md`）。依 SHOULD FIX 更正延後清理的理由，並補上兩支守門測試；使用者對 D-1（改成被持有時也先清一次）選維持現狀 |
+| 2026-10-21 | 增量審查（`review-fe5f0dd.md`）PASS，無 SHOULD FIX |
+| 2026-10-21 | PR #21 以 `51a1629` squash 合併為 main `1fe81aa`（07:33Z），合併內容與分支最新一致 |
+| 2026-10-21 | 結案 |
 
 ---
 **建立日期**: 2026-10-20
 **分級**: Medium — 跨 wukong-memory、wukong-scheduler、wukong-cli、wukong-web、wukong-schedulerd，沿既有相依方向，不改 schema
 **風險**: High
-**狀態**: 實作中
+**狀態**: 已完成
 
 GitHub：https://github.com/raybird/Wukong/issues/17
