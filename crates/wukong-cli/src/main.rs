@@ -292,11 +292,12 @@ async fn run_schedule_op(
         ScheduleOp::Trigger { id } => {
             let worker_id = format!("manual-{}", std::process::id());
             let Some(job) = store
-                .claim_job(id, now_unix(), &worker_id, 300)
+                .claim_job(id, now_unix(), &worker_id, MANUAL_TRIGGER_LEASE_SECS)
                 .await
                 .map_err(to_wukong_error)?
             else {
-                println!("找不到排程");
+                let job = store.get_job(id).await.map_err(to_wukong_error)?;
+                println!("{}", trigger_unavailable_message(job.as_ref()));
                 return Ok(());
             };
             trigger_job(&store, memory, backend, cfg, &job, &worker_id).await?;
@@ -322,6 +323,19 @@ async fn run_schedule_op(
     Ok(())
 }
 
+/// trigger 取不到 job 時的原因（issue-0013）。
+fn trigger_unavailable_message(job: Option<&Job>) -> &'static str {
+    match job {
+        None => "找不到排程",
+        Some(job) if !job.enabled => "排程已停用",
+        // 存在且啟用卻取不到，只剩另一個 worker 還持有 lease。
+        Some(_) => "排程正在執行中",
+    }
+}
+
+/// 手動 trigger 的 job lease；回合執行中會持續續租（issue-0013）。
+const MANUAL_TRIGGER_LEASE_SECS: i64 = 300;
+
 async fn trigger_job(
     store: &SchedulerStore,
     memory: &Memory,
@@ -336,7 +350,7 @@ async fn trigger_job(
         base_config: cfg,
         permission_policy: PermissionPolicy::from_env(),
     };
-    match wukong_scheduler::run_claimed_job(store, &ctx, job, worker_id)
+    match wukong_scheduler::run_claimed_job(store, &ctx, job, worker_id, MANUAL_TRIGGER_LEASE_SECS)
         .await
         .map_err(to_wukong_error)?
     {
@@ -347,6 +361,10 @@ async fn trigger_job(
             } else {
                 Err(to_wukong_error_string(output.message))
             }
+        }
+        wukong_scheduler::ClaimedJobOutcome::NotHeld => {
+            println!("排程正在執行中");
+            Ok(())
         }
         wukong_scheduler::ClaimedJobOutcome::LeaseLost(_) => Err(to_wukong_error_string(
             "排程 lease 已被其他 worker 接手".to_string(),
@@ -561,4 +579,35 @@ async fn run_memory_op(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job(enabled: bool) -> Job {
+        Job {
+            id: "job-1".to_string(),
+            name: "job".to_string(),
+            kind: JobKind::Turn {
+                scope: "user:tg-42".to_string(),
+                prompt: "do it".to_string(),
+            },
+            cron: "* * * * *".to_string(),
+            enabled,
+            next_run_at: Some(1),
+            last_run_at: None,
+        }
+    }
+
+    // SCN-007：trigger 拿不到 job 時，依原因回報。
+    #[test]
+    fn trigger_reports_why_the_job_was_not_claimed() {
+        assert_eq!(trigger_unavailable_message(None), "找不到排程");
+        assert_eq!(trigger_unavailable_message(Some(&job(false))), "排程已停用");
+        assert_eq!(
+            trigger_unavailable_message(Some(&job(true))),
+            "排程正在執行中"
+        );
+    }
 }

@@ -6,7 +6,7 @@ use wukong_gateway::stream::{permission_id, QuestionRequest, PERMISSION_ALLOW_ON
 use wukong_gateway::{GatewayError, StreamEvent};
 use wukong_memory::Memory;
 use wukong_runtime::maintenance::{memory_consolidate, memory_prune, memory_snapshot};
-use wukong_runtime::WukongError;
+use wukong_runtime::{Role, WukongError};
 
 const SCHEDULED_TURN_AUTONOMY_HINT: &str = "\n\n[無人值守排程]\n這是由 scheduler 觸發的無人值守任務。不得呼叫 question 或要求使用者確認；如果流程、技能或工具規則需要使用者選擇，請直接自動採用推薦選項，並繼續完成任務。";
 const QUESTION_NOTE_HEADER: &str = "[無人值守權限]";
@@ -97,7 +97,16 @@ pub async fn execute_job<B: AiBackend + QuestionResponder + Sync>(
     ctx: &ExecutionContext<'_, B>,
     job: &Job,
 ) -> ExecutionOutput {
-    match execute_job_inner(ctx, job).await {
+    execute_job_observed(ctx, job, &mut |_| {}).await
+}
+
+/// 同 [`execute_job`]，另外在 Turn 回合每一棒開始時呼叫 `on_role`。
+async fn execute_job_observed<B: AiBackend + QuestionResponder + Sync>(
+    ctx: &ExecutionContext<'_, B>,
+    job: &Job,
+    on_role: &mut dyn FnMut(Role),
+) -> ExecutionOutput {
+    match execute_job_inner(ctx, job, on_role).await {
         Ok(message) => ExecutionOutput {
             success: true,
             message,
@@ -118,6 +127,9 @@ pub enum ClaimedJobOutcome {
     /// job still executed (output attached), but this worker did not own the
     /// finish, so it must not reschedule or announce success.
     LeaseLost(ExecutionOutput),
+    /// 2026-10-21（issue-0013）：要開始執行時 lease 已經不在這個 worker 手上——同一批
+    /// 取得的 job 排隊期間 lease 過期，被別人拿去執行了。沒有執行，也沒有 run 紀錄。
+    NotHeld,
 }
 
 /// Run one already-claimed `job` through its full lifecycle: record a run start,
@@ -133,10 +145,20 @@ pub async fn run_claimed_job<B: AiBackend + QuestionResponder + Sync>(
     ctx: &ExecutionContext<'_, B>,
     job: &Job,
     worker_id: &str,
+    lease_secs: i64,
 ) -> Result<ClaimedJobOutcome, SchedulerError> {
     let started_at = chrono::Utc::now().timestamp();
+    // 2026-10-21（issue-0013）：同一批取得的 job 排隊時只有正在跑的那個會續租。輪到這個
+    // job 時先續租一次，lease 已經被別人拿走，代表它在等待期間已經被執行過。
+    if !store
+        .renew_job_lease(&job.id, worker_id, started_at, lease_secs)
+        .await?
+    {
+        return Ok(ClaimedJobOutcome::NotHeld);
+    }
     let run_id = store.start_run(&job.id, started_at).await?;
-    let output = execute_job(ctx, job).await;
+    let output =
+        execute_with_heartbeat(store, ctx, job, worker_id, lease_secs, run_id, started_at).await;
     let finished_at = chrono::Utc::now().timestamp();
     let status = if output.success {
         RunStatus::Success
@@ -156,9 +178,120 @@ pub async fn run_claimed_job<B: AiBackend + QuestionResponder + Sync>(
     }
 }
 
+/// 排程 run 目前的階段（issue-0013），寫進執行中的 run 訊息，以及失敗訊息的開頭。
+enum Phase {
+    Maintenance,
+    Planning,
+    Step(usize, Role),
+}
+
+impl Phase {
+    fn initial(job: &Job) -> Self {
+        match job.kind {
+            JobKind::Turn { .. } => Phase::Planning,
+            JobKind::Maintenance { .. } => Phase::Maintenance,
+        }
+    }
+
+    fn advance(&mut self, role: Role) {
+        let next = match self {
+            Phase::Step(k, _) => *k + 1,
+            _ => 1,
+        };
+        *self = Phase::Step(next, role);
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Phase::Maintenance => "維護作業".to_string(),
+            Phase::Planning => "規劃中".to_string(),
+            Phase::Step(k, role) => format!("第 {k} 棒 {}", role.name()),
+        }
+    }
+
+    /// 角色名稱是英文，後面接「失敗」要隔一個空白。
+    fn failed(&self) -> String {
+        match self {
+            Phase::Step(..) => format!("{} 失敗", self.label()),
+            _ => format!("{}失敗", self.label()),
+        }
+    }
+}
+
+/// 進度與 job lease 的更新間隔：lease 的三分之一，最長 30 秒。
+fn heartbeat_every(lease_secs: i64) -> std::time::Duration {
+    std::time::Duration::from_millis((lease_secs.max(1) as u64 * 1000 / 3).min(30_000))
+}
+
+/// 2026-10-21（issue-0013）：執行 job，期間定期續租 job lease，並把目前階段與已執行
+/// 秒數寫進 run 訊息；換階段時立刻寫。續租與執行在同一個 task，行程中止就不再續租。
+/// Turn 回合失敗時，訊息開頭加上失敗的階段。
+async fn execute_with_heartbeat<B: AiBackend + QuestionResponder + Sync>(
+    store: &SchedulerStore,
+    ctx: &ExecutionContext<'_, B>,
+    job: &Job,
+    worker_id: &str,
+    lease_secs: i64,
+    run_id: i64,
+    started_at: i64,
+) -> ExecutionOutput {
+    let elapsed = || chrono::Utc::now().timestamp() - started_at;
+    let (tx, mut roles) = tokio::sync::mpsc::unbounded_channel();
+    let mut on_role = move |role| {
+        let _ = tx.send(role);
+    };
+    let work = execute_job_observed(ctx, job, &mut on_role);
+    tokio::pin!(work);
+
+    let mut phase = Phase::initial(job);
+    let progress = |phase: &Phase| format!("進行中：{}，已執行 {} 秒", phase.label(), elapsed());
+    let report = |message: String| async move {
+        if let Err(err) = store.update_running_message(run_id, &message).await {
+            eprintln!("scheduler_progress_write_failed run={run_id}: {err}");
+        }
+    };
+    report(progress(&phase)).await;
+
+    let every = heartbeat_every(lease_secs);
+    let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut output = loop {
+        tokio::select! {
+            output = &mut work => break output,
+            Some(role) = roles.recv() => {
+                phase.advance(role);
+                report(progress(&phase)).await;
+            }
+            _ = ticker.tick() => {
+                let now = chrono::Utc::now().timestamp();
+                match store.renew_job_lease(&job.id, worker_id, now, lease_secs).await {
+                    Ok(true) => {}
+                    Ok(false) => eprintln!("scheduler_lease_renew_lost job={} worker={worker_id}", job.id),
+                    Err(err) => eprintln!("scheduler_lease_renew_failed job={}: {err}", job.id),
+                }
+                report(progress(&phase)).await;
+            }
+        }
+    };
+    // 最後一棒可能剛開始就失敗，那次 on_role 還留在 channel 裡。
+    while let Ok(role) = roles.try_recv() {
+        phase.advance(role);
+    }
+    if !output.success && !matches!(phase, Phase::Maintenance) {
+        output.message = format!(
+            "{}，已執行 {} 秒：{}",
+            phase.failed(),
+            elapsed(),
+            output.message
+        );
+    }
+    output
+}
+
 async fn execute_job_inner<B: AiBackend + QuestionResponder + Sync>(
     ctx: &ExecutionContext<'_, B>,
     job: &Job,
+    on_role: &mut dyn FnMut(Role),
 ) -> Result<String, WukongError> {
     match &job.kind {
         // job 的 scope 是擁有者，回送與聊天紀錄用它；回合本身在排程自己的 scope 執行。
@@ -166,7 +299,7 @@ async fn execute_job_inner<B: AiBackend + QuestionResponder + Sync>(
             let mut cfg = ctx.base_config.clone();
             cfg.scope = scheduled_turn_scope(&job.id);
             let prompt = format!("{prompt}{SCHEDULED_TURN_AUTONOMY_HINT}");
-            run_unattended_turn(ctx, &cfg, &prompt).await
+            run_unattended_turn(ctx, &cfg, &prompt, on_role).await
         }
         JobKind::Maintenance { scope, task } => match task {
             MaintenanceTask::Snapshot => memory_snapshot(ctx.memory, scope.as_deref()).await,
@@ -194,6 +327,7 @@ async fn run_unattended_turn<B: AiBackend + QuestionResponder + Sync>(
     ctx: &ExecutionContext<'_, B>,
     cfg: &GatewayConfig,
     prompt: &str,
+    on_role: &mut dyn FnMut(Role),
 ) -> Result<String, WukongError> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let mut on_event = |event: StreamEvent| {
@@ -201,15 +335,8 @@ async fn run_unattended_turn<B: AiBackend + QuestionResponder + Sync>(
             let _ = tx.send(request);
         }
     };
-    let mut on_role = |_| {};
-    let turn = wukong_runtime::run_turn(
-        ctx.memory,
-        ctx.backend,
-        cfg,
-        prompt,
-        &mut on_event,
-        &mut on_role,
-    );
+    let turn =
+        wukong_runtime::run_turn(ctx.memory, ctx.backend, cfg, prompt, &mut on_event, on_role);
     tokio::pin!(turn);
 
     let mut notes: Vec<String> = Vec::new();
@@ -589,6 +716,336 @@ mod tests {
                 stderr: "permission_reply 連線失敗".to_string(),
             })
         }
+    }
+
+    /// 每次呼叫都先睡 `delay` 再照劇本回覆，模擬跑得比 lease 久的回合。
+    struct SlowBackend {
+        delay: std::time::Duration,
+        replies: Mutex<VecDeque<Result<String, GatewayError>>>,
+    }
+
+    impl SlowBackend {
+        fn new(delay_ms: u64, replies: Vec<Result<&str, GatewayError>>) -> Self {
+            Self {
+                delay: std::time::Duration::from_millis(delay_ms),
+                replies: Mutex::new(replies.into_iter().map(|r| r.map(str::to_string)).collect()),
+            }
+        }
+    }
+
+    impl AiBackend for SlowBackend {
+        async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+            tokio::time::sleep(self.delay).await;
+            let reply = self
+                .replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Ok(String::new()))?;
+            Ok(AgentResponse {
+                text: reply,
+                session_id: Some("ses_slow".to_string()),
+            })
+        }
+    }
+
+    impl QuestionResponder for SlowBackend {
+        async fn allow_permission_once(&self, _: &str, _: &str) -> Result<(), GatewayError> {
+            unreachable!("這個 backend 不會送出詢問")
+        }
+
+        async fn reject_question(&self, _: &str, _: &str) -> Result<(), GatewayError> {
+            unreachable!("這個 backend 不會送出詢問")
+        }
+    }
+
+    fn timed_out() -> GatewayError {
+        GatewayError::AgentFailed {
+            code: None,
+            stderr: "本機 OpenCode 回合逾時，已中止程序。".to_string(),
+        }
+    }
+
+    async fn open_store() -> SchedulerStore {
+        let file = NamedTempFile::new().unwrap();
+        let url = format!("sqlite://{}", file.path().display());
+        std::mem::forget(file);
+        SchedulerStore::open(&url).await.unwrap()
+    }
+
+    /// 新增一個 Turn 排程，並以 worker-a 取得 `lease_secs` 秒的 job lease。
+    async fn claimed_turn(store: &SchedulerStore, lease_secs: i64) -> Job {
+        let job = store
+            .add_job(crate::job::NewJob {
+                name: "long".to_string(),
+                kind: JobKind::Turn {
+                    scope: "user:tg-42".to_string(),
+                    prompt: "長任務".to_string(),
+                },
+                cron: "0 9 * * *".to_string(),
+            })
+            .await
+            .unwrap();
+        store
+            .claim_job(
+                &job.id,
+                chrono::Utc::now().timestamp(),
+                "worker-a",
+                lease_secs,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    async fn only_run(store: &SchedulerStore, job: &Job) -> crate::store::JobRun {
+        let mut runs = store.recent_runs(Some(&job.id), 10).await.unwrap();
+        assert_eq!(runs.len(), 1);
+        runs.remove(0)
+    }
+
+    fn elapsed_secs(message: &str) -> i64 {
+        let rest = message
+            .split("已執行 ")
+            .nth(1)
+            .unwrap_or_else(|| panic!("訊息沒有已執行秒數：{message}"));
+        rest.split(' ').next().unwrap().parse().unwrap()
+    }
+
+    // SCN-004：回合跑得比 job lease 久，執行中別的 worker 拿不到 job；原回合正常完成。
+    #[tokio::test]
+    async fn turn_longer_than_job_lease_keeps_the_job_claimed() {
+        let memory = open_memory().await;
+        let store = open_store().await;
+        let backend = SlowBackend::new(1600, vec![Ok("oracle"), Ok("完成")]);
+        let cfg = cfg("project:Base");
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &backend,
+            base_config: &cfg,
+            permission_policy: PermissionPolicy::Reject,
+        };
+        let job = claimed_turn(&store, 2).await;
+
+        let intruder = async {
+            tokio::time::sleep(std::time::Duration::from_millis(2600)).await;
+            store
+                .claim_job(&job.id, chrono::Utc::now().timestamp(), "worker-b", 300)
+                .await
+                .unwrap()
+        };
+        let (outcome, stolen) =
+            tokio::join!(run_claimed_job(&store, &ctx, &job, "worker-a", 2), intruder);
+
+        assert!(stolen.is_none(), "回合執行中 job 被 worker-b 取得");
+        match outcome.unwrap() {
+            ClaimedJobOutcome::Completed(out) => assert!(out.success, "{}", out.message),
+            other => panic!("原回合應正常完成：{other:?}"),
+        }
+        assert!(
+            store
+                .get_job(&job.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .next_run_at
+                .unwrap()
+                > 1
+        );
+    }
+
+    // SCN-008：排隊期間 lease 被別人拿走的 job，輪到時不執行、不留 run 紀錄。
+    #[tokio::test]
+    async fn queued_job_whose_lease_was_taken_is_skipped() {
+        let memory = open_memory().await;
+        let store = open_store().await;
+        let backend = MockBackend::new(vec![Ok("oracle"), Ok("不該執行")]);
+        let cfg = cfg("project:Base");
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &backend,
+            base_config: &cfg,
+            permission_policy: PermissionPolicy::Reject,
+        };
+        // lease 0 秒：worker-a 取得後立刻過期，worker-b 接著取得。
+        let job = claimed_turn(&store, 0).await;
+        let now = chrono::Utc::now().timestamp();
+        assert!(store
+            .claim_job(&job.id, now, "worker-b", 300)
+            .await
+            .unwrap()
+            .is_some());
+
+        let outcome = run_claimed_job(&store, &ctx, &job, "worker-a", 300)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, ClaimedJobOutcome::NotHeld);
+        assert!(backend.prompts.lock().unwrap().is_empty());
+        assert!(store
+            .recent_runs(Some(&job.id), 10)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    // SCN-001 的上限：daemon 預設 lease 300 秒，進度仍至少每 30 秒更新。
+    #[test]
+    fn heartbeat_is_capped_at_thirty_seconds() {
+        assert_eq!(heartbeat_every(300), std::time::Duration::from_secs(30));
+        assert_eq!(heartbeat_every(3), std::time::Duration::from_secs(1));
+    }
+
+    // SCN-001：執行中的 run 訊息顯示目前階段與已執行秒數，同一階段內也會更新。
+    #[tokio::test]
+    async fn running_run_shows_phase_and_elapsed_seconds() {
+        let memory = open_memory().await;
+        let store = open_store().await;
+        // planner 與唯一一棒各 1.6 秒；lease 3 秒時每 1 秒更新一次進度。
+        let backend = SlowBackend::new(1600, vec![Ok("oracle"), Ok("完成")]);
+        let cfg = cfg("project:Base");
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &backend,
+            base_config: &cfg,
+            permission_policy: PermissionPolicy::Reject,
+        };
+        let job = claimed_turn(&store, 3).await;
+
+        let probe = async {
+            let start = tokio::time::Instant::now();
+            let mut messages = Vec::new();
+            for at in [300u64, 1300, 2500] {
+                tokio::time::sleep_until(start + std::time::Duration::from_millis(at)).await;
+                let run = only_run(&store, &job).await;
+                assert_eq!(run.status, RunStatus::Running);
+                messages.push(run.message);
+            }
+            messages
+        };
+        let (outcome, messages) =
+            tokio::join!(run_claimed_job(&store, &ctx, &job, "worker-a", 3), probe);
+        outcome.unwrap();
+
+        assert!(
+            messages[0].starts_with("進行中：規劃中，已執行 "),
+            "{messages:?}"
+        );
+        assert!(
+            messages[1].starts_with("進行中：規劃中，已執行 "),
+            "{messages:?}"
+        );
+        assert!(
+            elapsed_secs(&messages[1]) >= 1,
+            "同一階段內沒有更新：{messages:?}"
+        );
+        assert!(
+            messages[2].starts_with("進行中：第 1 棒 oracle，已執行 "),
+            "{messages:?}"
+        );
+    }
+
+    // SCN-002：失敗時訊息開頭標出失敗的階段與已執行秒數，後面保留原錯誤。
+    #[tokio::test]
+    async fn failure_message_names_the_planning_phase() {
+        let memory = open_memory().await;
+        let store = open_store().await;
+        let backend = SlowBackend::new(0, vec![Err(timed_out())]);
+        let cfg = cfg("project:Base");
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &backend,
+            base_config: &cfg,
+            permission_policy: PermissionPolicy::Reject,
+        };
+        let job = claimed_turn(&store, 300).await;
+
+        run_claimed_job(&store, &ctx, &job, "worker-a", 300)
+            .await
+            .unwrap();
+
+        let run = only_run(&store, &job).await;
+        assert_eq!(run.status, RunStatus::Failure);
+        assert!(
+            run.message.starts_with("規劃中失敗，已執行 "),
+            "{}",
+            run.message
+        );
+        assert!(
+            run.message.contains("本機 OpenCode 回合逾時，已中止程序。"),
+            "{}",
+            run.message
+        );
+    }
+
+    #[tokio::test]
+    async fn failure_message_names_the_failing_step() {
+        let memory = open_memory().await;
+        let store = open_store().await;
+        let backend = SlowBackend::new(
+            0,
+            vec![Ok("explorer, fixer"), Ok("看過了"), Err(timed_out())],
+        );
+        let cfg = cfg("project:Base");
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &backend,
+            base_config: &cfg,
+            permission_policy: PermissionPolicy::Reject,
+        };
+        let job = claimed_turn(&store, 300).await;
+
+        run_claimed_job(&store, &ctx, &job, "worker-a", 300)
+            .await
+            .unwrap();
+
+        let run = only_run(&store, &job).await;
+        assert_eq!(run.status, RunStatus::Failure);
+        assert!(
+            run.message.starts_with("第 2 棒 fixer 失敗，已執行 "),
+            "{}",
+            run.message
+        );
+        assert!(
+            run.message.contains("本機 OpenCode 回合逾時，已中止程序。"),
+            "{}",
+            run.message
+        );
+    }
+
+    // SCN-006：在 lease 時間內結束的回合，run 訊息仍是最終輸出，lease 也照常釋放。
+    #[tokio::test]
+    async fn short_turn_result_and_leases_are_unchanged() {
+        let memory = open_memory().await;
+        let store = open_store().await;
+        let backend = SlowBackend::new(0, vec![Ok("oracle"), Ok("完成")]);
+        let cfg = cfg("project:Base");
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &backend,
+            base_config: &cfg,
+            permission_policy: PermissionPolicy::Reject,
+        };
+        let job = claimed_turn(&store, 300).await;
+
+        run_claimed_job(&store, &ctx, &job, "worker-a", 300)
+            .await
+            .unwrap();
+
+        let run = only_run(&store, &job).await;
+        assert_eq!(run.status, RunStatus::Success);
+        assert_eq!(run.message, "完成");
+        let now = chrono::Utc::now().timestamp();
+        assert!(store
+            .claim_job(&job.id, now, "worker-b", 300)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(memory
+            .acquire_agent_session_lease(&scheduled_turn_scope(&job.id), "other", 300)
+            .await
+            .unwrap()
+            .is_some());
     }
 
     /// 回覆送不出去時不能默默繼續等：那只是把 1200 秒的等待換個位置發生。

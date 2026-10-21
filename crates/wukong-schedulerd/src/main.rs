@@ -215,19 +215,27 @@ async fn run_scan(
             base_config: cfg,
             permission_policy: PermissionPolicy::from_env(),
         };
-        let output = match wukong_scheduler::run_claimed_job(store, &ctx, &job, worker_id)
-            .await
-            .map_err(|e| e.to_string())?
-        {
-            ClaimedJobOutcome::Completed(output) => output,
-            ClaimedJobOutcome::LeaseLost(_) => {
-                eprintln!(
-                    "warning: job {} lease was taken by another worker before completion",
-                    job.id
-                );
-                continue;
-            }
-        };
+        let output =
+            match wukong_scheduler::run_claimed_job(store, &ctx, &job, worker_id, lease_secs)
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                ClaimedJobOutcome::Completed(output) => output,
+                ClaimedJobOutcome::NotHeld => {
+                    eprintln!(
+                        "warning: job {} skipped: lease was taken by another worker while queued",
+                        job.id
+                    );
+                    continue;
+                }
+                ClaimedJobOutcome::LeaseLost(_) => {
+                    eprintln!(
+                        "warning: job {} lease was taken by another worker before completion",
+                        job.id
+                    );
+                    continue;
+                }
+            };
         if output.success {
             eprintln!("job {} succeeded", job.id);
         } else {
