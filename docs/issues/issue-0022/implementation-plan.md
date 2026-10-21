@@ -142,7 +142,7 @@
    - 修正：
      - M-1：`clear_orphan_turn_scopes` 只把小寫、有連字號的 UUID 當成排程 id（`Uuid::parse_str(id).is_ok_and(|u| u.hyphenated().to_string() == id)`）。大寫、`{...}`、`urn:uuid:`、不含連字號都能解析成 UUID，但 `get_job` 是精確比對，一定查不到，原本會被當成孤兒刪掉。
      - S-2／D-2：`run_claimed_job` 只對 `JobKind::Turn` 呼叫 `advance_next_run`。
-     - S-1／D-1：刪掉 daemon 啟動時的 `recover_interrupted_runs` 與測試 `startup_recovery_runs_only_for_daemon_mode`；`run_scan` 每輪的標記在常駐模式第一輪（啟動時立刻執行）與 `--once` 都會做。
+     - S-1／D-1：刪掉 daemon 啟動時的 `recover_interrupted_runs` 與測試 `startup_recovery_runs_only_for_daemon_mode`；`run_scan` 每輪的標記在常駐模式與 `--once` 都會做。（2026-10-21 增量審查 S-4 更正：原本寫「常駐模式第一輪在啟動時立刻執行」，但設定檔讀不到時主迴圈整輪跳過掃描，標記也跟著延後；使用者選 D-3 不改程式，只改正說法。）
      - S-3：把 `clearing_orphan_scopes_deletes_nothing_when_jobs_cannot_be_read`（刪掉整張表）換成 `clearing_orphan_scopes_deletes_nothing_when_a_job_cannot_be_read`：排在前面的是真正的孤兒，排在後面的排程列被改成種類對不上，讓 `get_job` 出錯；斷言兩個 scope 都沒被刪。
      - N-1：`scheduled_turn_scope` 的 doc comment 移回函式上。N-4：CHANGELOG 範圍改寫，`issue-0017` 的 TBD-4 標註由 #22 處理。N-5：AGENTS.md 補上兩個執行者同時在跑時的中途顯示。
      - 不處理：N-2（推進失敗時 run 要等 lease 到期才被標記，訊息寫成行程結束）、N-3（標記出錯時整輪不取得排程）。兩者都是資料庫出錯時才會發生，和 `start_run` 失敗時的既有模式相同。

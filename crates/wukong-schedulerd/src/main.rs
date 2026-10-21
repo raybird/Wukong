@@ -210,7 +210,7 @@ async fn run_scan(
 ) -> Result<(), String> {
     let now = now_unix();
     // issue-0022：每輪都檢查，行程在 lease 到期前就重啟時，舊 run 也會在 lease 到期後被標記。
-    // 常駐模式的第一輪在啟動時立刻執行，`--once` 也會標記。
+    // `--once` 也會標記。啟動時不另外檢查，所以設定檔讀不到、主迴圈跳過掃描時，標記也跟著延後。
     let interrupted = store
         .interrupt_stale_runs(now)
         .await
