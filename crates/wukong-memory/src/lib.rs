@@ -653,6 +653,25 @@ mod tests {
         Memory::open(&url).await.unwrap()
     }
 
+    // issue-0012 審查 S-1：Memory 層用真實的現在時間判斷過期。
+    #[tokio::test]
+    async fn active_session_leases_uses_the_current_time() {
+        let mem = open_mem().await;
+        // 1970 年取得、早已過期的 lease。
+        mem.store
+            .acquire_agent_session_lease("agent:schedule-old", "sched", 100, 5)
+            .await
+            .unwrap();
+        mem.acquire_agent_session_lease("user:tg-42", "chat", 900)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            mem.active_session_leases().await.unwrap(),
+            vec!["user:tg-42".to_string()]
+        );
+    }
+
     #[tokio::test]
     async fn agent_session_round_trip() {
         let mem = open_mem().await;
