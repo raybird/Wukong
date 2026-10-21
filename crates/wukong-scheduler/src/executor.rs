@@ -180,6 +180,28 @@ async fn clear_scope_if_deleted(
     Ok(true)
 }
 
+/// 2026-10-21（issue-0022）：清掉排程已不存在的 Turn 排程 scope，給 daemon 啟動時用。
+/// 只處理後綴是排程 id 寫法（小寫、有連字號的 UUID）的 `agent:schedule-<id>`；其他寫法即使能
+/// 解析成 UUID，`get_job` 也一定查不到，不能當成孤兒。先確認所有候選的排程都查得到
+/// 結果，再開始刪，查詢出錯就整個回錯誤、不刪任何東西。回傳清掉的 scope 數。
+pub async fn clear_orphan_turn_scopes(
+    store: &SchedulerStore,
+    memory: &Memory,
+) -> Result<u64, SchedulerError> {
+    let mut orphans = Vec::new();
+    for scope in memory.scopes_with_prefix(TURN_SCOPE_PREFIX).await? {
+        let id = &scope[TURN_SCOPE_PREFIX.len()..];
+        let is_job_id = uuid::Uuid::parse_str(id).is_ok_and(|u| u.hyphenated().to_string() == id);
+        if is_job_id && store.get_job(id).await?.is_none() {
+            orphans.push(scope);
+        }
+    }
+    for scope in &orphans {
+        memory.delete_scope(scope).await?;
+    }
+    Ok(orphans.len() as u64)
+}
+
 /// Run one already-claimed `job` through its full lifecycle: record a run start,
 /// execute it, record the run result, then release the lease and reschedule.
 ///
@@ -207,6 +229,11 @@ pub async fn run_claimed_job<B: AiBackend + QuestionResponder + Sync>(
         return Ok(ClaimedJobOutcome::NotHeld);
     }
     let run_id = store.start_run(&job.id, started_at).await?;
+    // 2026-10-21（issue-0022）：回合開始後就推進，行程中途結束時不重跑這一次，避免重複送出訊息
+    // 或寫入檔案。維護排程補跑不會重複對外的動作，不推進，中斷後 lease 到期就補跑。
+    if matches!(job.kind, JobKind::Turn { .. }) {
+        store.advance_next_run(job, worker_id, started_at).await?;
+    }
     let output =
         execute_with_heartbeat(store, ctx, job, worker_id, lease_secs, run_id, started_at).await;
     let finished_at = chrono::Utc::now().timestamp();
@@ -364,10 +391,12 @@ async fn execute_job_inner<B: AiBackend + QuestionResponder + Sync>(
     }
 }
 
+const TURN_SCOPE_PREFIX: &str = "agent:schedule-";
+
 /// 2026-10-20（issue-0014）：排程回合的記憶、召回與 session 都落在這個 scope，
 /// 不寫進建立排程的使用者 scope；同一個排程的多次觸發共用它。
 fn scheduled_turn_scope(job_id: &str) -> String {
-    format!("agent:schedule-{job_id}")
+    format!("{TURN_SCOPE_PREFIX}{job_id}")
 }
 
 /// 跑一個無人值守回合，並在回合進行中即時處置 opencode 送出的詢問。
@@ -935,6 +964,302 @@ mod tests {
             .unwrap()
             .records;
         (records.len(), memory.agent_session(scope).await.unwrap())
+    }
+
+    const YEARLY: &str = "0 0 1 1 *";
+
+    async fn open_store_with_url() -> (SchedulerStore, String) {
+        let file = NamedTempFile::new().unwrap();
+        let url = format!("sqlite://{}", file.path().display());
+        std::mem::forget(file);
+        (SchedulerStore::open(&url).await.unwrap(), url)
+    }
+
+    /// 新增一個每年一次的 Turn 排程，並把 `next_run_at` 改到 5 秒前，讓它以實際時間到期。
+    async fn due_yearly_turn(store: &SchedulerStore, url: &str) -> Job {
+        due_yearly_job(
+            store,
+            url,
+            JobKind::Turn {
+                scope: "user:tg-42".to_string(),
+                prompt: "年度提醒".to_string(),
+            },
+        )
+        .await
+    }
+
+    async fn due_yearly_job(store: &SchedulerStore, url: &str, kind: JobKind) -> Job {
+        let job = store
+            .add_job(crate::job::NewJob {
+                name: "yearly".to_string(),
+                kind,
+                cron: YEARLY.to_string(),
+            })
+            .await
+            .unwrap();
+        let pool = sqlx::SqlitePool::connect(url).await.unwrap();
+        sqlx::query("UPDATE scheduler_jobs SET next_run_at = ?1 WHERE id = ?2")
+            .bind(chrono::Utc::now().timestamp() - 5)
+            .bind(&job.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        store.get_job(&job.id).await.unwrap().unwrap()
+    }
+
+    // issue-0022 SCN-001：回合開始之後行程結束，lease 到期後同一次不再被取得。
+    #[tokio::test]
+    async fn a_turn_interrupted_after_it_started_is_not_run_again() {
+        let memory = open_memory().await;
+        let (store, url) = open_store_with_url().await;
+        let job = due_yearly_turn(&store, &url).await;
+        let started = chrono::Utc::now().timestamp();
+        let claimed = store
+            .claim_due_jobs(started, "worker-a", 5, 10)
+            .await
+            .unwrap();
+        assert_eq!(claimed, vec![job.clone()]);
+        let backend = SlowBackend::new(1000, vec![Ok("oracle"), Ok("不該完成")]);
+        let cfg = cfg("project:Base");
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &backend,
+            base_config: &cfg,
+            permission_policy: PermissionPolicy::Reject,
+        };
+
+        // 行程在回合中途結束：future 被丟掉，不會 finish_run，也不再續租。
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            run_claimed_job(&store, &ctx, &claimed[0], "worker-a", 5),
+        )
+        .await
+        .is_err());
+
+        let after_lease = chrono::Utc::now().timestamp() + 6;
+        assert!(store
+            .claim_due_jobs(after_lease, "worker-b", 300, 10)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store.get_job(&job.id).await.unwrap().unwrap().next_run_at,
+            crate::job::next_after(YEARLY, started).unwrap()
+        );
+        assert_eq!(store.interrupt_stale_runs(after_lease).await.unwrap(), 1);
+        assert_eq!(only_run(&store, &job).await.status, RunStatus::Interrupted);
+    }
+
+    // issue-0022：維護排程中途結束時不推進，lease 到期後照常補跑；跳過只適用於 Turn 排程。
+    #[tokio::test]
+    async fn an_interrupted_maintenance_job_is_claimed_again() {
+        let file = NamedTempFile::new().unwrap();
+        let memory_url = format!("sqlite://{}", file.path().display());
+        let memory = Memory::open(&memory_url).await.unwrap();
+        let (store, url) = open_store_with_url().await;
+        let job = due_yearly_job(
+            &store,
+            &url,
+            JobKind::Maintenance {
+                scope: Some("project:T".to_string()),
+                task: MaintenanceTask::Prune,
+            },
+        )
+        .await;
+        // 讓一筆記憶符合 prune 條件，再由另一條連線拿住寫入鎖，prune 刪除時就會卡住。
+        seed_scope(&memory, "project:T").await;
+        let pool = sqlx::SqlitePool::connect(&memory_url).await.unwrap();
+        sqlx::query("UPDATE memories SET kind = 'note', created_at = 0, importance = 0.1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut lock = pool.acquire().await.unwrap();
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *lock)
+            .await
+            .unwrap();
+        let started = chrono::Utc::now().timestamp();
+        let claimed = store
+            .claim_due_jobs(started, "worker-a", 5, 10)
+            .await
+            .unwrap();
+        let backend = MockBackend::new(vec![]);
+        let cfg = cfg("project:Base");
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &backend,
+            base_config: &cfg,
+            permission_policy: PermissionPolicy::Reject,
+        };
+
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            run_claimed_job(&store, &ctx, &claimed[0], "worker-a", 5),
+        )
+        .await
+        .is_err());
+
+        assert_eq!(only_run(&store, &job).await.status, RunStatus::Running);
+        let again = store
+            .claim_due_jobs(started + 6, "worker-b", 300, 10)
+            .await
+            .unwrap();
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].next_run_at, job.next_run_at);
+    }
+
+    // issue-0022 SCN-002：取得了但還沒開始執行，lease 到期後照常被取得。
+    #[tokio::test]
+    async fn a_claimed_turn_that_never_started_is_claimed_again() {
+        let (store, url) = open_store_with_url().await;
+        let job = due_yearly_turn(&store, &url).await;
+        let now = chrono::Utc::now().timestamp();
+        assert_eq!(
+            store
+                .claim_due_jobs(now, "worker-a", 5, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // worker-a 在輪到它之前就結束了。
+        let claimed = store
+            .claim_due_jobs(now + 6, "worker-b", 300, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].next_run_at, job.next_run_at);
+    }
+
+    // issue-0022 SCN-003：正常完成後，下次執行時間和變更前一樣，以完成時間推算。
+    #[tokio::test]
+    async fn a_completed_turn_is_rescheduled_from_its_finish_time() {
+        let memory = open_memory().await;
+        let (store, url) = open_store_with_url().await;
+        let job = due_yearly_turn(&store, &url).await;
+        let claimed = store
+            .claim_due_jobs(chrono::Utc::now().timestamp(), "worker-a", 300, 10)
+            .await
+            .unwrap();
+        let backend = MockBackend::new(vec![Ok("oracle"), Ok("年度提醒完成")]);
+        let cfg = cfg("project:Base");
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &backend,
+            base_config: &cfg,
+            permission_policy: PermissionPolicy::Reject,
+        };
+
+        let outcome = run_claimed_job(&store, &ctx, &claimed[0], "worker-a", 300)
+            .await
+            .unwrap();
+        let finished = chrono::Utc::now().timestamp();
+
+        assert!(matches!(outcome, ClaimedJobOutcome::Completed(_)));
+        assert_eq!(
+            store.get_job(&job.id).await.unwrap().unwrap().next_run_at,
+            crate::job::next_after(YEARLY, finished).unwrap()
+        );
+    }
+
+    // issue-0022 SCN-003：手動 trigger 還沒到期的排程，中途結束也不改它的下次執行時間。
+    #[tokio::test]
+    async fn manually_triggering_a_job_that_is_not_due_keeps_its_next_run() {
+        let memory = open_memory().await;
+        let store = open_store().await;
+        let job = claimed_turn(&store, 5).await;
+        let backend = SlowBackend::new(1000, vec![Ok("oracle"), Ok("不該完成")]);
+        let cfg = cfg("project:Base");
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &backend,
+            base_config: &cfg,
+            permission_policy: PermissionPolicy::Reject,
+        };
+
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            run_claimed_job(&store, &ctx, &job, "worker-a", 5),
+        )
+        .await
+        .is_err());
+
+        assert_eq!(
+            store.get_job(&job.id).await.unwrap().unwrap().next_run_at,
+            job.next_run_at
+        );
+    }
+
+    // issue-0022 SCN-005：只清排程不存在、而且後綴是 UUID 的排程 scope。
+    #[tokio::test]
+    async fn clearing_orphan_scopes_keeps_live_and_non_uuid_scopes() {
+        let memory = open_memory().await;
+        let store = open_store().await;
+        let live = claimed_turn(&store, 300).await;
+        let gone = "0b5c3a52-6f2e-4c55-9d0e-0a6f1e2b3c4d";
+        let orphan = scheduled_turn_scope(gone);
+        // 排程 id 一律是小寫、有連字號的 UUID；其他寫法即使能解析成 UUID，也不是排程寫出來的。
+        let kept = [
+            scheduled_turn_scope(&live.id),
+            scheduled_turn_scope(&live.id.to_uppercase()),
+            scheduled_turn_scope(&format!("{{{}}}", live.id)),
+            scheduled_turn_scope(&format!("urn:uuid:{}", live.id)),
+            scheduled_turn_scope(&live.id.replace('-', "")),
+            format!("{orphan}-x"),
+            "agent:schedule-notes".to_string(),
+            "user:tg-42".to_string(),
+        ];
+        for scope in std::iter::once(&orphan).chain(&kept) {
+            seed_scope(&memory, scope).await;
+        }
+
+        assert_eq!(clear_orphan_turn_scopes(&store, &memory).await.unwrap(), 1);
+
+        assert_eq!(scope_left(&memory, &orphan).await, (0, None));
+        for scope in &kept {
+            assert_eq!(
+                scope_left(&memory, scope).await,
+                (1, Some(format!("ses-{scope}"))),
+                "{scope}"
+            );
+        }
+        // 已經清乾淨，再跑一次不會再清任何東西。
+        assert_eq!(clear_orphan_turn_scopes(&store, &memory).await.unwrap(), 0);
+    }
+
+    // issue-0022 SCN-005：查不到排程是因為出錯時，不能當成排程不存在；任何一個排程查詢出錯，
+    // 排在前面、已經確認是孤兒的 scope 也不刪。
+    #[tokio::test]
+    async fn clearing_orphan_scopes_deletes_nothing_when_a_job_cannot_be_read() {
+        let memory = open_memory().await;
+        let (store, url) = open_store_with_url().await;
+        let unreadable = claimed_turn(&store, 0).await;
+        let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+        sqlx::query("UPDATE scheduler_jobs SET kind = 'maintenance' WHERE id = ?1")
+            .bind(&unreadable.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(store.get_job(&unreadable.id).await.is_err());
+        let scopes = [
+            scheduled_turn_scope("00000000-0000-4000-8000-000000000000"),
+            scheduled_turn_scope(&unreadable.id),
+        ];
+        for scope in &scopes {
+            seed_scope(&memory, scope).await;
+        }
+
+        assert!(clear_orphan_turn_scopes(&store, &memory).await.is_err());
+
+        for scope in &scopes {
+            assert_eq!(
+                scope_left(&memory, scope).await,
+                (1, Some(format!("ses-{scope}"))),
+                "{scope}"
+            );
+        }
     }
 
     // issue-0017 SCN-001：刪除沒在執行的 Turn 排程，只清掉它自己的 scope。
