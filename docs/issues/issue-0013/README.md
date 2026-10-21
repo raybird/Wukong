@@ -161,11 +161,14 @@ Feature: 長時間排程回合可以查到進度，執行中持續持有 lease
 | 2026-10-21 | 使用者核准 SCN-001～007 |
 | 2026-10-21 | 重現 lease 過期後的重複執行與共用 session；實作續租與進度，重現腳本與中止測試複驗通過 |
 | 2026-10-21 | PR #20 審查 PASS；使用者對 D-1 選本 PR 小修（新增 SCN-008），對 D-2 選只在文件註明（TBD-5） |
+| 2026-10-21 | PR #20 複審（`review-8aa7e9b.md`）PASS，無 SHOULD FIX；使用者要求合併前修正 NIT 1（NotHeld 措辭） |
+| 2026-10-21 | PR #20 以 `8aa7e9b` 的內容 squash 合併為 main `a78d040`（03:56Z），比措辭修正早。措辭修正（`2695ab0`、`1d0141d`，只改註解、警告字串與文件）與三份審查報告（`review-8aa7e9b.md`、`review-2695ab0.md`、`review-1d0141d.md`，增量審查都 PASS）依使用者指示在合併後直接提交到 main |
+| 2026-10-21 | 結案 |
 
 ---
 **建立日期**: 2026-10-08
 **分級**: Medium — 跨 wukong-scheduler、wukong-runtime、wukong-cli、wukong-schedulerd，沿既有相依方向，不改 schema（2026-10-21 由 Large 調降）
 **風險**: Medium
-**狀態**: 實作中
+**狀態**: 已完成
 
 GitHub：https://github.com/raybird/Wukong/issues/13

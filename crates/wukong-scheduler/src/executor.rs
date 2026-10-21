@@ -127,8 +127,9 @@ pub enum ClaimedJobOutcome {
     /// job still executed (output attached), but this worker did not own the
     /// finish, so it must not reschedule or announce success.
     LeaseLost(ExecutionOutput),
-    /// 2026-10-21（issue-0013）：要開始執行時 lease 已經不在這個 worker 手上——同一批
-    /// 取得的 job 排隊期間 lease 過期，被別人拿去執行了。沒有執行，也沒有 run 紀錄。
+    /// 2026-10-21（issue-0013）：要開始執行時 lease 已經不在這個 worker 手上。同一批
+    /// 取得的 job 排隊期間可能被別人取得執行，也可能被停用、重新啟用或刪除（都會清掉
+    /// lease）。沒有執行，也沒有 run 紀錄。
     NotHeld,
 }
 
@@ -149,7 +150,8 @@ pub async fn run_claimed_job<B: AiBackend + QuestionResponder + Sync>(
 ) -> Result<ClaimedJobOutcome, SchedulerError> {
     let started_at = chrono::Utc::now().timestamp();
     // 2026-10-21（issue-0013）：同一批取得的 job 排隊時只有正在跑的那個會續租。輪到這個
-    // job 時先續租一次，lease 已經被別人拿走，代表它在等待期間已經被執行過。
+    // job 時先續租一次；lease 已經不在自己手上，代表它在等待期間被別人取得執行，或被停用、
+    // 重新啟用、刪除。
     if !store
         .renew_job_lease(&job.id, worker_id, started_at, lease_secs)
         .await?

@@ -144,6 +144,11 @@
      - 在這之前，跑了兩次不帶 `--no-fail-fast` 的全量測試，`wukong-gateway` 的 `local_process::tests::invalid_listener_releases_child` 兩次都失敗（`child still alive`），cargo 因此停在那個 crate，後面的 crate 沒跑。那支測試只等子行程結束 1 秒，當時系統 load 約 5。單獨重跑 3 次、用篩選條件跑 3 次、`--no-fail-fast` 全量跑 1 次，都通過。本次沒有改到 gateway，所以判定為既有的時序敏感測試，不在本次範圍。
    - `gitnexus_detect_changes`（risk=high）：正式程式碼改動只有 `run_claimed_job` 與 `run_scan`；CLI 那處落在 `run_schedule_op` 裡，報告標成相鄰的 `describe_job_kind`。其他列出的都是文件段落與測試模組。
 
+7. ✅ **複審 NIT 1 措辭**（`review-8aa7e9b.md`，PASS，2026-10-21）
+   - 審查探針證實，排隊中的 job 被停用、重新啟用或刪除時也會清掉 lease，同樣回 `NotHeld`；原本的註解與 daemon 警告只寫「被別人取得」。使用者要求合併前修正措辭。
+   - 改動：`ClaimedJobOutcome::NotHeld` 的註解、daemon 的警告訊息、`AGENTS.md` 的對應句子。增量審查（`review-2695ab0.md`，PASS）指出 `run_claimed_job` 內的註解與 `docs/cli-reference.md` 仍是舊說法，已一併修正。行為不變；新的警告文字是 `skipped: lease no longer held when its turn came (taken by another worker, or the job was disabled, re-enabled or deleted while queued)`。
+   - 其他 NIT 不處理：計時測試的 0.5 秒餘裕、`schedule enable` 清掉執行中 job 的 lease（BASE 就有），以及計畫中第一版壓縮測試假綠燈的描述無法從 repo 重建，這三項都只記錄。
+
 ## 驗收對照
 | Scenario | 層級 | 證據 |
 |---|---|---|
