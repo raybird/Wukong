@@ -133,12 +133,19 @@ impl SchedulerStore {
         row.map(row_to_job).transpose()
     }
 
-    pub async fn remove_job(&self, id: &str) -> Result<bool, SchedulerError> {
-        let result = sqlx::query("DELETE FROM scheduler_jobs WHERE id = ?1")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(result.rows_affected() > 0)
+    /// 刪除一個 job。`None` 代表找不到；`Some(held)` 的 `held` 是刪除當下 job 是否
+    /// 正被持有（執行中，或已被取得、還在排隊）。2026-10-21（issue-0017）：用同一句
+    /// SQL 回報，避免先檢查再刪除之間被別人取得。
+    pub async fn remove_job(&self, id: &str) -> Result<Option<bool>, SchedulerError> {
+        let row = sqlx::query(
+            "DELETE FROM scheduler_jobs WHERE id = ?1
+             RETURNING locked_by IS NOT NULL AND COALESCE(locked_until, 0) > ?2 AS held",
+        )
+        .bind(id)
+        .bind(now_unix())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| row.get::<bool, _>("held")))
     }
 
     pub async fn set_enabled(&self, id: &str, enabled: bool) -> Result<bool, SchedulerError> {
@@ -466,6 +473,31 @@ mod tests {
         }
     }
 
+    // issue-0017：刪除時回報當下是否被持有；lease 已到期的不算。
+    #[tokio::test]
+    async fn remove_job_reports_whether_the_job_was_held() {
+        let store = open_store().await;
+        let now = now_unix();
+        let held = store.add_job(new_turn("* * * * *")).await.unwrap();
+        store
+            .claim_job(&held.id, now, "worker-a", 300)
+            .await
+            .unwrap()
+            .unwrap();
+        let expired = store.add_job(new_turn("* * * * *")).await.unwrap();
+        store
+            .claim_job(&expired.id, now - 10, "worker-a", 5)
+            .await
+            .unwrap()
+            .unwrap();
+        let idle = store.add_job(new_turn("* * * * *")).await.unwrap();
+
+        assert_eq!(store.remove_job(&held.id).await.unwrap(), Some(true));
+        assert_eq!(store.remove_job(&expired.id).await.unwrap(), Some(false));
+        assert_eq!(store.remove_job(&idle.id).await.unwrap(), Some(false));
+        assert_eq!(store.remove_job("missing").await.unwrap(), None);
+    }
+
     // issue-0013：只有持有 lease 的 worker 能續租；續租後別人在原到期時間之後仍拿不到。
     #[tokio::test]
     async fn renew_job_lease_extends_only_the_holders_lease() {
@@ -532,8 +564,9 @@ mod tests {
 
         assert_eq!(store.get_job(&job.id).await.unwrap(), Some(job.clone()));
         assert_eq!(store.list_jobs().await.unwrap(), vec![job.clone()]);
-        assert!(store.remove_job(&job.id).await.unwrap());
+        assert_eq!(store.remove_job(&job.id).await.unwrap(), Some(false));
         assert_eq!(store.get_job(&job.id).await.unwrap(), None);
+        assert_eq!(store.remove_job(&job.id).await.unwrap(), None);
     }
 
     #[tokio::test]

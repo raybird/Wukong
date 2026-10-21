@@ -13,7 +13,7 @@ use wukong_gateway::workspace_dir;
 use wukong_memory::Memory;
 use wukong_runtime::util::now_unix;
 use wukong_scheduler::{
-    ClaimedJobOutcome, ExecutionContext, Job, PermissionPolicy, SchedulerStore,
+    ClaimedJobOutcome, ExecutionContext, ExecutionOutput, Job, PermissionPolicy, SchedulerStore,
 };
 use wukong_tg_client::client::ReqwestTgClient;
 
@@ -215,27 +215,11 @@ async fn run_scan(
             base_config: cfg,
             permission_policy: PermissionPolicy::from_env(),
         };
-        let output = match wukong_scheduler::run_claimed_job(
-            store, &ctx, &job, worker_id, lease_secs,
-        )
-        .await
-        .map_err(|e| e.to_string())?
-        {
-            ClaimedJobOutcome::Completed(output) => output,
-            ClaimedJobOutcome::NotHeld => {
-                eprintln!(
-                        "warning: job {} skipped: lease no longer held when its turn came (taken by another worker, or the job was disabled, re-enabled or deleted while queued)",
-                        job.id
-                    );
-                continue;
-            }
-            ClaimedJobOutcome::LeaseLost(_) => {
-                eprintln!(
-                    "warning: job {} lease was taken by another worker before completion",
-                    job.id
-                );
-                continue;
-            }
+        let outcome = wukong_scheduler::run_claimed_job(store, &ctx, &job, worker_id, lease_secs)
+            .await
+            .map_err(|e| e.to_string())?;
+        let Some(output) = deliverable_output(&job.id, outcome) else {
+            continue;
         };
         if output.success {
             eprintln!("job {} succeeded", job.id);
@@ -254,6 +238,27 @@ async fn run_scan(
         let _ = std::io::stderr().flush();
     }
     Ok(())
+}
+
+/// 決定一個 job 的結果要不要記成 succeeded／failed 並送通知；不送的情況在這裡印出原因。
+fn deliverable_output(job_id: &str, outcome: ClaimedJobOutcome) -> Option<ExecutionOutput> {
+    match outcome {
+        ClaimedJobOutcome::Completed(output) => Some(output),
+        ClaimedJobOutcome::NotHeld => {
+            eprintln!(
+                "warning: job {job_id} skipped: lease no longer held when its turn came (taken by another worker, or the job was disabled, re-enabled or deleted while queued)"
+            );
+            None
+        }
+        ClaimedJobOutcome::Deleted(output) => {
+            eprintln!("job {job_id} was deleted while running; cleared its scope");
+            Some(output)
+        }
+        ClaimedJobOutcome::LeaseLost(_) => {
+            eprintln!("warning: job {job_id} lease was taken by another worker before completion");
+            None
+        }
+    }
 }
 
 /// Build the optional Telegram notifier. Disabled when `WUKONG_SCHED_NOTIFY=0`
@@ -360,6 +365,28 @@ mod tests {
         std::fs::write(&path, "{").unwrap();
         assert!(refresh_model_settings(&mut cfg, &path).is_err());
         assert_eq!(cfg.default_model.as_deref(), Some("opencode/old-model"));
+    }
+
+    // issue-0017 SCN-004：執行中被刪除的回合照常記錄與送通知；lease 被接手的才跳過。
+    #[test]
+    fn deleted_job_output_is_still_delivered() {
+        let output = |message: &str| ExecutionOutput {
+            success: true,
+            message: message.to_string(),
+        };
+        assert_eq!(
+            deliverable_output("j", ClaimedJobOutcome::Deleted(output("提醒完成"))),
+            Some(output("提醒完成"))
+        );
+        assert_eq!(
+            deliverable_output("j", ClaimedJobOutcome::Completed(output("ok"))),
+            Some(output("ok"))
+        );
+        assert_eq!(
+            deliverable_output("j", ClaimedJobOutcome::LeaseLost(output("x"))),
+            None
+        );
+        assert_eq!(deliverable_output("j", ClaimedJobOutcome::NotHeld), None);
     }
 
     async fn open_store() -> (NamedTempFile, SchedulerStore) {

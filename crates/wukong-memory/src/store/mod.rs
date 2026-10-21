@@ -753,6 +753,30 @@ impl Store {
         Ok(())
     }
 
+    /// 2026-10-21（issue-0017）：刪掉單一 scope 的所有資料——記憶（FTS 由 AFTER DELETE
+    /// trigger 同步）、`sessions` 列，以及兩張 session 指向表。只用等號比對；空字串
+    /// 不執行。回傳刪除的記憶筆數。
+    pub async fn delete_scope(&self, scope: &str) -> Result<u64> {
+        if scope.is_empty() {
+            return Err(crate::error::MemoryError::InvalidScope(String::new()));
+        }
+        let mut tx = self.pool.begin().await?;
+        let deleted = sqlx::query("DELETE FROM memories WHERE scope = ?1")
+            .bind(scope)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        for sql in [
+            "DELETE FROM sessions WHERE scope = ?1",
+            "DELETE FROM agent_sessions WHERE scope = ?1",
+            "DELETE FROM agent_session_state WHERE scope = ?1",
+        ] {
+            sqlx::query(sql).bind(scope).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(deleted)
+    }
+
     /// Delete the given memory rows. The AFTER DELETE trigger keeps FTS in sync.
     /// Returns the number of rows removed.
     pub async fn delete_memories(&self, ids: &[i64]) -> Result<u64> {
@@ -1682,6 +1706,101 @@ mod tests {
     }
 
     // issue-0012 SCN-003：只列出仍有效的 lease。
+    // issue-0017：只刪目標 scope；名稱以它開頭的 scope、擁有者與其他排程都不動。
+    #[tokio::test]
+    async fn delete_scope_removes_only_that_scope() {
+        let store = test_store().await;
+        let target = "agent:schedule-job1";
+        let others = ["agent:schedule-job1-x", "user:tg-42", "agent:schedule-job2"];
+        for scope in std::iter::once(target).chain(others) {
+            for kind in [MemoryKind::Event, MemoryKind::Note, MemoryKind::Summary] {
+                store
+                    .insert_memory(
+                        Some("turn-1"),
+                        scope,
+                        kind,
+                        &format!("排程提醒 {scope}"),
+                        1.0,
+                        100,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+            }
+            store
+                .upsert_session(&format!("turn-{scope}"), scope, 100)
+                .await
+                .unwrap();
+            store
+                .set_agent_session(scope, &format!("ses-{scope}"), 100)
+                .await
+                .unwrap();
+        }
+        let counts = |scope: &'static str| {
+            let pool = store.pool.clone();
+            async move {
+                let mut out = Vec::new();
+                for sql in [
+                    "SELECT COUNT(*) FROM memories WHERE scope = ?1",
+                    "SELECT COUNT(*) FROM memories_fts f JOIN memories m ON m.id = f.rowid
+                     WHERE memories_fts MATCH '排程' AND m.scope = ?1",
+                    "SELECT COUNT(*) FROM sessions WHERE scope = ?1",
+                    "SELECT COUNT(*) FROM agent_sessions WHERE scope = ?1",
+                    "SELECT COUNT(*) FROM agent_session_state WHERE scope = ?1",
+                ] {
+                    let n: i64 = sqlx::query_scalar(sql)
+                        .bind(scope)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                    out.push(n);
+                }
+                out
+            }
+        };
+        let fts_rows = || {
+            let pool = store.pool.clone();
+            async move {
+                let n: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH '排程'",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                n
+            }
+        };
+        assert_eq!(counts(target).await, [3, 3, 1, 1, 1]);
+        assert_eq!(fts_rows().await, 12);
+
+        assert_eq!(store.delete_scope(target).await.unwrap(), 3);
+
+        assert_eq!(counts(target).await, [0, 0, 0, 0, 0]);
+        for scope in others {
+            assert_eq!(counts(scope).await, [3, 3, 1, 1, 1], "{scope}");
+        }
+        // FTS 的列也要刪掉，不能只是 JOIN 不到。
+        assert_eq!(fts_rows().await, 9);
+    }
+
+    #[tokio::test]
+    async fn delete_scope_rejects_an_empty_scope() {
+        let store = test_store().await;
+        store
+            .insert_memory(None, "", MemoryKind::Note, "空 scope", 1.0, 100, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.delete_scope("").await,
+            Err(crate::error::MemoryError::InvalidScope(_))
+        ));
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memories")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
     #[tokio::test]
     async fn active_session_leases_lists_only_unexpired_leases() {
         let store = test_store().await;

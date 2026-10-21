@@ -127,10 +127,57 @@ pub enum ClaimedJobOutcome {
     /// job still executed (output attached), but this worker did not own the
     /// finish, so it must not reschedule or announce success.
     LeaseLost(ExecutionOutput),
+    /// 2026-10-21（issue-0017）：回合跑完時排程已經被刪除（例如回合自己呼叫了
+    /// `schedule rm`）。scope 已清掉；結果照常回報與送出通知。
+    Deleted(ExecutionOutput),
     /// 2026-10-21（issue-0013）：要開始執行時 lease 已經不在這個 worker 手上。同一批
     /// 取得的 job 排隊期間可能被別人取得執行，也可能被停用、重新啟用或刪除（都會清掉
     /// lease）。沒有執行，也沒有 run 紀錄。
     NotHeld,
+}
+
+/// 2026-10-21（issue-0017）：刪除排程的結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteJobOutcome {
+    NotFound,
+    /// 刪除時沒有人持有它，已經清掉它的 scope。
+    Deleted,
+    /// 刪除時正在執行，或已被取得、還在排隊。scope 等 executor 處理完這個 job 再清。
+    DeletedWhileHeld,
+}
+
+/// 刪除排程，並清掉 Turn 排程的 scope（`agent:schedule-<id>`）的記憶與 session 指向。
+/// CLI 的 `schedule rm` 與 Web 的刪除共用。執行中的回合在結束時才寫入記憶、重建 session
+/// 狀態，提早清也會被寫回去，所以被持有的排程只刪 job，scope 由 `run_claimed_job` 事後清理。
+pub async fn delete_job(
+    store: &SchedulerStore,
+    memory: &Memory,
+    id: &str,
+) -> Result<DeleteJobOutcome, SchedulerError> {
+    Ok(match store.remove_job(id).await? {
+        None => DeleteJobOutcome::NotFound,
+        Some(true) => DeleteJobOutcome::DeletedWhileHeld,
+        Some(false) => {
+            memory.delete_scope(&scheduled_turn_scope(id)).await?;
+            DeleteJobOutcome::Deleted
+        }
+    })
+}
+
+/// 排程已經被刪除時，清掉它的 scope 並回 `true`（issue-0017）。清理失敗只記 log：
+/// 呼叫端此時手上是已經跑完或已經跳過的 job，結果仍要照常回報。
+async fn clear_scope_if_deleted(
+    store: &SchedulerStore,
+    memory: &Memory,
+    job_id: &str,
+) -> Result<bool, SchedulerError> {
+    if store.get_job(job_id).await?.is_some() {
+        return Ok(false);
+    }
+    if let Err(err) = memory.delete_scope(&scheduled_turn_scope(job_id)).await {
+        eprintln!("scheduler_scope_cleanup_failed job={job_id}: {err}");
+    }
+    Ok(true)
 }
 
 /// Run one already-claimed `job` through its full lifecycle: record a run start,
@@ -156,6 +203,7 @@ pub async fn run_claimed_job<B: AiBackend + QuestionResponder + Sync>(
         .renew_job_lease(&job.id, worker_id, started_at, lease_secs)
         .await?
     {
+        clear_scope_if_deleted(store, ctx.memory, &job.id).await?;
         return Ok(ClaimedJobOutcome::NotHeld);
     }
     let run_id = store.start_run(&job.id, started_at).await?;
@@ -175,6 +223,8 @@ pub async fn run_claimed_job<B: AiBackend + QuestionResponder + Sync>(
         .await?
     {
         Ok(ClaimedJobOutcome::Completed(output))
+    } else if clear_scope_if_deleted(store, ctx.memory, &job.id).await? {
+        Ok(ClaimedJobOutcome::Deleted(output))
     } else {
         Ok(ClaimedJobOutcome::LeaseLost(output))
     }
@@ -856,6 +906,167 @@ mod tests {
         );
     }
 
+    /// 在 `scope` 寫一筆記憶與 session 指向。
+    async fn seed_scope(memory: &Memory, scope: &str) {
+        memory
+            .remember(wukong_memory::RememberInput {
+                scope: scope.to_string(),
+                session_id: None,
+                items: vec![wukong_memory::MemoryItem {
+                    kind: MemoryKind::Summary,
+                    text: format!("{scope} 的摘要"),
+                    importance: None,
+                    dedupe_key: None,
+                }],
+            })
+            .await
+            .unwrap();
+        memory
+            .set_agent_session(scope, &format!("ses-{scope}"))
+            .await
+            .unwrap();
+    }
+
+    /// `scope` 剩下的記憶筆數與 session 指向。
+    async fn scope_left(memory: &Memory, scope: &str) -> (usize, Option<String>) {
+        let records = memory
+            .records(Some(scope), None, 100)
+            .await
+            .unwrap()
+            .records;
+        (records.len(), memory.agent_session(scope).await.unwrap())
+    }
+
+    // issue-0017 SCN-001：刪除沒在執行的 Turn 排程，只清掉它自己的 scope。
+    #[tokio::test]
+    async fn deleting_an_idle_turn_job_clears_only_its_scope() {
+        let memory = open_memory().await;
+        let store = open_store().await;
+        let job = claimed_turn(&store, 0).await;
+        let own = scheduled_turn_scope(&job.id);
+        let sibling = format!("{own}-x");
+        for scope in [own.as_str(), sibling.as_str(), "user:tg-42"] {
+            seed_scope(&memory, scope).await;
+        }
+
+        let outcome = delete_job(&store, &memory, &job.id).await.unwrap();
+
+        assert_eq!(outcome, DeleteJobOutcome::Deleted);
+        assert!(store.get_job(&job.id).await.unwrap().is_none());
+        assert_eq!(scope_left(&memory, &own).await, (0, None));
+        assert_eq!(
+            scope_left(&memory, &sibling).await,
+            (1, Some(format!("ses-{sibling}")))
+        );
+        assert_eq!(
+            scope_left(&memory, "user:tg-42").await,
+            (1, Some("ses-user:tg-42".to_string()))
+        );
+    }
+
+    // issue-0017 SCN-006：維護排程與不存在的 id，行為不變。
+    #[tokio::test]
+    async fn deleting_a_maintenance_job_or_a_missing_id() {
+        let memory = open_memory().await;
+        let store = open_store().await;
+        seed_scope(&memory, "project:T").await;
+        let job = store
+            .add_job(crate::job::NewJob {
+                name: "prune".to_string(),
+                kind: JobKind::Maintenance {
+                    scope: Some("project:T".to_string()),
+                    task: MaintenanceTask::Prune,
+                },
+                cron: "0 3 * * *".to_string(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            delete_job(&store, &memory, &job.id).await.unwrap(),
+            DeleteJobOutcome::Deleted
+        );
+        assert_eq!(
+            scope_left(&memory, "project:T").await,
+            (1, Some("ses-project:T".to_string()))
+        );
+        assert_eq!(
+            delete_job(&store, &memory, &job.id).await.unwrap(),
+            DeleteJobOutcome::NotFound
+        );
+    }
+
+    // issue-0017 SCN-003：執行中被刪除，回合照常成功，結束後才清 scope（含本回合寫入的記憶）。
+    #[tokio::test]
+    async fn deleting_a_running_job_cleans_up_after_the_turn() {
+        let memory = open_memory().await;
+        let store = open_store().await;
+        let backend = SlowBackend::new(1000, vec![Ok("oracle"), Ok("提醒完成")]);
+        let cfg = cfg("project:Base");
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &backend,
+            base_config: &cfg,
+            permission_policy: PermissionPolicy::Reject,
+        };
+        let job = claimed_turn(&store, 300).await;
+        let own = scheduled_turn_scope(&job.id);
+
+        let run = run_claimed_job(&store, &ctx, &job, "worker-a", 300);
+        let delete = async {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            delete_job(&store, &memory, &job.id).await.unwrap()
+        };
+        let (outcome, deleted) = tokio::join!(run, delete);
+
+        assert_eq!(deleted, DeleteJobOutcome::DeletedWhileHeld);
+        match outcome.unwrap() {
+            ClaimedJobOutcome::Deleted(output) => {
+                assert!(output.success, "{}", output.message);
+                assert_eq!(output.message, "提醒完成");
+            }
+            other => panic!("預期 Deleted，實際是 {other:?}"),
+        }
+        assert!(store.get_job(&job.id).await.unwrap().is_none());
+        assert_eq!(scope_left(&memory, &own).await, (0, None));
+    }
+
+    // issue-0017 SCN-005：已被取得、還在排隊時被刪除，輪到時不執行，並清掉 scope。
+    #[tokio::test]
+    async fn deleting_a_queued_job_skips_it_and_clears_its_scope() {
+        let memory = open_memory().await;
+        let store = open_store().await;
+        let backend = MockBackend::new(vec![Ok("oracle"), Ok("不該執行")]);
+        let cfg = cfg("project:Base");
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &backend,
+            base_config: &cfg,
+            permission_policy: PermissionPolicy::Reject,
+        };
+        let job = claimed_turn(&store, 300).await;
+        let own = scheduled_turn_scope(&job.id);
+        seed_scope(&memory, &own).await;
+
+        assert_eq!(
+            delete_job(&store, &memory, &job.id).await.unwrap(),
+            DeleteJobOutcome::DeletedWhileHeld
+        );
+        // 被持有時不清，留給 executor。
+        assert_eq!(
+            scope_left(&memory, &own).await,
+            (1, Some(format!("ses-{own}")))
+        );
+
+        let outcome = run_claimed_job(&store, &ctx, &job, "worker-a", 300)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, ClaimedJobOutcome::NotHeld);
+        assert!(backend.prompts.lock().unwrap().is_empty());
+        assert_eq!(scope_left(&memory, &own).await, (0, None));
+    }
+
     // SCN-008：排隊期間 lease 被別人拿走的 job，輪到時不執行、不留 run 紀錄。
     #[tokio::test]
     async fn queued_job_whose_lease_was_taken_is_skipped() {
@@ -871,6 +1082,8 @@ mod tests {
         };
         // lease 0 秒：worker-a 取得後立刻過期，worker-b 接著取得。
         let job = claimed_turn(&store, 0).await;
+        let own = scheduled_turn_scope(&job.id);
+        seed_scope(&memory, &own).await;
         let now = chrono::Utc::now().timestamp();
         assert!(store
             .claim_job(&job.id, now, "worker-b", 300)
@@ -889,6 +1102,11 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+        // issue-0017：排程還在（只是被別人取得），不能清它的 scope。
+        assert_eq!(
+            scope_left(&memory, &own).await,
+            (1, Some(format!("ses-{own}")))
+        );
     }
 
     // SCN-001 的上限：daemon 預設 lease 300 秒，進度仍至少每 30 秒更新。

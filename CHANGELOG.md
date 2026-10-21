@@ -13,6 +13,13 @@
 
 ### Changed
 
+- **刪除排程會一併清掉它的記憶與 session。** 排程回合在自己的 `agent:schedule-<job id>`
+  執行之後，刪除排程只刪掉排程本身，它的記憶與 session 指向會一直留著，opencode 的
+  session 也因此永遠不會被保留期清理刪掉。現在 `schedule rm` 與 Web 的刪除會一併清掉這個
+  scope。排程如果正在執行（例如一次性提醒在回合中刪掉自己），就先刪排程、等回合跑完再清，
+  回合照常成功，結果也照常送到 Telegram。過去這種情況會被誤報為 lease 被其他 worker
+  接手，結果也不會送出。
+
 - **長時間排程看得到進度，執行中不會被重複執行。** 過去排程 run 從開始到結束訊息都是空的，
   逾時只留下一句「本機 OpenCode 回合逾時」，看不出卡在哪一棒；job lease（300 秒）與
   session lease（900 秒）在執行中也不續租，回合跑得比 lease 久時，手動 trigger 會再跑一次、
@@ -33,8 +40,7 @@
   現在排程回合在自己的 `agent:schedule-<job id>` 執行：記憶、召回與 session 都在那裡，
   同一個排程的多次觸發彼此延續；排程的 `--scope` 只代表擁有者，Telegram 回送與聊天紀錄
   照舊。既有排程下次觸發即切換，已寫進使用者記憶的舊紀錄不會清除。對話中要查排程回報過
-  什麼，助手會改用 `wukong schedule runs --id <id>`。已知限制：刪除排程後，它的 scope
-  留下的 session 指向與記憶目前不會被清理（#17）。
+  什麼，助手會改用 `wukong schedule runs --id <id>`。
 - **簡單追問不再啟動完整調查。** 規劃角色與技能的 planner 過去只看到本次訊息，
   像「所以沒辦法跑成功嗎」這種追問會被當成除錯任務，每次都掛上
   `systematic-debugging`，有時還排兩棒，重新調查上一回合已經回答過的事。

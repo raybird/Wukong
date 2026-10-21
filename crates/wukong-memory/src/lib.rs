@@ -193,6 +193,12 @@ impl Memory {
             .await
     }
 
+    /// 2026-10-21（issue-0017）：刪掉單一 scope 的記憶與 session 指向，給刪除排程用。
+    /// 回傳刪除的記憶筆數。
+    pub async fn delete_scope(&self, scope: &str) -> Result<u64> {
+        self.store.delete_scope(scope).await
+    }
+
     /// Clear the stored opencode session id for a scope.
     pub async fn clear_agent_session(&self, scope: &str) -> Result<()> {
         self.store.clear_agent_session(scope).await

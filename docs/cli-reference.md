@@ -98,7 +98,7 @@ wukong-schedulerd
 | `schedule list` | 列出所有排程 job |
 | `schedule add-turn --name N --cron C --scope S --prompt P` | 新增定時 Wukong turn，執行時沿用既有 planner 自動選 role/skill；`--scope` 是擁有者（見下方排程語意） |
 | `schedule add-maintenance --name N --cron C --task snapshot\|consolidate\|prune [--scope S]` | 新增定時記憶維護 job |
-| `schedule rm --id ID` | 刪除排程 job |
+| `schedule rm --id ID` | 刪除排程 job，並清掉 Turn 排程的 scope（`agent:schedule-<id>`）的記憶與 session 指向；排程正在執行時先刪 job，回合結束後才清，結果照常回送 |
 | `schedule enable --id ID` / `schedule disable --id ID` | 啟用或停用排程 job |
 | `schedule trigger --id ID` | 立即執行單一 job，並記錄 run history；job 正在執行時印「排程正在執行中」、已停用時印「排程已停用」，都不執行 |
 | `schedule runs [--id ID] [--limit N]` | 查看最近執行紀錄；執行中的 run 顯示目前階段與已執行秒數 |
