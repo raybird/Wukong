@@ -82,6 +82,7 @@
      - S-3：新函式插在 `previous_turn_records` 的 doc comment 與函式之間，說明被接到新函式上。已移回原位，只改註解。
      - S-5：呼叫處如果改回 `?`，單元測試抓不到，只有變異實驗抓得到。資料庫錯誤在 runtime 測試中無法以合理成本注入，記為殘餘缺口。
      - D-2：PR #18 已在 2026-10-20 以審查退回的版本合併。使用者 2026-10-21 選開後續 PR：從 main `5f75637` 開分支 `issue-0012-lease-lookup-fix`，把修正 cherry-pick 過去。
+       不另寫 Gate 豁免紀錄：docs/AGENTS.md 要求豁免以使用者明確要求為前提，並記下使用者原話。PR #18 的合併只是一個動作，沒有要求跳過審查的原話；PR #19 合併後 main 上也沒有未經審查的程式碼。這段經過記在 README Timeline（PR #19 審查 S-7）。
    - **D-1 告知列出其他使用者的對話 scope**：2026-10-21 使用者選 (a) 維持現狀，記入 README 待確認事項 TBD-5。
    - 影響分析：再次修改 `run_turn_traced_with_attachments`（CRITICAL，同步驟 3）。這次只把 `?` 換成不會失敗的呼叫，沒有其他回合時的行為不變。
    - 全量檢查（2026-10-21）：fmt、clippy 通過；`cargo test --workspace --locked` passed=641 failed=0 ignored=12，比步驟 5 多了上述 2 支測試。
