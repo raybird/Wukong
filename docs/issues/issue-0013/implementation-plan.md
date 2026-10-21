@@ -17,7 +17,7 @@
 
 所有步驟都要等 SCN-001～007 核准（TBD-AC）後才開始。
 
-1. 📝 **首要驗證：在真實行程重現 lease 過期後的重複執行**（SCN-003、SCN-004）
+1. ✅ **首要驗證：在真實行程重現 lease 過期後的重複執行**（SCN-003、SCN-004）
    - 產出：一支重現腳本，放在 scratchpad，結果抄錄進本計畫。內容：
      - 臨時目錄、假 agent，每次呼叫睡 N 秒。
      - `WUKONG_SESSION_LEASE_SECS` 與 daemon 的 `--lease-secs` 都設成遠小於回合時間。
@@ -25,6 +25,13 @@
      - 記錄兩邊的 exit code、run 紀錄、`agent_session_state`，以及假 agent 收到的 session。
    - 相依：TBD-AC。
    - 完成判準：現行版本至少重現下列其中一項，作為紅燈基線：trigger 重複執行、共用 session、原回合以 `session lease unavailable` 失敗。若都沒有重現，回 README 重新評估。
+   - 結果（2026-10-21，`a7d8935` 的 debug binary；腳本在 scratchpad 的 `repro13/run.sh`、`agent.sh`）：
+     - 設定：`WUKONG_SESSION_LEASE_SECS=4`、daemon `--lease-secs 2`，假 agent 每棒睡 8 秒。先用 trigger 暖身一次，讓排程 scope 存下 session `ses_2931387`。之後 daemon 開始執行，第 5 秒另開行程 trigger。
+     - 第 5 秒的 lease：job 的 `locked_until` 是 t0+2，已經過期；session 的 `lease_until` 是 t0+4，也已經過期。
+     - **重複執行（SCN-004 紅燈）**：trigger 取得 job 並執行一個完整回合，exit 0，run #3 為 success。daemon 印出 `lease was taken by another worker before completion`。
+     - **共用 session（SCN-003 紅燈）**：假 agent 的紀錄顯示，daemon 那棒（第 0～8 秒）和 trigger 那棒（第 5～13 秒）都以 `resumed=ses_2931387` 執行，有 3 秒重疊。
+     - **誤判失敗**：daemon 的 run #2 在第 8 秒失敗，原因是 `session lease unavailable for scope agent:schedule-…`。但它的回答 `done by daemon` 已經寫進記憶。
+     - 結論：三項全部重現，設計前提成立。
 2. 📝 **紅燈**
    - `wukong-memory`／`wukong-runtime`：用假 backend 讓一棒的執行時間超過 session lease 時間。執行中，從另一個 owner 嘗試取得同一個 scope 的 lease，預期拿不到；回合成功並寫回 session（SCN-003）。
    - `wukong-scheduler`：
