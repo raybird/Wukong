@@ -199,16 +199,10 @@ pub async fn run_turn_traced_with_attachments(
     let rotated_from = preparation.rotated_from.clone();
     let session_owner = preparation.owner.clone();
     let session_lease_secs = preparation.lease_secs;
-    // 2026-10-20（issue-0012）：拿到自己的 lease 之後，其他仍持有 lease 的 scope
-    // 就是同時在這個工作目錄執行的回合；告訴每一棒，但不阻擋任何一方。
-    let others: Vec<String> = memory
-        .active_session_leases()
-        .await?
-        .into_iter()
-        .filter(|scope| scope != &cfg.scope)
-        .collect();
-    let concurrent_notice = (!others.is_empty())
-        .then(|| persona::concurrent_turns_notice(&others, &persona::scheduling_bin()));
+    // 2026-10-20（issue-0012）：拿到自己的 lease 之後，告訴每一棒有哪些回合同時在
+    // 這個工作目錄執行，但不阻擋任何一方。
+    let concurrent_notice =
+        notice_for_other_turns(memory.active_session_leases().await, &cfg.scope);
     let result = async {
     let n_steps = steps.len();
     let mut prior: Vec<wukong_orchestrator::Outcome> = Vec::new();
@@ -474,6 +468,24 @@ fn planner_preference_hint(cfg: &GatewayConfig) -> Option<PlannerPreferenceHint>
             preferred_skills,
         })
     }
+}
+
+/// 其他仍持有 session lease 的 scope 就是同時在執行的回合。告知只是軟性提示：
+/// 查詢失敗就當作沒有其他回合，不能讓回合失敗——這時本回合的 lease 已經取得，
+/// 在 `result` 區塊外失敗會讓它殘留到過期（issue-0012 審查 M-1）。
+fn notice_for_other_turns(
+    leases: Result<Vec<String>, wukong_memory::MemoryError>,
+    own_scope: &str,
+) -> Option<String> {
+    let others: Vec<String> = match leases {
+        Ok(scopes) => scopes.into_iter().filter(|s| s != own_scope).collect(),
+        Err(err) => {
+            eprintln!("concurrent_turn_lookup_failed scope={own_scope}: {err}");
+            return None;
+        }
+    };
+    (!others.is_empty())
+        .then(|| persona::concurrent_turns_notice(&others, &persona::scheduling_bin()))
 }
 
 /// The scope's previous turn (its two newest turn memories), oldest first.
@@ -805,6 +817,22 @@ mod tests {
                 .unwrap()
                 .turn_count,
             0
+        );
+    }
+
+    // issue-0012 審查 M-1：查詢失敗不能讓回合失敗；查不到就不告知。
+    #[test]
+    fn notice_lookup_failure_is_ignored() {
+        assert_eq!(
+            notice_for_other_turns(
+                Err(wukong_memory::MemoryError::InvalidQuery("boom".to_string())),
+                "user:tg-42",
+            ),
+            None
+        );
+        assert_eq!(
+            notice_for_other_turns(Ok(vec!["user:tg-42".to_string()]), "user:tg-42"),
+            None
         );
     }
 
