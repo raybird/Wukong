@@ -151,11 +151,13 @@ Feature: schedulerd 重啟後的處理
 | 2026-10-21 | 實作完成；真實行程對照 main：回合中途 kill -9 後重啟，不再重跑同一次，舊 run 標成 interrupted，孤兒 scope 被清掉 |
 | 2026-10-21 | 開 PR #23；獨立審查 `review-1d65567.md` 判定 RETURN TO execute-task（M-1：非正規寫法的 UUID 會被誤刪）。使用者決定 D-1、D-2，修正見 implementation-plan 步驟 6 |
 | 2026-10-21 | 增量審查 `review-c959b8a.md` 判定 PASS，S-4 需決策；使用者選 D-3「不改程式，改正說法」 |
+| 2026-10-21 | 註解與文件更正的審查 `review-b115650.md` PASS；PR #23 以 `5727963` squash 合併為 main `5cf3c70`，合併內容與分支最新一致 |
+| 2026-10-21 | 結案 |
 
 ---
 **建立日期**: 2026-10-21
 **分級**: Medium — 跨 wukong-memory、wukong-scheduler、wukong-schedulerd，沿既有相依方向，不改 schema
 **風險**: High
-**狀態**: 實作中
+**狀態**: 已完成
 
 GitHub：https://github.com/raybird/Wukong/issues/22
