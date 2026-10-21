@@ -272,6 +272,41 @@ impl SchedulerStore {
         Ok(())
     }
 
+    /// 2026-10-21（issue-0013）：回合執行中延長自己持有的 job lease。
+    /// lease 已經不在 `worker_id` 手上時回 `false`。
+    pub async fn renew_job_lease(
+        &self,
+        id: &str,
+        worker_id: &str,
+        now: i64,
+        lease_secs: i64,
+    ) -> Result<bool, SchedulerError> {
+        let result = sqlx::query(
+            "UPDATE scheduler_jobs SET locked_until = ?3 WHERE id = ?1 AND locked_by = ?2",
+        )
+        .bind(id)
+        .bind(worker_id)
+        .bind(now + lease_secs)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// 2026-10-21（issue-0013）：寫入執行中 run 的進度；run 已結束時不動它。
+    pub async fn update_running_message(
+        &self,
+        run_id: i64,
+        message: &str,
+    ) -> Result<(), SchedulerError> {
+        sqlx::query("UPDATE scheduler_runs SET message = ?2 WHERE id = ?1 AND status = ?3")
+            .bind(run_id)
+            .bind(message)
+            .bind(RunStatus::Running.as_str())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn complete_job(&self, job: &Job, finished_at: i64) -> Result<(), SchedulerError> {
         let next = if job.enabled {
             next_after(&job.cron, finished_at)?
@@ -429,6 +464,65 @@ mod tests {
             },
             cron: cron.to_string(),
         }
+    }
+
+    // issue-0013：只有持有 lease 的 worker 能續租；續租後別人在原到期時間之後仍拿不到。
+    #[tokio::test]
+    async fn renew_job_lease_extends_only_the_holders_lease() {
+        let store = open_store().await;
+        let job = store.add_job(new_turn("* * * * *")).await.unwrap();
+        store
+            .claim_job(&job.id, 100, "worker-a", 10)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(!store
+            .renew_job_lease(&job.id, "worker-b", 105, 10)
+            .await
+            .unwrap());
+        assert!(store
+            .renew_job_lease(&job.id, "worker-a", 105, 10)
+            .await
+            .unwrap());
+
+        assert!(store
+            .claim_job(&job.id, 112, "worker-b", 10)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .claim_job(&job.id, 115, "worker-b", 10)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    // issue-0013：進度只寫進還在執行中的 run，已結束的 run 保留最終結果。
+    #[tokio::test]
+    async fn update_running_message_skips_finished_runs() {
+        let store = open_store().await;
+        let job = store.add_job(new_turn("* * * * *")).await.unwrap();
+        let running = store.start_run(&job.id, 100).await.unwrap();
+        let finished = store.start_run(&job.id, 100).await.unwrap();
+        store
+            .finish_run(finished, RunStatus::Success, "完成", 110)
+            .await
+            .unwrap();
+
+        store
+            .update_running_message(running, "進行中")
+            .await
+            .unwrap();
+        store
+            .update_running_message(finished, "進行中")
+            .await
+            .unwrap();
+
+        let runs = store.recent_runs(Some(&job.id), 10).await.unwrap();
+        let message = |id| runs.iter().find(|r| r.id == id).unwrap().message.clone();
+        assert_eq!(message(running), "進行中");
+        assert_eq!(message(finished), "完成");
     }
 
     #[tokio::test]

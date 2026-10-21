@@ -203,222 +203,232 @@ pub async fn run_turn_traced_with_attachments(
     // 這個工作目錄執行，但不阻擋任何一方。
     let concurrent_notice =
         notice_for_other_turns(memory.active_session_leases().await, &cfg.scope);
-    let result = async {
-    let n_steps = steps.len();
-    let mut prior: Vec<wukong_orchestrator::Outcome> = Vec::new();
-    let mut captured_session: Option<String> = None;
-    let mut final_repair: Option<(Role, Option<String>, String)> = None;
-    let skill_root = crate::skill_assets::materialize_default_runtime_skills().map_err(|err| {
-        WukongError::Backend(wukong_gateway::GatewayError::AgentFailed {
-            code: None,
-            stderr: format!("failed to prepare runtime skill assets: {err}"),
-        })
-    })?;
-    for (i, step) in steps.into_iter().enumerate() {
-        let role = step.role;
-        on_role(role);
-        let skill = step.skill_name.as_deref().and_then(find_skill);
-        let augmented = format!("{input}{}", wukong_orchestrator::chain_context(&prior));
-        let is_final = i + 1 == n_steps;
-        let hits = if is_final { &recall.data } else { &helper_hits };
-        let mut prompt =
-            persona::build_prompt_with_skill(role, skill, &skill_root, hits, &augmented);
-        // Advertise the scheduling capability only on the user-facing final step,
-        // so stateless helper steps never take a side-effecting schedule action.
-        if is_final {
-            prompt.push_str("\n\n");
-            prompt.push_str(persona::final_answer_directive());
-            prompt.push_str("\n\n");
-            prompt.push_str(&persona::scheduling_capability_hint(
-                &cfg.scope,
-                &persona::scheduling_bin(),
-            ));
-            // Same reasoning as scheduling: only the final, user-facing step.
-            // Helper steps are stateless, so a memory they wrote would outlive
-            // the reasoning that produced it with no way to trace it back.
-            if persona::memoria_hint_enabled() {
+    let work = async {
+        let n_steps = steps.len();
+        let mut prior: Vec<wukong_orchestrator::Outcome> = Vec::new();
+        let mut captured_session: Option<String> = None;
+        let mut final_repair: Option<(Role, Option<String>, String)> = None;
+        let skill_root =
+            crate::skill_assets::materialize_default_runtime_skills().map_err(|err| {
+                WukongError::Backend(wukong_gateway::GatewayError::AgentFailed {
+                    code: None,
+                    stderr: format!("failed to prepare runtime skill assets: {err}"),
+                })
+            })?;
+        for (i, step) in steps.into_iter().enumerate() {
+            let role = step.role;
+            on_role(role);
+            let skill = step.skill_name.as_deref().and_then(find_skill);
+            let augmented = format!("{input}{}", wukong_orchestrator::chain_context(&prior));
+            let is_final = i + 1 == n_steps;
+            let hits = if is_final { &recall.data } else { &helper_hits };
+            let mut prompt =
+                persona::build_prompt_with_skill(role, skill, &skill_root, hits, &augmented);
+            // Advertise the scheduling capability only on the user-facing final step,
+            // so stateless helper steps never take a side-effecting schedule action.
+            if is_final {
                 prompt.push_str("\n\n");
-                prompt.push_str(persona::memoria_capability_hint());
+                prompt.push_str(persona::final_answer_directive());
+                prompt.push_str("\n\n");
+                prompt.push_str(&persona::scheduling_capability_hint(
+                    &cfg.scope,
+                    &persona::scheduling_bin(),
+                ));
+                // Same reasoning as scheduling: only the final, user-facing step.
+                // Helper steps are stateless, so a memory they wrote would outlive
+                // the reasoning that produced it with no way to trace it back.
+                if persona::memoria_hint_enabled() {
+                    prompt.push_str("\n\n");
+                    prompt.push_str(persona::memoria_capability_hint());
+                }
             }
-        }
-        if let Some(notice) = &concurrent_notice {
-            prompt.push_str("\n\n");
-            prompt.push_str(notice);
-        }
-        let session_id = if is_final { stored.clone() } else { None };
-        if is_final {
-            final_repair = Some((role, session_id.clone(), prompt.clone()));
-        }
-        let resp = if is_final {
-            backend
-                .run_streaming(
-                    AgentRequest {
-                        prompt,
-                        session_id,
-                        thinking: cfg.thinking,
-                        model: cfg.default_model.clone(),
-                        agent: None,
-                        tool_overrides: std::collections::BTreeMap::new(),
-                        attachments: attachments.clone(),
-                    },
-                    on_event,
-                )
-                .await?
-        } else {
-            backend
-                .run_streaming_ephemeral(
-                    AgentRequest {
-                        prompt,
-                        session_id: None,
-                        thinking: cfg.thinking,
-                        model: None,
-                        agent: None,
-                        tool_overrides: std::collections::BTreeMap::new(),
-                        attachments: attachments.clone(),
-                    },
-                    on_event,
-                )
-                .await?
-        };
-        if is_final {
-            captured_session = resp.session_id.clone();
-        }
-        let text = resp.text;
-        // Surface helper-baton output to observers as soon as it lands; the final
-        // step is delivered via the returned TurnOutput, not on_step.
-        if !is_final && !text.trim().is_empty() {
-            on_step(ObservedStep {
-                role,
-                skill_name: step.skill_name.as_deref(),
-                output: &text,
-            });
-        }
-        prior.push(wukong_orchestrator::Outcome { role, output: text });
-    }
-
-    let last = prior
-        .last()
-        .cloned()
-        .unwrap_or(wukong_orchestrator::Outcome {
-            role: Role::Oracle,
-            output: String::new(),
-        });
-    // The final step may be an executor that finished via tool calls without a
-    // closing message, leaving its output empty. Fall back to the most recent
-    // non-empty step so the user never receives a blank reply and memory/history
-    // are not polluted with an empty Assistant entry.
-    let answer = if last.output.trim().is_empty() {
-        if let Some(existing) = prior
-            .iter()
-            .rev()
-            .find(|o| !o.output.trim().is_empty())
-            .cloned()
-        {
-            existing
-        } else if let Some((role, session_id, prompt)) = final_repair {
-            let repair = backend
-                .run_streaming(
-                    AgentRequest {
-                        prompt: append_empty_output_repair_directive(prompt),
-                        session_id: captured_session.clone().or(session_id),
-                        thinking: cfg.thinking,
-                        model: cfg.default_model.clone(),
-                        agent: None,
-                        tool_overrides: std::collections::BTreeMap::new(),
-                        attachments: attachments.clone(),
-                    },
-                    on_event,
-                )
-                .await?;
-            if let Some(id) = repair.session_id.as_deref() {
-                captured_session = Some(id.to_string());
+            if let Some(notice) = &concurrent_notice {
+                prompt.push_str("\n\n");
+                prompt.push_str(notice);
             }
-            if !repair.text.trim().is_empty() {
-                wukong_orchestrator::Outcome {
+            let session_id = if is_final { stored.clone() } else { None };
+            if is_final {
+                final_repair = Some((role, session_id.clone(), prompt.clone()));
+            }
+            let resp = if is_final {
+                backend
+                    .run_streaming(
+                        AgentRequest {
+                            prompt,
+                            session_id,
+                            thinking: cfg.thinking,
+                            model: cfg.default_model.clone(),
+                            agent: None,
+                            tool_overrides: std::collections::BTreeMap::new(),
+                            attachments: attachments.clone(),
+                        },
+                        on_event,
+                    )
+                    .await?
+            } else {
+                backend
+                    .run_streaming_ephemeral(
+                        AgentRequest {
+                            prompt,
+                            session_id: None,
+                            thinking: cfg.thinking,
+                            model: None,
+                            agent: None,
+                            tool_overrides: std::collections::BTreeMap::new(),
+                            attachments: attachments.clone(),
+                        },
+                        on_event,
+                    )
+                    .await?
+            };
+            if is_final {
+                captured_session = resp.session_id.clone();
+            }
+            let text = resp.text;
+            // Surface helper-baton output to observers as soon as it lands; the final
+            // step is delivered via the returned TurnOutput, not on_step.
+            if !is_final && !text.trim().is_empty() {
+                on_step(ObservedStep {
                     role,
-                    output: repair.text,
+                    skill_name: step.skill_name.as_deref(),
+                    output: &text,
+                });
+            }
+            prior.push(wukong_orchestrator::Outcome { role, output: text });
+        }
+
+        let last = prior
+            .last()
+            .cloned()
+            .unwrap_or(wukong_orchestrator::Outcome {
+                role: Role::Oracle,
+                output: String::new(),
+            });
+        // The final step may be an executor that finished via tool calls without a
+        // closing message, leaving its output empty. Fall back to the most recent
+        // non-empty step so the user never receives a blank reply and memory/history
+        // are not polluted with an empty Assistant entry.
+        let answer = if last.output.trim().is_empty() {
+            if let Some(existing) = prior
+                .iter()
+                .rev()
+                .find(|o| !o.output.trim().is_empty())
+                .cloned()
+            {
+                existing
+            } else if let Some((role, session_id, prompt)) = final_repair {
+                let repair = backend
+                    .run_streaming(
+                        AgentRequest {
+                            prompt: append_empty_output_repair_directive(prompt),
+                            session_id: captured_session.clone().or(session_id),
+                            thinking: cfg.thinking,
+                            model: cfg.default_model.clone(),
+                            agent: None,
+                            tool_overrides: std::collections::BTreeMap::new(),
+                            attachments: attachments.clone(),
+                        },
+                        on_event,
+                    )
+                    .await?;
+                if let Some(id) = repair.session_id.as_deref() {
+                    captured_session = Some(id.to_string());
+                }
+                if !repair.text.trim().is_empty() {
+                    wukong_orchestrator::Outcome {
+                        role,
+                        output: repair.text,
+                    }
+                } else {
+                    wukong_orchestrator::Outcome {
+                        role,
+                        output: "(本回合未產生文字輸出)".to_string(),
+                    }
                 }
             } else {
                 wukong_orchestrator::Outcome {
-                    role,
+                    role: last.role,
                     output: "(本回合未產生文字輸出)".to_string(),
                 }
             }
         } else {
-            wukong_orchestrator::Outcome {
-                role: last.role,
-                output: "(本回合未產生文字輸出)".to_string(),
-            }
-        }
-    } else {
-        last
-    };
+            last
+        };
 
-    // 2026-10-06：session 會跨回合沿用，不能當防重複 key（否則只有第一回合被記住）；
-    // 每次 run_turn 產生自己的識別碼，同一回合只寫一次。
-    let turn_key = format!("scope:{}:turn:{}", cfg.scope, uuid::Uuid::new_v4());
+        // 2026-10-06：session 會跨回合沿用，不能當防重複 key（否則只有第一回合被記住）；
+        // 每次 run_turn 產生自己的識別碼，同一回合只寫一次。
+        let turn_key = format!("scope:{}:turn:{}", cfg.scope, uuid::Uuid::new_v4());
 
-    memory
-        .remember(RememberInput {
-            scope: cfg.scope.clone(),
-            session_id: captured_session.clone().or_else(|| stored.clone()),
-            items: vec![
-                MemoryItem {
-                    kind: MemoryKind::Event,
-                    text: format!("User: {user_text}"),
-                    importance: None,
-                    dedupe_key: Some(format!("runtime:{turn_key}:user")),
-                },
-                MemoryItem {
-                    kind: MemoryKind::Event,
-                    text: format!("Assistant: {}", answer.output),
-                    importance: None,
-                    dedupe_key: Some(format!("runtime:{turn_key}:assistant")),
-                },
-            ],
-        })
-        .await?;
-
-    memory
-        .acquire_agent_session_lease(&cfg.scope, &session_owner, session_lease_secs)
-        .await?
-        .ok_or_else(|| {
-            WukongError::Backend(wukong_gateway::GatewayError::AgentFailed {
-                code: None,
-                stderr: format!("session lease unavailable for scope {}", cfg.scope),
+        memory
+            .remember(RememberInput {
+                scope: cfg.scope.clone(),
+                session_id: captured_session.clone().or_else(|| stored.clone()),
+                items: vec![
+                    MemoryItem {
+                        kind: MemoryKind::Event,
+                        text: format!("User: {user_text}"),
+                        importance: None,
+                        dedupe_key: Some(format!("runtime:{turn_key}:user")),
+                    },
+                    MemoryItem {
+                        kind: MemoryKind::Event,
+                        text: format!("Assistant: {}", answer.output),
+                        importance: None,
+                        dedupe_key: Some(format!("runtime:{turn_key}:assistant")),
+                    },
+                ],
             })
-        })?;
-    let turn_session_id = captured_session.clone().or(stored.clone());
-    memory
-        .finish_agent_session_turn(&cfg.scope, &session_owner, turn_session_id.as_deref())
-        .await?
-        .ok_or_else(|| {
-            WukongError::Backend(wukong_gateway::GatewayError::AgentFailed {
-                code: None,
-                stderr: format!("session lease lost for scope {}", cfg.scope),
-            })
-        })?;
-    if let Some(old_id) = rotated_from.as_deref() {
-        if captured_session.as_deref() != Some(old_id) {
-            let new_id = captured_session.as_deref().unwrap_or("<none>");
-            eprintln!(
-                "session_rotated scope={} old_session_id={} new_session_id={}",
-                cfg.scope, old_id, new_id
-            );
-            if let Err(error) = backend.delete_session(old_id).await {
+            .await?;
+
+        memory
+            .acquire_agent_session_lease(&cfg.scope, &session_owner, session_lease_secs)
+            .await?
+            .ok_or_else(|| {
+                WukongError::Backend(wukong_gateway::GatewayError::AgentFailed {
+                    code: None,
+                    stderr: format!("session lease unavailable for scope {}", cfg.scope),
+                })
+            })?;
+        let turn_session_id = captured_session.clone().or(stored.clone());
+        memory
+            .finish_agent_session_turn(&cfg.scope, &session_owner, turn_session_id.as_deref())
+            .await?
+            .ok_or_else(|| {
+                WukongError::Backend(wukong_gateway::GatewayError::AgentFailed {
+                    code: None,
+                    stderr: format!("session lease lost for scope {}", cfg.scope),
+                })
+            })?;
+        if let Some(old_id) = rotated_from.as_deref() {
+            if captured_session.as_deref() != Some(old_id) {
+                let new_id = captured_session.as_deref().unwrap_or("<none>");
                 eprintln!(
+                    "session_rotated scope={} old_session_id={} new_session_id={}",
+                    cfg.scope, old_id, new_id
+                );
+                if let Err(error) = backend.delete_session(old_id).await {
+                    eprintln!(
                     "session_rotation_cleanup_failed scope={} old_session_id={} new_session_id={}: {error}",
                     cfg.scope, old_id, new_id
                 );
+                }
             }
         }
-    }
 
-    Ok(TurnOutput {
-        role: answer.role,
-        text: answer.output,
-    })
-    }
+        Ok(TurnOutput {
+            role: answer.role,
+            text: answer.output,
+        })
+    };
+    // 2026-10-21（issue-0013）：單次 backend 呼叫可以比 session lease 久，執行期間續租，
+    // 別的回合才不會在中途拿走 lease、和本回合共用同一個 session。
+    let result = crate::session::hold_session_lease(
+        memory,
+        &cfg.scope,
+        &session_owner,
+        session_lease_secs,
+        work,
+    )
     .await;
 
     if result.is_err() {

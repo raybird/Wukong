@@ -94,10 +94,8 @@ pub async fn prepare_final_session_with_policy(
     }
 
     let session_id = state.session_id.expect("checked above");
-    match backend
-        .compact_session(&session_id, cfg.default_model.as_deref())
-        .await
-    {
+    let compaction = backend.compact_session(&session_id, cfg.default_model.as_deref());
+    match hold_session_lease(memory, &cfg.scope, &owner, policy.lease_secs, compaction).await {
         Ok(_) => {
             match memory
                 .mark_agent_session_compacted(&cfg.scope, &owner, &session_id)
@@ -183,6 +181,35 @@ pub fn is_unsupported_compaction(error: &GatewayError) -> bool {
     )
 }
 
+/// 2026-10-21（issue-0013）：在 `work` 執行期間持續持有 `scope` 的 session lease。
+/// 單次 backend 呼叫可以跑得比 lease 久，不續租的話，別的回合會在中途拿走 lease。
+pub async fn hold_session_lease<F: std::future::Future>(
+    memory: &Memory,
+    scope: &str,
+    owner: &str,
+    lease_secs: i64,
+    work: F,
+) -> F::Output {
+    // 每隔 lease 的三分之一續租一次；續租和工作在同一個 task，工作結束或被丟掉，
+    // 續租就跟著停，lease 照原本的時間到期。
+    let every = std::time::Duration::from_millis(lease_secs.max(1) as u64 * 1000 / 3);
+    let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tokio::pin!(work);
+    loop {
+        tokio::select! {
+            output = &mut work => return output,
+            _ = ticker.tick() => {
+                match memory.renew_agent_session_lease(scope, owner, lease_secs).await {
+                    Ok(true) => {}
+                    Ok(false) => eprintln!("session_lease_renew_lost scope={scope} owner={owner}"),
+                    Err(err) => eprintln!("session_lease_renew_failed scope={scope}: {err}"),
+                }
+            }
+        }
+    }
+}
+
 fn stale_lease_error(scope: &str) -> WukongError {
     WukongError::Backend(GatewayError::AgentFailed {
         code: None,
@@ -201,6 +228,71 @@ fn positive_env_i64(name: &str, default: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    async fn open_memory() -> Memory {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let url = format!("sqlite://{}", file.path().display());
+        std::mem::forget(file);
+        Memory::open(&url).await.unwrap()
+    }
+
+    // SCN-003：工作跑得比 lease 久，別的 owner 在中途拿不到 lease。
+    #[tokio::test]
+    async fn lease_stays_held_while_work_outlives_it() {
+        let memory = open_memory().await;
+        memory
+            .acquire_agent_session_lease("agent:schedule-j1", "turn-a", 2)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let work = hold_session_lease(&memory, "agent:schedule-j1", "turn-a", 2, async {
+            tokio::time::sleep(Duration::from_millis(3500)).await;
+        });
+        let intruder = async {
+            tokio::time::sleep(Duration::from_millis(3000)).await;
+            memory
+                .acquire_agent_session_lease("agent:schedule-j1", "turn-b", 2)
+                .await
+                .unwrap()
+        };
+        let ((), stolen) = tokio::join!(work, intruder);
+
+        assert!(
+            stolen.is_none(),
+            "lease 在工作途中被 turn-b 拿走：{stolen:?}"
+        );
+    }
+
+    // SCN-005：工作被中止（future 被丟掉）後就不再續租，lease 照原本的時間到期。
+    #[tokio::test]
+    async fn lease_expires_once_the_work_is_dropped() {
+        let memory = open_memory().await;
+        memory
+            .acquire_agent_session_lease("agent:schedule-j1", "turn-a", 2)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let held = hold_session_lease(
+            &memory,
+            "agent:schedule-j1",
+            "turn-a",
+            2,
+            std::future::pending::<()>(),
+        );
+        assert!(tokio::time::timeout(Duration::from_millis(1500), held)
+            .await
+            .is_err());
+        tokio::time::sleep(Duration::from_millis(3000)).await;
+
+        assert!(memory
+            .acquire_agent_session_lease("agent:schedule-j1", "turn-b", 2)
+            .await
+            .unwrap()
+            .is_some());
+    }
 
     #[test]
     fn compact_threshold_parser_supports_disable() {
