@@ -150,11 +150,12 @@ Feature: 長時間排程回合可以查到進度，執行中持續持有 lease
 | 2026-10-08 | 依使用者授權在 GitHub 建立議題與驗收草案，尚未核准 |
 | 2026-10-21 | 讀碼盤點逾時與 lease 機制；使用者選範圍「可觀察性＋lease 續租」，並回答 Q1～Q4 |
 | 2026-10-21 | 使用者核准 SCN-001～007 |
+| 2026-10-21 | 重現 lease 過期後的重複執行與共用 session；實作續租與進度，重現腳本與中止測試複驗通過 |
 
 ---
 **建立日期**: 2026-10-08
 **分級**: Medium — 跨 wukong-scheduler、wukong-runtime、wukong-cli、wukong-schedulerd，沿既有相依方向，不改 schema（2026-10-21 由 Large 調降）
 **風險**: Medium
-**狀態**: 待實作
+**狀態**: 實作中
 
 GitHub：https://github.com/raybird/Wukong/issues/13
