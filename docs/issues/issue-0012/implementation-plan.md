@@ -77,7 +77,11 @@
      - 綠燈：同一個變異 worktree 套上修正後，印出 `concurrent_turn_lookup_failed … no such table`，結果是 `turn_ok=true lease_until=None`。
      - 回歸測試：`turn.rs` 的 `notice_lookup_failure_is_ignored` 直接測錯誤分支與「只有自己」的情況。資料庫錯誤在 runtime 測試中無法以合理成本注入，所以端到端的失敗路徑以上述變異實驗為證據。
    - **S-1 Memory 層的過期判斷沒有測試**：新增 `lib.rs` 的 `active_session_leases_uses_the_current_time`，用 1970 年取得的過期 lease 和剛取得的 lease 比對。把 `now_unix()` 換成 `0` 時這支測試紅燈，改回來是綠燈。
-   - **S-2 措辭**：已更正步驟 4 與 PR 說明。
+   - **S-2 措辭**：已更正步驟 4。PR #18 已經合併，所以它的說明沒有改；更正後的說法寫在後續 PR。
+   - **複審**（`review-6f4330d.md`，HEAD `6f4330d`）：PASS。另提出兩項不阻塞的建議和一項需決策：
+     - S-3：新函式插在 `previous_turn_records` 的 doc comment 與函式之間，說明被接到新函式上。已移回原位，只改註解。
+     - S-5：呼叫處如果改回 `?`，單元測試抓不到，只有變異實驗抓得到。資料庫錯誤在 runtime 測試中無法以合理成本注入，記為殘餘缺口。
+     - D-2：PR #18 已在 2026-10-20 以審查退回的版本合併。使用者 2026-10-21 選開後續 PR：從 main `5f75637` 開分支 `issue-0012-lease-lookup-fix`，把修正 cherry-pick 過去。
    - **D-1 告知列出其他使用者的對話 scope**：2026-10-21 使用者選 (a) 維持現狀，記入 README 待確認事項 TBD-5。
    - 影響分析：再次修改 `run_turn_traced_with_attachments`（CRITICAL，同步驟 3）。這次只把 `?` 換成不會失敗的呼叫，沒有其他回合時的行為不變。
    - 全量檢查（2026-10-21）：fmt、clippy 通過；`cargo test --workspace --locked` passed=641 failed=0 ignored=12，比步驟 5 多了上述 2 支測試。
