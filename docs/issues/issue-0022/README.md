@@ -138,17 +138,19 @@ Feature: schedulerd 重啟後的處理
 | TBD-AC | SCN-001～005 的具體行為 | 已解決 | 2026-10-21 使用者回覆「核准」 |
 | TBD-1 | 一次性提醒在執行中被中斷，要等到下一個符合 cron 的時間（可能是明年）才會再觸發，排程也會留著 | 不影響本次交付 | 使用者 Q2 選定的代價 |
 | TBD-2 | 回合總時間上限（#13 TBD-2）、逾時後接續與成果另外驗證（#13 TBD-3） | 不影響本次交付 | 不在 #22 範圍 |
+| TBD-3 | 當掉的回合留下的 session lease 最多占用 900 秒，這段期間同一個 scope 的回合會在規劃階段以「session lease unavailable」失敗 | 不影響本次交付 | 步驟 4 實測發現，是既有行為（main 也一樣）。排程頻率低於 15 分鐘一次時不受影響；要處理需要另開 issue |
 
 ## Timeline
 | 日期 | 異動 |
 |---|---|
 | 2026-10-21 | 讀碼盤點；使用者回答 Q1～Q4（Q3 得知跳過的影響後重新選擇）；開立 GitHub #22 |
 | 2026-10-21 | 使用者核准 SCN-001～005；GitHub #22 內文的推進時機改為開始執行時 |
+| 2026-10-21 | 實作完成；真實行程對照 main：回合中途 kill -9 後重啟，不再重跑同一次，舊 run 標成 interrupted，孤兒 scope 被清掉 |
 
 ---
 **建立日期**: 2026-10-21
 **分級**: Medium — 跨 wukong-memory、wukong-scheduler、wukong-schedulerd，沿既有相依方向，不改 schema
 **風險**: High
-**狀態**: 待實作
+**狀態**: 實作中
 
 GitHub：https://github.com/raybird/Wukong/issues/22
