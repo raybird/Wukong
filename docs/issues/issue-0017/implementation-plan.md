@@ -95,6 +95,7 @@
      - 拿掉回合結束後的清理：SCN-003 紅燈。
      - 拿掉排隊跳過時的清理：SCN-005 紅燈。
      - 被持有時也立刻清：SCN-003 與 SCN-005 都紅燈。
+       - 2026-10-21 依審查更正：SCN-003 紅燈只是因為刪除結果從 `DeletedWhileHeld` 變成了 `Deleted`，斷言對不上，並不是回合失敗。審查的變異 M10（照常回 `DeletedWhileHeld`，但也立刻清）下，SCN-003 全綠，回合照樣成功，見步驟 6。
 4. ✅ **真實行程驗證**（SCN-003／004）
    - 在臨時目錄用假 agent 建一個排程。假 agent 在回合中途執行 `wukong schedule rm --id <自己的 id>`，再睡幾秒後結束。
    - 由 daemon 執行，記錄以下結果：
@@ -116,7 +117,7 @@
      | rm 的輸出 | 已刪除排程 | 已刪除排程；排程正在執行，回合結束後才會清掉它的記憶與 session |
      | daemon | `lease was taken by another worker before completion`，沒有送通知 | `was deleted while running; cleared its scope`、`succeeded`、`telegram delivery … failed`（proxy 擋下） |
 
-     第 2 秒時，排程已經不在了，但 session 狀態還在，所以回合能正常結束（SCN-003）。兩邊結束後的 trigger 都印「找不到排程」。
+     第 2 秒時，排程已經不在了，但 scope 還沒清（SCN-003）；回合結束後才清空。兩邊結束後的 trigger 都印「找不到排程」。
 5. ✅ **常青文件與交付**
    - 根目錄 `AGENTS.md` 的「排程能力注入」：補上刪除排程會清掉它的 scope，以及執行中刪除的處理方式。
    - `docs/cli-reference.md` 的 `schedule rm`。
@@ -134,6 +135,23 @@
 
      列出的 `Memory::remember`、`set_enabled`、`snapshot`、`due_job` 等只是位置相鄰；`git diff` 確認 `memory/src/lib.rs` 只有新增，`store.rs` 只改了 `remove_job` 與測試。
    - code-simplify：清理邏輯只有 `delete_scope` 一處；executor 的兩條事後清理共用 `clear_scope_if_deleted`。no-op。
+
+6. ✅ **審查修正**（PR #21 審查 `review-94a5682.md`，PASS，2026-10-21）
+   - **SHOULD FIX 1：延後清理的理由寫錯了**。原本寫「執行中先清，`finish_agent_session_turn` 會失敗」，但回合結束前的 `acquire_agent_session_lease` 會重建 session 狀態列，所以先清不會讓回合失敗。審查的變異 M10 證實了這一點。
+     - 真正的理由是：回合結束時才寫入記憶、重建 session 狀態，提早清也會被寫回去。
+     - 已更正 `AGENTS.md`、`delete_job` 的註解、README「已確認證據」，以及步驟 3、步驟 4 的描述。延後清理本身是使用者 Q4 核准的行為，不變。
+   - **D-1**：審查建議可以改成「被持有時也先清一次，回合結束後再清一次」，讓 TBD-1 的殘留只剩當回合寫入的部分。使用者 2026-10-21 選維持現狀。
+   - **SHOULD FIX 2：兩條路徑沒有守門**。
+     - M11（排程還在時照樣清 scope）：在 SCN-008 的 `queued_job_whose_lease_was_taken_is_skipped` 裡，先為 scope 寫入資料，並斷言被別人取得時 scope 不變。M11 下這支測試紅燈。
+     - M9（CLI trigger 收到 `Deleted` 時改回錯誤）：把 trigger 的結果判斷抽成 `trigger_report`，回傳要印的訊息與錯誤，行為不變；新增 `trigger_reports_a_turn_deleted_while_running`。M9 下這支測試紅燈。
+     - 審查另外用真實行程補跑了 trigger：本分支 exit 0、印出「提醒完成」、scope 歸零；main 是 exit 1，回報 lease 被接手。紀錄在 scratchpad 的 `rev17/`。
+   - 全量檢查（2026-10-21）：fmt、clippy 通過；`cargo test --workspace --locked --no-fail-fast` passed=666 failed=0 ignored=12，比步驟 5 多 1 支 trigger 測試。SCN-008 那支是在原測試裡加斷言，不算新測試。
+   - `gitnexus_detect_changes`（risk=medium）：正式程式碼只動到 CLI 的 `trigger_job`（抽出 `trigger_report`）與 `delete_job` 的註解。列出的 `run_claimed_job`、`describe_job_kind` 等只是位置相鄰。
+   - NICE TO HAVE 不處理，只記錄：
+     - Web 刪除執行中的排程沒有回應碼測試；
+     - `Deleted` 的註解寫「已清掉」，但清理失敗時只記 log；
+     - heartbeat 在排程被刪除後會印 `lease_renew_lost`；
+     - `WUKONG_MD_DIR` 的 markdown 鏡像不會刪。
 
 ## 驗收對照
 | Scenario | 層級 | 證據 |

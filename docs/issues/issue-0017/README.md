@@ -36,7 +36,8 @@
   - 已經被 consolidate 的 event 會被 prune 掉，但 summary 永遠不在 prune 的範圍內。
   - Web 的記憶頁列出所有 scope（`crates/wukong-web/src/memory_api.rs`），所以孤兒記憶會一直出現在那裡。
 - **session 指向**：`Memory::clear_agent_session` 已經會在同一個 transaction 刪掉兩張表的那一列（`store/mod.rs:742-754`），但目前沒有任何正式路徑呼叫它。保留期清理只要有 scope 指向某棵 session 樹，就整棵保留。
-- **執行中清 session 狀態會讓回合失敗**：回合結束時，`finish_agent_session_turn` 要求 lease 仍在自己手上；找不到那一列就回「session lease lost」錯誤（`crates/wukong-runtime/src/turn.rs:393-401`）。所以執行中不能清 session 狀態。
+- **回合結束時才寫入**：回合結束時，先寫入本回合的記憶，再以 `acquire_agent_session_lease` 重新取得 lease，最後才 `finish_agent_session_turn`（`crates/wukong-runtime/src/turn.rs:383-401`）。`acquire_agent_session_lease` 會在 session 狀態列不存在時以 `INSERT … ON CONFLICT DO NOTHING` 重建它（`crates/wukong-memory/src/store/mod.rs:577-600`）。所以執行中先清 scope 不會讓回合失敗，但清完之後回合又會寫回去；只有在回合結束後清，才清得乾淨。
+  - 2026-10-21 依 PR #21 審查 SHOULD FIX 1 更正：原本誤寫為「執行中清 session 狀態會讓回合失敗」。
 - **執行中被刪除就不送通知**：`run_scan` 遇到 `LeaseLost` 會 `continue`，不送 Telegram（`crates/wukong-schedulerd/src/main.rs:232-238`）。
 - **agent 會自己刪排程**：每回合最後一棒的排程能力提示，教 agent 用 `schedule rm --id <id>` 刪除排程（`crates/wukong-runtime/src/persona.rs:147`），排程回合也會收到。所以排程有可能在自己執行時刪掉自己。
 - **正式環境沒有既有的孤兒資料**：#14（排程在自己的 scope 執行）在 2026-10-20 合併，最新發布的是 v0.22.1（2026-10-07），還不包含它。正式環境沒有 `agent:schedule-*` scope，所以不需要掃描既有的孤兒資料。
@@ -154,6 +155,7 @@ Feature: 刪除排程時清掉它的 scope
 | 2026-10-21 | 讀碼盤點；使用者回答 Q1～Q5（Q4 得知排程會刪掉自己之後重新選擇） |
 | 2026-10-21 | 使用者核准 SCN-001～006 |
 | 2026-10-21 | 實作完成；真實行程對照 main：執行中自我刪除的排程，回合成功、scope 清空、照常嘗試送通知 |
+| 2026-10-21 | PR #21 審查 PASS（`review-94a5682.md`）。依 SHOULD FIX 更正延後清理的理由，並補上兩支守門測試；使用者對 D-1（改成被持有時也先清一次）選維持現狀 |
 
 ---
 **建立日期**: 2026-10-20
