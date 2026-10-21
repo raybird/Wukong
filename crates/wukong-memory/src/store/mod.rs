@@ -777,6 +777,26 @@ impl Store {
         Ok(deleted)
     }
 
+    /// 2026-10-21（issue-0022）：列出以 `prefix` 開頭的所有 scope（記憶、`sessions`、兩張
+    /// session 指向表），不重複、依字典序。區分大小寫，`%`／`_` 不是萬用字元；空字串
+    /// 不執行。
+    pub async fn scopes_with_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+        if prefix.is_empty() {
+            return Err(crate::error::MemoryError::InvalidScope(String::new()));
+        }
+        let rows = sqlx::query(
+            "SELECT scope FROM memories WHERE substr(scope, 1, length(?1)) = ?1
+             UNION SELECT scope FROM sessions WHERE substr(scope, 1, length(?1)) = ?1
+             UNION SELECT scope FROM agent_sessions WHERE substr(scope, 1, length(?1)) = ?1
+             UNION SELECT scope FROM agent_session_state WHERE substr(scope, 1, length(?1)) = ?1
+             ORDER BY scope",
+        )
+        .bind(prefix)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.get("scope")).collect())
+    }
+
     /// Delete the given memory rows. The AFTER DELETE trigger keeps FTS in sync.
     /// Returns the number of rows removed.
     pub async fn delete_memories(&self, ids: &[i64]) -> Result<u64> {
@@ -1706,6 +1726,79 @@ mod tests {
     }
 
     // issue-0012 SCN-003：只列出仍有效的 lease。
+    // issue-0022：列出排程 scope 時，前綴比對要區分大小寫、不把 `%`／`_` 當萬用字元。
+    #[tokio::test]
+    async fn scopes_with_prefix_matches_case_sensitively_without_wildcards() {
+        let store = test_store().await;
+        // 每個 scope 只出現在一張表，確認四張表都有列進來。
+        store
+            .insert_memory(None, "agent:a-mem", MemoryKind::Event, "x", 1.0, 100, None)
+            .await
+            .unwrap();
+        store
+            .upsert_session("turn-1", "agent:a-ses", 100)
+            .await
+            .unwrap();
+        store
+            .set_agent_session("agent:a-ptr", "ses-1", 100)
+            .await
+            .unwrap();
+        store
+            .acquire_agent_session_lease("agent:a-state", "owner", 100, 60)
+            .await
+            .unwrap();
+        // 同一個 scope 出現在多張表，只列一次。
+        store
+            .insert_memory(None, "agent:a-ptr", MemoryKind::Note, "y", 1.0, 100, None)
+            .await
+            .unwrap();
+        // 不該被列出：大小寫不同、`_` 與 `%` 當成萬用字元時才會符合、前綴不同。
+        for scope in [
+            "AGENT:A-upper",
+            "agent:aX_wild",
+            "agent:b-other",
+            "user:tg-42",
+        ] {
+            store
+                .insert_memory(None, scope, MemoryKind::Event, "z", 1.0, 100, None)
+                .await
+                .unwrap();
+        }
+        store
+            .insert_memory(None, "agent:a_1", MemoryKind::Event, "z", 1.0, 100, None)
+            .await
+            .unwrap();
+        store
+            .insert_memory(None, "agent:ab1", MemoryKind::Event, "z", 1.0, 100, None)
+            .await
+            .unwrap();
+        store
+            .insert_memory(None, "agent:a%1", MemoryKind::Event, "z", 1.0, 100, None)
+            .await
+            .unwrap();
+        store
+            .insert_memory(None, "agent:aZZ1", MemoryKind::Event, "z", 1.0, 100, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.scopes_with_prefix("agent:a-").await.unwrap(),
+            ["agent:a-mem", "agent:a-ptr", "agent:a-ses", "agent:a-state"]
+        );
+        assert_eq!(
+            store.scopes_with_prefix("agent:a_").await.unwrap(),
+            ["agent:a_1"]
+        );
+        assert_eq!(
+            store.scopes_with_prefix("agent:a%").await.unwrap(),
+            ["agent:a%1"]
+        );
+        assert!(matches!(
+            store.scopes_with_prefix("").await,
+            Err(crate::error::MemoryError::InvalidScope(_))
+        ));
+    }
+
     // issue-0017：只刪目標 scope；名稱以它開頭的 scope、擁有者與其他排程都不動。
     #[tokio::test]
     async fn delete_scope_removes_only_that_scope() {

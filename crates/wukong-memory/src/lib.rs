@@ -199,6 +199,11 @@ impl Memory {
         self.store.delete_scope(scope).await
     }
 
+    /// 2026-10-21（issue-0022）：列出以 `prefix` 開頭的所有 scope，給清孤兒排程 scope 用。
+    pub async fn scopes_with_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+        self.store.scopes_with_prefix(prefix).await
+    }
+
     /// Clear the stored opencode session id for a scope.
     pub async fn clear_agent_session(&self, scope: &str) -> Result<()> {
         self.store.clear_agent_session(scope).await

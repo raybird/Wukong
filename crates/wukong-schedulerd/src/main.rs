@@ -70,6 +70,11 @@ async fn run(cli: Cli) -> Result<(), String> {
     if interrupted > 0 {
         eprintln!("recovered {interrupted} interrupted scheduler run(s)");
     }
+    match clear_orphan_scopes(&store, &memory, cli.once).await {
+        Ok(0) => {}
+        Ok(n) => eprintln!("cleared {n} orphan scheduled-turn scope(s)"),
+        Err(e) => eprintln!("warning: orphan scheduled-turn scope cleanup failed: {e}"),
+    }
     let history = match ChatHistoryStore::open(&cfg.db_url).await {
         Ok(store) => Some(store),
         Err(e) => {
@@ -179,6 +184,21 @@ async fn recover_interrupted_runs(
         .map_err(|e| e.to_string())
 }
 
+/// issue-0022：排程在執行中被刪除、行程又在回合結束前結束時，它的 scope 沒有人清。
+/// 和 `recover_interrupted_runs` 一樣只在常駐模式啟動時做一次。
+async fn clear_orphan_scopes(
+    store: &SchedulerStore,
+    memory: &Memory,
+    once: bool,
+) -> Result<u64, String> {
+    if once {
+        return Ok(0);
+    }
+    wukong_scheduler::clear_orphan_turn_scopes(store, memory)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 async fn claim_ready_jobs(
     store: &SchedulerStore,
     backend: &AgentBackend,
@@ -207,6 +227,14 @@ async fn run_scan(
     history: Option<&ChatHistoryStore>,
 ) -> Result<(), String> {
     let now = now_unix();
+    // issue-0022：行程在 lease 到期前就重啟時，啟動時的檢查標不到舊 run，所以每輪都檢查。
+    let interrupted = store
+        .interrupt_stale_runs(now)
+        .await
+        .map_err(|e| e.to_string())?;
+    if interrupted > 0 {
+        eprintln!("marked {interrupted} stale scheduler run(s) as interrupted");
+    }
     let jobs = claim_ready_jobs(store, backend, now, worker_id, lease_secs, limit).await?;
     for job in jobs {
         let ctx = ExecutionContext {
@@ -501,6 +529,104 @@ mod tests {
         .unwrap();
 
         assert_eq!(claimed, vec![job]);
+    }
+
+    // issue-0022 SCN-004：每輪掃描都把 lease 已到期的 running run 標成 interrupted，
+    // 即使 backend 還沒準備好、這一輪取得不到排程；lease 還在別人手上的 run 不動。
+    #[tokio::test]
+    async fn each_scan_interrupts_runs_whose_lease_expired() {
+        let (file, store) = open_store().await;
+        let url = format!("sqlite://{}", file.path().display());
+        let memory = Memory::open(&url).await.unwrap();
+        let now = now_unix();
+        // 已結束的 worker 在 600 秒前取得、lease 300 秒，現在已經到期。
+        let stale = due_job(&store).await;
+        store
+            .claim_job(&stale.id, now - 600, "dead", 300)
+            .await
+            .unwrap()
+            .unwrap();
+        let stale_run = store.start_run(&stale.id, now - 600).await.unwrap();
+        let held = due_job(&store).await;
+        store
+            .claim_job(&held.id, now, "other", 300)
+            .await
+            .unwrap()
+            .unwrap();
+        let held_run = store.start_run(&held.id, now).await.unwrap();
+        let unavailable = AgentBackend::Server(
+            wukong_gateway::opencode_server::OpencodeServerBackend::from_env(
+                "http://127.0.0.1:1".to_string(),
+                None,
+            ),
+        );
+        let cfg = GatewayConfig {
+            scope: "project:test".to_string(),
+            db_url: url.clone(),
+            agent_command: vec![],
+            default_model: None,
+            planner_preferences: None,
+            thinking: false,
+            recall_top_k: 5,
+            stream: false,
+        };
+
+        assert!(run_scan(
+            &store,
+            &memory,
+            &unavailable,
+            &cfg,
+            "worker",
+            300,
+            10,
+            None,
+            None
+        )
+        .await
+        .is_err());
+
+        let status = |job: &Job, run_id: i64| {
+            let store = &store;
+            let job_id = job.id.clone();
+            async move {
+                let runs = store.recent_runs(Some(&job_id), 10).await.unwrap();
+                let run = runs.into_iter().find(|run| run.id == run_id).unwrap();
+                (run.status, run.message)
+            }
+        };
+        assert_eq!(
+            status(&stale, stale_run).await,
+            (
+                RunStatus::Interrupted,
+                "scheduler process ended before the run completed".to_string()
+            )
+        );
+        assert_eq!(status(&held, held_run).await.0, RunStatus::Running);
+    }
+
+    // issue-0022 SCN-005：常駐模式啟動時清掉排程已不存在的 scope，`--once` 不清。
+    #[tokio::test]
+    async fn orphan_scopes_are_cleared_only_for_daemon_mode() {
+        let (file, store) = open_store().await;
+        let memory = Memory::open(&format!("sqlite://{}", file.path().display()))
+            .await
+            .unwrap();
+        let live = due_job(&store).await;
+        let orphan = "agent:schedule-0b5c3a52-6f2e-4c55-9d0e-0a6f1e2b3c4d";
+        let live_scope = format!("agent:schedule-{}", live.id);
+        for scope in [orphan, live_scope.as_str()] {
+            memory.set_agent_session(scope, "ses-1").await.unwrap();
+        }
+
+        assert_eq!(clear_orphan_scopes(&store, &memory, true).await.unwrap(), 0);
+        assert!(memory.agent_session(orphan).await.unwrap().is_some());
+
+        assert_eq!(
+            clear_orphan_scopes(&store, &memory, false).await.unwrap(),
+            1
+        );
+        assert_eq!(memory.agent_session(orphan).await.unwrap(), None);
+        assert!(memory.agent_session(&live_scope).await.unwrap().is_some());
     }
 
     #[tokio::test]

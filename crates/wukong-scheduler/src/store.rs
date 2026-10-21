@@ -333,6 +333,28 @@ impl SchedulerStore {
         Ok(())
     }
 
+    /// 2026-10-21（issue-0022）：回合開始執行時，把下次執行時間推進到 `started_at` 之後的
+    /// 下一個 cron 時間點，讓行程中途結束的那一次不會再被掃描取得。只在自己持有 lease 時
+    /// 推進；正常完成時 `complete_claimed_job` 會再以完成時間推算一次。
+    pub async fn advance_next_run(
+        &self,
+        job: &Job,
+        worker_id: &str,
+        started_at: i64,
+    ) -> Result<(), SchedulerError> {
+        sqlx::query(
+            "UPDATE scheduler_jobs SET next_run_at = ?2, updated_at = ?3
+             WHERE id = ?1 AND locked_by = ?4",
+        )
+        .bind(&job.id)
+        .bind(next_after(&job.cron, started_at)?)
+        .bind(started_at)
+        .bind(worker_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn complete_claimed_job(
         &self,
         job: &Job,
