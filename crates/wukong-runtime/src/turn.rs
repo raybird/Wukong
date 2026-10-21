@@ -470,8 +470,6 @@ fn planner_preference_hint(cfg: &GatewayConfig) -> Option<PlannerPreferenceHint>
     }
 }
 
-/// The scope's previous turn (its two newest turn memories), oldest first.
-/// Called before this turn is remembered.
 /// 其他仍持有 session lease 的 scope 就是同時在執行的回合。告知只是軟性提示：
 /// 查詢失敗就當作沒有其他回合，不能讓回合失敗——這時本回合的 lease 已經取得，
 /// 在 `result` 區塊外失敗會讓它殘留到過期（issue-0012 審查 M-1）。
@@ -490,6 +488,8 @@ fn notice_for_other_turns(
         .then(|| persona::concurrent_turns_notice(&others, &persona::scheduling_bin()))
 }
 
+/// The scope's previous turn (its two newest turn memories), oldest first.
+/// Called before this turn is remembered.
 async fn previous_turn_records(
     memory: &Memory,
     scope: &str,
