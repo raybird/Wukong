@@ -153,11 +153,12 @@ Feature: 刪除排程時清掉它的 scope
 | 2026-10-20 | 由 #14 審查 SHOULD FIX 1 開立 |
 | 2026-10-21 | 讀碼盤點；使用者回答 Q1～Q5（Q4 得知排程會刪掉自己之後重新選擇） |
 | 2026-10-21 | 使用者核准 SCN-001～006 |
+| 2026-10-21 | 實作完成；真實行程對照 main：執行中自我刪除的排程，回合成功、scope 清空、照常嘗試送通知 |
 
 ---
 **建立日期**: 2026-10-20
 **分級**: Medium — 跨 wukong-memory、wukong-scheduler、wukong-cli、wukong-web、wukong-schedulerd，沿既有相依方向，不改 schema
 **風險**: High
-**狀態**: 待實作
+**狀態**: 實作中
 
 GitHub：https://github.com/raybird/Wukong/issues/17
