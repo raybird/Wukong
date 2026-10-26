@@ -38,6 +38,8 @@
      - PR 審查修正（2026-10-26，review-b1afa4d.md 覆核）：
        - P1：排除 OpenCode task 子代理（`mode=subagent`）之可恢復串流錯誤，避免中止可正常重試並完成的主要回合；補齊純單元測試與端到端回歸測試 `subagent_stream_error_does_not_abort_successful_primary_turn`，`wukong-gateway` 測試增至 137 passed。
        - P2：更新 `docs/docker.md` 補充 Wukong `agent.default_model` 明確覆寫的切換方式與清除說明，避免只改 OpenCode `user.json` 仍被 Wukong 指定回原模型。
+     - PR 審查修正（2026-10-26，review-9f9b3a0.md 覆核）：
+       - P2：更正 `docs/docker.md` 中不存在的 `wukong models set` 命令為明確的 REPL `/set_models <model>` 指令與 Web Console `/settings`。
 3. ✅ **SCN-001、SCN-002：交付與文件**
    - 相依：步驟 2。
    - 產出：更新 Docker 診斷文件、CHANGELOG、原任務證據與獨立 review。
