@@ -31,10 +31,17 @@
        - S-2：`classify_text` 透過 `contains_any_ignore_ascii_case` 支援大小寫不敏感比對。
        - N-1：`tokio::select!` 加上 `biased;` 優先處理串流錯誤。
        - N-2：補齊 `parse_local_stream_error` 單元測試，`wukong-gateway` 測試增為 134 passed。
-3. 📝 **SCN-001、SCN-002：交付與文件**
+3. ✅ **SCN-001、SCN-002：交付與文件**
    - 相依：步驟 2。
    - 產出：更新 Docker 診斷文件、CHANGELOG、原任務證據與獨立 review。
    - 完成判準：`cargo fmt --all -- --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --workspace --locked` 通過；依 review-evidence 流程審查，提交前執行 GitNexus detect_changes。若實際修改 compose／entrypoint，另跑 `bash scripts/test-docker-runtime.sh`。
+   - 執行紀錄（2026-10-26）：
+     - 更新 `docs/docker.md` 新增模型額度不足與上游錯誤診斷說明。
+     - 更新 `CHANGELOG.md` 於 `[Unreleased]` 記錄修正行為。
+     - 全量檢查：`cargo fmt`、`cargo clippy` 零警告、`cargo test --workspace --locked` 通過（670+ 項測試全綠）。
+     - 獨立代碼審查：完成兩輪審查，初審指出 M-1（轉義雙引號），經修復後第二輪審查通過（`docs/issues/issue-0024/review-66ad52a.md` 判定 PASS）。
+     - 執行 `verify-artifact.py` 驗證報告提交有效。
+     - 建立 GitHub PR #25。
 
 SCN-003 尚待 TBD-1，不安排可執行部署任務。決策後補入同一清單，記錄模型選擇、正式變更授權、最小真實請求及指定排程的成果判準；不得用恢復模型額度替代 SCN-001 的修正驗證。
 
