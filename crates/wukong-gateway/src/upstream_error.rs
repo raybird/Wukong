@@ -140,7 +140,16 @@ pub fn classify_text(text: &str) -> Option<UpstreamFailure> {
     if has_status_signal(text, 410) || contains_any(text, &["end of life"]) {
         return Some(UpstreamFailure::ModelEol);
     }
-    if has_status_signal(text, 429) || contains_any(text, &["RESOURCE_EXHAUSTED"]) {
+    if has_status_signal(text, 429)
+        || contains_any(
+            text,
+            &[
+                "RESOURCE_EXHAUSTED",
+                "usage limit reached",
+                "Usage limit reached",
+            ],
+        )
+    {
         return Some(UpstreamFailure::RateLimited);
     }
     if contains_any(text, &["ProviderModelNotFoundError", "Model not found"]) {
@@ -253,6 +262,12 @@ mod tests {
         );
         assert_eq!(
             classify_text("RESOURCE_EXHAUSTED"),
+            Some(UpstreamFailure::RateLimited)
+        );
+        assert_eq!(
+            classify_text(
+                "AI_APICallError: Free usage limit reached. Free models work in OpenCode"
+            ),
             Some(UpstreamFailure::RateLimited)
         );
     }

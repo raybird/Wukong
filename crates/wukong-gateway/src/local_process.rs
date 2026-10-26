@@ -69,10 +69,17 @@ impl LocalProcessBackend {
         let deadline = tokio::time::Instant::now() + agent_timeout();
         let mut command = Command::new(&self.binary);
         command
-            .args(["serve", "--hostname", "127.0.0.1", "--port", "0"])
+            .args([
+                "serve",
+                "--hostname",
+                "127.0.0.1",
+                "--port",
+                "0",
+                "--print-logs",
+            ])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         if let Some(workspace) = &self.workspace {
             command.current_dir(workspace).env("PWD", workspace);
@@ -97,6 +104,17 @@ impl LocalProcessBackend {
         };
         let operation = async {
             let mut lines = BufReader::new(process.child.stdout.take().unwrap()).lines();
+            let mut stderr_lines = BufReader::new(process.child.stderr.take().unwrap()).lines();
+            let (stream_err_tx, mut stream_err_rx) = tokio::sync::mpsc::unbounded_channel();
+            let stderr_drain = tokio::spawn(async move {
+                while let Ok(Some(line)) = stderr_lines.next_line().await {
+                    eprintln!("{line}");
+                    if let Some(err) = parse_local_stream_error(&line) {
+                        let _ = stream_err_tx.send(err);
+                    }
+                }
+            });
+            let _stderr_drain = Drain(stderr_drain);
             let url = loop {
                 let line = lines
                     .next_line()
@@ -160,6 +178,9 @@ impl LocalProcessBackend {
                     result = &mut run => break result?,
                     Some(question) = pending_questions.recv(), if !interactive => {
                         self.reply(&question.session_id, &question.request_id, None).await?;
+                    }
+                    Some(err) = stream_err_rx.recv() => {
+                        return Err(err);
                     }
                 }
             };
@@ -299,6 +320,44 @@ fn failed(message: &str) -> GatewayError {
     }
 }
 
+fn parse_local_stream_error(line: &str) -> Option<GatewayError> {
+    if line.contains("message=\"stream error\"") || line.contains("message='stream error'") {
+        let detail = if let Some(idx) = line.find("error.error=\"") {
+            let rest = &line[idx + "error.error=\"".len()..];
+            if let Some(end) = rest.find('"') {
+                rest[..end].to_string()
+            } else {
+                rest.to_string()
+            }
+        } else if let Some(idx) = line.find("error.error=") {
+            let rest = &line[idx + "error.error=".len()..];
+            let trimmed = rest.trim();
+            if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
+                trimmed[1..trimmed.len() - 1].to_string()
+            } else {
+                trimmed.to_string()
+            }
+        } else {
+            line.to_string()
+        };
+
+        let kind = crate::upstream_error::classify_text(&detail)
+            .unwrap_or(crate::upstream_error::UpstreamFailure::Other);
+        let status_code = if kind == crate::upstream_error::UpstreamFailure::RateLimited {
+            Some(429)
+        } else {
+            None
+        };
+        Some(GatewayError::UpstreamFailed {
+            kind,
+            status_code,
+            detail,
+        })
+    } else {
+        None
+    }
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
@@ -368,6 +427,80 @@ mod tests {
             fixture("echo 'opencode server listening on http://127.0.0.1:1'\nexec sleep 30");
         let error = backend.run(request()).await.unwrap_err();
         assert!(error.to_string().contains("health_check"));
+        assert_stopped(dir.path()).await;
+    }
+
+    /// SCN-001：上游免費額度耗盡時，OpenCode 1.19.3 的 SSE 串流保持掛起、無 error/idle 事件，
+    /// 僅在 stderr/日誌輸出 stream error。本機回合必須立即失敗並保留原始原因，不得苦等 timeout。
+    #[tokio::test]
+    async fn upstream_quota_error_in_local_process_fails_immediately_with_cause() {
+        let _guard = crate::backend::AGENT_TIMEOUT_ENV_LOCK.lock().await;
+        std::env::set_var("WUKONG_AGENT_TIMEOUT_SECS", "3");
+
+        let script = r#"
+exec python3 -c '
+import http.server, socketserver, threading, sys, time, signal
+signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+socketserver.ThreadingTCPServer.daemon_threads = True
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/global/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+        elif self.path == "/event":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.flush()
+            time.sleep(30)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        if self.path == "/session":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{\"id\":\"ses_probe\"}")
+        elif "/prompt_async" in self.path:
+            self.send_response(204)
+            self.end_headers()
+            # 模擬 OpenCode 1.19.3：上游拒絕時在 stderr 印出 stream error，但 SSE 靜默掛起
+            sys.stderr.write("level=ERROR message=\"stream error\" error.error=\"AI_APICallError: Free usage limit reached. Free models work in OpenCode\"\n")
+            sys.stderr.flush()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
+server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+port = server.server_address[1]
+print(f"opencode server listening on http://127.0.0.1:{port}", flush=True)
+server.serve_forever()
+'
+"#;
+        let (dir, backend) = fixture(script);
+        let start = std::time::Instant::now();
+        let result = backend.run(request()).await;
+        std::env::remove_var("WUKONG_AGENT_TIMEOUT_SECS");
+
+        let err = result.expect_err("額度不足必須失敗");
+        let elapsed = start.elapsed();
+        let err_msg = err.to_string();
+
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "回合應在收到錯誤後立即結束而不等待 timeout，但耗時 {elapsed:?}"
+        );
+        assert!(
+            err_msg.contains("Free usage limit reached"),
+            "錯誤訊息應包含額度不足的原因，實際為: {err_msg}"
+        );
         assert_stopped(dir.path()).await;
     }
 }

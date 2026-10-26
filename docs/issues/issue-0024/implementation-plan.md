@@ -8,14 +8,23 @@
 
 ## 實作步驟
 
-1. 📝 **SCN-001、SCN-002：確認契約並重現**
+1. ✅ **SCN-001、SCN-002：確認契約並重現**
    - 相依：實作前提交已核准規格，修改 symbol 前執行 GitNexus impact 並回報範圍。
    - 產出：隔離 scope／工作目錄中的 OpenCode 1.19.3 去識別事件與訊息樣本，以及能重現額度錯誤被掩蓋的契約測試。
    - 完成判準：記錄啟動／請求命令、版本、事件順序、原始錯誤來源及修正前紅燈；確認是漏接、解析失敗或上游根本未送事件，避免由日誌推定。
-2. 📝 **SCN-001、SCN-002：最小修正與回歸驗證**
+   - 執行紀錄（2026-10-26）：
+     - 執行 GitNexus impact 分析 `LocalProcessBackend` 影響範圍。
+     - 探測 OpenCode 1.19.3：確認收到 `AI_APICallError: Free usage limit reached` 時，SSE 串流完全不發送 `session.error` 或 `session.idle`，連線保持開啟且持續處於 busy，僅在 stderr 輸出 `level=ERROR message="stream error" error.error="..."`。
+     - 建立契約測試 `upstream_quota_error_in_local_process_fails_immediately_with_cause`，取得修正前紅燈（耗時逾時且錯誤未包含額度原因）。
+2. ✅ **SCN-001、SCN-002：最小修正與回歸驗證**
    - 相依：步驟 1。
    - 產出：必要的 gateway 修改與排程整合測試；保持正常回覆與真正無回應的既有行為。
    - 完成判準：額度錯誤在測試截止時間前回傳原始原因，scheduler 寫入 failure；正常回覆成功、無回應會逾時。記錄紅綠重構證據，並執行 `cargo test -p wukong-gateway -p wukong-scheduler`。
+   - 執行紀錄（2026-10-26）：
+     - `crates/wukong-gateway/src/local_process.rs`：啟動命令加入 `--print-logs`，`stderr` 設為 `Stdio::piped()`，非同步擷取串流錯誤並立即中止回合。
+     - `crates/wukong-gateway/src/upstream_error.rs`：`classify_text` 擴充支援 `usage limit reached`，歸類為 `UpstreamFailure::RateLimited`。
+     - `crates/wukong-scheduler/src/executor.rs`：新增整合測試 `turn_job_reports_quota_exhaustion_failure_with_cause`。
+     - 驗證結果：契約測試由逾時轉為 0.08 秒即時通過；`cargo test -p wukong-gateway`（132 passed）、`cargo test -p wukong-scheduler`（51 passed）全數通過，既有回歸測試全部維持綠燈。
 3. 📝 **SCN-001、SCN-002：交付與文件**
    - 相依：步驟 2。
    - 產出：更新 Docker 診斷文件、CHANGELOG、原任務證據與獨立 review。
@@ -37,7 +46,7 @@ SCN-003 尚待 TBD-1，不安排可執行部署任務。決策後補入同一清
 
 ## 檢查清單
 
-- [ ] 真實失敗契約與修正前紅燈已保存。
-- [ ] 已核准範圍的紅綠重構證據與回歸檢查齊備。
+- [x] 真實失敗契約與修正前紅燈已保存。
+- [x] 已核准範圍的紅綠重構證據與回歸檢查齊備。
 - [ ] TBD-1 有決策與授權後才執行模型處置。
 - [ ] 獨立審查與全部必要驗收完成後才結案。

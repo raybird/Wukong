@@ -264,3 +264,13 @@ docker compose exec -u wukong wukong-schedulerd wukong opencode prune --dry-run
 │    wukong-data                                           │
 └─────────────────────────────────────────────────────────┘
 ```
+
+## 模型額度不足與上游錯誤診斷（2026-10-26）
+
+當排程或對話使用的模型達到用量上限（例如 `AI_APICallError: Free usage limit reached` 或 429 錯誤）時，OpenCode 1.19.3 本機執行會在日誌輸出 `message="stream error"`，但 SSE 串流可能靜默掛起而不發送錯誤事件。
+
+Wukong Gateway 自 2026-10-26 起，在按需啟動本機 OpenCode 時加上 `--print-logs` 並監聽 stderr 串流錯誤：
+- **立即失敗**：收到上游串流錯誤後立即中止回合，保留原始錯誤原因，不再等待 1200 秒逾時。
+- **排程診斷**：排程 run 結果標記為 failure，並標記 `[上游失敗: 達到請求頻率或額度上限]` 與詳細錯誤內容，可直接透過 `wukong schedule runs` 檢視。
+- **處置方式**：若遇到額度不足，請檢查該模型的配額，或在 `opencode-config` Volume 的 `user.json` 中配置替代模型。
+
