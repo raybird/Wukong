@@ -141,14 +141,8 @@ pub fn classify_text(text: &str) -> Option<UpstreamFailure> {
         return Some(UpstreamFailure::ModelEol);
     }
     if has_status_signal(text, 429)
-        || contains_any(
-            text,
-            &[
-                "RESOURCE_EXHAUSTED",
-                "usage limit reached",
-                "Usage limit reached",
-            ],
-        )
+        || contains_any(text, &["RESOURCE_EXHAUSTED"])
+        || contains_any_ignore_ascii_case(text, &["usage limit reached"])
     {
         return Some(UpstreamFailure::RateLimited);
     }
@@ -160,6 +154,13 @@ pub fn classify_text(text: &str) -> Option<UpstreamFailure> {
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
+}
+
+fn contains_any_ignore_ascii_case(text: &str, needles: &[&str]) -> bool {
+    let lower = text.to_ascii_lowercase();
+    needles
+        .iter()
+        .any(|needle| lower.contains(&needle.to_ascii_lowercase()))
 }
 
 /// 只在數字明確作為 `status` / `statusCode` 的**值**出現時才算命中。涵蓋
@@ -268,6 +269,10 @@ mod tests {
             classify_text(
                 "AI_APICallError: Free usage limit reached. Free models work in OpenCode"
             ),
+            Some(UpstreamFailure::RateLimited)
+        );
+        assert_eq!(
+            classify_text("error: USAGE LIMIT REACHED FOR CURRENT TIER"),
             Some(UpstreamFailure::RateLimited)
         );
     }

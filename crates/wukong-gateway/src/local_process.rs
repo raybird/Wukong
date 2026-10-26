@@ -175,12 +175,13 @@ impl LocalProcessBackend {
             tokio::pin!(run);
             let mut response = loop {
                 tokio::select! {
+                    biased;
+                    Some(err) = stream_err_rx.recv() => {
+                        return Err(err);
+                    }
                     result = &mut run => break result?,
                     Some(question) = pending_questions.recv(), if !interactive => {
                         self.reply(&question.session_id, &question.request_id, None).await?;
-                    }
-                    Some(err) = stream_err_rx.recv() => {
-                        return Err(err);
                     }
                 }
             };
@@ -321,10 +322,14 @@ fn failed(message: &str) -> GatewayError {
 }
 
 fn parse_local_stream_error(line: &str) -> Option<GatewayError> {
-    if line.contains("message=\"stream error\"") || line.contains("message='stream error'") {
+    let is_error_level = line.contains("level=ERROR") || line.contains("level=error");
+    let is_stream_error =
+        line.contains("message=\"stream error\"") || line.contains("message='stream error'");
+
+    if is_error_level && is_stream_error {
         let detail = if let Some(idx) = line.find("error.error=\"") {
             let rest = &line[idx + "error.error=\"".len()..];
-            if let Some(end) = rest.find('"') {
+            if let Some(end) = find_closing_quote(rest) {
                 rest[..end].to_string()
             } else {
                 rest.to_string()
@@ -332,8 +337,12 @@ fn parse_local_stream_error(line: &str) -> Option<GatewayError> {
         } else if let Some(idx) = line.find("error.error=") {
             let rest = &line[idx + "error.error=".len()..];
             let trimmed = rest.trim();
-            if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
-                trimmed[1..trimmed.len() - 1].to_string()
+            if let Some(inner) = trimmed.strip_prefix('"') {
+                if let Some(end) = find_closing_quote(inner) {
+                    inner[..end].to_string()
+                } else {
+                    inner.to_string()
+                }
             } else {
                 trimmed.to_string()
             }
@@ -356,6 +365,20 @@ fn parse_local_stream_error(line: &str) -> Option<GatewayError> {
     } else {
         None
     }
+}
+
+fn find_closing_quote(s: &str) -> Option<usize> {
+    let mut escaped = false;
+    for (idx, ch) in s.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            return Some(idx);
+        }
+    }
+    None
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -428,6 +451,33 @@ mod tests {
         let error = backend.run(request()).await.unwrap_err();
         assert!(error.to_string().contains("health_check"));
         assert_stopped(dir.path()).await;
+    }
+
+    #[test]
+    fn parse_local_stream_error_extracts_json_payload_without_truncating_escaped_quotes() {
+        let line = r#"level=ERROR message="stream error" error.error="AI_APICallError: {\"message\": \"Free usage limit reached\"}""#;
+        let err = parse_local_stream_error(line).expect("應解析出錯誤");
+        match err {
+            GatewayError::UpstreamFailed {
+                kind,
+                status_code,
+                detail,
+            } => {
+                assert!(
+                    detail.contains("Free usage limit reached"),
+                    "detail 不得被截斷，實際為: {detail}"
+                );
+                assert_eq!(kind, crate::upstream_error::UpstreamFailure::RateLimited);
+                assert_eq!(status_code, Some(429));
+            }
+            other => panic!("預期 UpstreamFailed，實際為: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_local_stream_error_ignores_non_error_levels() {
+        let line = r#"level=INFO message="stream error" error.error="not an actual failure""#;
+        assert!(parse_local_stream_error(line).is_none());
     }
 
     /// SCN-001：上游免費額度耗盡時，OpenCode 1.19.3 的 SSE 串流保持掛起、無 error/idle 事件，

@@ -25,6 +25,12 @@
      - `crates/wukong-gateway/src/upstream_error.rs`：`classify_text` 擴充支援 `usage limit reached`，歸類為 `UpstreamFailure::RateLimited`。
      - `crates/wukong-scheduler/src/executor.rs`：新增整合測試 `turn_job_reports_quota_exhaustion_failure_with_cause`。
      - 驗證結果：契約測試由逾時轉為 0.08 秒即時通過；`cargo test -p wukong-gateway`（132 passed）、`cargo test -p wukong-scheduler`（51 passed）全數通過，既有回歸測試全部維持綠燈。
+     - 獨立 Review 修正（2026-10-26）：
+       - M-1：`parse_local_stream_error` 在提取 `error.error` 時遇跳脫引號（`\"`，如 JSON 訊息）會被截斷；新增 `find_closing_quote` 跳過轉義引號，補上單元測試取得紅綠證據。
+       - S-1：要求 `level=ERROR` 或 `level=error`，防止非 ERROR 日誌誤觸。
+       - S-2：`classify_text` 透過 `contains_any_ignore_ascii_case` 支援大小寫不敏感比對。
+       - N-1：`tokio::select!` 加上 `biased;` 優先處理串流錯誤。
+       - N-2：補齊 `parse_local_stream_error` 單元測試，`wukong-gateway` 測試增為 134 passed。
 3. 📝 **SCN-001、SCN-002：交付與文件**
    - 相依：步驟 2。
    - 產出：更新 Docker 診斷文件、CHANGELOG、原任務證據與獨立 review。
