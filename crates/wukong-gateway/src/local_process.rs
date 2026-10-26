@@ -378,6 +378,9 @@ fn is_auxiliary_stream_error(line: &str) -> bool {
         || line.contains("small=true")
         || line.contains("small=\"true\"")
         || line.contains("small='true'")
+        || line.contains("mode=subagent")
+        || line.contains("mode=\"subagent\"")
+        || line.contains("mode='subagent'")
 }
 
 fn find_closing_quote(s: &str) -> Option<usize> {
@@ -521,6 +524,12 @@ mod tests {
         assert!(
             parse_local_stream_error(agent_title).is_none(),
             "agent=title 輔助請求錯誤應被忽略"
+        );
+
+        let subagent_retryable = r#"level=ERROR message="stream error" small=false agent=general mode=subagent error.error="AI_APICallError: An error occurred while processing your request.""#;
+        assert!(
+            parse_local_stream_error(subagent_retryable).is_none(),
+            "subagent 子代理可恢復錯誤應被忽略"
         );
 
         let main_request = r#"level=ERROR message="stream error" small=false agent=build error.error="AI_APICallError: Free usage limit reached""#;
@@ -690,6 +699,88 @@ server.serve_forever()
 
         let response = result.expect("輔助請求標題生成失敗不得讓主要回合失敗");
         assert_eq!(response.text, "hello from main");
+        assert_stopped(dir.path()).await;
+    }
+
+    /// OpenCode task 子代理產生的可恢復串流錯誤（mode=subagent）不得中斷主要回合。
+    #[tokio::test]
+    async fn subagent_stream_error_does_not_abort_successful_primary_turn() {
+        if !can_bind_loopback() {
+            eprintln!("skipping test: sandbox forbids binding socket");
+            return;
+        }
+        let _guard = crate::backend::AGENT_TIMEOUT_ENV_LOCK.lock().await;
+        std::env::set_var("WUKONG_AGENT_TIMEOUT_SECS", "5");
+
+        let script = r#"
+exec python3 -c '
+import http.server, socketserver, threading, sys, time, signal
+signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+socketserver.ThreadingTCPServer.daemon_threads = True
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/global/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+        elif self.path == "/event":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            time.sleep(0.05)
+            # 主要回合正常送出文字與 idle
+            self.wfile.write(b"data: {\"type\":\"message.part.updated\",\"properties\":{\"sessionID\":\"ses_probe\",\"part\":{\"type\":\"text\",\"text\":\"completed after subagent retry\"}}}\n\n")
+            self.wfile.flush()
+            time.sleep(0.05)
+            self.wfile.write(b"data: {\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"ses_probe\"}}\n\n")
+            self.wfile.flush()
+            time.sleep(10)
+        elif "/message" in self.path:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"[{\"info\":{\"role\":\"assistant\"},\"parts\":[{\"type\":\"text\",\"text\":\"completed after subagent retry\"}]}]")
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_DELETE(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"true")
+
+    def do_POST(self):
+        if self.path == "/session":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{\"id\":\"ses_probe\"}")
+        elif "/prompt_async" in self.path:
+            self.send_response(204)
+            self.end_headers()
+            # 模擬 OpenCode task 子代理可恢復錯誤：輸出 mode=subagent 的 stream error
+            sys.stderr.write("timestamp=2026-07-26T02:20:17.420Z level=ERROR message=\"stream error\" providerID=openai modelID=gpt-5.6-sol session.id=ses_subagent small=false agent=general mode=subagent error.error=\"AI_APICallError: An error occurred while processing your request.\"\n")
+            sys.stderr.flush()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
+server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+port = server.server_address[1]
+print(f"opencode server listening on http://127.0.0.1:{port}", flush=True)
+server.serve_forever()
+'
+"#;
+        let (dir, backend) = fixture(script);
+        let result = backend.run(request()).await;
+        std::env::remove_var("WUKONG_AGENT_TIMEOUT_SECS");
+
+        let response = result.expect("子代理可恢復錯誤不得中斷主要回合");
+        assert_eq!(response.text, "completed after subagent retry");
         assert_stopped(dir.path()).await;
     }
 }

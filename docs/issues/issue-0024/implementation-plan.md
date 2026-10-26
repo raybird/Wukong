@@ -35,6 +35,9 @@
        - 排除標題生成等背景輔助請求的串流錯誤（`is_auxiliary_stream_error` 比對 `agent=title` 與 `small=true`），避免輔助請求失敗時誤殺正常主要回合。
        - 補齊不需 socket 的純單元測試 `parse_local_stream_error_ignores_auxiliary_requests`，確保在禁止建立 socket 的沙箱環境亦能完整驗證。
        - 新增回歸測試 `auxiliary_title_stream_error_does_not_abort_successful_turn`，驗證標題生成失敗但主要回合順利完成，並加入 `can_bind_loopback()` 沙箱相容防護。`wukong-gateway` 測試增至 136 passed。
+     - PR 審查修正（2026-10-26，review-b1afa4d.md 覆核）：
+       - P1：排除 OpenCode task 子代理（`mode=subagent`）之可恢復串流錯誤，避免中止可正常重試並完成的主要回合；補齊純單元測試與端到端回歸測試 `subagent_stream_error_does_not_abort_successful_primary_turn`，`wukong-gateway` 測試增至 137 passed。
+       - P2：更新 `docs/docker.md` 補充 Wukong `agent.default_model` 明確覆寫的切換方式與清除說明，避免只改 OpenCode `user.json` 仍被 Wukong 指定回原模型。
 3. ✅ **SCN-001、SCN-002：交付與文件**
    - 相依：步驟 2。
    - 產出：更新 Docker 診斷文件、CHANGELOG、原任務證據與獨立 review。
