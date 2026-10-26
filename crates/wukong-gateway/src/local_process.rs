@@ -327,6 +327,10 @@ fn parse_local_stream_error(line: &str) -> Option<GatewayError> {
         line.contains("message=\"stream error\"") || line.contains("message='stream error'");
 
     if is_error_level && is_stream_error {
+        if is_auxiliary_stream_error(line) {
+            return None;
+        }
+
         let detail = if let Some(idx) = line.find("error.error=\"") {
             let rest = &line[idx + "error.error=\"".len()..];
             if let Some(end) = find_closing_quote(rest) {
@@ -365,6 +369,15 @@ fn parse_local_stream_error(line: &str) -> Option<GatewayError> {
     } else {
         None
     }
+}
+
+fn is_auxiliary_stream_error(line: &str) -> bool {
+    line.contains("agent=title")
+        || line.contains("agent=\"title\"")
+        || line.contains("agent='title'")
+        || line.contains("small=true")
+        || line.contains("small=\"true\"")
+        || line.contains("small='true'")
 }
 
 fn find_closing_quote(s: &str) -> Option<usize> {
@@ -409,6 +422,10 @@ mod tests {
             Some(dir.path().into()),
         );
         (dir, backend)
+    }
+
+    fn can_bind_loopback() -> bool {
+        std::net::TcpListener::bind("127.0.0.1:0").is_ok()
     }
 
     async fn assert_stopped(dir: &std::path::Path) {
@@ -480,10 +497,50 @@ mod tests {
         assert!(parse_local_stream_error(line).is_none());
     }
 
+    #[test]
+    fn parse_local_stream_error_ignores_auxiliary_requests() {
+        let title_timeout = r#"level=ERROR message="stream error" small=true agent=title error.error="ProviderHeaderTimeoutError: Provider response headers timed out after 10000ms""#;
+        assert!(
+            parse_local_stream_error(title_timeout).is_none(),
+            "標題生成超時應被忽略"
+        );
+
+        let title_model_not_found = r#"level=ERROR message="stream error" small=true agent=title error.error="AI_APICallError: Model not found gpt-5.6-luna""#;
+        assert!(
+            parse_local_stream_error(title_model_not_found).is_none(),
+            "標題生成模型未找到應被忽略"
+        );
+
+        let small_auxiliary = r#"level=ERROR message="stream error" small=true error.error="AI_APICallError: Free usage limit reached""#;
+        assert!(
+            parse_local_stream_error(small_auxiliary).is_none(),
+            "small=true 輔助請求錯誤應被忽略"
+        );
+
+        let agent_title = r#"level=ERROR message="stream error" agent=title error.error="AI_APICallError: Free usage limit reached""#;
+        assert!(
+            parse_local_stream_error(agent_title).is_none(),
+            "agent=title 輔助請求錯誤應被忽略"
+        );
+
+        let main_request = r#"level=ERROR message="stream error" small=false agent=build error.error="AI_APICallError: Free usage limit reached""#;
+        let err = parse_local_stream_error(main_request).expect("主要請求錯誤必須被捕捉");
+        match err {
+            GatewayError::UpstreamFailed { kind, .. } => {
+                assert_eq!(kind, crate::upstream_error::UpstreamFailure::RateLimited);
+            }
+            other => panic!("預期 UpstreamFailed，實際為: {other:?}"),
+        }
+    }
+
     /// SCN-001：上游免費額度耗盡時，OpenCode 1.19.3 的 SSE 串流保持掛起、無 error/idle 事件，
     /// 僅在 stderr/日誌輸出 stream error。本機回合必須立即失敗並保留原始原因，不得苦等 timeout。
     #[tokio::test]
     async fn upstream_quota_error_in_local_process_fails_immediately_with_cause() {
+        if !can_bind_loopback() {
+            eprintln!("skipping test: sandbox forbids binding socket");
+            return;
+        }
         let _guard = crate::backend::AGENT_TIMEOUT_ENV_LOCK.lock().await;
         std::env::set_var("WUKONG_AGENT_TIMEOUT_SECS", "3");
 
@@ -551,6 +608,88 @@ server.serve_forever()
             err_msg.contains("Free usage limit reached"),
             "錯誤訊息應包含額度不足的原因，實際為: {err_msg}"
         );
+        assert_stopped(dir.path()).await;
+    }
+
+    /// 標題生成等背景輔助請求的 stream error 不得中斷正常完成的主要回合。
+    #[tokio::test]
+    async fn auxiliary_title_stream_error_does_not_abort_successful_turn() {
+        if !can_bind_loopback() {
+            eprintln!("skipping test: sandbox forbids binding socket");
+            return;
+        }
+        let _guard = crate::backend::AGENT_TIMEOUT_ENV_LOCK.lock().await;
+        std::env::set_var("WUKONG_AGENT_TIMEOUT_SECS", "5");
+
+        let script = r#"
+exec python3 -c '
+import http.server, socketserver, threading, sys, time, signal
+signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+socketserver.ThreadingTCPServer.daemon_threads = True
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/global/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+        elif self.path == "/event":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            time.sleep(0.05)
+            # 送出主要回合的文字與完成事件
+            self.wfile.write(b"data: {\"type\":\"message.part.updated\",\"properties\":{\"sessionID\":\"ses_probe\",\"part\":{\"type\":\"text\",\"text\":\"hello from main\"}}}\n\n")
+            self.wfile.flush()
+            time.sleep(0.05)
+            self.wfile.write(b"data: {\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"ses_probe\"}}\n\n")
+            self.wfile.flush()
+            time.sleep(10)
+        elif "/message" in self.path:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"[{\"info\":{\"role\":\"assistant\"},\"parts\":[{\"type\":\"text\",\"text\":\"hello from main\"}]}]")
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_DELETE(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"true")
+
+    def do_POST(self):
+        if self.path == "/session":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{\"id\":\"ses_probe\"}")
+        elif "/prompt_async" in self.path:
+            self.send_response(204)
+            self.end_headers()
+            # 模擬 OpenCode 標題生成失敗：背景輸出 small=true agent=title 的 stream error
+            sys.stderr.write("timestamp=2026-07-06T13:10:04.160Z level=ERROR message=\"stream error\" small=true agent=title error.error=\"ProviderHeaderTimeoutError: Provider response headers timed out after 10000ms\"\n")
+            sys.stderr.flush()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
+server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+port = server.server_address[1]
+print(f"opencode server listening on http://127.0.0.1:{port}", flush=True)
+server.serve_forever()
+'
+"#;
+        let (dir, backend) = fixture(script);
+        let result = backend.run(request()).await;
+        std::env::remove_var("WUKONG_AGENT_TIMEOUT_SECS");
+
+        let response = result.expect("輔助請求標題生成失敗不得讓主要回合失敗");
+        assert_eq!(response.text, "hello from main");
         assert_stopped(dir.path()).await;
     }
 }

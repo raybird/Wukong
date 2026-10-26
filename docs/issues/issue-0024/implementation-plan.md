@@ -31,6 +31,10 @@
        - S-2：`classify_text` 透過 `contains_any_ignore_ascii_case` 支援大小寫不敏感比對。
        - N-1：`tokio::select!` 加上 `biased;` 優先處理串流錯誤。
        - N-2：補齊 `parse_local_stream_error` 單元測試，`wukong-gateway` 測試增為 134 passed。
+     - PR 審查修正（2026-10-26）：
+       - 排除標題生成等背景輔助請求的串流錯誤（`is_auxiliary_stream_error` 比對 `agent=title` 與 `small=true`），避免輔助請求失敗時誤殺正常主要回合。
+       - 補齊不需 socket 的純單元測試 `parse_local_stream_error_ignores_auxiliary_requests`，確保在禁止建立 socket 的沙箱環境亦能完整驗證。
+       - 新增回歸測試 `auxiliary_title_stream_error_does_not_abort_successful_turn`，驗證標題生成失敗但主要回合順利完成，並加入 `can_bind_loopback()` 沙箱相容防護。`wukong-gateway` 測試增至 136 passed。
 3. ✅ **SCN-001、SCN-002：交付與文件**
    - 相依：步驟 2。
    - 產出：更新 Docker 診斷文件、CHANGELOG、原任務證據與獨立 review。
