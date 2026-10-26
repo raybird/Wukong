@@ -264,3 +264,15 @@ docker compose exec -u wukong wukong-schedulerd wukong opencode prune --dry-run
 │    wukong-data                                           │
 └─────────────────────────────────────────────────────────┘
 ```
+
+## 模型額度不足與上游錯誤診斷（2026-10-26）
+
+當排程或對話使用的模型達到用量上限（例如 `AI_APICallError: Free usage limit reached` 或 429 錯誤）時，OpenCode 1.19.3 本機執行會在日誌輸出 `message="stream error"`，但 SSE 串流可能靜默掛起而不發送錯誤事件。
+
+Wukong Gateway 自 2026-10-26 起，在按需啟動本機 OpenCode 時加上 `--print-logs` 並監聽 stderr 串流錯誤：
+- **立即失敗**：收到上游串流錯誤後立即中止回合，保留原始錯誤原因，不再等待 1200 秒逾時。
+- **排程診斷**：排程 run 結果標記為 failure，並標記 `[上游失敗: 達到請求頻率或額度上限]` 與詳細錯誤內容，可直接透過 `wukong schedule runs` 檢視。
+- **處置方式**：
+  1. **調整 Wukong 明確模型設定**：若已在 Wukong 設定了預設模型（例如 `/data/settings.json` 的 `agent.default_model`），回合最後一棒會明確傳入該模型覆寫 OpenCode 預設值。可透過 Web Console 設定頁面（`/settings`）切換為其他可用模型，亦可進入 Wukong REPL 使用 `/set_models <model>` 指令設定。若欲完全移除覆寫、交由 OpenCode 預設決策，需手動自 `/data/settings.json` 中將 `agent.default_model` 設為 `null` 或刪除該欄位（現有 Web 與 REPL 介面不接受空值輸入）。
+  2. **配置 OpenCode 模型與補充額度**：若未在 Wukong 指定明確模型，可在 `opencode-config` Volume 的 `user.json` 中配置替代模型；或至模型供應商處確認 API 金鑰並補充帳戶額度。
+

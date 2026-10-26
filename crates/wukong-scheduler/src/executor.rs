@@ -1919,6 +1919,44 @@ mod tests {
         assert!(out.message.contains("410"), "{}", out.message);
     }
 
+    /// SCN-001：排程遇到模型免費額度不足時，排程結果為 failure 且包含額度不足的原始原因。
+    #[tokio::test]
+    async fn turn_job_reports_quota_exhaustion_failure_with_cause() {
+        let memory = open_memory().await;
+        let backend = MockBackend::new(vec![Err(GatewayError::UpstreamFailed {
+            kind: wukong_gateway::UpstreamFailure::RateLimited,
+            status_code: Some(429),
+            detail: "AI_APICallError: Free usage limit reached. Free models work in OpenCode"
+                .to_string(),
+        })]);
+        let cfg = cfg("project:Base");
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &backend,
+            base_config: &cfg,
+            permission_policy: PermissionPolicy::Reject,
+        };
+        let job = job(JobKind::Turn {
+            scope: "project:Scheduled".to_string(),
+            prompt: "do it".to_string(),
+        });
+
+        let out = execute_job(&ctx, &job).await;
+
+        assert!(!out.success, "額度耗盡排程結果必須為 failure");
+        assert!(
+            out.message
+                .contains(wukong_gateway::UpstreamFailure::RateLimited.label()),
+            "message 應包含分類標籤: {}",
+            out.message
+        );
+        assert!(
+            out.message.contains("Free usage limit reached"),
+            "message 應包含額度原因: {}",
+            out.message
+        );
+    }
+
     /// AC-6 失敗路徑：一般 backend 失敗不得被貼上上游錯誤的分類。
     #[tokio::test]
     async fn ordinary_backend_failure_is_not_labelled_as_upstream() {
