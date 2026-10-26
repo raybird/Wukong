@@ -11,14 +11,17 @@
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-10-26
+
 ### Fixed
 
 - **模型額度不足或上游串流錯誤立即回報，不再苦等逾時。** OpenCode 1.19.3 在本機執行遇到上游
   模型額度耗盡（如 `AI_APICallError: Free usage limit reached`）或串流錯誤時，SSE 串流
   不會發送 error 或 idle 事件，導致回合等待滿 1200 秒後才被逾時中斷，真實錯誤被掩蓋。
-  現在按需啟動本機程序時加上 `--print-logs` 並監聽 stderr 串流錯誤，一旦偵測到上游失敗
+  現在按需啟動本機程序時加上 `--print-logs` 並監聽 stderr 串流錯誤，一旦偵測到主要請求的上游失敗
   立即結束回合並回傳原始錯誤原因；排程 run 結果會標記為 failure 與
-  `[上游失敗: 達到請求頻率或額度上限]`，方便直接診斷（#24）。
+  `[上游失敗: 達到請求頻率或額度上限]`，方便直接診斷。標題生成與子代理的背景錯誤不會
+  中止仍可成功的主要回合（#24、#25）。
 
 
 ## [0.23.0] - 2026-10-21
@@ -1016,7 +1019,8 @@ server 模式補回那個 CLI 免費獲得的週期性重置，同時保留暖�
   不安全綁定（`0.0.0.0` + 空 token）啟動即拒絕（fail-closed，可用
   `WUKONG_WEB_ALLOW_INSECURE=1` 覆寫）；Telegram callback 加白名單檢查。
 
-[Unreleased]: https://github.com/raybird/Wukong/compare/v0.23.0...HEAD
+[Unreleased]: https://github.com/raybird/Wukong/compare/v0.23.1...HEAD
+[0.23.1]: https://github.com/raybird/Wukong/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/raybird/Wukong/compare/v0.22.1...v0.23.0
 [0.22.1]: https://github.com/raybird/Wukong/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/raybird/Wukong/compare/v0.21.11...v0.22.0
