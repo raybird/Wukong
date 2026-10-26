@@ -40,6 +40,8 @@
        - P2：更新 `docs/docker.md` 補充 Wukong `agent.default_model` 明確覆寫的切換方式與清除說明，避免只改 OpenCode `user.json` 仍被 Wukong 指定回原模型。
      - PR 審查修正（2026-10-26，review-9f9b3a0.md 覆核）：
        - P2：更正 `docs/docker.md` 中不存在的 `wukong models set` 命令為明確的 REPL `/set_models <model>` 指令與 Web Console `/settings`。
+     - PR 審查修正（2026-10-26，review-249257d.md 覆核）：
+       - P2：更正 `docs/docker.md` 移除 Web Console 清空模型之不實描述，明確說明若欲移除覆寫需手動自 `/data/settings.json` 刪除或設為 null（Web 與 REPL 介面不接受空值）。
 3. ✅ **SCN-001、SCN-002：交付與文件**
    - 相依：步驟 2。
    - 產出：更新 Docker 診斷文件、CHANGELOG、原任務證據與獨立 review。
