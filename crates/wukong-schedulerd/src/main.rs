@@ -431,6 +431,7 @@ mod tests {
                 kind: JobKind::Turn {
                     scope: "project:test".to_string(),
                     prompt: "run".to_string(),
+                    model: None,
                 },
                 cron: "* * * * *".to_string(),
             })

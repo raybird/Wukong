@@ -24,6 +24,7 @@ async fn scheduler_managed_reject_and_allow_once_have_distinct_effects() {
             kind: JobKind::Turn {
                 scope: cfg.scope.clone(),
                 prompt: "PERMISSION_PROBE".into(),
+                model: None,
             },
             cron: "* * * * *".into(),
             enabled: true,
@@ -56,6 +57,7 @@ async fn scheduler_managed_reject_and_allow_once_have_distinct_effects() {
         job.kind = JobKind::Turn {
             scope: cfg.scope.clone(),
             prompt: "QUESTION_PROBE".into(),
+            model: None,
         };
         let out = tokio::time::timeout(std::time::Duration::from_secs(20), execute_job(&ctx, &job))
             .await

@@ -146,6 +146,7 @@ mod tests {
             kind: JobKind::Turn {
                 scope: scope.to_string(),
                 prompt: "go".to_string(),
+                model: None,
             },
             cron: "0 9 * * *".to_string(),
             enabled: true,

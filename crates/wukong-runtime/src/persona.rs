@@ -141,6 +141,7 @@ pub fn scheduling_capability_hint(scope: &str, bin: &str) -> String {
          你具備為使用者建立與管理定時排程（cron）的真實能力。當使用者要求「定時、每天、每隔、提醒、排程、固定時間執行」之類任務時，\
          請直接在終端機執行下列指令完成設定——這是可用的內建功能，不要拒絕，也不要只用文字描述而不執行：\n\
          - 新增定時對話：`{bin} schedule add-turn --name \"<名稱>\" --cron \"<分 時 日 月 週>\" --scope \"{scope}\" --prompt \"<到時要執行的提示詞>\"`\n\
+         - 指定排程使用的模型：新增時加 `--model \"<provider/model>\"`；修改既有排程用 `{bin} schedule set-model --id <id> --model \"<provider/model>\"`，省略 `--model` 就改回使用預設模型\n\
          - 列出所有排程：`{bin} schedule list`\n\
          - 立即觸發一次：`{bin} schedule trigger --id <id>`\n\
          - 查看排程的執行結果：`{bin} schedule runs --id <id>`\n\
@@ -253,6 +254,18 @@ mod tests {
         let hint = scheduling_capability_hint("user:tg-42", "wukong");
         assert!(hint.contains("`wukong schedule runs --id <id>`"));
         assert!(hint.contains("`--scope` 是排程的擁有者"));
+    }
+
+    // issue-0026 SCN-003：對話中也能指定與修改排程的模型。
+    #[test]
+    fn scheduling_hint_lists_model_commands() {
+        let hint = scheduling_capability_hint("user:tg-42", "wukong");
+        assert!(hint.contains("--model \"<provider/model>\""), "{hint}");
+        assert!(
+            hint.contains("`wukong schedule set-model --id <id> --model \"<provider/model>\"`"),
+            "{hint}"
+        );
+        assert!(hint.contains("省略 `--model`"), "{hint}");
     }
 
     #[test]

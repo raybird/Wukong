@@ -21,6 +21,7 @@ async fn scheduler_executor_completes_cli_turn_and_resumes() {
         kind: JobKind::Turn {
             scope: cfg.scope.clone(),
             prompt: "integration probe".into(),
+            model: None,
         },
         cron: "* * * * *".into(),
         enabled: true,

@@ -374,9 +374,12 @@ async fn execute_job_inner<B: AiBackend + QuestionResponder + Sync>(
 ) -> Result<String, WukongError> {
     match &job.kind {
         // job 的 scope 是擁有者，回送與聊天紀錄用它；回合本身在排程自己的 scope 執行。
-        JobKind::Turn { prompt, .. } => {
+        JobKind::Turn { prompt, model, .. } => {
             let mut cfg = ctx.base_config.clone();
             cfg.scope = scheduled_turn_scope(&job.id);
+            if model.is_some() {
+                cfg.apply_default_model(model.as_deref());
+            }
             let prompt = format!("{prompt}{SCHEDULED_TURN_AUTONOMY_HINT}");
             run_unattended_turn(ctx, &cfg, &prompt, on_role).await
         }
@@ -562,6 +565,7 @@ mod tests {
     struct MockBackend {
         replies: Mutex<VecDeque<Result<String, GatewayError>>>,
         prompts: Mutex<Vec<String>>,
+        models: Mutex<Vec<Option<String>>>,
     }
 
     impl MockBackend {
@@ -569,12 +573,14 @@ mod tests {
             Self {
                 replies: Mutex::new(replies.into_iter().map(|r| r.map(str::to_string)).collect()),
                 prompts: Mutex::new(Vec::new()),
+                models: Mutex::new(Vec::new()),
             }
         }
     }
 
     impl AiBackend for MockBackend {
         async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+            self.models.lock().unwrap().push(req.model);
             self.prompts.lock().unwrap().push(req.prompt);
             let reply = self
                 .replies
@@ -862,6 +868,7 @@ mod tests {
                 kind: JobKind::Turn {
                     scope: "user:tg-42".to_string(),
                     prompt: "長任務".to_string(),
+                    model: None,
                 },
                 cron: "0 9 * * *".to_string(),
             })
@@ -983,6 +990,7 @@ mod tests {
             JobKind::Turn {
                 scope: "user:tg-42".to_string(),
                 prompt: "年度提醒".to_string(),
+                model: None,
             },
         )
         .await
@@ -1608,6 +1616,7 @@ mod tests {
         let job = job(JobKind::Turn {
             scope: "project:Scheduled".to_string(),
             prompt: "do it".to_string(),
+            model: None,
         });
 
         // 逾時代表回歸：回合又變成等 backend 而不是自己收尾。
@@ -1642,6 +1651,7 @@ mod tests {
         let job = job(JobKind::Turn {
             scope: "project:Scheduled".to_string(),
             prompt: "do it".to_string(),
+            model: None,
         });
 
         let out = execute_job(&ctx, &job).await;
@@ -1681,6 +1691,7 @@ mod tests {
         let job = job(JobKind::Turn {
             scope: "project:Scheduled".to_string(),
             prompt: "do it".to_string(),
+            model: None,
         });
 
         let out = execute_job(&ctx, &job).await;
@@ -1710,6 +1721,7 @@ mod tests {
         let job = job(JobKind::Turn {
             scope: "project:Scheduled".to_string(),
             prompt: "do it".to_string(),
+            model: None,
         });
 
         let out = execute_job(&ctx, &job).await;
@@ -1730,6 +1742,7 @@ mod tests {
             ..job(JobKind::Turn {
                 scope: "user:tg-42".to_string(),
                 prompt: prompt.to_string(),
+                model: None,
             })
         }
     }
@@ -1877,6 +1890,7 @@ mod tests {
         let job = job(JobKind::Turn {
             scope: "project:Scheduled".to_string(),
             prompt: "do it".to_string(),
+            model: None,
         });
 
         let out = execute_job(&ctx, &job).await;
@@ -1905,6 +1919,7 @@ mod tests {
         let job = job(JobKind::Turn {
             scope: "project:Scheduled".to_string(),
             prompt: "do it".to_string(),
+            model: None,
         });
 
         let out = execute_job(&ctx, &job).await;
@@ -1939,6 +1954,7 @@ mod tests {
         let job = job(JobKind::Turn {
             scope: "project:Scheduled".to_string(),
             prompt: "do it".to_string(),
+            model: None,
         });
 
         let out = execute_job(&ctx, &job).await;
@@ -1975,6 +1991,7 @@ mod tests {
         let job = job(JobKind::Turn {
             scope: "project:Scheduled".to_string(),
             prompt: "do it".to_string(),
+            model: None,
         });
 
         let out = execute_job(&ctx, &job).await;
@@ -2002,6 +2019,7 @@ mod tests {
         let job = job(JobKind::Turn {
             scope: "project:Scheduled".to_string(),
             prompt: "do it".to_string(),
+            model: None,
         });
 
         let out = execute_job(&ctx, &job).await;
@@ -2010,6 +2028,48 @@ mod tests {
         let prompts = backend.prompts.lock().unwrap();
         assert!(prompts.iter().any(|p| p.contains("無人值守排程")));
         assert!(prompts.iter().any(|p| p.contains("自動採用推薦選項")));
+    }
+
+    async fn models_sent_for_turn(job_model: Option<&str>) -> Vec<Option<String>> {
+        let memory = open_memory().await;
+        let backend = MockBackend::new(vec![Ok("oracle"), Ok("done")]);
+        let mut cfg = cfg("project:Base");
+        cfg.default_model = Some("opencode/default".to_string());
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &backend,
+            base_config: &cfg,
+            permission_policy: PermissionPolicy::Reject,
+        };
+        let job = job(JobKind::Turn {
+            scope: "project:Scheduled".to_string(),
+            prompt: "do it".to_string(),
+            model: job_model.map(str::to_string),
+        });
+
+        assert!(execute_job(&ctx, &job).await.success);
+        let models = backend.models.lock().unwrap().clone();
+        models
+    }
+
+    // issue-0026 SCN-003：產生回覆的那一棒用排程自己的模型，預設模型完全沒被送出。
+    #[tokio::test]
+    async fn turn_job_uses_its_own_model_instead_of_the_default() {
+        let models = models_sent_for_turn(Some("nvidia/x/y")).await;
+        assert_eq!(models.last().unwrap().as_deref(), Some("nvidia/x/y"));
+        assert!(
+            !models
+                .iter()
+                .any(|m| m.as_deref() == Some("opencode/default")),
+            "{models:?}"
+        );
+    }
+
+    // issue-0026 SCN-004
+    #[tokio::test]
+    async fn turn_job_without_model_uses_the_current_default() {
+        let models = models_sent_for_turn(None).await;
+        assert_eq!(models.last().unwrap().as_deref(), Some("opencode/default"));
     }
 
     #[tokio::test]

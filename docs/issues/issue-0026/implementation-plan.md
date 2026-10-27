@@ -29,10 +29,27 @@
      - 靜態檢查：`cargo fmt --all -- --check` 通過；`cargo clippy -p wukong-web --all-targets --locked -- -D warnings` 通過。
    - **測試對應**：`crates/wukong-web/src/models_api.rs` 的 tests（fixture `crates/wukong-web/tests/fixtures/opencode-models-1.19.3.txt`）。SCN-001：`real_output_is_grouped_by_provider_in_listed_order`、`lines_without_a_provider_and_model_are_ignored`、`cache_reuses_a_result_within_ttl`、`cache_refetches_after_ttl`、`listing_success_is_json_grouped_by_provider`，以及 `lib.rs` 的 `models_requires_token_when_set`。SCN-005（API 端）：`empty_output_yields_no_providers`、`failures_and_empty_listings_are_not_cached`、`listing_failure_is_reported_as_bad_gateway_with_reason`；前端退回手動輸入的部分在步驟 3 驗收。
    - 逾時沿用 `run_opencode_diagnostic` 的 5 秒（`SYSTEM_DIAGNOSTIC_TIMEOUT_SECS`），實測約 1.4 秒；逾時時回 502 `command timed out`。
-2. 📝 **SCN-003、SCN-004：排程模型欄位、執行覆寫與 CLI**
+2. ✅ **SCN-003、SCN-004：排程模型欄位、執行覆寫與 CLI**
    - 相依：無（可與步驟 1 並行）。
    - 產出：`JobKind::Turn.model`；`SchedulerStore` 修改模型；`run_claimed_job` 以排程模型覆寫預設模型；CLI `add-turn --model`、`schedule set-model --id <id> [--model <m>]`（省略 `--model` 即清除）、`schedule list` 顯示模型或「使用預設」；`persona::scheduling_capability_hint` 補上兩個指令。
    - 完成判準：舊版沒有 `model` 的 `config_json` 能讀成 `None`；以假 backend 斷言有模型的排程把該模型送進 `AgentRequest.model`，清除後送出的是當下預設模型；`set-model` 對 Maintenance 排程與不存在的 id 回錯誤。
+   - **實作**：`JobKind::Turn` 加 `#[serde(default, skip_serializing_if = "Option::is_none")] model`，沒指定時 `config_json` 跟舊版一字不差，降版也讀得懂。`normalize_model` 把空白視為沒指定。`SchedulerStore::set_turn_model` 回 `Updated`／`NotFound`／`NotTurn`。`execute_job_inner` 在排程有模型時以 `apply_default_model` 覆寫該回合的設定，因此套用範圍跟預設模型一樣（最後一棒、補救重送、壓縮）。`set-model` 對不存在的 id 與維護排程照既有 `enable`／`disable` 的慣例印出原因、exit 0，分別是「找不到排程」與「維護排程不使用模型，無法設定」。
+   - **紅綠證據**（2026-10-27）：
+     - 結構變更（加欄位，22 個建構處補 `model: None`）後，`cargo test --workspace --locked` 全綠，確認沒有改變既有行為。
+     - 外迴圈紅燈：`cargo test -p wukong-cli --test schedule_model` → 2 failed（`left: "turn(scope=project:T)" right: "turn(scope=project:T,model=nvidia/x/y)"`；`left: "找不到排程" right: "維護排程不使用模型，無法設定"`）。
+     - 單元紅燈（`--no-fail-fast`）：
+       - `a_turn_without_model_is_stored_in_the_old_format`：`left` 多了 `"model":null`。
+       - `set_turn_model_sets_trims_and_clears_the_model`：`left: NotFound right: Updated`。
+       - `set_turn_model_rejects_maintenance_and_unknown_jobs`：`left: NotFound right: NotTurn`。
+       - `turn_job_uses_its_own_model_instead_of_the_default`：`left: Some("opencode/default") right: Some("nvidia/x/y")`。
+       - `scheduling_hint_lists_model_commands`：斷言失敗。
+     - 空殼階段就綠的防護：`a_turn_saved_before_the_model_field_still_loads`（serde 會把缺少的 `Option` 欄位當成 `None`）、`turn_job_without_model_uses_the_current_default`（現行行為）、`parses_schedule_add_turn_model`、`parses_schedule_set_model_with_and_without_model`（clap 宣告式定義，行為由外迴圈 binary 測試承擔）。
+     - 最小實作後全綠：`cargo test -p wukong-scheduler -p wukong-runtime -p wukong-cli -p wukong-gateway --locked --no-fail-fast` 全部 ok（scheduler lib 57、runtime lib 86、gateway lib 139、`schedule_model` 2）。
+     - 精煉：檢查過一次，沒有需要改的地方。綠燈同上。
+     - 全 workspace：`cargo fmt --all -- --check` 通過、`cargo clippy --all-targets --locked -- -D warnings` exit 0、`cargo test --workspace --locked` 702 passed／0 failed。
+     - 真實路徑：用臨時 DB 與一個會記錄 argv 的假 agent（`WUKONG_AGENT_CMD="<scratchpad>/fake-agent.sh run"`，設定檔預設模型 `opencode/default`）實跑 `schedule add-turn --model nvidia/deepseek-ai/deepseek-v4.1-flash` → `schedule list` 顯示 `kind=turn(scope=project:T,model=nvidia/deepseek-ai/deepseek-v4.1-flash)`；`schedule trigger` 時 agent 收到 `--model nvidia/deepseek-ai/deepseek-v4.1-flash`，沒有收到 `opencode/default`。`set-model --id <id>` 清除後再 trigger，agent 收到 `--model opencode/default`。
+   - **影響分析**（補跑：應在修改前跑，實際在實作後才跑）：`JobKind` LOW、`execute_job_inner` LOW（上游 `run_scan`）、`scheduling_capability_hint` CRITICAL（每回合最後一棒都會注入，這次多一行說明如何指定模型；runtime 既有 86 個測試全綠）。
+   - 常青文件（`docs/cli-reference.md`）依計畫在步驟 4 更新。
 3. 📝 **SCN-002、SCN-003、SCN-005：Web API 與兩級選單**
    - 相依：步驟 1、步驟 2。
    - 產出：排程列表回傳模型；修改排程模型的 API；`wukong-settings.js`、`wukong-schedules.js` 的兩級選單與手動輸入退路。

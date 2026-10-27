@@ -2671,6 +2671,7 @@ mod tests {
                 kind: wukong_scheduler::JobKind::Turn {
                     scope: "user:tg-42".to_string(),
                     prompt: "提醒我".to_string(),
+                    model: None,
                 },
                 cron: "0 9 * * *".to_string(),
             })
@@ -2753,6 +2754,7 @@ mod tests {
                 kind: wukong_scheduler::JobKind::Turn {
                     scope: "global".to_string(),
                     prompt: "hi".to_string(),
+                    model: None,
                 },
                 cron: "0 9 * * *".to_string(),
             })
