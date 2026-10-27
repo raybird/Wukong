@@ -74,7 +74,7 @@ Feature: 支援對話與排程獨立模型設定及 Provider 兩級連動挑選
 
 ## Gherkin 核准紀錄
 
-- **核准 commit**: 待提交
+- **核准 commit**: dcb901e
 - **核准來源**:
   - 2026-10-26 使用者需求原話：「需要能在 setting 調整 chat 的預設對話模型，然後每個排程都能獨立挑選模型，需要搭配 docker 內可以載入的 provider 使用 select 挑選後在列出可以切換的模型」。
   - 2026-10-27 逐題確認（dev-cycle 對話）：Q1 選「沿用同一個（建議）」——Chat 預設模型即 `agent.default_model`，同時是未指定模型排程的 fallback（SCN-002、SCN-004）；Q2 選「再加 CLI 改模型指令」——Web 只在既有排程卡片上指定或清除模型，CLI `add-turn` 加 `--model`，另新增 `schedule set-model --id <id> [--model <m>]`（SCN-003、SCN-004）；Q3 選「opencode models＋可手動（建議）」——後端執行 `opencode models` 依 Provider 分組並快取，保留手動輸入，清單取不到時退回手動輸入，已存模型不在清單時照原值顯示並標示（SCN-001、SCN-005）。
