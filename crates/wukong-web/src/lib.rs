@@ -482,6 +482,37 @@ where
     }
 }
 
+#[derive(serde::Deserialize)]
+struct ScheduleModelRequest {
+    model: Option<String>,
+}
+
+/// 指定或清除 Turn 排程的模型；`model` 為 null 或空白時改回預設模型（issue-0026）。
+async fn patch_schedule_model<B>(
+    State(state): State<AppState<B>>,
+    Path(id): Path<String>,
+    Json(req): Json<ScheduleModelRequest>,
+) -> axum::response::Response
+where
+    B: AiBackend + Send + Sync + 'static,
+{
+    use axum::response::IntoResponse;
+    use wukong_scheduler::SetModelOutcome;
+
+    let store = match SchedulerStore::open(&state.db_url).await {
+        Ok(store) => store,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    match store.set_turn_model(&id, req.model.as_deref()).await {
+        Ok(SetModelOutcome::Updated) => StatusCode::OK.into_response(),
+        Ok(SetModelOutcome::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        Ok(SetModelOutcome::NotTurn) => {
+            (StatusCode::BAD_REQUEST, "maintenance jobs have no model").into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 async fn delete_schedule<B>(
     State(state): State<AppState<B>>,
     Path(id): Path<String>,
@@ -830,6 +861,7 @@ where
         .route("/app.js", get(static_assets::app_js))
         .route("/lib/html.js", get(static_assets::html_js))
         .route("/lib/chat-layout.mjs", get(static_assets::chat_layout_js))
+        .route("/lib/model-picker.mjs", get(static_assets::model_picker_js))
         .route(
             "/lib/unread-marker.mjs",
             get(static_assets::unread_marker_js),
@@ -932,7 +964,7 @@ where
         )
         .route(
             "/api/schedules/:id",
-            axum::routing::delete(delete_schedule::<B>),
+            axum::routing::delete(delete_schedule::<B>).patch(patch_schedule_model::<B>),
         )
         .route("/api/system", get(get_system::<B>))
         .route_layer(axum::middleware::from_fn_with_state(
@@ -1126,6 +1158,12 @@ mod tests {
         assert!(content_type(
             build_router(state(None, &[]).await),
             "/lib/unread-marker.mjs"
+        )
+        .await
+        .contains("javascript"));
+        assert!(content_type(
+            build_router(state(None, &[]).await),
+            "/lib/model-picker.mjs"
         )
         .await
         .contains("javascript"));
@@ -2740,6 +2778,100 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    async fn patch_model_status(app: &axum::Router, id: &str, body: &str) -> StatusCode {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/schedules/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    async fn listed_models(app: &axum::Router) -> Vec<serde_json::Value> {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/schedules")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let jobs: Vec<serde_json::Value> = serde_json::from_str(&body_string(resp).await).unwrap();
+        jobs.iter().map(|job| job["model"].clone()).collect()
+    }
+
+    // issue-0026 SCN-003／SCN-004：Web 排程卡片指定、清除模型，列表反映結果。
+    #[tokio::test]
+    async fn schedule_model_can_be_set_and_cleared_over_http() {
+        let app_state = state(None, &[]).await;
+        let store = wukong_scheduler::SchedulerStore::open(&app_state.db_url)
+            .await
+            .unwrap();
+        let job = store
+            .add_job(wukong_scheduler::NewJob {
+                name: "morning".to_string(),
+                kind: wukong_scheduler::JobKind::Turn {
+                    scope: "global".to_string(),
+                    prompt: "hi".to_string(),
+                    model: None,
+                },
+                cron: "0 9 * * *".to_string(),
+            })
+            .await
+            .unwrap();
+        let app = build_router(app_state);
+
+        assert_eq!(
+            patch_model_status(&app, &job.id, r#"{"model":"nvidia/x/y"}"#).await,
+            StatusCode::OK
+        );
+        assert_eq!(listed_models(&app).await, [serde_json::json!("nvidia/x/y")]);
+
+        assert_eq!(
+            patch_model_status(&app, &job.id, r#"{"model":null}"#).await,
+            StatusCode::OK
+        );
+        assert_eq!(listed_models(&app).await, [serde_json::Value::Null]);
+    }
+
+    // issue-0026 SCN-003
+    #[tokio::test]
+    async fn schedule_model_rejects_maintenance_and_unknown_jobs() {
+        let app_state = state(None, &[]).await;
+        let store = wukong_scheduler::SchedulerStore::open(&app_state.db_url)
+            .await
+            .unwrap();
+        let job = store
+            .add_job(wukong_scheduler::NewJob {
+                name: "snap".to_string(),
+                kind: wukong_scheduler::JobKind::Maintenance {
+                    scope: None,
+                    task: wukong_scheduler::MaintenanceTask::Snapshot,
+                },
+                cron: "0 2 * * *".to_string(),
+            })
+            .await
+            .unwrap();
+        let app = build_router(app_state);
+
+        assert_eq!(
+            patch_model_status(&app, &job.id, r#"{"model":"opencode/a"}"#).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            patch_model_status(&app, "missing", r#"{"model":"opencode/a"}"#).await,
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[tokio::test]

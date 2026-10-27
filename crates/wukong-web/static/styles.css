@@ -606,6 +606,10 @@ wukong-chat { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .schedule-card h3 { margin: 0 0 0.5rem; }
 .schedule-card p { margin: 0.25rem 0; }
 .schedule-actions { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
+.model-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+.model-picker select, .model-picker input { font: inherit; padding: 0.5rem; border: 1px solid #8886; border-radius: 0.5rem; background: transparent; color: inherit; min-width: 0; max-width: 100%; }
+.model-picker-note { flex-basis: 100%; font-size: 0.875rem; opacity: 0.85; }
+.schedule-model { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-top: 0.5rem; }
 .system-list { display: grid; grid-template-columns: max-content 1fr; gap: 0.5rem 1rem; }
 .system-list dt { font-weight: 700; }
 .system-list dd { margin: 0; }

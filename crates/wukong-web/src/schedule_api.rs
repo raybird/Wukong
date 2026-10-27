@@ -8,6 +8,8 @@ pub struct ScheduleJobResponse {
     pub kind: String,
     pub scope: Option<String>,
     pub prompt: Option<String>,
+    /// Turn 排程的專屬模型；`None` 代表使用預設模型（issue-0026）。
+    pub model: Option<String>,
     pub task: Option<String>,
     pub cron: String,
     pub enabled: bool,
@@ -16,13 +18,16 @@ pub struct ScheduleJobResponse {
 }
 
 pub fn job_response(job: Job) -> ScheduleJobResponse {
-    let (kind, scope, prompt, task) = match job.kind {
-        JobKind::Turn { scope, prompt, .. } => {
-            ("turn".to_string(), Some(scope), Some(prompt), None)
-        }
+    let (kind, scope, prompt, model, task) = match job.kind {
+        JobKind::Turn {
+            scope,
+            prompt,
+            model,
+        } => ("turn".to_string(), Some(scope), Some(prompt), model, None),
         JobKind::Maintenance { scope, task } => (
             "maintenance".to_string(),
             scope,
+            None,
             None,
             Some(task_label(task).to_string()),
         ),
@@ -33,6 +38,7 @@ pub fn job_response(job: Job) -> ScheduleJobResponse {
         kind,
         scope,
         prompt,
+        model,
         task,
         cron: job.cron,
         enabled: job.enabled,

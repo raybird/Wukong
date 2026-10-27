@@ -50,10 +50,27 @@
      - 真實路徑：用臨時 DB 與一個會記錄 argv 的假 agent（`WUKONG_AGENT_CMD="<scratchpad>/fake-agent.sh run"`，設定檔預設模型 `opencode/default`）實跑 `schedule add-turn --model nvidia/deepseek-ai/deepseek-v4.1-flash` → `schedule list` 顯示 `kind=turn(scope=project:T,model=nvidia/deepseek-ai/deepseek-v4.1-flash)`；`schedule trigger` 時 agent 收到 `--model nvidia/deepseek-ai/deepseek-v4.1-flash`，沒有收到 `opencode/default`。`set-model --id <id>` 清除後再 trigger，agent 收到 `--model opencode/default`。
    - **影響分析**（補跑：應在修改前跑，實際在實作後才跑）：`JobKind` LOW、`execute_job_inner` LOW（上游 `run_scan`）、`scheduling_capability_hint` CRITICAL（每回合最後一棒都會注入，這次多一行說明如何指定模型；runtime 既有 86 個測試全綠）。
    - 常青文件（`docs/cli-reference.md`）依計畫在步驟 4 更新。
-3. 📝 **SCN-002、SCN-003、SCN-005：Web API 與兩級選單**
+3. ✅ **SCN-002、SCN-003、SCN-005：Web API 與兩級選單**
    - 相依：步驟 1、步驟 2。
    - 產出：排程列表回傳模型；修改排程模型的 API；`wukong-settings.js`、`wukong-schedules.js` 的兩級選單與手動輸入退路。
    - 完成判準：API 測試涵蓋設定、清除、非 Turn 排程與不存在的 id；前端測試或實機操作確認切換 Provider 會更新模型選項、儲存後重新載入顯示正確、清單 API 失敗時可手動輸入、不在清單的已存值照原值顯示。
+   - **實作**：
+     - `GET /api/schedules` 每筆多了 `model`。
+     - 新增 `PATCH /api/schedules/:id`，body `{"model": "<id>" | null}`：null 或空白就改回預設；回 200、404，維護排程回 400。路由走既有的 token middleware。
+     - 新模組 `static/lib/model-picker.mjs`：純邏輯 `initialPickerState`、`modelsFor`、`pickedModel`，加上 DOM 的 `mountModelPicker` 與 `loadModelCatalog`，Settings 和排程卡片共用。
+     - Settings 的文字框換成兩級選單。
+     - 排程頁只有對話排程的卡片多了「模型」列、兩級選單、「儲存模型」和「改回預設」；沒有指定模型時「改回預設」是停用的。
+   - **紅綠證據**（2026-10-27）：
+     - API 紅燈：先放空殼（PATCH 回 501、列表 `model` 固定 null、`/lib/model-picker.mjs` 沒有路由），`cargo test -p wukong-web --lib` → 3 failed。`schedule_model_can_be_set_and_cleared_over_http` 是 `left: 501 right: 200`，`schedule_model_rejects_maintenance_and_unknown_jobs` 是 `left: 501 right: 400`，`serves_static_assets_with_content_types` 是 `left: 404 right: 200`。
+     - 前端紅燈：空殼模組下 `node --test crates/wukong-web/static/lib/model-picker.test.mjs` → 6 個全 fail，失敗訊息都是 `ERR_ASSERTION`。
+     - 最小實作後全綠：`cargo test -p wukong-web --lib` 87 passed；`node --test` model-picker 6 passed。
+     - 精煉：檢查過一次，沒有需要改的地方。綠燈同上。
+     - 全 workspace：`cargo fmt --all -- --check` 通過；`cargo clippy --all-targets --locked -- -D warnings` exit 0；`node --test crates/wukong-web/static/lib/*.test.mjs crates/wukong-web/static/components/*.test.mjs` 17 passed。`cargo test --workspace --locked` 第一次跑出 1 個失敗、在 188 passed 時停下；失敗名稱被我當時的彙總指令濾掉，無法辨識是哪一個。之後以 `--no-fail-fast` 連跑三次，都是 704 passed／0 failed，沒有重現。殘餘風險：既有測試中可能有一個時序相關的 flaky 測試，留給 review 與 CI 觀察。
+     - 瀏覽器實測（Chrome，本機臨時 wukong-web 搭本機 opencode 1.18.31，臨時 DB 有三個對話排程和一個維護排程）：
+       - SCN-002：Settings 一開就停在已存的 `opencode` → `big-pickle`。切到 `nvidia` 後模型選單只剩 38 個 `nvidia/*` 加「請選擇模型」，沒有 `opencode/*`。選 `deepseek-ai/deepseek-v4.1-flash` 儲存後，設定檔 `agent.default_model` 變成 `nvidia/deepseek-ai/deepseek-v4.1-flash`，頁面也顯示這個值。
+       - SCN-003：維護排程卡片沒有模型選單。有模型的卡片停在 `nvidia` 和該模型。在「晚報-用預設」選 `opencode/big-pickle` 按儲存、在「晨報-有模型」按「改回預設」後，`wukong schedule list` 分別顯示 `model=opencode/big-pickle` 和 `model=使用預設`。
+       - SCN-005：已存值 `custom/not-listed` 的卡片切到手動輸入，保留原值，並標示「目前的模型不在清單中。」。用 `PATH=/usr/bin:/bin` 重啟讓 `/api/models` 回 502 後，Settings 隱藏兩個下拉選單，手動輸入框保留原值並顯示「無法取得模型清單，請手動輸入。」；手動輸入 `opencode/manual-typed` 儲存後寫進設定檔。過程中 console 沒有錯誤。
+     - 未驗證：手機寬度的版面。樣式用 `flex-wrap` 讓欄位換行，但沒有實際在窄螢幕看過。
 4. 📝 **交付、文件與獨立審查**
    - 相依：步驟 1～3。
    - 產出：`docs/cli-reference.md`（`add-turn --model`、`set-model`）、`docs/entrypoints.md`（Web 模型設定）、`CHANGELOG.md` 的 `[Unreleased]`；建立 PR 並取得獨立審查。

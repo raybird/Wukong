@@ -1,4 +1,5 @@
 import { html } from '/lib/html.js';
+import { loadModelCatalog, mountModelPicker } from '/lib/model-picker.mjs';
 
 export class WukongSettings extends HTMLElement {
   connectedCallback() {
@@ -11,10 +12,10 @@ export class WukongSettings extends HTMLElement {
           </div>
         </div>
         <section class="settings-card">
-          <h3>全域模型</h3>
-          <p class="settings-help">第一版只支援全域預設模型，後續 Web / Telegram / Scheduler / CLI turns 都會使用。</p>
+          <h3>預設模型</h3>
+          <p class="settings-help">Web、Telegram、CLI 對話與沒有指定模型的排程都使用這個模型；排程可在「排程」頁各自指定。先選 Provider，再選模型。</p>
           <form id="model-form" class="settings-form">
-            <label>Default model<input id="model-input" type="text" placeholder="opencode/deepseek-v4-flash-free" /></label>
+            <div id="model-picker"></div>
             <button type="submit">儲存模型</button>
           </form>
           <p id="model-status" class="settings-status">載入中…</p>
@@ -33,7 +34,6 @@ export class WukongSettings extends HTMLElement {
     `.toString();
     this.status = this.querySelector('#settings-status');
     this.modelStatus = this.querySelector('#model-status');
-    this.modelInput = this.querySelector('#model-input');
     this.tokenInput = this.querySelector('#tg-token');
     this.allowedInput = this.querySelector('#tg-allowed');
     this.querySelector('#settings-form').addEventListener('submit', (e) => {
@@ -59,8 +59,12 @@ export class WukongSettings extends HTMLElement {
       return;
     }
     const data = await resp.json();
-    this.modelInput.value = data.model || '';
-    this.modelInput.disabled = !data.editable;
+    const catalog = await loadModelCatalog(this.tokenParam());
+    this.modelPicker = mountModelPicker(this.querySelector('#model-picker'), {
+      catalog,
+      current: data.model,
+    });
+    this.modelPicker.setDisabled(!data.editable);
     this.querySelector('#model-form button').disabled = !data.editable;
     this.modelStatus.textContent = data.model
       ? '目前模型：' + data.model + '（來源：' + data.source + '）'
@@ -68,7 +72,7 @@ export class WukongSettings extends HTMLElement {
   }
 
   async saveModel() {
-    const model = this.modelInput.value.trim();
+    const model = this.modelPicker ? this.modelPicker.value() : '';
     if (!model) {
       this.modelStatus.textContent = '模型不可為空。';
       return;
