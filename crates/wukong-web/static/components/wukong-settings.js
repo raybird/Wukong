@@ -16,7 +16,7 @@ export class WukongSettings extends HTMLElement {
           <p class="settings-help">Web、Telegram、CLI 對話與沒有指定模型的排程都使用這個模型；排程可在「排程」頁各自指定。先選 Provider，再選模型。</p>
           <form id="model-form" class="settings-form">
             <div id="model-picker"></div>
-            <button type="submit">儲存模型</button>
+            <button type="submit" disabled>儲存模型</button>
           </form>
           <p id="model-status" class="settings-status">載入中…</p>
         </section>

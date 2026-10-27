@@ -13,12 +13,17 @@ export class WukongSchedules extends HTMLElement {
   }
 
   async load() {
+    // 等待期間可能又觸發新的 load()（停用、刪除、儲存），過期的這次就放棄，
+    // 不在新畫面上重複掛選單與事件。
+    const generation = (this.loadGeneration = (this.loadGeneration || 0) + 1);
     const resp = await fetch('/api/schedules' + this.tokenParam());
+    if (generation !== this.loadGeneration) return;
     if (!resp.ok) {
       this.list.textContent = resp.status === 401 ? '沒有權限讀取資料。' : '無法讀取排程：HTTP ' + resp.status;
       return;
     }
     const jobs = await resp.json();
+    if (generation !== this.loadGeneration) return;
     if (!jobs.length) {
       this.list.innerHTML = '<p class="empty-state">目前沒有排程，可先用 CLI 建立排程。</p>';
       return;
@@ -30,6 +35,7 @@ export class WukongSchedules extends HTMLElement {
     const turns = jobs.filter((job) => job.kind === 'turn');
     if (!turns.length) return;
     const catalog = await loadModelCatalog(this.tokenParam());
+    if (generation !== this.loadGeneration) return;
     for (const job of turns) {
       const card = this.list.querySelector(`[data-job="${CSS.escape(job.id)}"]`);
       const picker = mountModelPicker(card.querySelector('.schedule-model-picker'), {

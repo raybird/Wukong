@@ -80,7 +80,22 @@
      - 套用範圍含補救重送：`turn.rs` 的 repair 請求用 `cfg.default_model`。
      - 套用範圍含壓縮：`run_turn` 用同一份 cfg 呼叫 `prepare_final_session`，裡面的 `compact_session` 帶 `cfg.default_model`。
      - 錯誤訊息文字：`set_model_message`。
-   - 待辦：push 分支、建立 PR、獨立審查。
+   - **PR 與第一輪審查**（2026-10-27）：PR #27 以 `378ade3` 建立。獨立審查判定 PASS，報告見 `review-378ade3.md`（`5a76caa`）。報告沒有 MUST FIX，列了兩項 SHOULD FIX，使用者決定「先修再合併」。
+   - **審查後修正**（2026-10-27，✅）：
+     - **S-1 排程頁重複載入**（`wukong-schedules.js`）：
+       - 紅燈：在 Chrome 對臨時服務實測。假 `opencode` 先 `sleep 3` 再回空清單，所以每次載入清單都要 3 秒；兩個排程都先設成 `custom/old`。清單還沒載完時按「停用」，等 8 秒後在最後一張卡片輸入 `opencode/new-model` 並按「儲存模型」，結果送出 2 個 PATCH：`{"model":"custom/old"}` 與 `{"model":"opencode/new-model"}`。
+       - 前一次在兩個排程都沒有模型時做的同樣操作，只送出 1 個 PATCH。原因是過期的選單 `value()` 回空字串，只會顯示「請先選擇模型」，所以重現時必須讓排程先有模型。
+       - 修正：`load()` 加上載入世代計數，在每個 `await` 之後檢查，過期的那次直接放棄。
+       - 綠燈：同一個腳本只送出 1 個 PATCH，內容是 `opencode/new-model`。刪除情境（覆寫 `confirm`，清單載完前刪掉第一張卡片）結果是剩 1 張卡片、選單只掛一次、沒有未處理的錯誤。這個情境沒有先跑紅燈，它和停用情境是同一個根因。
+     - **S-2 `run_fixed` 子行程**（`backend.rs`）：
+       - 先跑 GitNexus impact。結果是 CRITICAL，直接呼叫者有 2 個：CLI `/providers`、`/models`（`command.rs`），以及 Web `run_opencode_diagnostic`。三者都是在逾時時放棄等待，加上 `kill_on_drop` 不會改變正常完成時的行為。
+       - 紅燈：`run_fixed_kills_the_child_when_the_caller_gives_up` 跑 `sh -c "sleep 1; touch <marker>"`，100 ms 後放棄等待，1.5 秒後 marker 仍然出現，斷言失敗（"the abandoned child kept running"）。
+       - 修正：加上 `kill_on_drop(true)`。
+       - 綠燈：wukong-gateway lib 測試 140 passed。
+     - **N-3 Settings 清單載完前就能儲存**（`wukong-settings.js`）：「儲存模型」按鈕一開始設成 `disabled`，選單掛上後再依 `editable` 啟用。Chrome 實測：進入頁面 300 ms 時是停用，4.8 秒後已啟用。
+     - 整體檢查：`cargo fmt --all -- --check` 通過；`cargo clippy --all-targets --locked -- -D warnings` 通過；`cargo test --workspace --locked --no-fail-fast` 705 passed、0 failed；`node --test` 17 passed。`detect_changes` 判定 medium，範圍是 3 個檔案。
+     - 沒有處理的 NICE TO HAVE：N-4（PATCH body 送 `{}` 等於清除模型）、N-5（PATCH 沒有 401 測試）、N-6（正規化邏輯寫了兩份）。這三項不在使用者同意的範圍內，保留在審查報告中。
+   - 待辦：新 HEAD 重新獨立審查。
 
 ## 使用方式對照
 
