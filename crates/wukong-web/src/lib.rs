@@ -2,6 +2,7 @@
 //! streams role progress + the rendered answer over SSE.
 
 pub mod memory_api;
+pub mod models_api;
 pub mod schedule_api;
 pub mod skills_api;
 pub mod system_api;
@@ -411,6 +412,17 @@ where
         .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+static MODELS_CACHE: models_api::ModelCatalogCache = models_api::ModelCatalogCache::new();
+
+async fn get_models() -> axum::response::Response {
+    let result = MODELS_CACHE
+        .get_or_fetch(models_api::MODELS_CACHE_TTL, || {
+            run_opencode_diagnostic(&["models"])
+        })
+        .await;
+    models_api::models_response(result)
 }
 
 async fn list_schedules<B>(
@@ -901,6 +913,7 @@ where
             "/api/settings/model",
             get(get_model_settings::<B>).put(put_model_settings::<B>),
         )
+        .route("/api/models", get(get_models))
         .route("/api/memory/summary", get(get_memory_summary::<B>))
         .route("/api/memory/records", get(get_memory_records::<B>))
         .route(
@@ -1854,6 +1867,24 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/settings")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // SCN-001: the model list is served behind the same token as the rest.
+    #[tokio::test]
+    async fn models_requires_token_when_set() {
+        let app = build_router(state(Some("sekret"), &[]).await);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/models")
                     .body(Body::empty())
                     .unwrap(),
             )

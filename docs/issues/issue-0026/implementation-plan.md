@@ -9,10 +9,26 @@
 
 ## 實作步驟
 
-1. 📝 **SCN-001、SCN-005：探測 `opencode models` 契約並實作 `/api/models`**
+1. ✅ **SCN-001、SCN-005：探測 `opencode models` 契約並實作 `/api/models`**
    - 相依：無。
    - 產出：探測紀錄（輸出格式、耗時、失敗 exit code、臨時 `OPENCODE_CONFIG` 加自訂 Provider 是否列出、server 模式 `GET /provider` 與 Web 容器清單的比對）；解析與分組函式、`GET /api/models`、快取。
    - 完成判準：以真實輸出為 fixture 的解析測試通過；`opencode models` 失敗、逾時或輸出為空時 API 回可辨識的狀態且不 crash；探測結論寫回本步驟。
+   - **契約探測**（2026-10-27，本機測試部署 `~/Documents/RunWuKong` 的 `wukong-web` 容器，opencode 1.19.3，CLI 模式；只用 `/tmp` 下的臨時設定檔，用完即刪）：
+     - 格式：stdout 一行一個 `provider/model`，成功時 stderr 為空、exit 0；模型 ID 可含多個 `/`（`nvidia/deepseek-ai/deepseek-v4.1-flash`、自訂的 `probe26/org/model-a`），所以只以第一個 `/` 切出 Provider。
+     - 耗時：`docker exec wukong-web opencode models` 兩次各 1411、1452 ms。
+     - 失敗：`opencode models nope` 印出 `Provider not found` 並 exit 1。
+     - 會列出的 Provider：`OPENCODE_CONFIG=/tmp/probe-26.json`（內含自訂 openai-compatible Provider）會列出 `probe26/*`；帶 `NVIDIA_API_KEY` 會列出 38 個 `nvidia/*`。沒有設定或憑證的 Provider 不會出現（未設定時只有 `opencode/*`）。
+     - 清單會變動：同一天先後兩次，opencode 自家的免費模型分別是 12 與 9 個，所以快取設 5 分鐘 TTL，不快取到重啟為止。
+     - server 模式：沒有啟動 `opencode serve` 比對 `GET /provider`。改以 `docker-compose.yml` 核對：`opencode-server` 與 `wukong-web` 用同一份 image，掛載同樣的 `opencode-config`、`opencode-state` volume，兩邊都沒有傳 Provider 金鑰類環境變數。Web 服務行程由 entrypoint `export OPENCODE_CONFIG`（`scripts/docker-entrypoint.sh:242`），子行程 `opencode models` 跟 `opencode run` 讀到同一份設定。殘餘風險：使用者只在 `opencode-server` 的 override 加金鑰環境變數時，兩邊清單會不一致，由手動輸入兜底（SCN-005）。
+   - **紅綠證據**：
+     - 單元紅燈：先寫空殼（`parse_models` 回空、快取不快取、錯誤回 200），`cargo test -p wukong-web --lib models_api` → 7 failed／1 passed，全是斷言不符（例如快取呼叫次數 `left: 2 right: 1`、錯誤狀態碼 `left: 200 right: 502`、分組 `left: []`）。`empty_output_yields_no_providers` 在空殼下本來就成立，保留為防護。
+     - 路由紅燈：`models_requires_token_when_set` → `left: 404 right: 401`（路由不存在）。
+     - 最小實作後全綠：`cargo test -p wukong-web` → lib 85 passed，其他 test target 全綠。
+     - 精煉：檢查過一次，沒有需要改的地方（`Default` 實作是為了 clippy 的 `new_without_default`）。綠燈同上。
+     - 端到端（本機 opencode 1.18.31，臨時 DB 與設定檔）：`GET /api/models` 回 200，依 Provider 分組 `[opencode 10, nvidia 37, ollama-cloud 23, openai 24]`，第一次 1.16 秒，第二次命中快取 0.0007 秒；`PATH=/usr/bin:/bin`（找不到 opencode）時回 `HTTP 502`，body 是 `io error: No such file or directory (os error 2)`。
+     - 靜態檢查：`cargo fmt --all -- --check` 通過；`cargo clippy -p wukong-web --all-targets --locked -- -D warnings` 通過。
+   - **測試對應**：`crates/wukong-web/src/models_api.rs` 的 tests（fixture `crates/wukong-web/tests/fixtures/opencode-models-1.19.3.txt`）。SCN-001：`real_output_is_grouped_by_provider_in_listed_order`、`lines_without_a_provider_and_model_are_ignored`、`cache_reuses_a_result_within_ttl`、`cache_refetches_after_ttl`、`listing_success_is_json_grouped_by_provider`，以及 `lib.rs` 的 `models_requires_token_when_set`。SCN-005（API 端）：`empty_output_yields_no_providers`、`failures_and_empty_listings_are_not_cached`、`listing_failure_is_reported_as_bad_gateway_with_reason`；前端退回手動輸入的部分在步驟 3 驗收。
+   - 逾時沿用 `run_opencode_diagnostic` 的 5 秒（`SYSTEM_DIAGNOSTIC_TIMEOUT_SECS`），實測約 1.4 秒；逾時時回 502 `command timed out`。
 2. 📝 **SCN-003、SCN-004：排程模型欄位、執行覆寫與 CLI**
    - 相依：無（可與步驟 1 並行）。
    - 產出：`JobKind::Turn.model`；`SchedulerStore` 修改模型；`run_claimed_job` 以排程模型覆寫預設模型；CLI `add-turn --model`、`schedule set-model --id <id> [--model <m>]`（省略 `--model` 即清除）、`schedule list` 顯示模型或「使用預設」；`persona::scheduling_capability_hint` 補上兩個指令。
