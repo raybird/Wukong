@@ -71,10 +71,16 @@
        - SCN-003：維護排程卡片沒有模型選單。有模型的卡片停在 `nvidia` 和該模型。在「晚報-用預設」選 `opencode/big-pickle` 按儲存、在「晨報-有模型」按「改回預設」後，`wukong schedule list` 分別顯示 `model=opencode/big-pickle` 和 `model=使用預設`。
        - SCN-005：已存值 `custom/not-listed` 的卡片切到手動輸入，保留原值，並標示「目前的模型不在清單中。」。用 `PATH=/usr/bin:/bin` 重啟讓 `/api/models` 回 502 後，Settings 隱藏兩個下拉選單，手動輸入框保留原值並顯示「無法取得模型清單，請手動輸入。」；手動輸入 `opencode/manual-typed` 儲存後寫進設定檔。過程中 console 沒有錯誤。
      - 未驗證：手機寬度的版面。樣式用 `flex-wrap` 讓欄位換行，但沒有實際在窄螢幕看過。
-4. 📝 **交付、文件與獨立審查**
+4. ⏳ **交付、文件與獨立審查**
    - 相依：步驟 1～3。
    - 產出：`docs/cli-reference.md`（`add-turn --model`、`set-model`）、`docs/entrypoints.md`（Web 模型設定）、`CHANGELOG.md` 的 `[Unreleased]`；建立 PR 並取得獨立審查。
    - 完成判準：`cargo fmt --all -- --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --workspace --locked` 通過，review 報告判定 PASS。
+   - **文件**（2026-10-27，✅）：更新了 `docs/cli-reference.md`（範例、指令表、排程語意的模型一節）、`docs/entrypoints.md`（Web 模型設定、`/set_models` 的影響範圍），以及 `docs/web-console-sop-v1.md`（Settings 與 Schedules 流程、smoke checklist）。`CHANGELOG.md` 的 `[Unreleased]` 加了兩筆 Added。`README.md` 沒有描述模型設定，不需要改。文件裡的事實都已向程式核對：
+     - 快取 5 分鐘：`models_api::MODELS_CACHE_TTL`。
+     - 套用範圍含補救重送：`turn.rs` 的 repair 請求用 `cfg.default_model`。
+     - 套用範圍含壓縮：`run_turn` 用同一份 cfg 呼叫 `prepare_final_session`，裡面的 `compact_session` 帶 `cfg.default_model`。
+     - 錯誤訊息文字：`set_model_message`。
+   - 待辦：push 分支、建立 PR、獨立審查。
 
 ## 使用方式對照
 

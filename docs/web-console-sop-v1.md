@@ -15,9 +15,9 @@ Web Console v1 is a control center, not a memory maintenance console. Memory mut
 - Chat: daily conversation entry point, shared history, scope-aware turns, intermediate baton cards, and skill metadata.
 - Memory: read-only records, summary, recall preview, and recall score explanations.
 - Skills: role and Superpowers catalog, global planner preferences, and preference enablement.
-- Schedules: existing schedule management entry point.
+- Schedules: existing schedule management entry point, plus a per-schedule model picker on turn jobs.
 - System: read-only runtime diagnostics for providers, models, GitHub CLI, environment, schedules, and token/memory status.
-- Settings: global model setting and persisted Web/Telegram-related settings.
+- Settings: default model (provider → model picker) and persisted Web/Telegram-related settings.
 
 ## Deferred Scope
 
@@ -56,17 +56,19 @@ Web Console v1 is a control center, not a memory maintenance console. Memory mut
 ## Settings Flow
 
 1. Open the `Settings` tab.
-2. Review the current global model.
-3. Change the global model only when future Web, Telegram, Scheduler, and CLI turns should share the new default.
-4. Submit only non-empty model IDs.
-5. If an environment-controlled value is shown, treat persisted changes as lower precedence than environment configuration.
+2. Review the current default model.
+3. Change it only when future Web, Telegram, and CLI turns, and schedules without their own model, should share the new default.
+4. Pick a provider, then a model. Use "自訂（手動輸入）" for a model the list does not show; when the list cannot be loaded the picker falls back to manual input.
+5. Submit only non-empty model IDs.
+6. If an environment-controlled value is shown, treat persisted changes as lower precedence than environment configuration.
 
 ## Schedules Flow
 
 1. Open the `Schedules` tab.
 2. Review existing scheduled jobs and enabled state.
 3. Use existing schedule controls for management.
-4. Use System diagnostics to confirm total schedules, enabled schedules, and nearest next run.
+4. On a turn job, pick a provider and model and press "儲存模型" to pin that job to the model, or "改回預設" to make it follow the default model again.
+5. Use System diagnostics to confirm total schedules, enabled schedules, and nearest next run.
 
 ## System Diagnostics Flow
 
@@ -93,7 +95,8 @@ Use this checklist before calling Web Console v1 ready in a local environment:
 - Recall preview returns hits for a meaningful query.
 - Recall explanations show score components and source signals.
 - Skills preferences can be saved, reloaded, and reflected in Chat context.
-- Settings can read and update the global model.
+- Settings can read and update the default model through the provider → model picker.
+- A turn job's model can be set and cleared from its schedule card.
 - Schedules tab loads existing schedule state.
 - System tab loads grouped diagnostics without failing the whole page when one check warns.
 - Web token protection remains active when configured.
