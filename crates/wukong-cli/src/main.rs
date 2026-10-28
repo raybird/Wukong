@@ -14,8 +14,8 @@ use wukong_runtime::maintenance::{memory_consolidate, memory_prune, memory_snaps
 use wukong_runtime::session_retention::{prune_opencode_sessions, render_report, RetentionPolicy};
 use wukong_runtime::util::now_unix;
 use wukong_scheduler::{
-    DeleteJobOutcome, ExecutionContext, Job, JobKind, MaintenanceTask, NewJob, PermissionPolicy,
-    SchedulerStore,
+    normalize_model, DeleteJobOutcome, ExecutionContext, Job, JobKind, MaintenanceTask, NewJob,
+    PermissionPolicy, SchedulerStore, SetModelOutcome,
 };
 
 #[tokio::main]
@@ -213,6 +213,7 @@ async fn run_schedule_op(
             cron,
             scope,
             prompt,
+            model,
         } => {
             let job = store
                 .add_job(NewJob {
@@ -220,6 +221,7 @@ async fn run_schedule_op(
                     kind: JobKind::Turn {
                         scope: scope.clone(),
                         prompt: prompt.clone(),
+                        model: normalize_model(model.as_deref()),
                     },
                     cron: cron.clone(),
                 })
@@ -252,6 +254,16 @@ async fn run_schedule_op(
                 "已建立排程: {} next={}",
                 job.id,
                 format_opt_ts(job.next_run_at)
+            );
+        }
+        ScheduleOp::SetModel { id, model } => {
+            let outcome = store
+                .set_turn_model(id, model.as_deref())
+                .await
+                .map_err(to_wukong_error)?;
+            println!(
+                "{}",
+                set_model_message(outcome, normalize_model(model.as_deref()).as_deref())
             );
         }
         ScheduleOp::Rm { id } => {
@@ -317,6 +329,15 @@ async fn run_schedule_op(
         }
     }
     Ok(())
+}
+
+fn set_model_message(outcome: SetModelOutcome, model: Option<&str>) -> String {
+    match (outcome, model) {
+        (SetModelOutcome::NotFound, _) => "找不到排程".to_string(),
+        (SetModelOutcome::NotTurn, _) => "維護排程不使用模型，無法設定".to_string(),
+        (SetModelOutcome::Updated, Some(model)) => format!("已設定排程模型：{model}"),
+        (SetModelOutcome::Updated, None) => "已改回使用預設模型".to_string(),
+    }
 }
 
 /// trigger 取不到 job 時的原因（issue-0013）。
@@ -399,7 +420,10 @@ fn map_maintenance_task(task: ScheduleMaintenanceTaskArg) -> MaintenanceTask {
 
 fn describe_job_kind(kind: &JobKind) -> String {
     match kind {
-        JobKind::Turn { scope, .. } => format!("turn(scope={scope})"),
+        JobKind::Turn { scope, model, .. } => format!(
+            "turn(scope={scope},model={})",
+            model.as_deref().unwrap_or("使用預設")
+        ),
         JobKind::Maintenance { scope, task } => {
             format!(
                 "maintenance(task={task:?},scope={})",
@@ -609,6 +633,7 @@ mod tests {
             kind: JobKind::Turn {
                 scope: "user:tg-42".to_string(),
                 prompt: "do it".to_string(),
+                model: None,
             },
             cron: "* * * * *".to_string(),
             enabled,

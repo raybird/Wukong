@@ -441,7 +441,8 @@ impl OpencodeUtility {
 
     pub async fn run_fixed(&self, args: &[&str]) -> Result<String, GatewayError> {
         let mut cmd = Command::new(&self.binary);
-        cmd.args(args).stdin(Stdio::null());
+        // 呼叫端逾時放棄時一併終止，不讓子行程留在背景。
+        cmd.args(args).kill_on_drop(true).stdin(Stdio::null());
         if let Some(ws) = &self.workspace {
             cmd.current_dir(ws);
         }
@@ -1218,6 +1219,28 @@ mod tests {
             "hi",
         );
         assert!(!blank.contains(&"--agent".to_string()));
+    }
+
+    // issue-0026 review-378ade3 S-2：呼叫端逾時放棄後，子行程不能繼續在背景跑。
+    #[tokio::test]
+    async fn run_fixed_kills_the_child_when_the_caller_gives_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("finished");
+        let util = OpencodeUtility {
+            binary: "sh".to_string(),
+            workspace: None,
+        };
+        let script = format!("sleep 1; touch '{}'", marker.display());
+
+        let gave_up = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            util.run_fixed(&["-c", &script]),
+        )
+        .await;
+        assert!(gave_up.is_err());
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        assert!(!marker.exists(), "the abandoned child kept running");
     }
 
     #[test]

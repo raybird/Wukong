@@ -1,4 +1,4 @@
-use crate::job::{next_after, Job, JobKind, NewJob, SchedulerError};
+use crate::job::{next_after, normalize_model, Job, JobKind, NewJob, SchedulerError};
 use sqlx::{Row, SqlitePool};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +38,14 @@ pub struct JobRun {
     pub finished_at: Option<i64>,
     pub status: RunStatus,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetModelOutcome {
+    Updated,
+    NotFound,
+    /// 維護排程不呼叫 agent，沒有模型可指定。
+    NotTurn,
 }
 
 pub struct SchedulerStore {
@@ -170,6 +178,38 @@ impl SchedulerStore {
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    /// 修改 Turn 排程的專屬模型；`None` 或空白代表回到預設模型（issue-0026）。
+    pub async fn set_turn_model(
+        &self,
+        id: &str,
+        model: Option<&str>,
+    ) -> Result<SetModelOutcome, SchedulerError> {
+        let Some(job) = self.get_job(id).await? else {
+            return Ok(SetModelOutcome::NotFound);
+        };
+        let JobKind::Turn { scope, prompt, .. } = job.kind else {
+            return Ok(SetModelOutcome::NotTurn);
+        };
+        let kind = JobKind::Turn {
+            scope,
+            prompt,
+            model: normalize_model(model),
+        };
+        let result = sqlx::query(
+            "UPDATE scheduler_jobs SET config_json = ?2, updated_at = ?3 WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(serde_json::to_string(&kind)?)
+        .bind(now_unix())
+        .execute(&self.pool)
+        .await?;
+        Ok(if result.rows_affected() > 0 {
+            SetModelOutcome::Updated
+        } else {
+            SetModelOutcome::NotFound
+        })
     }
 
     pub async fn claim_due_jobs(
@@ -490,9 +530,114 @@ mod tests {
             kind: JobKind::Turn {
                 scope: "project:T".to_string(),
                 prompt: "do it".to_string(),
+                model: None,
             },
             cron: cron.to_string(),
         }
+    }
+
+    fn turn_model(job: Option<Job>) -> Option<String> {
+        match job.expect("job exists").kind {
+            JobKind::Turn { model, .. } => model,
+            JobKind::Maintenance { .. } => panic!("expected a turn"),
+        }
+    }
+
+    // issue-0026 SCN-004：升級前存的 Turn 沒有 model 欄位，照樣讀得出來。
+    #[tokio::test]
+    async fn a_turn_saved_before_the_model_field_still_loads() {
+        let store = open_store().await;
+        let job = store.add_job(new_turn("* * * * *")).await.unwrap();
+        sqlx::query("UPDATE scheduler_jobs SET config_json = ?2 WHERE id = ?1")
+            .bind(&job.id)
+            .bind(r#"{"Turn":{"scope":"project:T","prompt":"do it"}}"#)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        let loaded = store.get_job(&job.id).await.unwrap();
+        assert_eq!(turn_model(loaded), None);
+    }
+
+    // issue-0026 SCN-004：沒指定模型的排程照舊格式存，降版回去也讀得懂。
+    #[tokio::test]
+    async fn a_turn_without_model_is_stored_in_the_old_format() {
+        let store = open_store().await;
+        let job = store.add_job(new_turn("* * * * *")).await.unwrap();
+        let raw: String =
+            sqlx::query_scalar("SELECT config_json FROM scheduler_jobs WHERE id = ?1")
+                .bind(&job.id)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(raw, r#"{"Turn":{"scope":"project:T","prompt":"do it"}}"#);
+    }
+
+    // issue-0026 SCN-003／SCN-004
+    #[tokio::test]
+    async fn set_turn_model_sets_trims_and_clears_the_model() {
+        let store = open_store().await;
+        let job = store.add_job(new_turn("* * * * *")).await.unwrap();
+
+        assert_eq!(
+            store
+                .set_turn_model(&job.id, Some(" nvidia/x/y "))
+                .await
+                .unwrap(),
+            SetModelOutcome::Updated
+        );
+        assert_eq!(
+            turn_model(store.get_job(&job.id).await.unwrap()).as_deref(),
+            Some("nvidia/x/y")
+        );
+
+        for cleared in [None, Some("  ")] {
+            store
+                .set_turn_model(&job.id, Some("opencode/a"))
+                .await
+                .unwrap();
+            assert_eq!(
+                store.set_turn_model(&job.id, cleared).await.unwrap(),
+                SetModelOutcome::Updated
+            );
+            assert_eq!(turn_model(store.get_job(&job.id).await.unwrap()), None);
+        }
+    }
+
+    // issue-0026 SCN-003
+    #[tokio::test]
+    async fn set_turn_model_rejects_maintenance_and_unknown_jobs() {
+        let store = open_store().await;
+        let maintenance = store
+            .add_job(NewJob {
+                name: "snap".to_string(),
+                kind: JobKind::Maintenance {
+                    scope: None,
+                    task: MaintenanceTask::Snapshot,
+                },
+                cron: "* * * * *".to_string(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .set_turn_model(&maintenance.id, Some("opencode/a"))
+                .await
+                .unwrap(),
+            SetModelOutcome::NotTurn
+        );
+        assert_eq!(
+            store.get_job(&maintenance.id).await.unwrap().unwrap().kind,
+            maintenance.kind
+        );
+        assert_eq!(
+            store
+                .set_turn_model("missing", Some("opencode/a"))
+                .await
+                .unwrap(),
+            SetModelOutcome::NotFound
+        );
     }
 
     // issue-0017：刪除時回報當下是否被持有；lease 已到期的不算。

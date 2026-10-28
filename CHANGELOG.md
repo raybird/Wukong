@@ -11,6 +11,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- **每個排程可以指定自己的模型。** CLI `schedule add-turn` 新增選用的 `--model`，另有
+  `schedule set-model --id <id> [--model <m>]`（省略 `--model` 就改回預設模型）；Web 排程頁的
+  每張對話排程卡片也能指定或清除。有指定的排程不受預設模型變更影響，沒指定的（包括升級前建立的）
+  照舊使用執行當下的預設模型。助手在對話中也知道這兩個指令（#26）。
+- **Web 以 Provider → Model 兩級選單設定模型。** Settings 的預設模型與排程卡片改用兩級選單，
+  清單來自新的 `GET /api/models`（執行 `opencode models`，依 Provider 分組，快取 5 分鐘）；
+  清單取不到時退回手動輸入，已存的模型不在清單中時照原值顯示並標示（#26）。
+
 ## [0.23.1] - 2026-10-26
 
 ### Fixed

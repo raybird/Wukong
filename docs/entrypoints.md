@@ -51,6 +51,7 @@ cargo run -p wukong-telegram
 - **核心設計**：重用與 CLI 相同的 `run_turn` 引擎與記憶資料庫，透過 Server-Sent Events (SSE) 即時串流專家角色的執行進度與渲染後的答案。
 - **前端實作**：採用原生 ES Modules 與自定義的 `<wukong-chat>` Custom Element（遵循 `raybird/plainvanillaweb` 核心慣例之 SafeHTML 設計）。
 - **共享對話歷史**：Web、Telegram 與 Scheduler 共用 scope-based chat history；Web 對話頁可從來源選單切換 `Global`、`Project ...` 或 `Telegram <chat_id>`，查看同一份對話脈絡與排程推送紀錄。
+- **模型設定**：Settings 的「預設模型」與排程頁每個對話排程的卡片，都用「先選 Provider，再選模型」的兩級選單。清單來自 `GET /api/models`：後端執行 `opencode models`，依 Provider 分組，快取 5 分鐘。所以只會列出容器裡已設定或有憑證的 Provider。清單取不到時退回手動輸入；已存的模型不在清單中時，照原值顯示並標示「目前的模型不在清單中。」。排程卡片的「改回預設」會清除該排程的模型（`PATCH /api/schedules/:id`，body `{"model": null}`）。
 - **打包部署**：所有靜態資源由 Axum 透過 `include_str!` 巨集直接內嵌於 binary 中，單一執行檔即自帶完整前端，無需額外外部部署。
 
 ```bash
@@ -74,7 +75,7 @@ CLI/REPL、Web 與 Telegram 共用一組 allowlist 控制指令：
 - `/compact`：要求 opencode 壓縮目前 scope 的 stored session。
 - `/providers`：執行 `opencode providers list` 並回傳輸出。
 - `/models`：執行 `opencode models` 並回傳輸出。
-- `/set_models <model>`：持久化全系統預設模型，後續 Web、Telegram、Scheduler 與 CLI turns 都會套用。
+- `/set_models <model>`：持久化全系統預設模型，後續 Web、Telegram、CLI turns 與沒有指定模型的排程都會套用；有指定模型的排程不受影響。
 
 未知 slash command 不會自動 passthrough 給 opencode。
 

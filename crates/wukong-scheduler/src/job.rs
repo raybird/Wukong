@@ -30,6 +30,10 @@ pub enum JobKind {
     Turn {
         scope: String,
         prompt: String,
+        /// 這個排程專用的模型；`None` 時用執行當下的預設模型（issue-0026）。
+        /// 沒設定時不寫進 JSON，舊版讀得懂。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     Maintenance {
         scope: Option<String>,
@@ -60,6 +64,14 @@ pub struct NewJob {
     pub name: String,
     pub kind: JobKind,
     pub cron: String,
+}
+
+/// 空白視同沒有指定，回到預設模型。
+pub fn normalize_model(model: Option<&str>) -> Option<String> {
+    model
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string)
 }
 
 pub fn validate_cron(expr: &str) -> Result<(), SchedulerError> {

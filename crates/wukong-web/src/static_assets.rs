@@ -9,6 +9,7 @@ pub(crate) const APP_JS: &str = include_str!("../static/app.js");
 pub(crate) const HTML_JS: &str = include_str!("../static/lib/html.js");
 pub(crate) const CHAT_LAYOUT_JS: &str = include_str!("../static/lib/chat-layout.mjs");
 pub(crate) const UNREAD_MARKER_JS: &str = include_str!("../static/lib/unread-marker.mjs");
+pub(crate) const MODEL_PICKER_JS: &str = include_str!("../static/lib/model-picker.mjs");
 pub(crate) const CHAT_JS: &str = include_str!("../static/components/wukong-chat.js");
 pub(crate) const CHAT_THREAD_HEADER_JS: &str =
     include_str!("../static/components/chat-thread-header.js");
@@ -44,6 +45,9 @@ pub(crate) async fn chat_layout_js() -> axum::response::Response {
 }
 pub(crate) async fn unread_marker_js() -> axum::response::Response {
     asset(JS, UNREAD_MARKER_JS)
+}
+pub(crate) async fn model_picker_js() -> axum::response::Response {
+    asset(JS, MODEL_PICKER_JS)
 }
 pub(crate) async fn chat_js() -> axum::response::Response {
     asset(JS, CHAT_JS)

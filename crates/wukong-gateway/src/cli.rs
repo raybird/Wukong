@@ -126,6 +126,16 @@ pub enum ScheduleOp {
         scope: String,
         #[arg(long)]
         prompt: String,
+        /// Model for this job only (`provider/model`); omit to use the default model.
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Set or clear the model of a scheduled turn; omit --model to use the default model.
+    SetModel {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Add a scheduled memory maintenance job.
     AddMaintenance {
@@ -298,14 +308,68 @@ mod tests {
                         cron,
                         scope,
                         prompt,
+                        model,
                     },
             }) => {
                 assert_eq!(name, "daily");
                 assert_eq!(cron, "0 9 * * *");
                 assert_eq!(scope, "project:X");
                 assert_eq!(prompt, "review");
+                assert_eq!(model, None);
             }
             _ => panic!("expected schedule add-turn"),
+        }
+    }
+
+    // issue-0026 SCN-003
+    #[test]
+    fn parses_schedule_add_turn_model() {
+        let cli = Cli::try_parse_from([
+            "wukong",
+            "schedule",
+            "add-turn",
+            "--name",
+            "daily",
+            "--cron",
+            "0 9 * * *",
+            "--scope",
+            "project:X",
+            "--prompt",
+            "review",
+            "--model",
+            "nvidia/x/y",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Schedule {
+                op: ScheduleOp::AddTurn { model, .. },
+            }) => assert_eq!(model.as_deref(), Some("nvidia/x/y")),
+            _ => panic!("expected schedule add-turn"),
+        }
+    }
+
+    // issue-0026 SCN-003／SCN-004：省略 --model 即清除。
+    #[test]
+    fn parses_schedule_set_model_with_and_without_model() {
+        for (args, expected) in [
+            (
+                vec!["--id", "job-1", "--model", "opencode/a"],
+                Some("opencode/a"),
+            ),
+            (vec!["--id", "job-1"], None),
+        ] {
+            let cli =
+                Cli::try_parse_from(["wukong", "schedule", "set-model"].into_iter().chain(args))
+                    .unwrap();
+            match cli.command {
+                Some(Command::Schedule {
+                    op: ScheduleOp::SetModel { id, model },
+                }) => {
+                    assert_eq!(id, "job-1");
+                    assert_eq!(model.as_deref(), expected);
+                }
+                _ => panic!("expected schedule set-model"),
+            }
         }
     }
 
