@@ -71,7 +71,7 @@
        - SCN-003：維護排程卡片沒有模型選單。有模型的卡片停在 `nvidia` 和該模型。在「晚報-用預設」選 `opencode/big-pickle` 按儲存、在「晨報-有模型」按「改回預設」後，`wukong schedule list` 分別顯示 `model=opencode/big-pickle` 和 `model=使用預設`。
        - SCN-005：已存值 `custom/not-listed` 的卡片切到手動輸入，保留原值，並標示「目前的模型不在清單中。」。用 `PATH=/usr/bin:/bin` 重啟讓 `/api/models` 回 502 後，Settings 隱藏兩個下拉選單，手動輸入框保留原值並顯示「無法取得模型清單，請手動輸入。」；手動輸入 `opencode/manual-typed` 儲存後寫進設定檔。過程中 console 沒有錯誤。
      - 未驗證：手機寬度的版面。樣式用 `flex-wrap` 讓欄位換行，但沒有實際在窄螢幕看過。
-4. ⏳ **交付、文件與獨立審查**
+4. ✅ **交付、文件與獨立審查**
    - 相依：步驟 1～3。
    - 產出：`docs/cli-reference.md`（`add-turn --model`、`set-model`）、`docs/entrypoints.md`（Web 模型設定）、`CHANGELOG.md` 的 `[Unreleased]`；建立 PR 並取得獨立審查。
    - 完成判準：`cargo fmt --all -- --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --workspace --locked` 通過，review 報告判定 PASS。
@@ -95,7 +95,8 @@
      - **N-3 Settings 清單載完前就能儲存**（`wukong-settings.js`）：「儲存模型」按鈕一開始設成 `disabled`，選單掛上後再依 `editable` 啟用。Chrome 實測：進入頁面 300 ms 時是停用，4.8 秒後已啟用。
      - 整體檢查：`cargo fmt --all -- --check` 通過；`cargo clippy --all-targets --locked -- -D warnings` 通過；`cargo test --workspace --locked --no-fail-fast` 705 passed、0 failed；`node --test` 17 passed。`detect_changes` 判定 medium，範圍是 3 個檔案。
      - 沒有處理的 NICE TO HAVE：N-4（PATCH body 送 `{}` 等於清除模型）、N-5（PATCH 沒有 401 測試）、N-6（正規化邏輯寫了兩份）。這三項不在使用者同意的範圍內，保留在審查報告中。
-   - 待辦：新 HEAD 重新獨立審查。
+   - **第二輪審查**（2026-10-27）：`240f8a1` 判定 PASS，沒有 MUST FIX 或 SHOULD FIX。報告見 `review-240f8a1.md`（提交 `f74abd0`），驗證腳本確認 `f74abd0` 只新增了這份報告。報告另外列了兩項 NICE TO HAVE：一是 `fetch` 拋出時排程頁沒有錯誤訊息，這是改版前就有的問題；二是本步驟 S-2 段落的影響分析描述不精確，結論仍然成立。兩項都沒有處理，保留在報告中。
+   - **合併**：PR #27 於 2026-10-28 squash 合併為 `ec9cd97`，合併時的 head 是 `f74abd0`，與審查範圍一致。GitHub #26 已關閉。
 
 ## 使用方式對照
 
