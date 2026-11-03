@@ -26,19 +26,23 @@ enum Operation {
     Compact(String, Option<String>),
     Delete(String),
     List,
+    CreatedAt(String),
 }
 
 /// `execute` 的結果：列出 session 回清單，其餘操作回一般回應。
 enum Outcome {
     Response(AgentResponse),
     Listing(SessionListing),
+    CreatedAt(i64),
 }
 
 impl Outcome {
     fn response(self) -> AgentResponse {
         match self {
             Outcome::Response(response) => response,
-            Outcome::Listing(_) => unreachable!("only Operation::List returns a listing"),
+            Outcome::Listing(_) | Outcome::CreatedAt(_) => {
+                unreachable!("only List and CreatedAt return something other than a response")
+            }
         }
     }
 }
@@ -173,6 +177,12 @@ impl LocalProcessBackend {
                     }));
                 }
                 Operation::List => return backend.list_sessions().await.map(Outcome::Listing),
+                Operation::CreatedAt(id) => {
+                    return backend
+                        .session_created_ms(&id)
+                        .await
+                        .map(Outcome::CreatedAt)
+                }
             };
             let _pending = PendingTurn {
                 pending: &self.pending,
@@ -264,7 +274,17 @@ impl AiBackend for LocalProcessBackend {
     async fn list_sessions(&self) -> Result<SessionListing, GatewayError> {
         match self.execute(Operation::List, &mut |_| {}).await? {
             Outcome::Listing(listing) => Ok(listing),
-            Outcome::Response(_) => unreachable!("Operation::List always returns a listing"),
+            _ => unreachable!("Operation::List always returns a listing"),
+        }
+    }
+
+    async fn session_created_ms(&self, session_id: &str) -> Result<i64, GatewayError> {
+        match self
+            .execute(Operation::CreatedAt(session_id.into()), &mut |_| {})
+            .await?
+        {
+            Outcome::CreatedAt(created_ms) => Ok(created_ms),
+            _ => unreachable!("Operation::CreatedAt always returns a time"),
         }
     }
 
@@ -629,6 +649,50 @@ server.serve_forever()
             ]
         );
         assert!(!listing.truncated);
+        assert_stopped(dir.path()).await;
+    }
+
+    /// issue-0028 SCN-004：本機模式也查得到 session 建立時間，查完就回收程序。
+    #[tokio::test]
+    async fn reads_session_created_time_through_an_on_demand_server() {
+        if !can_bind_loopback() {
+            eprintln!("skipping test: sandbox forbids binding socket");
+            return;
+        }
+        let script = r#"
+exec python3 -c '
+import http.server, socketserver, sys, signal
+signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+socketserver.ThreadingTCPServer.daemon_threads = True
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/global/health":
+            body = b"{}"
+        elif self.path == "/session/ses_1":
+            body = b"{\"id\":\"ses_1\",\"time\":{\"created\":1793677006691,\"updated\":1793677027641}}"
+        else:
+            self.send_response(404)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+print(f"opencode server listening on http://127.0.0.1:{server.server_address[1]}", flush=True)
+server.serve_forever()
+'
+"#;
+        let (dir, backend) = fixture(script);
+        assert_eq!(
+            backend.session_created_ms("ses_1").await.unwrap(),
+            1793677006691
+        );
         assert_stopped(dir.path()).await;
     }
 

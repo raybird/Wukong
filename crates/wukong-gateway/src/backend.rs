@@ -93,6 +93,16 @@ pub trait AiBackend {
         })
     }
 
+    /// When the session was created, in milliseconds since the Unix epoch
+    /// (opencode's `time.created`, which compaction does not reset). Only the
+    /// opencode server API exposes it.
+    async fn session_created_ms(&self, _session_id: &str) -> Result<i64, GatewayError> {
+        Err(GatewayError::AgentFailed {
+            code: None,
+            stderr: "目前只有 opencode server API 支援查詢 session 建立時間。".to_string(),
+        })
+    }
+
     async fn compact_session(
         &self,
         session_id: &str,
@@ -390,6 +400,14 @@ impl AiBackend for AgentBackend {
             AgentBackend::Cli(backend) => backend.list_sessions().await,
             AgentBackend::Local(backend) => backend.list_sessions().await,
             AgentBackend::Server(backend) => backend.list_sessions().await,
+        }
+    }
+
+    async fn session_created_ms(&self, session_id: &str) -> Result<i64, GatewayError> {
+        match self {
+            AgentBackend::Cli(backend) => backend.session_created_ms(session_id).await,
+            AgentBackend::Local(backend) => backend.session_created_ms(session_id).await,
+            AgentBackend::Server(backend) => backend.session_created_ms(session_id).await,
         }
     }
 

@@ -95,21 +95,54 @@
      - 變異（還原後確認）：改成 7 天、邊界多 1 秒（等於 `<=`）、被 `policy.enabled` 擋住（SCN-009），三者都在 `main.rs:432` 紅燈。
      - 真實 daemon：在步驟 2 的沙盒記憶庫放 `old`（90,000 秒前）與 `new`（60 秒前）兩筆事件，以 `WUKONG_MEMORY_AUTO_MAINTENANCE=0` 跑 debug `wukong-schedulerd` 6 秒。日誌 `chat live events pruned deleted=1`，剩下 `new`。
 
-4. 📝 **B：依年齡輪替與上一回合注入**（SCN-004～SCN-007、SCN-010）
+4. ✅ **B：依年齡輪替與上一回合注入**（SCN-004～SCN-007、SCN-010）
    - 產出：
      - `session.rs` 測試：假 backend 回傳不同的建立時間（門檻前後各一、查詢失敗），在 compaction 時點前後各跑一次，斷言 `session_id`／`rotated_from`、是否呼叫 compaction、未到時點時沒有查年齡；
      - `turn.rs` 測試：輪替回合最後一棒的 prompt 含上一回合，未輪替時不含；取得新 session 後舊的被刪除；
      - 真實 opencode 的端到端：拋棄式容器中，`WUKONG_SESSION_COMPACT_EVERY_TURNS=1`、同一個 scope 連跑兩回合。session 的建立時間無法透過 API 改寫，所以用 debug 建置的測試鉤子縮短門檻，或直接改複本 `opencode.db` 的 `time_created`，方法在實作時決定並記錄。觀察 `session_rotated` 日誌、scope 指向的變化，以及舊 session 從清單消失。
    - 相依：步驟 1。
    - 完成判準：紅綠重構證據齊全，斷言用字面值的時間與 session id。變異：門檻比較方向顛倒、單位錯一千倍、輪替時沒有注入上一回合、查詢失敗時當成過期、每回合都查年齡，都要紅燈。
+   - 結果（2026-11-03）：
+     - 影響分析（GitNexus）：`prepare_final_session_with_policy` 判為 CRITICAL（每個回合都經過，四個入口都用到）；`AiBackend` 判為 CRITICAL（30 個實作）。已先告知使用者並取得同意。新方法有預設實作，只有 server 與本機 backend 覆寫。
+     - 實作：
+       - gateway：`AiBackend::session_created_ms`（預設回不支援）；server 打 `GET /session/{id}` 讀 `time.created`，缺少或不是整數就回錯誤；本機 backend 新增 `Operation::CreatedAt`；`AgentBackend` 分派。
+       - runtime：`prepare_final_session_with_policy` 在 compaction 之前，以 `hold_session_lease` 包住年齡查詢。超過 `ROTATE_AFTER_MS`（7 天）就回 `rotated_from` 並記 `session_rotation_due`；查不到就記 `warning: session_age_unknown`，照原本 compaction。`run_turn` 在 `rotated_from` 有值時，最後一棒改用 `helper_hits`（帶上一回合）。
+     - 紅燈：
+       - gateway `cargo test -p wukong-gateway --lib session_created`：兩支都拿到 `stderr: "目前只有 opencode server API 支援查詢 session 建立時間。"`；
+       - runtime `session::tests`：`an_old_session_rotates_instead_of_compacting`、`an_unknown_age_falls_back_to_compaction`、`deciding_to_rotate_leaves_the_pointer_for_the_next_turn` 失敗；`a_young_session_is_compacted_as_before`、`the_age_is_not_queried_before_the_compaction_point` 本來就綠（既有行為，作為回歸網）；
+       - runtime `turn::tests`：第一次執行三支都紅，但 SCN-005、SCN-007 是紅在「完全沒有刪除任何 session」——planner 的 helper session 本來就會被刪，是測試假設錯誤。改成只檢查 `ses_old`（與既有的 `unsupported_compaction_rotates_after_new_session_succeeds` 相同）之後，只剩 SCN-004 紅在 `turn.rs:1334`（最後一棒沒有 `User: 晚餐吃什麼`），是目標行為。
+     - 綠燈：gateway lib 143、runtime lib 94 全過。
+     - 變異（`mut.py` 逐一套用、跑整個 runtime lib、還原）：
+       - M1 門檻比較顛倒、M2 單位錯一千倍、M3 輪替時不帶上一回合、M4 查詢失敗當成過期、M5 每回合都查年齡，全部轉紅，而且紅的是對應的測試（例如 M3 只紅 `an_old_session_rotates_and_the_final_step_sees_the_previous_turn`，M5 紅 `the_age_is_not_queried_before_the_compaction_point`）。
+       - 第一次跑時把兩個過濾字串傳給 `cargo test`，cargo 以參數錯誤結束，看起來像 5 個都紅，其實沒有跑任何測試。發現後改成解析真正失敗的測試名稱再跑一次，上面是第二次的結果。
+     - 真實 opencode 端到端（SCN-004）：
+       - 環境：opencode 1.19.4，`HOME`／`XDG_*` 指到 scratchpad 的沙盒，debug `wukong` CLI 加 `--scope project:e2e`，`WUKONG_SESSION_COMPACT_EVERY_TURNS=1`，模型是 opencode 預設的 `big-pickle`。
+       - 第一回合「記住：我的代號是藍鯨。只要回覆「好」。」→ 回「好」，scope 指向 `ses_e5fe8af8…`，`turn_count=1`。
+       - 用 sqlite3 把該 session 的 `time_created` 改成 8 天前（opencode 沒有 API 能改）。
+       - 第二回合「我剛剛說我的代號是什麼？只回答代號。」→ 日誌依序出現 `session_rotation_due … created_ms=1792996059259`、`session_rotated old_session_id=ses_e5fe8af8… new_session_id=ses_e5fe860f…`、`session_deleted session_id=ses_e5fe8af8…`；回答「藍鯨」。opencode.db 只剩新 session，scope 指向它；沒有殘留的 opencode 行程。
+     - 觀察：輪替後 `turn_count` 是 2，沒有歸零。原因是 `finish_agent_session_turn` 換 session 時只做 `turn_count + 1`（`crates/wukong-memory/src/store/mod.rs:632-650`，既有行為），所以下一回合仍在 compaction 時點，會對新 session 多查一次年齡、多做一次 compaction（TBD-5）。
 
-5. 📝 **文件與全套驗證**
+
+5. ✅ **文件與全套驗證**
    - 產出：
      - `docs/docker.md`：保留期清理段落改寫本機模式條件，補上 B 的輪替與 C 的 live event 清理；
      - `AGENTS.md`「關鍵設計細節」：opencode session 保留期清理改寫本機模式條件，新增輪替；
      - `CHANGELOG.md` `[Unreleased]`。
    - 相依：步驟 2～4。
    - 完成判準：`cargo fmt --all -- --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --workspace --locked` 全綠；沒有改 compose 與 `.env.example`，所以不需要 `scripts/test-docker-runtime.sh`（實作中若改到就要跑）。文件提到的每個行為都對應到步驟 2～4 的測試或探測（W-1）。
+   - 結果（2026-11-03）：
+     - 文件：`docs/docker.md`（本機模式條件、`WUKONG_SESSION_COMPACT_EVERY_TURNS` 說明、保留期清理依 backend 分列、新增「長期 session 的輪替」、本機模式不做 vacuum 的理由）、`docs/entrypoints.md`（自動輪替）、`AGENTS.md`「關鍵設計細節」（保留期清理的啟用條件、長期 session 的輪替、live event 清理）、`CHANGELOG.md` `[Unreleased]`。
+     - 另改 `.env.example` 的保留天數說明（原本只寫「這個 opencode server」），所以加跑 `bash scripts/test-docker-runtime.sh`：`ok: all 37 WUKONG_* variables offered in .env.example reach a container`、`docker runtime persistence checks passed`。
+     - 全套：
+       - `cargo fmt --all -- --check` 通過；
+       - `cargo clippy --all-targets --locked -- -D warnings`：第一次在新測試報 `MutexGuard` 跨 await（`turn.rs:1343`），調整斷言順序後乾淨；
+       - `cargo test --workspace --locked` 全過，沒有任何 FAILED（gateway lib 143、runtime lib 94、schedulerd bin 25 等）。
+     - W-1 對照：文件裡的每個行為都對應到測試或實測——
+       - 本機模式的啟用條件：步驟 2 的單元測試與沙盒 daemon；
+       - 約 0.7 秒：步驟 1 的量測；
+       - 輪替、帶上一回合、查不到時照原本 compaction：步驟 4 的單元測試與端到端；
+       - 24 小時：步驟 3；
+       - `turn_count` 不歸零：步驟 4 的觀察。
 
 ### 步驟 1 附錄：正式主機的唯讀量測（TBD-1）
 在正式主機上，對 `opencode.db` 的**複本**執行（不要對運行中的檔案寫入）：
@@ -141,7 +174,7 @@ opencode 的實際欄位名稱以複本的 `.schema` 為準，上面的欄位名
 | SCN-008、009 | schedulerd 單元（真 SQLite） | 同層，可合併單迴圈，理由記在步驟 3 |
 
 ## 檢查清單
-- [ ] 步驟 1 三項探測都有結論
+- [x] 步驟 1 三項探測都有結論
 - [ ] TBD-1 已有量測，或在 PR 揭露以 7 天交付
-- [ ] 每個 Scenario 都有紅綠重構證據
-- [ ] 常青文件已更新
+- [x] 每個 Scenario 都有紅綠重構證據
+- [x] 常青文件已更新
