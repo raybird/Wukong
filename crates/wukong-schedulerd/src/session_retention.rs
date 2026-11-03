@@ -44,11 +44,33 @@ pub fn ticker(every: Duration) -> tokio::time::Interval {
     tokio::time::interval_at(tokio::time::Instant::now() + every, every)
 }
 
-/// 這個 schedulerd 該不該跑清理；不該跑時回傳 `None`。
-pub fn active_policy(backend: &AgentBackend, policy: RetentionPolicy) -> Option<RetentionPolicy> {
-    // CLI 模式的 opencode.db 與使用者自己的 opencode 使用共用，Wukong 分不出哪些
-    // session 是自己建的，所以只有 server backend 才自動清掃。
-    (matches!(backend, AgentBackend::Server(_)) && policy.enabled()).then_some(policy)
+/// 這個 schedulerd 該不該跑清理；不該跑時回傳寫進啟動日誌的原因。
+/// `configured` 是保留天數的環境變數有沒有明確設定。
+pub fn active_policy(
+    backend: &AgentBackend,
+    policy: RetentionPolicy,
+    configured: bool,
+) -> Result<RetentionPolicy, &'static str> {
+    match backend {
+        // 純 CLI 模式的 opencode.db 與使用者自己的 opencode 使用共用，Wukong 分不出
+        // 哪些 session 是自己建的。
+        AgentBackend::Cli(_) => {
+            return Err("the CLI backend shares opencode.db with your own opencode use")
+        }
+        // 2026-11-03（issue-0028）：按需本機模式也一樣可能共用，但容器的 opencode-state
+        // 是專屬 volume，compose 會明確設定天數；主機上沒設定就視為共用、不清。
+        AgentBackend::Local(_) if !configured => {
+            return Err(
+                "the on-demand local backend only cleans up when WUKONG_OPENCODE_SESSION_RETENTION_DAYS is explicitly set",
+            )
+        }
+        AgentBackend::Local(_) | AgentBackend::Server(_) => {}
+    }
+    if policy.enabled() {
+        Ok(policy)
+    } else {
+        Err("WUKONG_OPENCODE_SESSION_RETENTION_DAYS is 0 or not a non-negative integer")
+    }
 }
 
 /// 跑一輪清理並記錄結果。錯誤交給呼叫端記錄——清理是背景維護，不能讓排程迴圈停下來。
@@ -107,6 +129,7 @@ async fn run_within(
 mod tests {
     use super::*;
     use wukong_gateway::backend::AgentCliBackend;
+    use wukong_gateway::local_process::LocalProcessBackend;
     use wukong_gateway::opencode_server::OpencodeServerBackend;
 
     const THIRTY_DAYS: RetentionPolicy = RetentionPolicy { retention_days: 30 };
@@ -127,15 +150,45 @@ mod tests {
         ))
     }
 
+    fn local_backend() -> AgentBackend {
+        AgentBackend::Local(LocalProcessBackend::new(
+            "command-that-must-not-run".to_string(),
+            None,
+        ))
+    }
+
+    // issue-0028 SCN-001～003：server 模式不論有沒有明確設定都照天數清；本機模式只在
+    // 明確設定時清；純 CLI 模式一律不清。`THIRTY_DAYS` 在未設定時就是預設值。
     #[test]
-    fn only_a_server_backend_with_retention_enabled_is_active() {
+    fn which_backends_and_settings_turn_retention_on() {
         assert_eq!(
-            active_policy(&server_backend(), THIRTY_DAYS),
-            Some(THIRTY_DAYS)
+            active_policy(&server_backend(), THIRTY_DAYS, false),
+            Ok(THIRTY_DAYS)
         );
-        assert_eq!(active_policy(&server_backend(), DISABLED), None);
+        assert_eq!(
+            active_policy(&server_backend(), THIRTY_DAYS, true),
+            Ok(THIRTY_DAYS)
+        );
+        assert_eq!(
+            active_policy(&local_backend(), THIRTY_DAYS, true),
+            Ok(THIRTY_DAYS)
+        );
+
+        let local_unset = active_policy(&local_backend(), THIRTY_DAYS, false).unwrap_err();
+        assert!(
+            local_unset.contains("WUKONG_OPENCODE_SESSION_RETENTION_DAYS"),
+            "{local_unset}"
+        );
+        assert!(local_unset.contains("explicitly"), "{local_unset}");
+
+        for backend in [server_backend(), local_backend()] {
+            let zero = active_policy(&backend, DISABLED, true).unwrap_err();
+            assert!(zero.contains("is 0"), "{zero}");
+        }
+
         // CLI 模式的 opencode.db 與使用者自己的 opencode 使用共用，不自動清掃。
-        assert_eq!(active_policy(&cli_backend(), THIRTY_DAYS), None);
+        let cli = active_policy(&cli_backend(), THIRTY_DAYS, true).unwrap_err();
+        assert!(cli.contains("CLI backend"), "{cli}");
     }
 
     #[test]

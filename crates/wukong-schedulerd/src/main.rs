@@ -94,7 +94,14 @@ async fn run(cli: Cli) -> Result<(), String> {
             history.as_ref(),
         )
         .await?;
-        run_memory_maintenance(&memory, &backend).await?;
+        run_memory_maintenance(
+            &memory,
+            &backend,
+            history.as_ref(),
+            auto_maintenance::AutoMaintenanceConfig::from_env(),
+            wukong_runtime::util::now_unix(),
+        )
+        .await?;
         return Ok(());
     }
 
@@ -108,19 +115,19 @@ async fn run(cli: Cli) -> Result<(), String> {
     let retention_policy = session_retention::active_policy(
         &backend,
         wukong_runtime::session_retention::RetentionPolicy::from_env(),
+        wukong_runtime::session_retention::retention_days_configured(),
     );
     let retention_interval = session_retention::interval();
     match retention_policy {
-        Some(policy) => eprintln!(
+        Ok(policy) => eprintln!(
             "opencode session retention enabled retention_days={} first_run_in_secs={} interval_secs={}",
             policy.retention_days,
             retention_interval.as_secs(),
             retention_interval.as_secs()
         ),
-        None => eprintln!(
-            "opencode session retention disabled (needs the opencode server backend and WUKONG_OPENCODE_SESSION_RETENTION_DAYS > 0)"
-        ),
+        Err(reason) => eprintln!("opencode session retention disabled ({reason})"),
     }
+    let retention_policy = retention_policy.ok();
     let mut retention_ticks = session_retention::ticker(retention_interval);
     loop {
         tokio::select! {
@@ -134,7 +141,15 @@ async fn run(cli: Cli) -> Result<(), String> {
                 }
             }
             _ = maintenance_ticks.tick() => {
-                if let Err(e) = run_memory_maintenance(&memory, &backend).await {
+                if let Err(e) = run_memory_maintenance(
+                    &memory,
+                    &backend,
+                    history.as_ref(),
+                    auto_maintenance::AutoMaintenanceConfig::from_env(),
+                    wukong_runtime::util::now_unix(),
+                )
+                .await
+                {
                     eprintln!("warning: memory maintenance failed: {e}");
                 }
             }
@@ -154,8 +169,28 @@ async fn run(cli: Cli) -> Result<(), String> {
     Ok(())
 }
 
-async fn run_memory_maintenance(memory: &Memory, backend: &AgentBackend) -> Result<(), String> {
-    let policy = auto_maintenance::AutoMaintenanceConfig::from_env();
+/// issue-0028：live event 只給 Web 即時觀看，Web 從最新的 id 開始讀，超過一天的不會
+/// 再有人讀。
+const LIVE_EVENT_RETENTION_SECS: i64 = 24 * 60 * 60;
+
+async fn run_memory_maintenance(
+    memory: &Memory,
+    backend: &AgentBackend,
+    history: Option<&ChatHistoryStore>,
+    policy: auto_maintenance::AutoMaintenanceConfig,
+    now: i64,
+) -> Result<(), String> {
+    // live event 不屬於記憶，`WUKONG_MEMORY_AUTO_MAINTENANCE` 關不掉它；失敗也不擋記憶維護。
+    if let Some(history) = history {
+        match history
+            .prune_live_events_before(now - LIVE_EVENT_RETENTION_SECS)
+            .await
+        {
+            Ok(0) => {}
+            Ok(deleted) => eprintln!("chat live events pruned deleted={deleted}"),
+            Err(e) => eprintln!("warning: chat live event prune failed: {e}"),
+        }
+    }
     let report = auto_maintenance::run_once(memory, backend, policy).await?;
     if report.summaries_created > 0 || report.memories_pruned > 0 {
         eprintln!(
@@ -355,6 +390,53 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use wukong_scheduler::{Job, JobKind, NewJob, RunStatus};
+
+    /// issue-0028 SCN-008、SCN-009：維護迴圈刪掉建立超過 24 小時的 live event，而且
+    /// 關閉記憶自動維護也照樣刪。backend 是不能執行的命令：記憶維護若沒有被關掉、真的
+    /// 去跑摘要，就會失敗。
+    #[tokio::test]
+    async fn maintenance_prunes_day_old_live_events_even_with_memory_maintenance_off() {
+        let file = NamedTempFile::new().unwrap();
+        let db_url = format!("sqlite://{}", file.path().display());
+        let memory = Memory::open(&db_url).await.unwrap();
+        let history = ChatHistoryStore::open(&db_url).await.unwrap();
+        let now = 1_800_000_000;
+        for (content, created_at) in [
+            ("older than a day", now - 86_401),
+            ("exactly a day", now - 86_400),
+            ("recent", now - 10),
+        ] {
+            history
+                .insert_live_event("user:tg-1", "answer", None, content, None, created_at)
+                .await
+                .unwrap();
+        }
+        let backend = AgentBackend::Cli(wukong_gateway::backend::AgentCliBackend {
+            command: vec!["command-that-must-not-run".to_string()],
+            workspace: None,
+        });
+        let memory_maintenance_off =
+            auto_maintenance::AutoMaintenanceConfig::from_values(Some("0"), None, None);
+
+        run_memory_maintenance(
+            &memory,
+            &backend,
+            Some(&history),
+            memory_maintenance_off,
+            now,
+        )
+        .await
+        .unwrap();
+
+        let left: Vec<String> = history
+            .live_events_after("user:tg-1", 0, 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|event| event.content)
+            .collect();
+        assert_eq!(left, vec!["exactly a day", "recent"]);
+    }
 
     #[test]
     fn model_settings_follow_changes_and_removal_without_restart() {

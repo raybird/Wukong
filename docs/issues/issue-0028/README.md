@@ -170,8 +170,8 @@ SCN-003 是「server 模式不變」，由 A 的答案直接涵蓋。SCN-006、S
 ## 實作步驟概要
 權威清單見 [implementation-plan.md](./implementation-plan.md#實作步驟)。
 1. ✅ **首要驗證：opencode session 建立時間的契約探測**
-2. 📝 **A：本機模式保留期清理**
-3. 📝 **C：live event 清理**
+2. ✅ **A：本機模式保留期清理**
+3. ✅ **C：live event 清理**
 4. 📝 **B：依年齡輪替與上一回合注入**
 5. 📝 **文件與全套驗證**
 
@@ -189,6 +189,7 @@ SCN-003 是「server 模式不變」，由 A 的答案直接涵蓋。SCN-006、S
 | TBD-1 | 輪替門檻的最終天數。需要正式主機的唯讀量測：各 session 的 part/event 筆數與建立時間、`opencode.db` 大小。正式主機不是 RunWuKong（使用者 2026-10-21 說明），我無法存取；量測查詢見 implementation-plan 步驟 1 附錄 | 待確認 | SCN-004 的門檻值；沒有量測時用 7 天交付，並在 PR 揭露 |
 | TBD-2 | SCN-006（查不到建立時間時不輪替、回合照常）、SCN-007（輪替回合失敗時保留舊 session）、SCN-009（live event 清理不受 `WUKONG_MEMORY_AUTO_MAINTENANCE` 開關影響）是否照寫 | 已解決 | 2026-11-03 使用者回覆「都核准」，三條照原文核准 |
 | TBD-3 | 本機模式查 session 年齡要多啟動一次 opencode serve（約 0.7 秒），要多久查一次 | 已解決 | 2026-11-03 使用者選「只在 compaction 時查」；SCN-004～007、SCN-010 |
+| TBD-4 | 本機模式每刪一個 session 都要啟動一次 opencode serve（約 0.7 秒），一輪 5 分鐘預算大約只刪得完 400 個 | 不影響本次交付 | 2026-11-03 結論：預算用完時這一輪停止，沒刪的留到 6 小時後的下一輪；只有舊部署第一次清理時量大，之後每輪只會有少量新過期的 session。追蹤：無，PR 揭露即可。改成一次啟動、批次刪除，要讓 runtime 的清理知道 gateway 的程序生命週期，跨層改動不值得 |
 
 ## Timeline
 
