@@ -1419,6 +1419,12 @@ mod tests {
         .await;
 
         assert!(result.is_err());
+        // 走的是輪替：最後一棒沒有帶舊 session，前面也沒有做 compaction。
+        {
+            let prompts = backend.prompts.lock().unwrap();
+            assert!(!prompts.iter().any(|p| p == "/compact"));
+            assert_eq!(backend.session_ids.lock().unwrap()[1], None);
+        }
         assert!(!backend
             .deleted_sessions
             .lock()

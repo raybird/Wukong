@@ -144,6 +144,24 @@
        - 24 小時：步驟 3；
        - `turn_count` 不歸零：步驟 4 的觀察。
 
+6. ✅ **審查修正：CLI prune 比照 schedulerd 擋本機模式**（SCN-011；來源 `review-e63beeb.md`）
+   - 產出：`crates/wukong-cli/src/main.rs` 的 `local_prune_refusal`，在 `opencode prune` 開始前呼叫；SCN-007 的 turn 測試補上「走的是輪替」的斷言（審查 NICE TO HAVE 3）；`docs/cli-reference.md`、`docs/docker.md` 對應文字。
+   - 依賴：步驟 2。
+   - 完成判準：本機 backend、沒有明確設定、非 dry-run 時拒絕且不刪除；dry-run 照常列出；有設定或非本機 backend 不受影響。
+   - 結果（2026-11-03）：
+     - 影響分析：`main`（wukong-cli）為 LOW，入口點、沒有上游。
+     - 紅燈：先以回傳 `None` 的空實作跑 `cargo test -p wukong-cli --bin wukong local_prune`，`local_prune_without_configured_days_only_previews` 紅在 `main.rs:659`（`assert!(local_prune_refusal(&local, false, false).is_some())`）。
+     - 綠燈：wukong-cli bin 4 支全過。
+     - 變異：拿掉 `!dry_run` 紅在 `main.rs:665`（dry-run 也被拒）；拿掉 `!configured` 紅在 `main.rs:666`（有設定也被拒），都已還原。
+     - SCN-007 補強：新增「沒有 `/compact`」與「最後一棒 `session_id` 為 `None`」兩個斷言。把 `ROTATE_AFTER_MS` 改成 `i64::MAX`（不輪替、改做 compaction）後，紅在 `turn.rs:1421`，已還原。
+     - 真實 binary（debug `wukong`、opencode 1.19.4、步驟 4 的 e2e 沙盒）：用 `opencode run` 建一個無主 session，再把它的 `time_created`／`time_updated` 改成 40 天前。
+       1. 沒有設定、實際刪除：`error: 按需本機 backend 的 opencode.db 可能與你自己的 opencode 共用；…`，rc=1，session 數仍是 2；
+       2. 沒有設定、`--dry-run`：`[dry-run] 將刪除 1 個 opencode session（保留期 30 天）`，rc=0，session 數仍是 2；
+       3. `WUKONG_OPENCODE_SESSION_RETENTION_DAYS=30`：`session_deleted session_id=ses_e5fcb0a2…`、`已刪除 1 個`，rc=0；只剩 scope 指向的 session。
+       三次都沒有殘留的 opencode 行程。
+     - 全套：`cargo fmt --all -- --check` 通過；clippy `-D warnings` 乾淨；`cargo test --workspace --locked` 沒有任何失敗（共 718 支通過）。
+     - 沒有處理的審查建議（NICE TO HAVE 1、2、4），理由記在 README 待確認事項 TBD-6。
+
 ### 步驟 1 附錄：正式主機的唯讀量測（TBD-1）
 在正式主機上，對 `opencode.db` 的**複本**執行（不要對運行中的檔案寫入）：
 
@@ -172,6 +190,7 @@ opencode 的實際欄位名稱以複本的 `.schema` 為準，上面的欄位名
 | SCN-004、005、010 | 單元（session.rs、turn.rs）加真實 opencode 端到端 | 外部契約由步驟 1 處理，單元測試只驗決策與注入 |
 | SCN-006、007 | 單元 | 假 backend 模擬查詢失敗與回合失敗 |
 | SCN-008、009 | schedulerd 單元（真 SQLite） | 同層，可合併單迴圈，理由記在步驟 3 |
+| SCN-011 | CLI 單元加真實 binary | 決策是純函式；拒絕時有沒有真的不碰 opencode.db，要用真實 binary 確認 |
 
 ## 檢查清單
 - [x] 步驟 1 三項探測都有結論

@@ -227,7 +227,7 @@ services:
 - **按需本機模式**：只有明確設定 `WUKONG_OPENCODE_SESSION_RETENTION_DAYS` 時才清（2026-11-03 起）。compose 會替每個服務設定這個變數，容器專屬的 `opencode-state` 因此會被清；在主機上直接執行、沒有設定這個變數時，`opencode.db` 視為與你自己的 opencode 共用，不清。本機模式每刪一個 session 都要啟動一次 opencode（實測約 0.7 秒），一輪 5 分鐘大約只刪得完 400 個；舊部署第一次清理時，剩下的會留到 6 小時後的下一輪。
 - **純 CLI 模式**：一律不清。
 
-schedulerd 啟動時的 `opencode session retention disabled (...)` 那一行會寫出停用的原因。
+schedulerd 啟動時的 `opencode session retention disabled (...)` 那一行會寫出停用的原因。手動的 `wukong opencode prune` 用同一個條件：本機模式沒有設定這個變數時只允許 `--dry-run`，實際刪除會被拒絕。
 
 **這項清理假設 server 上的 session 都屬於這一套 Wukong、而且只有一份記憶庫在用它。** compose 部署成立，因為 `opencode-state` 與 `wukong-data` 兩個 volume 都是專屬的。三種情況不成立：
 

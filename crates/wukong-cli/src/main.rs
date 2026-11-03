@@ -11,7 +11,9 @@ use wukong_gateway::workspace_dir;
 use wukong_gateway::StreamEvent;
 use wukong_memory::Memory;
 use wukong_runtime::maintenance::{memory_consolidate, memory_prune, memory_snapshot};
-use wukong_runtime::session_retention::{prune_opencode_sessions, render_report, RetentionPolicy};
+use wukong_runtime::session_retention::{
+    prune_opencode_sessions, render_report, retention_days_configured, RetentionPolicy,
+};
 use wukong_runtime::util::now_unix;
 use wukong_scheduler::{
     normalize_model, DeleteJobOutcome, ExecutionContext, Job, JobKind, MaintenanceTask, NewJob,
@@ -90,6 +92,10 @@ async fn main() {
         op: OpencodeOp::Prune { dry_run },
     }) = &cli.command
     {
+        if let Some(reason) = local_prune_refusal(&backend, retention_days_configured(), *dry_run) {
+            eprintln!("error: {reason}");
+            std::process::exit(1);
+        }
         let policy = RetentionPolicy::from_env();
         // 清理的對錯取決於這份記憶庫是不是 server 實際在用的那一份，所以把它印出來。
         println!("記憶庫：{}", cfg.db_url);
@@ -622,9 +628,50 @@ async fn run_memory_op(
     Ok(())
 }
 
+/// 按需本機 backend 在主機上與使用者自己的 opencode 共用 `opencode.db`，所以沒有明確設定
+/// 保留天數時不真的刪除（issue-0028 SCN-011，與 schedulerd 的 `active_policy` 一致）；
+/// `--dry-run` 只讀，照常列出。
+fn local_prune_refusal(
+    backend: &AgentBackend,
+    configured: bool,
+    dry_run: bool,
+) -> Option<&'static str> {
+    match backend {
+        AgentBackend::Local(_) if !configured && !dry_run => Some(
+            "按需本機 backend 的 opencode.db 可能與你自己的 opencode 共用；\
+             要清理請明確設定 WUKONG_OPENCODE_SESSION_RETENTION_DAYS，或先用 --dry-run 預覽",
+        ),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn local_backend() -> AgentBackend {
+        AgentBackend::Local(wukong_gateway::local_process::LocalProcessBackend::new(
+            "command-that-must-not-run".to_string(),
+            None,
+        ))
+    }
+
+    // issue-0028 SCN-011：本機 backend 沒有明確設定保留天數時拒絕刪除，只允許預覽；
+    // 有設定時照常；其他 backend 不受影響。
+    #[test]
+    fn local_prune_without_configured_days_only_previews() {
+        let local = local_backend();
+        assert!(local_prune_refusal(&local, false, false).is_some());
+        assert_eq!(local_prune_refusal(&local, false, true), None);
+        assert_eq!(local_prune_refusal(&local, true, false), None);
+        let server = AgentBackend::Server(
+            wukong_gateway::opencode_server::OpencodeServerBackend::from_env(
+                "http://127.0.0.1:9".to_string(),
+                None,
+            ),
+        );
+        assert_eq!(local_prune_refusal(&server, false, false), None);
+    }
 
     fn job(enabled: bool) -> Job {
         Job {
