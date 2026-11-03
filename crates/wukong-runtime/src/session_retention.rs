@@ -95,6 +95,13 @@ pub fn select_expired(
     selection
 }
 
+/// 保留天數的環境變數有沒有明確設定（不論值是否合法）。本機模式只在明確設定時清理：
+/// 主機上直接執行時，opencode.db 與使用者自己的 opencode 共用；compose 則會替每個
+/// 服務設定這個變數。
+pub fn retention_days_configured() -> bool {
+    std::env::var_os(RETENTION_DAYS_ENV).is_some()
+}
+
 /// 保留期設定。天數為 0 表示停用清理。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetentionPolicy {

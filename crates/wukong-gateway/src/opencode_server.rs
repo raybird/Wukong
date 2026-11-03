@@ -742,6 +742,23 @@ impl AiBackend for OpencodeServerBackend {
         Ok(())
     }
 
+    async fn session_created_ms(&self, session_id: &str) -> Result<i64, GatewayError> {
+        let url = format!("{}/session/{session_id}", self.base_url);
+        let value = self
+            .send_json("session_created_ms", self.client.get(url))
+            .await?;
+        value
+            .get("time")
+            .and_then(|time| time.get("created"))
+            .and_then(Value::as_i64)
+            .ok_or_else(|| GatewayError::AgentFailed {
+                code: None,
+                stderr: format!(
+                    "opencode server session_created_ms: session {session_id} has no integer time.created"
+                ),
+            })
+    }
+
     async fn list_sessions(&self) -> Result<SessionListing, GatewayError> {
         // opencode 沒有「早於某時間」的過濾（`start` 是下界），所以整批取回再由
         // 呼叫端挑。不帶 limit 時它只回最新的 100 筆。子 session 也要：呼叫端靠它們
@@ -1660,6 +1677,40 @@ mod tests {
                 truncated: false,
             }
         );
+    }
+
+    // issue-0028 SCN-004～006：session 年齡取自 `GET /session/{id}` 的 `time.created`
+    // （毫秒，步驟 1 對 opencode 1.19.4 實測）；看不懂的回應是錯誤，不是 0。
+    #[tokio::test]
+    async fn session_created_ms_reads_time_created_from_the_session() {
+        let hits = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let backend = OpencodeServerBackend::from_env(
+            canned_server(
+                hits.clone(),
+                "200 OK",
+                r#"{"id":"ses_1","time":{"created":1793677006691,"updated":1793677027641}}"#,
+            )
+            .await,
+            None,
+        );
+        assert_eq!(
+            backend.session_created_ms("ses_1").await.unwrap(),
+            1793677006691
+        );
+        assert_eq!(hits.lock().unwrap().clone(), ["GET /session/ses_1"]);
+
+        for body in [
+            r#"{"id":"ses_1","time":{"updated":1}}"#,
+            r#"{"id":"ses_1"}"#,
+        ] {
+            let backend = OpencodeServerBackend::from_env(
+                canned_server(std::sync::Arc::new(Mutex::new(Vec::new())), "200 OK", body).await,
+                None,
+            );
+            let stderr =
+                agent_failed_stderr(backend.session_created_ms("ses_1").await.unwrap_err());
+            assert!(stderr.contains("time.created"), "{body}: {stderr}");
+        }
     }
 
     #[tokio::test]

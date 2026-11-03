@@ -1,6 +1,6 @@
 use crate::backend::{
     agent_timeout, question_reject_route, question_reply_route, AgentRequest, AgentResponse,
-    AiBackend, QuestionReplyRoute,
+    AiBackend, QuestionReplyRoute, SessionListing,
 };
 use crate::opencode_server::OpencodeServerBackend;
 use crate::{GatewayError, StreamEvent};
@@ -25,6 +25,26 @@ enum Operation {
     Run(AgentRequest, bool, bool),
     Compact(String, Option<String>),
     Delete(String),
+    List,
+    CreatedAt(String),
+}
+
+/// `execute` 的結果：列出 session 回清單，其餘操作回一般回應。
+enum Outcome {
+    Response(AgentResponse),
+    Listing(SessionListing),
+    CreatedAt(i64),
+}
+
+impl Outcome {
+    fn response(self) -> AgentResponse {
+        match self {
+            Outcome::Response(response) => response,
+            Outcome::Listing(_) | Outcome::CreatedAt(_) => {
+                unreachable!("only List and CreatedAt return something other than a response")
+            }
+        }
+    }
 }
 
 impl LocalProcessBackend {
@@ -65,7 +85,7 @@ impl LocalProcessBackend {
         &self,
         operation: Operation,
         on_event: &mut dyn FnMut(StreamEvent),
-    ) -> Result<AgentResponse, GatewayError> {
+    ) -> Result<Outcome, GatewayError> {
         let deadline = tokio::time::Instant::now() + agent_timeout();
         let mut command = Command::new(&self.binary);
         command
@@ -144,14 +164,24 @@ impl LocalProcessBackend {
             let (req, ephemeral, interactive) = match operation {
                 Operation::Run(req, ephemeral, interactive) => (req, ephemeral, interactive),
                 Operation::Compact(id, model) => {
-                    return backend.compact_session(&id, model.as_deref()).await
+                    return backend
+                        .compact_session(&id, model.as_deref())
+                        .await
+                        .map(Outcome::Response)
                 }
                 Operation::Delete(id) => {
                     backend.delete_session(&id).await?;
-                    return Ok(AgentResponse {
+                    return Ok(Outcome::Response(AgentResponse {
                         text: String::new(),
                         session_id: None,
-                    });
+                    }));
+                }
+                Operation::List => return backend.list_sessions().await.map(Outcome::Listing),
+                Operation::CreatedAt(id) => {
+                    return backend
+                        .session_created_ms(&id)
+                        .await
+                        .map(Outcome::CreatedAt)
                 }
             };
             let _pending = PendingTurn {
@@ -193,7 +223,7 @@ impl LocalProcessBackend {
                 }
                 response.session_id = None;
             }
-            Ok(response)
+            Ok(Outcome::Response(response))
         };
         let result = match tokio::time::timeout_at(deadline, operation).await {
             Ok(result) => result,
@@ -209,6 +239,7 @@ impl AiBackend for LocalProcessBackend {
         req.tool_overrides.insert("question".into(), false);
         self.execute(Operation::Run(req, false, false), &mut |_| {})
             .await
+            .map(Outcome::response)
     }
 
     async fn run_streaming(
@@ -218,6 +249,7 @@ impl AiBackend for LocalProcessBackend {
     ) -> Result<AgentResponse, GatewayError> {
         self.execute(Operation::Run(req, false, true), on_event)
             .await
+            .map(Outcome::response)
     }
 
     async fn compact_session(
@@ -230,6 +262,7 @@ impl AiBackend for LocalProcessBackend {
             &mut |_| {},
         )
         .await
+        .map(Outcome::response)
     }
 
     async fn delete_session(&self, session_id: &str) -> Result<(), GatewayError> {
@@ -238,10 +271,28 @@ impl AiBackend for LocalProcessBackend {
             .map(|_| ())
     }
 
+    async fn list_sessions(&self) -> Result<SessionListing, GatewayError> {
+        match self.execute(Operation::List, &mut |_| {}).await? {
+            Outcome::Listing(listing) => Ok(listing),
+            _ => unreachable!("Operation::List always returns a listing"),
+        }
+    }
+
+    async fn session_created_ms(&self, session_id: &str) -> Result<i64, GatewayError> {
+        match self
+            .execute(Operation::CreatedAt(session_id.into()), &mut |_| {})
+            .await?
+        {
+            Outcome::CreatedAt(created_ms) => Ok(created_ms),
+            _ => unreachable!("Operation::CreatedAt always returns a time"),
+        }
+    }
+
     async fn run_ephemeral(&self, mut req: AgentRequest) -> Result<AgentResponse, GatewayError> {
         req.tool_overrides.insert("question".into(), false);
         self.execute(Operation::Run(req, true, false), &mut |_| {})
             .await
+            .map(Outcome::response)
     }
 
     async fn run_streaming_ephemeral(
@@ -251,6 +302,7 @@ impl AiBackend for LocalProcessBackend {
     ) -> Result<AgentResponse, GatewayError> {
         self.execute(Operation::Run(req, true, true), on_event)
             .await
+            .map(Outcome::response)
     }
 }
 
@@ -540,6 +592,108 @@ mod tests {
             }
             other => panic!("預期 UpstreamFailed，實際為: {other:?}"),
         }
+    }
+
+    /// issue-0028 SCN-001：本機模式的保留期清理要能列出 session。列表在按需啟動的
+    /// serve 上執行，帶上取回全部的 limit（W-6），列完就回收程序。
+    #[tokio::test]
+    async fn lists_sessions_through_an_on_demand_server() {
+        if !can_bind_loopback() {
+            eprintln!("skipping test: sandbox forbids binding socket");
+            return;
+        }
+        let script = r#"
+exec python3 -c '
+import http.server, socketserver, sys, signal
+signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+socketserver.ThreadingTCPServer.daemon_threads = True
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/global/health":
+            body = b"{}"
+        elif self.path == "/session?limit=10000":
+            body = b"[{\"id\":\"ses_new\",\"time\":{\"created\":1793677006691,\"updated\":1793677027641}},{\"id\":\"ses_child\",\"parentID\":\"ses_new\",\"time\":{\"created\":1793677006000,\"updated\":1793677006000}}]"
+        else:
+            self.send_response(404)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+print(f"opencode server listening on http://127.0.0.1:{server.server_address[1]}", flush=True)
+server.serve_forever()
+'
+"#;
+        let (dir, backend) = fixture(script);
+        let listing = backend.list_sessions().await.unwrap();
+        assert_eq!(
+            listing.sessions,
+            vec![
+                crate::backend::SessionSummary {
+                    id: "ses_new".into(),
+                    updated_ms: 1793677027641,
+                    parent_id: None,
+                },
+                crate::backend::SessionSummary {
+                    id: "ses_child".into(),
+                    updated_ms: 1793677006000,
+                    parent_id: Some("ses_new".into()),
+                },
+            ]
+        );
+        assert!(!listing.truncated);
+        assert_stopped(dir.path()).await;
+    }
+
+    /// issue-0028 SCN-004：本機模式也查得到 session 建立時間，查完就回收程序。
+    #[tokio::test]
+    async fn reads_session_created_time_through_an_on_demand_server() {
+        if !can_bind_loopback() {
+            eprintln!("skipping test: sandbox forbids binding socket");
+            return;
+        }
+        let script = r#"
+exec python3 -c '
+import http.server, socketserver, sys, signal
+signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+socketserver.ThreadingTCPServer.daemon_threads = True
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/global/health":
+            body = b"{}"
+        elif self.path == "/session/ses_1":
+            body = b"{\"id\":\"ses_1\",\"time\":{\"created\":1793677006691,\"updated\":1793677027641}}"
+        else:
+            self.send_response(404)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+print(f"opencode server listening on http://127.0.0.1:{server.server_address[1]}", flush=True)
+server.serve_forever()
+'
+"#;
+        let (dir, backend) = fixture(script);
+        assert_eq!(
+            backend.session_created_ms("ses_1").await.unwrap(),
+            1793677006691
+        );
+        assert_stopped(dir.path()).await;
     }
 
     /// SCN-001：上游免費額度耗盡時，OpenCode 1.19.3 的 SSE 串流保持掛起、無 error/idle 事件，

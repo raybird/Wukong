@@ -15,7 +15,8 @@
 
 ### 當前流程
 - v0.22 起預設是按需本機模式（`WUKONG_AGENT_SERVER_URL` 留空，`AgentBackend::Local`）。`wukong-schedulerd` 的保留期清理只對 `AgentBackend::Server` 啟用，所以預設部署的 `opencode.db` 完全不清。
-- 保留期清理不刪仍被 scope 指向的 session。Telegram chat 與每個排程（`agent:schedule-<id>`）都綁著一個一直續接的 session，每 20 回合做一次 compaction。compaction 只縮短送給模型的 context，資料庫裡的 event/part 不會減少。只有 compaction 不被支援時（純 CLI backend）才會輪替。
+- 保留期清理不刪仍被 scope 指向的 session。Telegram chat 與每個排程（`agent:schedule-<id>`）都綁著一個一直續接的 session，每 20 回合做一次 compaction。compaction 只縮短送給模型的 context，資料庫裡的 event/part 不會減少。只有 server／本機 backend 的 summarize 回 404／405（例如 session 已不存在）時才會輪替。
+  - NOTE（2026-11-03 更正）：原本寫成「只有 compaction 不被支援時（純 CLI backend）才會輪替」，那是只讀 runtime 的 `is_unsupported_compaction` 就下的推論。純 CLI backend 的錯誤碼是行程結束碼（`backend.rs:470`、`:518`），不會是 404／405；它的 compaction 失敗時走一般失敗路徑，會把回合計數歸零，不會輪替。
 - Telegram 回合把即時事件寫進 `chat_live_events`，Web 從最新的 id 開始讀。`prune_live_events_before` 已經實作，但沒有任何呼叫端。
 
 ### 變更後流程
@@ -32,7 +33,7 @@
 | 本機模式的 `opencode.db` vacuum | 不做 | 不變（刪除後空出的頁面會被新資料重複使用） |
 | scope 的 session 建立超過輪替門檻 | 一直續接 | 下一個 compaction 時點（預設每 20 回合）改為輪替，舊 session 刪除 |
 | 關閉 compaction（`WUKONG_SESSION_COMPACT_EVERY_TURNS=0`） | 一直續接 | 不變：沒有 compaction 時點，也就不輪替 |
-| 純 CLI backend（`opencode run` 帶額外旗標或其他命令） | 每 20 回合因無法 compaction 而輪替 | 不變 |
+| 純 CLI backend（`opencode run` 帶額外旗標或其他命令） | 每 20 回合 compaction，不輪替 | 不變：查不到 session 年齡，照原本 compaction |
 | `chat_live_events` | 只寫不刪 | 超過 1 天刪除 |
 
 ## 已確認證據（2026-11-03 讀碼，main `ad29d32`）
@@ -60,7 +61,10 @@
 - `crates/wukong-gateway/src/local_process.rs` - 本機 backend 補上列出 session（A）
 - `crates/wukong-gateway/src/backend.rs`、`opencode_server.rs`、`local_process.rs` - 取得單一 session 的建立時間（B）
 ### 文件
-- `docs/docker.md`、`AGENTS.md`「關鍵設計細節」、`CHANGELOG.md` `[Unreleased]`
+- `docs/docker.md`、`docs/entrypoints.md`、`AGENTS.md`「關鍵設計細節」、`CHANGELOG.md` `[Unreleased]`
+- `.env.example` - 保留天數的說明改為也適用本機模式
+- `crates/wukong-cli/src/main.rs` - `opencode prune` 在本機模式沒有明確設定時只允許 `--dry-run`（SCN-011）
+- `docs/cli-reference.md` - `opencode prune` 的支援範圍
 
 ## Gherkin 驗收劇本
 
@@ -146,11 +150,22 @@ Feature: 長期運行時 opencode 與聊天即時事件的資料有上限
     When schedulerd 的維護迴圈執行一次
     Then 超過 24 小時的事件被刪除
     And 不執行記憶摘要
+
+  @SCN-011
+  Scenario: 本機模式沒有設定保留天數時，手動 prune 只允許預覽
+    Given backend 是按需本機模式
+    And 沒有設定 WUKONG_OPENCODE_SESSION_RETENTION_DAYS
+    When 執行 wukong opencode prune
+    Then 拒絕清理、結束碼為 1，錯誤訊息說明要先明確設定或改用 --dry-run
+    And opencode.db 的 session 一個都沒有被刪除
+    When 改執行 wukong opencode prune --dry-run
+    Then 照常列出將刪除與受保護的 session，不刪除任何 session
 ```
 
 ## Gherkin 核准紀錄
 - **核准 commit**: d0d6f0a（前一版 `445b34c`）
 - **核准來源**: 2026-11-03 對話。使用者先接受分析建議「好開成 issue」，接著四題都選建議答案：A「明確設定才啟用」（不新增變數，本機模式不做 vacuum）、B 觸發「依 session 年齡」（暫定 7 天，量測後定案）、B 接續「帶上一回合」、C「1 天」（固定值、不開放設定）。同日使用者回覆「都核准」，核准 SCN-006、SCN-007、SCN-009。步驟 1 量到本機模式每次查年齡要多啟動一次 opencode serve（約 0.7 秒），使用者對「B 要多久查一次 session 年齡」選「只在 compaction 時查（建議）」。該選項的說明寫明「每 20 回合到 compaction 時才查年齡，超過 7 天就輪替、不做那次 compaction……超過 7 天之後最多還會續接 19 回合，SCN-004 的『下一回合輪替』要改寫」，因此改寫 SCN-004～007、新增 SCN-010，以這個答案為核准來源。
+- **SCN-011 核准來源**：2026-11-03 PR #29 獨立審查（`review-e63beeb.md`）發現，本機 backend 有了 `list_sessions` 之後，主機上手動 `wukong opencode prune` 在沒有設定保留天數時也會以預設 30 天刪除使用者自己的 opencode session（改版前在列表那一步就失敗）。使用者對「要不要仍允許 `--dry-run`」選「允許 dry-run（建議）」：沒有設定時 `--dry-run` 照常列出，實際刪除拒絕。
 
 | Scenario | 核准日期 | 狀態 |
 |----------|---------|------|
@@ -164,16 +179,18 @@ Feature: 長期運行時 opencode 與聊天即時事件的資料有上限
 | SCN-010 | 2026-11-03 | 已核准 |
 | SCN-008 | 2026-11-03 | 已核准 |
 | SCN-009 | 2026-11-03 | 已核准 |
+| SCN-011 | 2026-11-03 | 已核准 |
 
 SCN-003 是「server 模式不變」，由 A 的答案直接涵蓋。SCN-006、SCN-007、SCN-009 是規劃時推導出的失敗路徑與邊界，經使用者確認後核准（TBD-2）。
 
 ## 實作步驟概要
 權威清單見 [implementation-plan.md](./implementation-plan.md#實作步驟)。
 1. ✅ **首要驗證：opencode session 建立時間的契約探測**
-2. 📝 **A：本機模式保留期清理**
-3. 📝 **C：live event 清理**
-4. 📝 **B：依年齡輪替與上一回合注入**
-5. 📝 **文件與全套驗證**
+2. ✅ **A：本機模式保留期清理**
+3. ✅ **C：live event 清理**
+4. ✅ **B：依年齡輪替與上一回合注入**
+5. ✅ **文件與全套驗證**
+6. ✅ **審查修正：CLI prune 比照 schedulerd 擋本機模式**（SCN-011）
 
 ## 風險與首要驗證
 - **最大風險**：B 依賴 opencode 回報的 session 建立時間，這個契約還沒驗證過。若單位錯（秒與毫秒）、compaction 會重設它、或本機與 server backend 取得方式不同，輪替會變成每回合都發生（每回合失去 context，並刪掉剛建立的 session），或者永遠不發生。A 會在既有容器部署第一次開啟刪除，刪除不可逆。
@@ -189,6 +206,9 @@ SCN-003 是「server 模式不變」，由 A 的答案直接涵蓋。SCN-006、S
 | TBD-1 | 輪替門檻的最終天數。需要正式主機的唯讀量測：各 session 的 part/event 筆數與建立時間、`opencode.db` 大小。正式主機不是 RunWuKong（使用者 2026-10-21 說明），我無法存取；量測查詢見 implementation-plan 步驟 1 附錄 | 待確認 | SCN-004 的門檻值；沒有量測時用 7 天交付，並在 PR 揭露 |
 | TBD-2 | SCN-006（查不到建立時間時不輪替、回合照常）、SCN-007（輪替回合失敗時保留舊 session）、SCN-009（live event 清理不受 `WUKONG_MEMORY_AUTO_MAINTENANCE` 開關影響）是否照寫 | 已解決 | 2026-11-03 使用者回覆「都核准」，三條照原文核准 |
 | TBD-3 | 本機模式查 session 年齡要多啟動一次 opencode serve（約 0.7 秒），要多久查一次 | 已解決 | 2026-11-03 使用者選「只在 compaction 時查」；SCN-004～007、SCN-010 |
+| TBD-4 | 本機模式每刪一個 session 都要啟動一次 opencode serve（約 0.7 秒），一輪 5 分鐘預算大約只刪得完 400 個 | 不影響本次交付 | 2026-11-03 結論：預算用完時這一輪停止，沒刪的留到 6 小時後的下一輪；只有舊部署第一次清理時量大，之後每輪只會有少量新過期的 session。追蹤：無，PR 揭露即可。改成一次啟動、批次刪除，要讓 runtime 的清理知道 gateway 的程序生命週期，跨層改動不值得 |
+| TBD-5 | 輪替後 `turn_count` 沒有歸零（`finish_agent_session_turn` 換 session 時只加 1，既有行為），下一回合會對新 session 多查一次年齡、多做一次 compaction | 不影響本次交付 | 2026-11-03 步驟 4 端到端時發現。每次輪替（約每 7 天一次）只多一次 compaction 與一次 opencode 啟動。追蹤：無，PR 揭露。輪替的下一回合對新 session 做 compaction 成功後，計數就歸零，所以不會連續輪替。NOTE（2026-11-03 更正）：原本還寫「同一個原因讓純 CLI backend 在 20 回合後每回合都輪替」，經查不成立（純 CLI 的錯誤碼不會是 404／405），使用者原本同意另開的 issue 因此沒有開 |
+| TBD-6 | PR #29 審查的 NICE TO HAVE 1、2、4 沒有處理 | 不影響本次交付 | 2026-11-03。1：本機模式舊部署前幾輪清理會用滿 5 分鐘、期間排程掃描暫停，逾時那輪沒有摘要行——已在 PR 揭露。2：純 CLI backend 每到 compaction 時點記一行 `session_age_unknown` 警告——只是雜訊。4：輪替時若沒取得新 session 仍會刪舊的（既有程式碼）——server 與本機 backend 一定回 session id，走不到。追蹤：無 |
 
 ## Timeline
 
@@ -196,12 +216,14 @@ SCN-003 是「server 模式不變」，由 A 的答案直接涵蓋。SCN-006、S
 |------|------|--------|
 | 2026-11-03 | 讀碼盤點與負擔分析；使用者回答 A／B／C 四題；開立 GitHub #28；核准 SCN-001～005、SCN-008 | - |
 | 2026-11-03 | 使用者核准 SCN-006、SCN-007、SCN-009，全部 Scenario 已核准 | - |
+| 2026-11-03 | PR #29 獨立審查 RETURN（CLI prune 未比照 schedulerd 擋本機模式）；新增 SCN-011 並經使用者核准，步驟 6 修正 | - |
+| 2026-11-03 | 步驟 2～5 完成（A、C、B 與文件），workspace 全套檢查通過 | - |
 | 2026-11-03 | 步驟 1 契約探測完成；更正「本機 backend 已能列出 session」的錯誤證據；使用者選擇只在 compaction 時點查年齡，改寫 SCN-004～007、新增 SCN-010 並核准 | - |
 
 ---
 **建立日期**: 2026-11-03
 **分級**: Medium — 跨 wukong-gateway、wukong-runtime、wukong-schedulerd，沿既有相依方向，不改 schema
 **風險**: High
-**狀態**: 待實作
+**狀態**: 實作完成，待 PR
 
 GitHub：https://github.com/raybird/Wukong/issues/28

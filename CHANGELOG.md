@@ -11,6 +11,22 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **容器的按需本機模式也會清理 opencode session。** 原本只有共用 server 模式會清，v0.22 起預設的
+  本機模式完全不清，`opencode.db` 因此沒有上限地成長。現在只要明確設定
+  `WUKONG_OPENCODE_SESSION_RETENTION_DAYS`（compose 預設為 30），schedulerd 就照同樣的規則清理；
+  在主機上直接執行、沒有設定這個變數時維持不清，以免刪到你自己的 opencode session；手動的
+  `wukong opencode prune` 同樣只允許 `--dry-run`。設成 `0` 可停用（#28）。
+- **長期續接的 session 超過 7 天會換新。** Telegram 對話與排程各綁著一個一直續接的 session，
+  compaction 只縮短 context，資料不會減少。現在到 compaction 時點（預設每 20 回合）時，若 session
+  建立已超過 7 天，就改成換新的 session，並把上一回合帶給新 session，舊的隨後刪除（#28）。
+
+### Fixed
+
+- **Web 即時事件不再無限累積。** Telegram 回合寫入的 `chat_live_events` 原本只寫不刪；schedulerd
+  的維護迴圈現在會刪掉超過 24 小時的事件（#28）。
+
 ## [0.24.0] - 2026-10-28
 
 ### Added

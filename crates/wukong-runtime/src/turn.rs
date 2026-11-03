@@ -221,7 +221,12 @@ pub async fn run_turn_traced_with_attachments(
             let skill = step.skill_name.as_deref().and_then(find_skill);
             let augmented = format!("{input}{}", wukong_orchestrator::chain_context(&prior));
             let is_final = i + 1 == n_steps;
-            let hits = if is_final { &recall.data } else { &helper_hits };
+            // 2026-11-03（issue-0028）：輪替的回合沒有舊 session 可接續，最後一棒也帶上一回合。
+            let hits = if is_final && rotated_from.is_none() {
+                &recall.data
+            } else {
+                &helper_hits
+            };
             let mut prompt =
                 persona::build_prompt_with_skill(role, skill, &skill_root, hits, &augmented);
             // Advertise the scheduling capability only on the user-facing final step,
@@ -601,6 +606,8 @@ mod tests {
         persistent_error: Mutex<bool>,
         deleted_sessions: Mutex<Vec<String>>,
         response_session_ids: Mutex<VecDeque<String>>,
+        session_created_ms: Mutex<Option<i64>>,
+        fail_on_call: Mutex<Option<usize>>,
     }
 
     impl MockBackend {
@@ -615,7 +622,20 @@ mod tests {
                 persistent_error: Mutex::new(false),
                 deleted_sessions: Mutex::new(Vec::new()),
                 response_session_ids: Mutex::new(VecDeque::new()),
+                session_created_ms: Mutex::new(None),
+                fail_on_call: Mutex::new(None),
             }
+        }
+
+        fn with_session_created_ms(self, created_ms: i64) -> MockBackend {
+            *self.session_created_ms.lock().unwrap() = Some(created_ms);
+            self
+        }
+
+        /// 第 `call` 次（從 0 起算）呼叫 `run` 時失敗。
+        fn failing_on_call(self, call: usize) -> MockBackend {
+            *self.fail_on_call.lock().unwrap() = Some(call);
+            self
         }
 
         fn with_compact_error(replies: &[&str], code: i32) -> MockBackend {
@@ -640,10 +660,17 @@ mod tests {
         async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
             let is_compact = req.prompt == "/compact";
             let has_session = req.session_id.is_some();
+            let call = self.prompts.lock().unwrap().len();
             self.prompts.lock().unwrap().push(req.prompt);
             self.session_ids.lock().unwrap().push(req.session_id);
             self.models.lock().unwrap().push(req.model);
             self.attachments.lock().unwrap().push(req.attachments);
+            if *self.fail_on_call.lock().unwrap() == Some(call) {
+                return Err(GatewayError::AgentFailed {
+                    code: Some(500),
+                    stderr: "scripted failure".to_string(),
+                });
+            }
             if has_session && *self.persistent_error.lock().unwrap() {
                 return Err(GatewayError::AgentFailed {
                     code: Some(500),
@@ -677,6 +704,16 @@ mod tests {
                 .unwrap()
                 .push(session_id.to_string());
             Ok(())
+        }
+
+        async fn session_created_ms(&self, _session_id: &str) -> Result<i64, GatewayError> {
+            self.session_created_ms
+                .lock()
+                .unwrap()
+                .ok_or_else(|| GatewayError::AgentFailed {
+                    code: None,
+                    stderr: "no time.created".to_string(),
+                })
         }
     }
 
@@ -1256,6 +1293,147 @@ mod tests {
             .unwrap()
             .iter()
             .any(|id| id == "ses_old"));
+    }
+
+    const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+    fn now_ms() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+    }
+
+    /// scope 指向 `ses_old`、累積 20 個回合（預設的壓縮門檻），上一回合是晚餐的問答。
+    async fn memory_at_the_compaction_point() -> Memory {
+        let mem = open_memory().await;
+        mem.set_agent_session("project:T", "ses_old").await.unwrap();
+        for _ in 0..20 {
+            mem.acquire_agent_session_lease("project:T", "seed", 300)
+                .await
+                .unwrap();
+            mem.finish_agent_session_turn("project:T", "seed", Some("ses_old"))
+                .await
+                .unwrap();
+        }
+        remember_turn(&mem, "project:T", "晚餐吃什麼", "吃拉麵").await;
+        mem
+    }
+
+    // issue-0028 SCN-004：舊 session 在壓縮時點改為輪替；最後一棒在新 session 執行、
+    // 帶上一回合，取得新 session 後刪掉舊的，而且不做壓縮。
+    #[tokio::test]
+    async fn an_old_session_rotates_and_the_final_step_sees_the_previous_turn() {
+        let mem = memory_at_the_compaction_point().await;
+        let backend = MockBackend::new(&["fixer", "answer"])
+            .with_session_created_ms(now_ms() - 8 * DAY_MS)
+            .with_response_session_ids(&["ses_helper", "ses_new"]);
+
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "然後呢",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            mem.agent_session("project:T").await.unwrap().as_deref(),
+            Some("ses_new")
+        );
+        let prompts = backend.prompts.lock().unwrap();
+        assert!(!prompts.iter().any(|prompt| prompt == "/compact"));
+        let final_prompt = prompts.last().unwrap();
+        assert!(final_prompt.contains("User: 晚餐吃什麼"), "{final_prompt}");
+        assert!(final_prompt.contains("Assistant: 吃拉麵"), "{final_prompt}");
+        assert_eq!(backend.session_ids.lock().unwrap().last().unwrap(), &None);
+        // planner 的 helper session 也會被刪，所以只看 `ses_old`。
+        assert!(backend
+            .deleted_sessions
+            .lock()
+            .unwrap()
+            .contains(&"ses_old".to_string()));
+    }
+
+    // issue-0028 SCN-005：未滿 7 天照原本壓縮、續接，最後一棒不額外帶上一回合。
+    #[tokio::test]
+    async fn a_young_session_is_compacted_and_the_final_step_gets_no_previous_turn() {
+        let mem = memory_at_the_compaction_point().await;
+        let backend = MockBackend::new(&["fixer", "compacted", "answer"])
+            .with_session_created_ms(now_ms() - 6 * DAY_MS)
+            .with_response_session_ids(&["ses_helper", "ses_old", "ses_old"]);
+
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "然後呢",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+        let prompts = backend.prompts.lock().unwrap();
+        assert!(prompts.iter().any(|prompt| prompt == "/compact"));
+        let final_prompt = prompts.last().unwrap();
+        assert!(!final_prompt.contains("晚餐吃什麼"), "{final_prompt}");
+        assert_eq!(
+            backend
+                .session_ids
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .as_deref(),
+            Some("ses_old")
+        );
+        assert!(!backend
+            .deleted_sessions
+            .lock()
+            .unwrap()
+            .contains(&"ses_old".to_string()));
+    }
+
+    // issue-0028 SCN-007：輪替的回合在取得新 session 之前失敗，舊 session 不刪、
+    // scope 仍指向它。
+    #[tokio::test]
+    async fn a_rotation_turn_that_fails_keeps_the_old_session() {
+        let mem = memory_at_the_compaction_point().await;
+        // 第 0 次是 planner，第 1 次是最後一棒。
+        let backend = MockBackend::new(&["fixer"])
+            .with_session_created_ms(now_ms() - 8 * DAY_MS)
+            .failing_on_call(1);
+
+        let result = run_turn(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "然後呢",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await;
+
+        assert!(result.is_err());
+        // 走的是輪替：最後一棒沒有帶舊 session，前面也沒有做 compaction。
+        {
+            let prompts = backend.prompts.lock().unwrap();
+            assert!(!prompts.iter().any(|p| p == "/compact"));
+            assert_eq!(backend.session_ids.lock().unwrap()[1], None);
+        }
+        assert!(!backend
+            .deleted_sessions
+            .lock()
+            .unwrap()
+            .contains(&"ses_old".to_string()));
+        assert_eq!(
+            mem.agent_session("project:T").await.unwrap().as_deref(),
+            Some("ses_old")
+        );
     }
 
     #[tokio::test]

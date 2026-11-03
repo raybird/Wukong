@@ -7,6 +7,7 @@
 - **Session 接續**：預設以**每 scope 持久的 opencode session** 接續對話（本機／server 以 session API，純 CLI 以 `-s <id>`），並預設帶入 `--thinking` 思考過程。
 - **清除上下文 (`/new`)**：在 REPL、Telegram 或 Web 輸入 `/new` 可以清空該 scope 的 session 以開啟全新對話；一次性 CLI 則可使用 `wukong --new "…"`。
 - **會話壓縮 (`/compact`)**：支援將 `/compact` passthrough 給當前 session（適用於 REPL、Telegram 與 Web）。
+- **自動輪替（2026-11-03 起）**：每個 scope 累積到 `WUKONG_SESSION_COMPACT_EVERY_TURNS` 回合（預設 20）時會自動 compaction；這時若 session 建立已超過 7 天，就改成換新的 session，最後一棒另外帶上一回合的內容，舊 session 隨後刪除。細節見 [docker.md](docker.md) 的「長期 session 的輪替」。
 - **停用思考過程**：使用 `--no-thinking` 參數或設定環境變數 `WUKONG_THINKING=0` 可關閉思考過程顯示。
 - **思考過程顯示效果**：
   - **REPL**：以 `💭` 符號即時印出思考內容。
