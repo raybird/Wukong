@@ -19,19 +19,17 @@
 - **判斷位置**：`prepare_final_session_with_policy`。取得 lease、確認有 `session_id` 之後先查年齡：
   - 超過門檻：回 `session_id: None, rotated_from: Some(old)`，不做 compaction；
   - 未超過：照原本的 compaction 規則；
-  - 查不到：照原本的規則、不輪替，記一行警告（SCN-006，待核准）。
+  - 查不到：照原本的規則、不輪替，記一行警告（SCN-006）。
 - **門檻**：固定常數 7 天（TBD-1 定案前的暫定值），不開放設定。
-- **刪除舊 session**：沿用 `run_turn` 既有的 `rotated_from` 路徑，取得新 session 後才刪。回合在取得新 session 前失敗時，scope 的指向不變（SCN-007，待核准；步驟 4 以測試確認既有路徑確實如此）。
+- **刪除舊 session**：沿用 `run_turn` 既有的 `rotated_from` 路徑，取得新 session 後才刪。回合在取得新 session 前失敗時，scope 的指向不變（SCN-007；步驟 4 以測試確認既有路徑確實如此）。
 - **上一回合注入**：`rotated_from.is_some()` 時，最後一棒的記憶也經過 `with_previous_turn`（沿用輔助棒的機制與 800 字上限）。
 
 ### C：live event 清理
 - schedulerd 的維護 tick（`maintenance_ticks`）在記憶維護之外，呼叫 `history.prune_live_events_before(now - 86_400)`。
-- 不受 `WUKONG_MEMORY_AUTO_MAINTENANCE` 影響（SCN-009，待核准）。失敗只記警告，不影響記憶維護。
+- 不受 `WUKONG_MEMORY_AUTO_MAINTENANCE` 影響（SCN-009）。失敗只記警告，不影響記憶維護。
 - `--once` 模式是否也清：跟著記憶維護的 `--once` 路徑一起執行。
 
 ## 實作步驟
-
-SCN-006、SCN-007、SCN-009 待核准（TBD-2），對應的測試在核准前不寫；其餘步驟的已核准部分可以先做。
 
 1. 📝 **首要驗證：opencode session 建立時間的契約探測**（README 首要驗證；SCN-004～006 的前提，也涵蓋 SCN-001 的列表）
    - 產出：本步驟下方的探測紀錄表，內容包括 opencode 版本、命令與實際回應。
@@ -50,17 +48,17 @@ SCN-006、SCN-007、SCN-009 待核准（TBD-2），對應的測試在核准前�
    - 相依：步驟 1 的 (3)。
    - 完成判準：先取得紅燈（Local backend 加明確設定時回 `None`），實作後轉綠。變異確認：「Local 不看是否明確設定」與「Server 也要求明確設定」都會讓測試紅燈。
 
-3. 📝 **C：live event 清理**（SCN-008；SCN-009 待核准）
+3. 📝 **C：live event 清理**（SCN-008、SCN-009）
    - 產出：schedulerd 測試，資料含 24 小時前後各一筆事件（時間用字面值）。執行一次維護後，逐筆確認刪除與保留。
    - 相依：無。
    - 完成判準：先取得紅燈（維護後舊事件仍在），實作後轉綠。變異：邊界改成 `<=`、改用 `now - 7 天`，測試都要紅燈。
 
-4. 📝 **B：依年齡輪替與上一回合注入**（SCN-004、SCN-005；SCN-006、SCN-007 待核准）
+4. 📝 **B：依年齡輪替與上一回合注入**（SCN-004～SCN-007）
    - 產出：
      - `session.rs` 測試：假 backend 回傳不同的建立時間（門檻前後各一、查詢失敗），斷言 `session_id`／`rotated_from`，以及是否呼叫 compaction；
      - `turn.rs` 測試：輪替回合最後一棒的 prompt 含上一回合，未輪替時不含；取得新 session 後舊的被刪除；
      - 用假 agent 的端到端：同一個 scope 連跑兩回合，第二回合前把 session 的建立時間調到門檻之前，觀察 `session_rotated` 日誌與 scope 指向的變化。
-   - 相依：步驟 1；SCN-006、SCN-007 的測試等 TBD-2。
+   - 相依：步驟 1。
    - 完成判準：紅綠重構證據齊全，斷言用字面值的時間與 session id。變異：門檻比較方向顛倒、單位錯一千倍、輪替時沒有注入上一回合、查詢失敗時當成過期，都要紅燈。
 
 5. 📝 **文件與全套驗證**
@@ -97,12 +95,11 @@ opencode 的實際欄位名稱以複本的 `.schema` 為準，上面的欄位名
 |---|---|---|
 | SCN-001～003 | 單元（`active_policy`）加一次整合（真實 opencode 上清一輪） | 決策邏輯用單元測試；實際刪除需要真實 opencode，因為 W-6 這類行為假 server 測不到 |
 | SCN-004、005 | 單元（session.rs、turn.rs）加假 agent 端到端 | 外部契約由步驟 1 處理，單元測試只驗決策與注入 |
-| SCN-006、007 | 單元 | 待核准 |
+| SCN-006、007 | 單元 | 假 backend 模擬查詢失敗與回合失敗 |
 | SCN-008、009 | schedulerd 單元（真 SQLite） | 同層，可合併單迴圈，理由記在步驟 3 |
 
 ## 檢查清單
 - [ ] 步驟 1 三項探測都有結論
-- [ ] SCN-006、007、009 已核准或已移除（TBD-2）
 - [ ] TBD-1 已有量測，或在 PR 揭露以 7 天交付
 - [ ] 每個 Scenario 都有紅綠重構證據
 - [ ] 常青文件已更新
