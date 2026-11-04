@@ -203,7 +203,7 @@ SCN-003 是「server 模式不變」，由 A 的答案直接涵蓋。SCN-006、S
 
 | 編號 | 事項 | 狀態 | 影響 |
 |------|------|------|------|
-| TBD-1 | 輪替門檻的最終天數。需要正式主機的唯讀量測：各 session 的 part/event 筆數與建立時間、`opencode.db` 大小。正式主機不是 RunWuKong（使用者 2026-10-21 說明），我無法存取；量測查詢見 implementation-plan 步驟 1 附錄 | 待確認 | SCN-004 的門檻值；沒有量測時用 7 天交付，並在 PR 揭露 |
+| TBD-1 | 輪替門檻的最終天數。需要正式主機的唯讀量測：各 session 的 part/event 筆數與建立時間、`opencode.db` 大小。正式主機不是 RunWuKong（使用者 2026-10-21 說明），我無法存取；量測查詢見 implementation-plan 步驟 1 附錄 | 不影響本次交付 | SCN-004 的門檻值。2026-11-04 結論：以暫定的 7 天交付，PR #29 已揭露。追蹤：無——量測查詢保留在 implementation-plan 步驟 1 附錄，之後要調整天數時另開 issue（使用者 2026-11-04 選擇） |
 | TBD-2 | SCN-006（查不到建立時間時不輪替、回合照常）、SCN-007（輪替回合失敗時保留舊 session）、SCN-009（live event 清理不受 `WUKONG_MEMORY_AUTO_MAINTENANCE` 開關影響）是否照寫 | 已解決 | 2026-11-03 使用者回覆「都核准」，三條照原文核准 |
 | TBD-3 | 本機模式查 session 年齡要多啟動一次 opencode serve（約 0.7 秒），要多久查一次 | 已解決 | 2026-11-03 使用者選「只在 compaction 時查」；SCN-004～007、SCN-010 |
 | TBD-4 | 本機模式每刪一個 session 都要啟動一次 opencode serve（約 0.7 秒），一輪 5 分鐘預算大約只刪得完 400 個 | 不影響本次交付 | 2026-11-03 結論：預算用完時這一輪停止，沒刪的留到 6 小時後的下一輪；只有舊部署第一次清理時量大，之後每輪只會有少量新過期的 session。追蹤：無，PR 揭露即可。改成一次啟動、批次刪除，要讓 runtime 的清理知道 gateway 的程序生命週期，跨層改動不值得 |
@@ -219,11 +219,14 @@ SCN-003 是「server 模式不變」，由 A 的答案直接涵蓋。SCN-006、S
 | 2026-11-03 | PR #29 獨立審查 RETURN（CLI prune 未比照 schedulerd 擋本機模式）；新增 SCN-011 並經使用者核准，步驟 6 修正 | - |
 | 2026-11-03 | 步驟 2～5 完成（A、C、B 與文件），workspace 全套檢查通過 | - |
 | 2026-11-03 | 步驟 1 契約探測完成；更正「本機 backend 已能列出 session」的錯誤證據；使用者選擇只在 compaction 時點查年齡，改寫 SCN-004～007、新增 SCN-010 並核准 | - |
+| 2026-11-03 | PR #29 重審（`review-ab44d7c.md`）PASS，報告提交 `eb42e72` 只新增這份報告 | - |
+| 2026-11-03 | PR #29 以 `eb42e72` squash 合併為 main `7d479b4`（07:13Z），合併內容與審查範圍一致；GitHub #28 已關閉 | - |
+| 2026-11-04 | TBD-1 記為不影響本次交付（追蹤：無）；結案 | - |
 
 ---
 **建立日期**: 2026-11-03
 **分級**: Medium — 跨 wukong-gateway、wukong-runtime、wukong-schedulerd，沿既有相依方向，不改 schema
 **風險**: High
-**狀態**: 實作完成，待 PR
+**狀態**: 已完成（PR #29 已於 2026-11-03 合併）
 
 GitHub：https://github.com/raybird/Wukong/issues/28

@@ -161,6 +161,7 @@
        三次都沒有殘留的 opencode 行程。
      - 全套：`cargo fmt --all -- --check` 通過；clippy `-D warnings` 乾淨；`cargo test --workspace --locked` 沒有任何失敗（共 718 支通過）。
      - 沒有處理的審查建議（NICE TO HAVE 1、2、4），理由記在 README 待確認事項 TBD-6。
+     - **重審與合併**：`ab44d7c` 重審 PASS（`review-ab44d7c.md`，提交 `eb42e72` 只新增這份報告）。PR #29 於 2026-11-03 squash 合併為 `7d479b4`，合併時的 head 是 `eb42e72`，與審查範圍一致。GitHub #28 已關閉。
 
 ### 步驟 1 附錄：正式主機的唯讀量測（TBD-1）
 在正式主機上，對 `opencode.db` 的**複本**執行（不要對運行中的檔案寫入）：
@@ -194,6 +195,6 @@ opencode 的實際欄位名稱以複本的 `.schema` 為準，上面的欄位名
 
 ## 檢查清單
 - [x] 步驟 1 三項探測都有結論
-- [ ] TBD-1 已有量測，或在 PR 揭露以 7 天交付
+- [x] TBD-1 已有量測，或在 PR 揭露以 7 天交付
 - [x] 每個 Scenario 都有紅綠重構證據
 - [x] 常青文件已更新
