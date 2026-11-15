@@ -58,7 +58,7 @@
 
 - **核准日期**: 2026-11-13
 - **核准來源**: 使用者 2026-11-13 對話同意「替第 1 項（Telegram 渲染）開 issue」（回覆「好」），範圍為子清單換行與縮排、保留編號、標題層級、`<think>`、巢狀引言；同日對 AC-1～AC-6 的建議格式（縮排 2 空白與 •◦▪、H1 加底線、think 整段拿掉、巢狀引言攤平、實機送出、逐字回歸）與 TBD-4 另開 issue 的建議回覆「都照建議」
-- **核准 commit**: 待提交
+- **核准 commit**: 89fd976
 
 ## 風險與首要驗證
 
@@ -97,7 +97,7 @@
    - 完成證據（2026-11-13）：28 passed、0 failed。修改前 GitNexus `impact(render_html, upstream)` 回 CRITICAL：直接呼叫者只有 `to_telegram_html`，13 條受影響流程都在 Telegram 回覆與排程回送路徑，與本 issue 範圍一致，已在對話中告知使用者。縮排先用一般空白（`LIST_INDENT`），待步驟 1 實機結果決定是否改 U+00A0。NOTE：原排序是步驟 1 實機探測在前；因 token 尚未提供，先完成不依賴探測結果的實作，探測結果只會影響 `LIST_INDENT` 一個常數
 5. ✅ **AC-5：實機送出實作後的輸出** — 驗證方式：把 AC-1～AC-4 樣本經 `to_telegram_html` 的實際輸出送到使用者聊天
    - 完成判準：每則都回 `ok: true`，使用者確認手機上的排版
-   - 完成證據（2026-11-15）：AC-1～AC-4 合併樣本（H1／H2、編號清單含兩層子清單、無序清單含編號子清單、巢狀引言、單獨一行的 `<think>`）經改動後的 `to_telegram_html` 輸出，`sendMessage` 回 `ok`。使用者手機確認：待回覆
+   - 完成證據（2026-11-15）：AC-1～AC-4 合併樣本（H1／H2、編號清單含兩層子清單、無序清單含編號子清單、巢狀引言、單獨一行的 `<think>`）經改動後的 `to_telegram_html` 輸出，`sendMessage` 回 `ok`。2026-11-15 使用者手機確認排版：「沒問題」
 6. ✅ **交付檢查** — 驗證方式：`cargo fmt --all -- --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`；更新 `CHANGELOG.md` 的 `[Unreleased]` 與 `docs/entrypoints.md` 的「格式渲染」
    - 完成判準：三道命令全綠，兩份文件已更新
    - 完成證據（2026-11-13，步驟 1、5 之前）：`cargo fmt --all -- --check` 通過；`cargo clippy --all-targets --locked -- -D warnings` 無警告；`cargo test --workspace --locked` 723 passed、0 failed；`CHANGELOG.md` `[Unreleased]` Fixed 與 `docs/entrypoints.md`「格式渲染」已更新。步驟 1 結果未改動 `LIST_INDENT`，不需重跑

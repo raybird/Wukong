@@ -30,7 +30,7 @@ CLI 顯示選項編號，輸入編號或選項文字回答；多選用逗號分�
 `wukong-telegram` 將對話引擎無縫串接至 Telegram，其內部運作流程如下：
 - **基本流程**：透過 Long-Polling 接收訊息 $\rightarrow$ 白名單過濾過後 $\rightarrow$ 依據對話群組指派獨立 Scope（`user:tg-<id>`） $\rightarrow$ 重用核心的 `run_turn` $\rightarrow$ 回覆答案。
 - **即時狀態回饋**：執行期間會建立一個**單一狀態泡泡**（原地隨調度角色即時更新狀態並保持 Typing 狀態），任務完成後該狀態泡泡會自動刪除並送出最終回答。
-- **格式渲染**：最終答案會經由 `wukong-render` 渲染為 Telegram 支援的 HTML 格式（支援粗體、程式碼區塊、表格自動降級呈現）。
+- **格式渲染**：最終答案會經由 `wukong-render` 渲染為 Telegram 支援的 HTML 格式（支援粗體、程式碼區塊、表格自動降級呈現）。清單每項各占一行，子清單每層縮 2 空白、符號依層級為 •、◦、▪，編號清單保留原號碼；H1 為粗體加底線、其他標題為粗體；`<think>` 區塊不輸出；巢狀引言攤平成一層。
 - **上傳與接續操作**：支援 Telegram `document`／`photo`（單檔 25 MiB、每則最多 5 份）。第一次上傳會把文字與 file part 一起送入目前 OpenCode session；後續可直接文字追問。回覆先前的檔案訊息會重新帶入該附件；上傳新檔並回覆舊檔可比較兩份。
 - **原檔、工作副本、回傳產物分離**：原始檔保存於 `.wukong/uploads`，OpenCode 實際操作 `.wukong/workfiles` 的副本；要求「修改後傳回」時，成品寫入該回合專屬 `.wukong/artifacts`，Wukong 再以 Telegram document 回傳。
 - **權限互動**：本機／server backend 收到 OpenCode `permission.asked` 時會顯示「允許一次／本次工作階段總是允許／拒絕」按鈕；取消或逾時會拒絕該請求。
