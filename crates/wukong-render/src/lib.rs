@@ -98,29 +98,47 @@ const LIST_INDENT: &str = "  ";
 /// Bullet per nesting level; deeper levels reuse the last one.
 const BULLETS: [&str; 3] = ["• ", "◦ ", "▪ "];
 
-/// Remove `<think>…</think>` regions from a raw-HTML fragment. A block may span
-/// several fragments, so `in_think` carries the state between calls.
-fn strip_think(fragment: &str, in_think: &mut bool) -> String {
-    let mut visible = String::new();
-    let mut rest = fragment;
-    loop {
-        let tag = if *in_think { "</think>" } else { "<think>" };
-        match rest.find(tag) {
-            Some(i) => {
-                if !*in_think {
-                    visible.push_str(&rest[..i]);
+/// Cut `<think>…</think>` regions out of the markdown source before rendering,
+/// so the renderer only ever sees a complete document and its output stays
+/// balanced. Tags are looked for only in raw-HTML events, so examples inside
+/// code spans and code blocks stay. Nested blocks are counted by depth; an
+/// unclosed block runs to the end of the message.
+fn strip_think(markdown: &str, opts: Options) -> String {
+    const OPEN: &str = "<think>";
+    const CLOSE: &str = "</think>";
+    let mut ranges = Vec::new();
+    let (mut depth, mut start) = (0usize, 0usize);
+    for (ev, range) in Parser::new_ext(markdown, opts).into_offset_iter() {
+        if !matches!(ev, Event::Html(_) | Event::InlineHtml(_)) {
+            continue;
+        }
+        let fragment = &markdown[range.clone()];
+        for (i, _) in fragment.match_indices('<') {
+            let at = range.start + i;
+            if fragment[i..].starts_with(OPEN) {
+                if depth == 0 {
+                    start = at;
                 }
-                rest = &rest[i + tag.len()..];
-                *in_think = !*in_think;
-            }
-            None => {
-                if !*in_think {
-                    visible.push_str(rest);
+                depth += 1;
+            } else if depth > 0 && fragment[i..].starts_with(CLOSE) {
+                depth -= 1;
+                if depth == 0 {
+                    ranges.push(start..at + CLOSE.len());
                 }
-                return visible;
             }
         }
     }
+    if depth > 0 {
+        ranges.push(start..markdown.len());
+    }
+    let mut visible = String::with_capacity(markdown.len());
+    let mut kept_from = 0;
+    for r in ranges {
+        visible.push_str(&markdown[kept_from..r.start]);
+        kept_from = r.end;
+    }
+    visible.push_str(&markdown[kept_from..]);
+    visible
 }
 
 /// Walk markdown events and emit a Telegram HTML-subset string.
@@ -128,7 +146,8 @@ fn render_html(markdown: &str) -> String {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
-    let parser = Parser::new_ext(markdown, opts);
+    let markdown = strip_think(markdown, opts);
+    let parser = Parser::new_ext(&markdown, opts);
 
     let mut out = String::new();
     // Table accumulation state.
@@ -140,25 +159,13 @@ fn render_html(markdown: &str) -> String {
     let mut link_stripped = false;
     // One entry per open list: None = bullet list, Some(n) = next item number.
     let mut lists: Vec<Option<u64>> = Vec::new();
+    // One entry per open list item: the column where its text starts, so
+    // continuation lines and paragraphs line up under it.
+    let mut item_cols: Vec<usize> = Vec::new();
     // Telegram HTML has no nested blockquote; only the outermost level is emitted.
     let mut quote_depth = 0usize;
-    // True between `<think>` and `</think>`: everything in between is dropped.
-    let mut in_think = false;
-    // Where the current paragraph began; a paragraph left empty (only a
-    // `<think>` block) emits no blank line.
-    let mut paragraph_start = 0usize;
 
     for ev in parser {
-        // Raw HTML in the source is treated as literal text (escaped) for safety,
-        // except `<think>` blocks, which are dropped. Tables ignore raw HTML as before.
-        if let (false, Event::Html(t) | Event::InlineHtml(t)) = (in_table, &ev) {
-            let visible = strip_think(t, &mut in_think);
-            out.push_str(&escape_html(&visible));
-            continue;
-        }
-        if in_think {
-            continue;
-        }
         if in_table {
             match ev {
                 Event::Start(Tag::TableHead) | Event::Start(Tag::TableRow) => row = Vec::new(),
@@ -217,16 +224,20 @@ fn render_html(markdown: &str) -> String {
             }
             Event::Start(Tag::Item) => {
                 let depth = lists.len().max(1);
-                out.push_str(&LIST_INDENT.repeat(depth - 1));
-                match lists.last_mut() {
+                let indent = LIST_INDENT.repeat(depth - 1);
+                let marker = match lists.last_mut() {
                     Some(Some(n)) => {
-                        out.push_str(&format!("{n}. "));
                         *n += 1;
+                        format!("{}. ", *n - 1)
                     }
-                    _ => out.push_str(BULLETS[(depth - 1).min(BULLETS.len() - 1)]),
-                }
+                    _ => BULLETS[(depth - 1).min(BULLETS.len() - 1)].to_string(),
+                };
+                item_cols.push(indent.len() + marker.chars().count());
+                out.push_str(&indent);
+                out.push_str(&marker);
             }
             Event::End(TagEnd::Item) => {
+                item_cols.pop();
                 if !out.ends_with('\n') {
                     out.push('\n');
                 }
@@ -249,15 +260,23 @@ fn render_html(markdown: &str) -> String {
                 in_table = true;
                 table.clear();
             }
-            Event::Start(Tag::Paragraph) => paragraph_start = out.len(),
-            Event::End(TagEnd::Paragraph) => {
-                if out.len() > paragraph_start {
-                    out.push_str("\n\n");
+            // A later paragraph of a list item starts on a fresh line.
+            Event::Start(Tag::Paragraph) => {
+                if let (Some(col), true) = (item_cols.last(), out.ends_with('\n')) {
+                    out.push_str(&" ".repeat(*col));
                 }
             }
+            Event::End(TagEnd::Paragraph) => out.push_str("\n\n"),
             Event::Code(t) => out.push_str(&format!("<code>{}</code>", escape_html(&t))),
             Event::Text(t) => out.push_str(&escape_html(&t)),
-            Event::SoftBreak | Event::HardBreak => out.push('\n'),
+            // Raw HTML in the source is treated as literal text (escaped) for safety.
+            Event::Html(t) | Event::InlineHtml(t) => out.push_str(&escape_html(&t)),
+            Event::SoftBreak | Event::HardBreak => {
+                out.push('\n');
+                if let Some(col) = item_cols.last() {
+                    out.push_str(&" ".repeat(*col));
+                }
+            }
             Event::Rule => out.push_str("——————\n"),
             _ => {}
         }
@@ -792,5 +811,65 @@ mod tests {
             out.contains("引言") && out.contains("巢狀") && out.contains("後文"),
             "{out}"
         );
+    }
+
+    // issue-0031 AC-3（PR #33 審查 P1）：表格儲存格裡的 think 不外露，前後文字保留。
+    #[test]
+    fn telegram_drops_think_inside_table_cells() {
+        let md = "| 項目 | 內容 |\n|---|---|\n| A | <think>hidden reasoning</think>答案 |\n";
+        assert_eq!(
+            to_telegram_html(md).join(""),
+            "<pre>項目  內容\nA   答案\n</pre>"
+        );
+    }
+
+    // issue-0031 AC-3（PR #33 審查 P1）：think 跨引言或清單邊界時，輸出的標籤仍成對，
+    // 後面的清單照常編號。
+    #[test]
+    fn telegram_think_across_blocks_keeps_html_balanced() {
+        let out = to_telegram_html("> 引言 <think>隱藏內容\n\n</think>\n\n正常回答").join("");
+        assert_eq!(out, "<blockquote>引言\n\n</blockquote>\n正常回答");
+        let out = to_telegram_html("- 一 <think>隱藏\n\n- 二</think> 後文\n- 三\n\n1. 甲\n2. 乙\n")
+            .join("");
+        assert_eq!(out, "• 一  後文\n• 三\n1. 甲\n2. 乙");
+    }
+
+    // issue-0031 AC-3（PR #33 審查 P2）：巢狀與連續的 think 都拿掉；沒有結尾的 think
+    // 拿掉到訊息結尾，寧可少顯示也不外露推理。
+    #[test]
+    fn telegram_drops_nested_consecutive_and_unclosed_think() {
+        let cases = [
+            (
+                "<think>\n外層推理\n<think>內層推理</think>\n剩餘推理\n</think>\n\n最終答案",
+                "最終答案",
+            ),
+            ("前文<think>a</think>中<think>b</think>後", "前文中後"),
+            ("答案開頭\n\n<think>沒有結尾的推理\n\n更多\n", "答案開頭"),
+        ];
+        for (md, expected) in cases {
+            assert_eq!(to_telegram_html(md).join(""), expected, "input: {md:?}");
+        }
+    }
+
+    // issue-0031 AC-3（PR #33 審查 P2）：程式碼裡的 think 標籤是內容，照原本跳脫後保留。
+    #[test]
+    fn telegram_keeps_think_tags_inside_code() {
+        let md = "inline `<think>x</think>` 保留\n\n```\n<think>y</think>\n```\n";
+        assert_eq!(
+            to_telegram_html(md).join(""),
+            "inline <code>&lt;think&gt;x&lt;/think&gt;</code> 保留\n\n<pre>&lt;think&gt;y&lt;/think&gt;\n</pre>"
+        );
+    }
+
+    // issue-0031 AC-7：清單項目裡的接續段落與換行，縮到該項文字的位置。
+    #[test]
+    fn telegram_indents_continuation_lines_inside_list_items() {
+        let md = "- 第一項\n\n  第一項第二段\n\n  - 子項\n\n    子項第二段\n\n- 第二項\n";
+        assert_eq!(
+            to_telegram_html(md).join(""),
+            "• 第一項\n\n  第一項第二段\n\n  ◦ 子項\n\n    子項第二段\n\n• 第二項"
+        );
+        let md = "10. 步驟\n    說明\n";
+        assert_eq!(to_telegram_html(md).join(""), "10. 步驟\n    說明");
     }
 }
