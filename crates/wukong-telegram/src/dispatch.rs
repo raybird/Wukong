@@ -1,6 +1,8 @@
 //! Per-message dispatch: allowlist → classify → run_turn → reply.
 
-use crate::client::{InlineKeyboard, InlineKeyboardButton, TgClient};
+use crate::client::{
+    send_html_with_plain_fallback, InlineKeyboard, InlineKeyboardButton, TgClient,
+};
 use crate::command::{classify_message, MessageAction};
 use crate::parse::{is_allowed, scope_for_chat, TgAttachment, TgCallbackQuery, TgMessage};
 use std::collections::HashMap;
@@ -1511,7 +1513,10 @@ pub async fn handle_message_with_responder<C, B, R>(
                         log_send(client.send_message(chat_id, "(無內容)").await, "answer");
                     } else {
                         for c in &chunks {
-                            log_send(client.send_message_html(chat_id, c).await, "answer");
+                            log_send(
+                                send_html_with_plain_fallback(client, chat_id, c, "answer").await,
+                                "answer",
+                            );
                         }
                     }
                     if let Some(dir) = artifact_dir.as_deref() {
@@ -2040,6 +2045,41 @@ mod tests {
             .await
             .unwrap();
         assert!(r.data.iter().any(|h| h.text.contains("User: 什麼是 BM25")));
+    }
+
+    #[tokio::test]
+    async fn rejected_html_chunk_is_resent_as_plain_and_other_chunks_stay_html() {
+        let client = MockTgClient::default().reject_html_containing(
+            "乙",
+            400,
+            "Bad Request: can't parse entities: Unsupported start tag \"think\" at byte offset 13",
+        );
+        let mem = open_memory().await;
+        // 三段各約 3000 bytes，切成三則；第二則被拒。
+        let answer = ["甲", "乙", "丙"].map(|c| c.repeat(1000)).join("\n\n");
+        let backend = MockBackend::new(&["oracle", &answer]);
+        let msg = TgMessage {
+            update_id: 1,
+            chat_id: 12,
+            text: "長回答".to_string(),
+            attachments: Vec::new(),
+        };
+        handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
+
+        let sent = client.sent.lock().unwrap();
+        let answer_parts: Vec<(bool, String)> = sent
+            .iter()
+            .filter(|s| ["甲", "乙", "丙"].iter().any(|c| s.text.contains(c)))
+            .map(|s| (s.html, s.text.trim_end().to_string()))
+            .collect();
+        assert_eq!(
+            answer_parts,
+            vec![
+                (true, "甲".repeat(1000)),
+                (false, "乙".repeat(1000)),
+                (true, "丙".repeat(1000)),
+            ]
+        );
     }
 
     #[tokio::test]

@@ -156,6 +156,73 @@ fn check_ok(v: serde_json::Value) -> Result<serde_json::Value, TgError> {
     }))
 }
 
+/// Telegram 拒收 HTML（`parse_mode=HTML` 解析失敗）時的錯誤：400，描述含
+/// `can't parse entities`。字樣取自 issue-0032 的實機探測；同為 400 的
+/// `chat not found`、`text must be non-empty` 不算。
+fn is_html_parse_error(err: &TgError) -> bool {
+    matches!(err, TgError::Api(msg)
+        if msg.starts_with("telegram api error 400:") && msg.contains("can't parse entities"))
+}
+
+/// 把 `wukong-render` 輸出的 Telegram HTML 轉成純文字：拿掉標籤、還原跳脫字元，
+/// 連結寫成「文字 (網址)」；空白與換行原樣保留。
+fn html_to_plain(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut href: Option<&str> = None;
+    let mut rest = html;
+    while let Some(start) = rest.find('<') {
+        out.push_str(&unescape_html(&rest[..start]));
+        let Some(len) = rest[start..].find('>') else {
+            // 沒有 `>` 就不是標籤，剩下的當文字。
+            rest = &rest[start..];
+            break;
+        };
+        let tag = &rest[start..start + len + 1];
+        if let Some(url) = tag
+            .strip_prefix("<a href=\"")
+            .and_then(|t| t.strip_suffix("\">"))
+        {
+            href = Some(url);
+        } else if tag == "</a>" {
+            if let Some(url) = href.take() {
+                out.push_str(&format!(" ({})", unescape_html(url)));
+            }
+        }
+        rest = &rest[start + len + 1..];
+    }
+    out.push_str(&unescape_html(rest));
+    out
+}
+
+/// 送出一段 HTML；Telegram 判定 HTML 解析失敗時，同一段改以純文字重送，並在 stderr
+/// 記一行警告（不含訊息內容）。其他錯誤原樣回傳，由呼叫端照原本的方式處理。
+pub async fn send_html_with_plain_fallback<C: TgClient>(
+    client: &C,
+    chat_id: i64,
+    html: &str,
+    context: &str,
+) -> Result<i64, TgError> {
+    match client.send_message_html(chat_id, html).await {
+        Err(err) if is_html_parse_error(&err) => {
+            eprintln!("{}", fallback_warning(context, &err));
+            client.send_message(chat_id, &html_to_plain(html)).await
+        }
+        result => result,
+    }
+}
+
+fn fallback_warning(context: &str, err: &TgError) -> String {
+    format!("🐵 Telegram 拒收 HTML（{context}），改送純文字：{err}")
+}
+
+/// `&amp;` 最後還原，`&amp;lt;` 才不會被還原兩次。
+fn unescape_html(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&")
+}
+
 /// Pull `result.message_id` out of a sendMessage response.
 fn message_id_of(v: &serde_json::Value) -> Result<i64, TgError> {
     v.get("result")
@@ -389,6 +456,25 @@ pub mod mock {
 
     type MockFiles = Arc<Mutex<HashMap<String, (TgFileInfo, Vec<u8>)>>>;
     type InlineEditLog = Arc<Mutex<Vec<(i64, i64, String, InlineKeyboard)>>>;
+    /// (內容片段, Telegram 的 error_code, description)
+    type Rejections = Arc<Mutex<Vec<(String, i64, String)>>>;
+
+    /// 內容含 `needle` 的送出，以 Telegram 實際的錯誤回應格式失敗，不寫進 `sent`。
+    fn rejection(rules: &Rejections, text: &str) -> Option<TgError> {
+        rules
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(needle, _, _)| text.contains(needle.as_str()))
+            .map(|(_, code, description)| {
+                check_ok(serde_json::json!({
+                    "ok": false,
+                    "error_code": code,
+                    "description": description,
+                }))
+                .unwrap_err()
+            })
+    }
 
     /// In-memory client: scripts no updates, records all calls. Returns
     /// monotonically increasing message_ids starting at 1.
@@ -406,6 +492,8 @@ pub mod mock {
         files: MockFiles,
         next_id: Arc<Mutex<i64>>,
         drafts_enabled: Arc<Mutex<bool>>,
+        html_rejections: Rejections,
+        plain_rejections: Rejections,
     }
 
     impl MockTgClient {
@@ -431,6 +519,26 @@ pub mod mock {
             self
         }
 
+        /// `send_message_html` 遇到含 `needle` 的內容時回這個錯誤。
+        pub fn reject_html_containing(self, needle: &str, code: i64, description: &str) -> Self {
+            self.html_rejections.lock().unwrap().push((
+                needle.to_string(),
+                code,
+                description.to_string(),
+            ));
+            self
+        }
+
+        /// `send_message` 遇到含 `needle` 的內容時回這個錯誤。
+        pub fn reject_plain_containing(self, needle: &str, code: i64, description: &str) -> Self {
+            self.plain_rejections.lock().unwrap().push((
+                needle.to_string(),
+                code,
+                description.to_string(),
+            ));
+            self
+        }
+
         pub fn with_message_drafts(self) -> Self {
             *self.drafts_enabled.lock().unwrap() = true;
             self
@@ -442,6 +550,9 @@ pub mod mock {
             Ok(serde_json::json!({ "result": [] }))
         }
         async fn send_message(&self, chat_id: i64, text: &str) -> Result<i64, TgError> {
+            if let Some(err) = rejection(&self.plain_rejections, text) {
+                return Err(err);
+            }
             self.sent.lock().unwrap().push(Sent {
                 chat_id,
                 text: text.to_string(),
@@ -450,6 +561,9 @@ pub mod mock {
             Ok(self.alloc_id())
         }
         async fn send_message_html(&self, chat_id: i64, html: &str) -> Result<i64, TgError> {
+            if let Some(err) = rejection(&self.html_rejections, html) {
+                return Err(err);
+            }
             self.sent.lock().unwrap().push(Sent {
                 chat_id,
                 text: html.to_string(),
@@ -679,5 +793,140 @@ mod check_ok_tests {
     #[test]
     fn rejects_missing_ok_field() {
         assert!(check_ok(json!({"result": {}})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 2026-11-16 實機回應（issue-0032 implementation-plan 步驟 1）。
+    fn api_error(code: i64, description: &str) -> TgError {
+        check_ok(serde_json::json!({
+            "ok": false,
+            "error_code": code,
+            "description": description,
+        }))
+        .unwrap_err()
+    }
+
+    #[test]
+    fn html_parse_failures_from_telegram_are_recognised() {
+        for desc in [
+            "Bad Request: can't parse entities: Unsupported start tag \"think\" at byte offset 13",
+            "Bad Request: can't parse entities: Can't find end tag corresponding to start tag \"b\"",
+            "Bad Request: can't parse entities: Unexpected end tag at byte offset 14",
+            "Bad Request: can't parse entities: Unclosed start tag at byte offset 13",
+        ] {
+            assert!(is_html_parse_error(&api_error(400, desc)), "{desc}");
+        }
+    }
+
+    #[test]
+    fn other_errors_are_not_html_parse_failures() {
+        assert!(!is_html_parse_error(&api_error(
+            400,
+            "Bad Request: chat not found"
+        )));
+        assert!(!is_html_parse_error(&api_error(
+            400,
+            "Bad Request: text must be non-empty"
+        )));
+        assert!(!is_html_parse_error(&api_error(
+            403,
+            "Forbidden: bot was blocked by the user"
+        )));
+        assert!(!is_html_parse_error(&TgError::Http(
+            "error sending request: connection refused".to_string()
+        )));
+    }
+
+    #[test]
+    fn html_to_plain_strips_tags_unescapes_and_spells_out_links() {
+        let cases = [
+            ("<b>粗</b> <i>斜</i> <code>x</code>", "粗 斜 x"),
+            ("a &lt; b &amp;&amp; c &gt; d", "a < b && c > d"),
+            (
+                r#"<a href="https://x.io/?a=1&amp;b=2">docs</a>"#,
+                "docs (https://x.io/?a=1&b=2)",
+            ),
+            (
+                "第一行\n  ◦ 子項\n<blockquote>引言</blockquote>",
+                "第一行\n  ◦ 子項\n引言",
+            ),
+            ("&amp;lt; 只還原一次", "&lt; 只還原一次"),
+        ];
+        for (html, want) in cases {
+            assert_eq!(html_to_plain(html), want, "{html}");
+        }
+    }
+
+    const PARSE_ERROR: &str =
+        "Bad Request: can't parse entities: Unsupported start tag \"think\" at byte offset 13";
+
+    fn sent(client: &mock::MockTgClient) -> Vec<(bool, String)> {
+        client
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| (s.html, s.text.clone()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn rejected_html_is_resent_as_plain_text() {
+        let client = mock::MockTgClient::default().reject_html_containing("<b>", 400, PARSE_ERROR);
+        let id = send_html_with_plain_fallback(&client, 7, "<b>粗</b> a &lt; b", "answer")
+            .await
+            .unwrap();
+        assert_eq!(id, 1);
+        assert_eq!(sent(&client), vec![(false, "粗 a < b".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn accepted_html_is_sent_once_without_fallback() {
+        let client = mock::MockTgClient::default();
+        send_html_with_plain_fallback(&client, 7, "<b>粗</b>", "answer")
+            .await
+            .unwrap();
+        assert_eq!(sent(&client), vec![(true, "<b>粗</b>".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn other_errors_are_returned_without_resending() {
+        let client = mock::MockTgClient::default().reject_html_containing(
+            "<b>",
+            400,
+            "Bad Request: chat not found",
+        );
+        let err = send_html_with_plain_fallback(&client, 7, "<b>粗</b>", "answer")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("chat not found"), "{err}");
+        assert!(sent(&client).is_empty());
+    }
+
+    #[tokio::test]
+    async fn plain_resend_failure_is_returned() {
+        let client = mock::MockTgClient::default()
+            .reject_html_containing("<b>", 400, PARSE_ERROR)
+            .reject_plain_containing("粗", 429, "Too Many Requests: retry after 5");
+        let err = send_html_with_plain_fallback(&client, 7, "<b>粗</b>", "answer")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Too Many Requests"), "{err}");
+        assert!(sent(&client).is_empty());
+    }
+
+    #[test]
+    fn fallback_warning_names_the_caller_and_reason_but_not_the_content() {
+        let warning = fallback_warning("schedule", &api_error(400, PARSE_ERROR));
+        assert!(warning.contains("schedule"), "{warning}");
+        assert!(
+            warning.contains("can't parse entities: Unsupported start tag"),
+            "{warning}"
+        );
+        assert!(!warning.contains("<b>粗</b>"), "{warning}");
     }
 }
