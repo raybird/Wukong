@@ -74,9 +74,11 @@ pulldown-cmark 把整個標籤（含屬性值）、整段註解、處理指令�
 | 2026-11-16 | GitHub #34 建立（#31 TBD-7 另開） | - |
 | 2026-11-16 | 建立 issue 文件；AC-1～AC-4 核准（Q1、Q2 照建議） | - |
 | 2026-11-16 | PR #37 第一輪第三方審查（6c2b8c6）建議 Request Changes：https://github.com/raybird/Wukong/pull/37#issuecomment-6910241669 ；P1 ×1、P2 ×1 實跑重現，屬已核准 AC 範圍內的修正（步驟 5） | - |
+| 2026-11-16 | PR #37 第二輪第三方審查（ec9cc47）APPROVE：https://github.com/raybird/Wukong/pull/37#issuecomment-6910585353 ；第一輪 P1、P2 皆已修正，無新發現；非阻擋提醒：workspace 首次執行的不明失敗持續觀察 flaky test | - |
+| 2026-11-16 | PR #37 squash 合併進 main（7783d0d），#34 關閉；結案 | - |
 
 ---
 **建立日期**: 2026-11-16  
 **分級**: Small  
 **風險**: Low\
-**狀態**: 待實作
+**狀態**: 已完成
