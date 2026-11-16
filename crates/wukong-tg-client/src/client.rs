@@ -855,6 +855,11 @@ mod tests {
                 "第一行\n  ◦ 子項\n引言",
             ),
             ("&amp;lt; 只還原一次", "&lt; 只還原一次"),
+            // wukong-render 對含雙引號的網址實際輸出這個；Telegram 以解析失敗拒收（#36）。
+            (
+                r#"<a href="https://x.io/a"b">docs</a>"#,
+                r#"docs (https://x.io/a"b)"#,
+            ),
         ];
         for (html, want) in cases {
             assert_eq!(html_to_plain(html), want, "{html}");

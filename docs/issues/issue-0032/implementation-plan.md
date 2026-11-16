@@ -82,6 +82,12 @@
    - 相依：步驟 4（步驟 5 不改程式碼時不需重跑）
    - 完成證據（2026-11-16）：三份文件已更新；`cargo fmt --all -- --check` 通過；`cargo clippy --all-targets --locked -- -D warnings` 無警告；`cargo test --workspace --locked` 740 passed、0 failed（main 為 728，新增 12）
 
+7. ✅ **PR #35 第一輪審查處理**（SCN-003、SCN-004；README TBD-2～TBD-5）
+   - 審查：2026-11-16 第三方審查 https://github.com/raybird/Wukong/pull/35#issuecomment-6907242018 （基線 e353b84），Conditional Approve：P0／P1 無，P2 ×2、P3 ×1，另列 3 項後續候選
+   - 查證（2026-11-16）：scratchpad 的暫時程式（path 依賴 `wukong-render`，未進 repo）渲染含雙引號的網址：`[docs](https://x.io/a"b)`、`[docs](<https://x.io/a"b>)`、`<https://x.io/a"b>` 都輸出 `<a href="https://x.io/a"b">…</a>`；網址含 `>`、`<` 時輸出 `&gt;`、`&lt;`。以步驟 1 的方式實送 `<a href="https://x.io/a"b">docs</a>`，Telegram 回 `400 Bad Request: can't parse entities: Empty attribute name in the tag "a" at byte offset 13`，屬解析失敗、會觸發退回。審查舉的少了結尾引號的寫法，render 產生不出來
+   - 處理：依使用者 2026-11-16 的四題回答——SCN-004 修訂為錯誤描述照原樣記錄、不含訊息本文（程式不改）；`html_to_plain` 的測試加上 render 實際會產生的雙引號連結，期望值手寫為 `docs (https://x.io/a"b)`；mock 不加嘗試紀錄；後續候選開 #36
+   - 完成證據（2026-11-16）：新增的案例在 e353b84 的實作上直接通過（刻畫既有行為，程式未改，所以沒有紅燈階段）；`cargo fmt --all -- --check` 通過；`cargo clippy --all-targets --locked -- -D warnings` 無警告；`cargo test --workspace --locked` 740 passed、0 failed（案例加在既有測試內，測試數不變）
+
 ## 使用方式對照
 
 | 情境 | 變更前 | 變更後 |
