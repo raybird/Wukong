@@ -104,14 +104,15 @@ const BULLETS: [&str; 3] = ["• ", "◦ ", "▪ "];
 /// code spans and code blocks stay. Nested blocks are counted by depth; an
 /// unclosed block runs to the end of the message. Think tags written inside
 /// another tag's quoted attribute value, a comment, a processing instruction,
-/// CDATA or a declaration are content, not tags (issue-0034).
+/// CDATA or a declaration are content, not tags (issue-0034). An HTML block is
+/// scanned as a whole, not per line event, so those constructs may span lines.
 fn strip_think(markdown: &str, opts: Options) -> String {
     const OPEN: &str = "<think>";
     const CLOSE: &str = "</think>";
     let mut ranges = Vec::new();
     let (mut depth, mut start) = (0usize, 0usize);
     for (ev, range) in Parser::new_ext(markdown, opts).into_offset_iter() {
-        if !matches!(ev, Event::Html(_) | Event::InlineHtml(_)) {
+        if !matches!(ev, Event::Start(Tag::HtmlBlock) | Event::InlineHtml(_)) {
             continue;
         }
         let fragment = &markdown[range.clone()];
@@ -921,6 +922,10 @@ mod tests {
         for md in [
             "<div>\n<b title=\"x> <think>secret</think> 後\n</div>\n\n答案",
             "<div>\n<!-- x <think>secret</think> 後\n</div>\n\n答案",
+            // PR #37 審查：跨行時同樣不外露。
+            "<div>\n<!--\n<think>secret</think>\n</div>\n\n答案",
+            "<!--\n<think>secret</think>\n\n答案",
+            "> <div title=\"\n> <think>secret</think>\n\n答案",
         ] {
             let out = to_telegram_html(md).join("");
             assert!(
@@ -988,6 +993,58 @@ mod tests {
             (
                 "<think>\n推理 <![CDATA[</think>]]>\n更多\n</think>\n\n答案",
                 "答案",
+            ),
+        ];
+        for (md, expected) in cases {
+            assert_eq!(to_telegram_html(md).join(""), expected, "input: {md:?}");
+        }
+    }
+
+    // issue-0034 AC-1～AC-3（PR #37 審查 P1、P2）：HTML 區塊逐行切成多個事件，跨行的屬性值、
+    // 註解、處理指令、CDATA、宣告仍視為一個整體；行內跨行的寫法本來就是單一事件。
+    #[test]
+    fn telegram_ignores_think_inside_multiline_html_constructs() {
+        let cases = [
+            (
+                "<think>\n內部推理\n<!--\n</think>\n-->\n不應顯示的推理內容\n</think>\n\n正常回答",
+                "正常回答",
+            ),
+            (
+                "<think>\n推理\n<div title=\"\n</think>\n\">\n不應顯示\n</think>\n\n正常回答",
+                "正常回答",
+            ),
+            (
+                "<div title=\"\n<think>\n\">\n正常內容\n</div>\n\n後續正常回答",
+                "&lt;div title=\"\n&lt;think&gt;\n\"&gt;\n正常內容\n&lt;/div&gt;\n後續正常回答",
+            ),
+            (
+                "<div title='\n<think>\n'>\n正常內容\n</div>\n\n後續正常回答",
+                "&lt;div title='\n&lt;think&gt;\n'&gt;\n正常內容\n&lt;/div&gt;\n後續正常回答",
+            ),
+            (
+                "<!--\n<think>\n-->\n\n後續正常回答",
+                "&lt;!--\n&lt;think&gt;\n--&gt;\n後續正常回答",
+            ),
+            (
+                "<?pi\n<think>\n?>\n\n答案",
+                "&lt;?pi\n&lt;think&gt;\n?&gt;\n答案",
+            ),
+            (
+                "<![CDATA[\n<think>\n]]>\n\n答案",
+                "&lt;![CDATA[\n&lt;think&gt;\n]]&gt;\n答案",
+            ),
+            ("<!X\n<think>\n\n答案", "&lt;!X\n&lt;think&gt;\n答案"),
+            (
+                "> <!--\n> <think>\n> -->\n\n後續正常回答",
+                "<blockquote>&lt;!--\n&lt;think&gt;\n--&gt;\n</blockquote>\n後續正常回答",
+            ),
+            (
+                "前文 <span title=\"\n<think>\n\">文字</span>\n\n後續正常回答",
+                "前文 &lt;span title=\"\n&lt;think&gt;\n\"&gt;文字&lt;/span&gt;\n\n後續正常回答",
+            ),
+            (
+                "前文<think>推理 <!--\n</think>\n--> 更多</think>後文",
+                "前文後文",
             ),
         ];
         for (md, expected) in cases {

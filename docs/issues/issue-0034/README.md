@@ -60,12 +60,20 @@ pulldown-cmark 把整個標籤（含屬性值）、整段註解、處理指令�
    - 完成判準：三道命令全綠，CHANGELOG 已更新
    - 完成證據（2026-11-16）：`cargo fmt --all -- --check` 通過；`cargo clippy --all-targets --locked -- -D warnings` 無警告；`cargo test --workspace --locked` 743 passed、0 failed。`CHANGELOG.md` `[Unreleased]` Fixed 新增一則（#34），`docs/entrypoints.md`「格式渲染」補上屬性值與註解類寫法照常顯示
 
+5. ✅ **PR #37 第一輪審查修正（跨行寫法）** — 驗證方式：先把審查的案例寫成測試、在 6c2b8c6 的實作上紅燈，改完後全綠
+   - 審查：2026-11-16 第三方審查 https://github.com/raybird/Wukong/pull/37#issuecomment-6910241669 ，建議 Request Changes：P1 think 區塊裡跨行註解中的結尾標籤讓 think 提早結束、推理外露；P2 跨行的屬性值與註解仍截掉後面的回答。審查者註明為靜態推演、未實跑
+   - 重現（2026-11-16，scratchpad `repro34` 釘在 repo 鎖定的 pulldown-cmark 0.12.2）：HTML 區塊被切成一行一個 `Html` 事件，例如 `<!--\n<think>\n-->` 是 `<!--\n`、`<think>\n`、`-->\n` 三個事件，跨行的註解、屬性值、處理指令、CDATA 在單一事件內都沒有結尾。P1 案例實際輸出 `--&gt;\n不應顯示的推理內容\n&lt;/think&gt;\n\n正常回答`；P2 兩例分別輸出 `&lt;div title="` 與 `&lt;!--`。段落裡跨行的寫法是單一 `InlineHtml` 事件（例如 `<!--\n<think>\n-->`），改動前就正確。6c2b8c6 之前的程式對 P1 案例同樣外露，不是本 PR 造成的回歸，但不符 AC-3；這些案例都在已核准的 AC-1～AC-3 文字範圍內（AC-2 已寫「行內與區塊兩種位置」），不需重新核准
+   - 做法：`strip_think` 改以 `Start(HtmlBlock)` 的範圍把整個 HTML 區塊當成一個片段掃描，不再掃描逐行的 `Html` 事件；`InlineHtml` 照舊。區塊範圍含引言、清單的前綴字元，只出現在被跳過的寫法內部或寫法之間，不影響判斷。沒有結尾的寫法仍只前進一個字元（TBD-1）
+   - NOTE（2026-11-16）：步驟 3「在每個 raw HTML 事件的片段內」對 HTML 區塊改為整個區塊一個片段
+   - 完成證據（2026-11-16）：新增 `telegram_ignores_think_inside_multiline_html_constructs`（11 組：審查的三例、think 區塊內跨行屬性值、單引號、處理指令、CDATA、宣告、引言內註解、兩組行內跨行），期望值同樣取自 think 換成 thonk 的對照組；`telegram_drops_standalone_think_inside_html_block` 補 3 組跨行安全案例（沒有結尾的跨行註解、引號之後的真正 think 仍拿掉，`secret` 不外露），改動前已實跑通過，屬既有行為刻畫。紅燈：`cargo test -p wukong-render --locked` 36 passed、1 failed，首組 `left: "--&gt;\n不應顯示的推理內容\n&lt;/think&gt;\n\n正常回答"`；改動後 37 passed、0 failed。交付檢查：`cargo fmt --all -- --check` 通過；`cargo clippy --all-targets --locked -- -D warnings` 無警告；`cargo test --workspace --locked` 第一次有 1 個失敗、cargo 在該 crate 停下（只統計到 193 passed，失敗名稱未保存），之後連續兩次完整重跑皆 744 passed、0 failed，`wukong-render` 每次都全綠
+
 ## Timeline
 
 | 日期 | 異動 | 負責人 |
 |------|------|--------|
 | 2026-11-16 | GitHub #34 建立（#31 TBD-7 另開） | - |
 | 2026-11-16 | 建立 issue 文件；AC-1～AC-4 核准（Q1、Q2 照建議） | - |
+| 2026-11-16 | PR #37 第一輪第三方審查（6c2b8c6）建議 Request Changes：https://github.com/raybird/Wukong/pull/37#issuecomment-6910241669 ；P1 ×1、P2 ×1 實跑重現，屬已核准 AC 範圍內的修正（步驟 5） | - |
 
 ---
 **建立日期**: 2026-11-16  
