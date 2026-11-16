@@ -102,7 +102,9 @@ const BULLETS: [&str; 3] = ["• ", "◦ ", "▪ "];
 /// so the renderer only ever sees a complete document and its output stays
 /// balanced. Tags are looked for only in raw-HTML events, so examples inside
 /// code spans and code blocks stay. Nested blocks are counted by depth; an
-/// unclosed block runs to the end of the message.
+/// unclosed block runs to the end of the message. Think tags written inside
+/// another tag's quoted attribute value, a comment, a processing instruction,
+/// CDATA or a declaration are content, not tags (issue-0034).
 fn strip_think(markdown: &str, opts: Options) -> String {
     const OPEN: &str = "<think>";
     const CLOSE: &str = "</think>";
@@ -113,18 +115,24 @@ fn strip_think(markdown: &str, opts: Options) -> String {
             continue;
         }
         let fragment = &markdown[range.clone()];
-        for (i, _) in fragment.match_indices('<') {
-            let at = range.start + i;
-            if fragment[i..].starts_with(OPEN) {
+        let mut i = 0;
+        while let Some(found) = fragment[i..].find('<') {
+            i += found;
+            let rest = &fragment[i..];
+            if rest.starts_with(OPEN) {
                 if depth == 0 {
-                    start = at;
+                    start = range.start + i;
                 }
                 depth += 1;
-            } else if depth > 0 && fragment[i..].starts_with(CLOSE) {
+                i += OPEN.len();
+            } else if depth > 0 && rest.starts_with(CLOSE) {
                 depth -= 1;
                 if depth == 0 {
-                    ranges.push(start..at + CLOSE.len());
+                    ranges.push(start..range.start + i + CLOSE.len());
                 }
+                i += CLOSE.len();
+            } else {
+                i += markup_len(rest);
             }
         }
     }
@@ -139,6 +147,46 @@ fn strip_think(markdown: &str, opts: Options) -> String {
     }
     visible.push_str(&markdown[kept_from..]);
     visible
+}
+
+/// Length of the comment, processing instruction, CDATA, declaration or tag
+/// that `s` (starting with `<`) opens, so a `<` inside it is not read as a tag.
+/// Only constructs that end inside `s` count; anything else is 1, so an
+/// unterminated quote or comment can never hide a later think tag.
+fn markup_len(s: &str) -> usize {
+    let until = |from: usize, end: &str| s[from..].find(end).map_or(1, |p| from + p + end.len());
+    if s.starts_with("<!--") {
+        return until(4, "-->");
+    }
+    if s.starts_with("<?") {
+        return until(2, "?>");
+    }
+    if s.starts_with("<![CDATA[") {
+        return until(9, "]]>");
+    }
+    if s.starts_with("<!") {
+        return until(2, ">");
+    }
+    let name = s.strip_prefix("</").unwrap_or(&s[1..]);
+    if !name.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        return 1;
+    }
+    // Quotes open an attribute value only right after `=` (spaces allowed).
+    let (mut quote, mut prev) = (None, '<');
+    for (i, c) in s.char_indices().skip(1) {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if (c == '"' || c == '\'') && prev == '=' => quote = Some(c),
+            None if c == '>' => return i + 1,
+            None if c == '<' => return 1,
+            None => {}
+        }
+        if !c.is_whitespace() {
+            prev = c;
+        }
+    }
+    1
 }
 
 /// Walk markdown events and emit a Telegram HTML-subset string.
@@ -859,6 +907,92 @@ mod tests {
             to_telegram_html(md).join(""),
             "inline <code>&lt;think&gt;x&lt;/think&gt;</code> 保留\n\n<pre>&lt;think&gt;y&lt;/think&gt;\n</pre>"
         );
+    }
+
+    // issue-0034 AC-4：HTML 區塊裡獨立的 think 標籤照樣連同內容拿掉。
+    #[test]
+    fn telegram_drops_standalone_think_inside_html_block() {
+        let md = "<div>\n前文 <think>x</think> 後\n</div>\n\n答案";
+        assert_eq!(
+            to_telegram_html(md).join(""),
+            "&lt;div&gt;\n前文  後\n&lt;/div&gt;\n答案"
+        );
+        // 沒有結尾的引號或註解不會把後面真正的 think 藏起來而讓推理外露。
+        for md in [
+            "<div>\n<b title=\"x> <think>secret</think> 後\n</div>\n\n答案",
+            "<div>\n<!-- x <think>secret</think> 後\n</div>\n\n答案",
+        ] {
+            let out = to_telegram_html(md).join("");
+            assert!(
+                !out.contains("secret") && out.ends_with("答案"),
+                "{md:?}: {out}"
+            );
+        }
+    }
+
+    // issue-0034 AC-1、AC-2：屬性值、註解、處理指令、CDATA、宣告裡的 think 字串不算標籤，
+    // 後面的回答完整輸出，這些寫法照原本跳脫後顯示。期望值取自把 think 換成其他字的輸出。
+    #[test]
+    fn telegram_ignores_think_inside_attributes_and_comments() {
+        let cases = [
+            (
+                "前文 <span title=\"<think>\">文字</span>\n\n後續正常回答",
+                "前文 &lt;span title=\"&lt;think&gt;\"&gt;文字&lt;/span&gt;\n\n後續正常回答",
+            ),
+            (
+                "<div title=\"<think>\">\n\n後續正常回答",
+                "&lt;div title=\"&lt;think&gt;\"&gt;\n後續正常回答",
+            ),
+            (
+                "前文 <span title='<think>'>文字</span> 後文",
+                "前文 &lt;span title='&lt;think&gt;'&gt;文字&lt;/span&gt; 後文",
+            ),
+            (
+                "前文 <!-- <think> -->\n\n後續正常回答",
+                "前文 &lt;!-- &lt;think&gt; --&gt;\n\n後續正常回答",
+            ),
+            (
+                "<!-- <think> -->\n\n後續正常回答",
+                "&lt;!-- &lt;think&gt; --&gt;\n後續正常回答",
+            ),
+            (
+                "前文 <?pi <think> ?> 後\n\n答案",
+                "前文 &lt;?pi &lt;think&gt; ?&gt; 後\n\n答案",
+            ),
+            (
+                "前文 <![CDATA[<think>]]> 後\n\n答案",
+                "前文 &lt;![CDATA[&lt;think&gt;]]&gt; 後\n\n答案",
+            ),
+            (
+                "前文 <!X <think> 後\n\n答案",
+                "前文 &lt;!X &lt;think&gt; 後\n\n答案",
+            ),
+        ];
+        for (md, expected) in cases {
+            assert_eq!(to_telegram_html(md).join(""), expected, "input: {md:?}");
+        }
+    }
+
+    // issue-0034 AC-3：think 區塊內，屬性值或註解裡的結尾標籤字串不會讓 think 提早結束。
+    #[test]
+    fn telegram_think_is_not_closed_by_end_tag_inside_attribute_or_comment() {
+        let cases = [
+            (
+                "前文<think>推理 <span title=\"</think>\">內</span> 更多</think>後文",
+                "前文後文",
+            ),
+            (
+                "前文<think>推理 <!-- </think> --> 更多</think>後文",
+                "前文後文",
+            ),
+            (
+                "<think>\n推理 <![CDATA[</think>]]>\n更多\n</think>\n\n答案",
+                "答案",
+            ),
+        ];
+        for (md, expected) in cases {
+            assert_eq!(to_telegram_html(md).join(""), expected, "input: {md:?}");
+        }
     }
 
     // issue-0031 AC-7：清單項目裡的接續段落與換行，縮到該項文字的位置。
