@@ -124,7 +124,7 @@ Feature: Telegram 拒收 HTML 時改以純文字送達
 ```
 
 ## Gherkin 核准紀錄
-- **核准 commit**: 待提交
+- **核准 commit**: e8dc29a
 - **核准來源**: 使用者 2026-11-16 對話以 `/dev-cycle issue:32` 推進本 issue，同日對四題建議全部照選：觸發條件「只限 HTML 解析失敗」（純文字也失敗時兩個呼叫端維持現況）→ SCN-001、SCN-002、SCN-005、SCN-006；純文字內容「把該段 HTML 轉成純文字」→ SCN-003；告知方式「只記一行 stderr 警告」→ SCN-004；實機探測「可以，照 #31 做法」→ SCN-008。SCN-007 為現況不變的回歸條件。同日實機探測後修訂 SCN-008 的樣本列表（TBD-1），使用者選「照修訂核准」；同日 PR #35 第一輪審查後修訂 SCN-004（TBD-3），使用者選「修訂 SCN-004」
 
 | Scenario | 核准日期 | 狀態 |
@@ -164,6 +164,7 @@ Feature: Telegram 拒收 HTML 時改以純文字送達
 | 2026-11-16 | 建立 issue 文件；SCN-001～SCN-008 核准（四題照建議） | - |
 | 2026-11-16 | 實機探測後修訂 SCN-008 樣本列表（不合法的實體不會被拒），SCN-008 待重新核准（TBD-1）；同日重新核准（「照修訂核准」） | - |
 | 2026-11-16 | PR #35 第一輪第三方審查（e353b84）Conditional Approve：https://github.com/raybird/Wukong/pull/35#issuecomment-6907242018 ；P2 ×2、P3 ×1 逐題確認（TBD-2～TBD-4），SCN-004 修訂並核准；後續候選另開 #36（TBD-5） | - |
+| 2026-11-16 | PR #35 第二輪第三方審查（BASE 2f4d914、HEAD e8dc29a，patch-id 9ee79b1f15ae2f094b67751c6c7c0a01e5eefa08）Approve，判定 PASS：https://github.com/raybird/Wukong/pull/35#issuecomment-6908976361 ；第一輪三項 Closed（TBD-2～TBD-4 的處置照收），無新發現；審查限制為靜態審查，未重跑測試與實機；核准 commit 回填 e8dc29a | - |
 
 ---
 **建立日期**: 2026-11-16  
