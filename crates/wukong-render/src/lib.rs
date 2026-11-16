@@ -1,7 +1,7 @@
 //! wukong-render: render LLM markdown into transport-specific formats.
 //! Telegram now (HTML subset); web (to_web_html) reserved for later.
 
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 /// Escape the three characters Telegram's HTML parse_mode is sensitive to.
 fn escape_html(s: &str) -> String {
@@ -93,12 +93,61 @@ pub fn to_web_html(markdown: &str) -> String {
     html.trim().to_string()
 }
 
+/// Indent added per nested list level in Telegram output.
+const LIST_INDENT: &str = "  ";
+/// Bullet per nesting level; deeper levels reuse the last one.
+const BULLETS: [&str; 3] = ["• ", "◦ ", "▪ "];
+
+/// Cut `<think>…</think>` regions out of the markdown source before rendering,
+/// so the renderer only ever sees a complete document and its output stays
+/// balanced. Tags are looked for only in raw-HTML events, so examples inside
+/// code spans and code blocks stay. Nested blocks are counted by depth; an
+/// unclosed block runs to the end of the message.
+fn strip_think(markdown: &str, opts: Options) -> String {
+    const OPEN: &str = "<think>";
+    const CLOSE: &str = "</think>";
+    let mut ranges = Vec::new();
+    let (mut depth, mut start) = (0usize, 0usize);
+    for (ev, range) in Parser::new_ext(markdown, opts).into_offset_iter() {
+        if !matches!(ev, Event::Html(_) | Event::InlineHtml(_)) {
+            continue;
+        }
+        let fragment = &markdown[range.clone()];
+        for (i, _) in fragment.match_indices('<') {
+            let at = range.start + i;
+            if fragment[i..].starts_with(OPEN) {
+                if depth == 0 {
+                    start = at;
+                }
+                depth += 1;
+            } else if depth > 0 && fragment[i..].starts_with(CLOSE) {
+                depth -= 1;
+                if depth == 0 {
+                    ranges.push(start..at + CLOSE.len());
+                }
+            }
+        }
+    }
+    if depth > 0 {
+        ranges.push(start..markdown.len());
+    }
+    let mut visible = String::with_capacity(markdown.len());
+    let mut kept_from = 0;
+    for r in ranges {
+        visible.push_str(&markdown[kept_from..r.start]);
+        kept_from = r.end;
+    }
+    visible.push_str(&markdown[kept_from..]);
+    visible
+}
+
 /// Walk markdown events and emit a Telegram HTML-subset string.
 fn render_html(markdown: &str) -> String {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
-    let parser = Parser::new_ext(markdown, opts);
+    let markdown = strip_think(markdown, opts);
+    let parser = Parser::new_ext(&markdown, opts);
 
     let mut out = String::new();
     // Table accumulation state.
@@ -108,6 +157,13 @@ fn render_html(markdown: &str) -> String {
     let mut cell = String::new();
     // True while inside a link whose scheme was rejected: emit the text, no anchor.
     let mut link_stripped = false;
+    // One entry per open list: None = bullet list, Some(n) = next item number.
+    let mut lists: Vec<Option<u64>> = Vec::new();
+    // One entry per open list item: the column where its text starts, so
+    // continuation lines and paragraphs line up under it.
+    let mut item_cols: Vec<usize> = Vec::new();
+    // Telegram HTML has no nested blockquote; only the outermost level is emitted.
+    let mut quote_depth = 0usize;
 
     for ev in parser {
         if in_table {
@@ -135,14 +191,57 @@ fn render_html(markdown: &str) -> String {
             Event::End(TagEnd::Emphasis) => out.push_str("</i>"),
             Event::Start(Tag::Strikethrough) => out.push_str("<s>"),
             Event::End(TagEnd::Strikethrough) => out.push_str("</s>"),
+            Event::Start(Tag::Heading {
+                level: HeadingLevel::H1,
+                ..
+            }) => out.push_str("<u><b>"),
+            Event::End(TagEnd::Heading(HeadingLevel::H1)) => out.push_str("</b></u>\n"),
             Event::Start(Tag::Heading { .. }) => out.push_str("<b>"),
             Event::End(TagEnd::Heading(_)) => out.push_str("</b>\n"),
-            Event::Start(Tag::BlockQuote(_)) => out.push_str("<blockquote>"),
-            Event::End(TagEnd::BlockQuote(_)) => out.push_str("</blockquote>\n"),
+            Event::Start(Tag::BlockQuote(_)) => {
+                quote_depth += 1;
+                if quote_depth == 1 {
+                    out.push_str("<blockquote>");
+                }
+            }
+            Event::End(TagEnd::BlockQuote(_)) => {
+                quote_depth -= 1;
+                if quote_depth == 0 {
+                    out.push_str("</blockquote>\n");
+                }
+            }
             Event::Start(Tag::CodeBlock(_)) => out.push_str("<pre>"),
             Event::End(TagEnd::CodeBlock) => out.push_str("</pre>\n"),
-            Event::Start(Tag::Item) => out.push_str("• "),
-            Event::End(TagEnd::Item) => out.push('\n'),
+            Event::Start(Tag::List(start)) => {
+                // A nested list starts inside its parent item's line.
+                if !lists.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                lists.push(start);
+            }
+            Event::End(TagEnd::List(_)) => {
+                lists.pop();
+            }
+            Event::Start(Tag::Item) => {
+                let depth = lists.len().max(1);
+                let indent = LIST_INDENT.repeat(depth - 1);
+                let marker = match lists.last_mut() {
+                    Some(Some(n)) => {
+                        *n += 1;
+                        format!("{}. ", *n - 1)
+                    }
+                    _ => BULLETS[(depth - 1).min(BULLETS.len() - 1)].to_string(),
+                };
+                item_cols.push(indent.len() + marker.chars().count());
+                out.push_str(&indent);
+                out.push_str(&marker);
+            }
+            Event::End(TagEnd::Item) => {
+                item_cols.pop();
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
             Event::Start(Tag::Link { dest_url, .. }) => {
                 if is_safe_url(&dest_url) {
                     out.push_str(&format!(r#"<a href="{}">"#, escape_html(&dest_url)));
@@ -161,12 +260,23 @@ fn render_html(markdown: &str) -> String {
                 in_table = true;
                 table.clear();
             }
+            // A later paragraph of a list item starts on a fresh line.
+            Event::Start(Tag::Paragraph) => {
+                if let (Some(col), true) = (item_cols.last(), out.ends_with('\n')) {
+                    out.push_str(&" ".repeat(*col));
+                }
+            }
             Event::End(TagEnd::Paragraph) => out.push_str("\n\n"),
             Event::Code(t) => out.push_str(&format!("<code>{}</code>", escape_html(&t))),
             Event::Text(t) => out.push_str(&escape_html(&t)),
             // Raw HTML in the source is treated as literal text (escaped) for safety.
             Event::Html(t) | Event::InlineHtml(t) => out.push_str(&escape_html(&t)),
-            Event::SoftBreak | Event::HardBreak => out.push('\n'),
+            Event::SoftBreak | Event::HardBreak => {
+                out.push('\n');
+                if let Some(col) = item_cols.last() {
+                    out.push_str(&" ".repeat(*col));
+                }
+            }
             Event::Rule => out.push_str("——————\n"),
             _ => {}
         }
@@ -612,5 +722,154 @@ mod tests {
             "anchor emitted for unsafe url: {out}"
         );
         assert!(out.contains("click me"), "inner text dropped: {out}");
+    }
+
+    // issue-0031 AC-6：不含清單、標題、<think>、巢狀引言的輸入，輸出與改動前逐字相同。
+    // 期望值是 2026-11-13 改動前的程式實際輸出。
+    #[test]
+    fn telegram_output_unchanged_for_unaffected_structures() {
+        let cases = [
+            (
+                "**粗** *斜* ~~刪~~ `code` 文字 & < >",
+                "<b>粗</b> <i>斜</i> <s>刪</s> <code>code</code> 文字 &amp; &lt; &gt;",
+            ),
+            (
+                "```\nfn main() { a < b }\n```\n",
+                "<pre>fn main() { a &lt; b }\n</pre>",
+            ),
+            (
+                "| a | b |\n|---|---|\n| 1 | 2 |\n",
+                "<pre>a  b\n1  2\n</pre>",
+            ),
+            (
+                "[docs](https://x.io) 與 [bad](javascript:alert(1))",
+                "<a href=\"https://x.io\">docs</a> 與 bad",
+            ),
+            (
+                "> 單層引言\n> 第二行\n\n後文",
+                "<blockquote>單層引言\n第二行\n\n</blockquote>\n後文",
+            ),
+            (
+                "段落一\n\n---\n\n段落二\n第二行",
+                "段落一\n\n——————\n段落二\n第二行",
+            ),
+            ("文字 <u>底線</u> 結尾", "文字 &lt;u&gt;底線&lt;/u&gt; 結尾"),
+        ];
+        for (md, expected) in cases {
+            assert_eq!(to_telegram_html(md).join(""), expected, "input: {md:?}");
+        }
+    }
+
+    // issue-0031 AC-1：每項另起一行，子清單每層多縮 2 空白、符號依層級 •◦▪，編號保留原號碼。
+    #[test]
+    fn telegram_nested_lists_keep_lines_levels_and_numbers() {
+        let md = "3. 第三步\n4. 第四步\n   - 子項 A\n     - 孫項\n   - 子項 B\n";
+        assert_eq!(
+            to_telegram_html(md).join(""),
+            "3. 第三步\n4. 第四步\n  ◦ 子項 A\n    ▪ 孫項\n  ◦ 子項 B"
+        );
+        let md = "- a\n  1. x\n  2. y\n- b\n";
+        assert_eq!(to_telegram_html(md).join(""), "• a\n  1. x\n  2. y\n• b");
+        let md = "- 1\n  - 2\n    - 3\n      - 4\n";
+        assert_eq!(
+            to_telegram_html(md).join(""),
+            "• 1\n  ◦ 2\n    ▪ 3\n      ▪ 4"
+        );
+    }
+
+    // issue-0031 AC-2：H1 底線在粗體外層，H2～H6 只有粗體。
+    #[test]
+    fn telegram_h1_is_underlined_bold_and_lower_levels_are_bold() {
+        assert_eq!(
+            to_telegram_html("# 一級\n## 二級\n###### 六級").join(""),
+            "<u><b>一級</b></u>\n<b>二級</b>\n<b>六級</b>"
+        );
+    }
+
+    // issue-0031 AC-3：<think> 連同內容不輸出，前後文字照常輸出。
+    #[test]
+    fn telegram_drops_think_blocks_and_keeps_surrounding_text() {
+        let cases = [
+            ("前文\n\n<think>secret</think>\n\n後文", "前文\n\n後文"),
+            ("<think>\n推理一\n\n推理二\n</think>\n\n答案", "答案"),
+            ("答 <think>x</think>案", "答 案"),
+        ];
+        for (md, expected) in cases {
+            let out = to_telegram_html(md).join("");
+            assert!(!out.contains("think"), "think tag leaked for {md:?}: {out}");
+            assert_eq!(out, expected, "input: {md:?}");
+        }
+    }
+
+    // issue-0031 AC-4：巢狀引言攤平成一層，內文全部保留。
+    #[test]
+    fn telegram_flattens_nested_blockquotes() {
+        let out = to_telegram_html("> 引言\n> > 巢狀\n\n後文").join("");
+        assert_eq!(out.matches("<blockquote>").count(), 1, "{out}");
+        assert_eq!(out.matches("</blockquote>").count(), 1, "{out}");
+        assert!(
+            out.contains("引言") && out.contains("巢狀") && out.contains("後文"),
+            "{out}"
+        );
+    }
+
+    // issue-0031 AC-3（PR #33 審查 P1）：表格儲存格裡的 think 不外露，前後文字保留。
+    #[test]
+    fn telegram_drops_think_inside_table_cells() {
+        let md = "| 項目 | 內容 |\n|---|---|\n| A | <think>hidden reasoning</think>答案 |\n";
+        assert_eq!(
+            to_telegram_html(md).join(""),
+            "<pre>項目  內容\nA   答案\n</pre>"
+        );
+    }
+
+    // issue-0031 AC-3（PR #33 審查 P1）：think 跨引言或清單邊界時，輸出的標籤仍成對，
+    // 後面的清單照常編號。
+    #[test]
+    fn telegram_think_across_blocks_keeps_html_balanced() {
+        let out = to_telegram_html("> 引言 <think>隱藏內容\n\n</think>\n\n正常回答").join("");
+        assert_eq!(out, "<blockquote>引言\n\n</blockquote>\n正常回答");
+        let out = to_telegram_html("- 一 <think>隱藏\n\n- 二</think> 後文\n- 三\n\n1. 甲\n2. 乙\n")
+            .join("");
+        assert_eq!(out, "• 一  後文\n• 三\n1. 甲\n2. 乙");
+    }
+
+    // issue-0031 AC-3（PR #33 審查 P2）：巢狀與連續的 think 都拿掉；沒有結尾的 think
+    // 拿掉到訊息結尾，寧可少顯示也不外露推理。
+    #[test]
+    fn telegram_drops_nested_consecutive_and_unclosed_think() {
+        let cases = [
+            (
+                "<think>\n外層推理\n<think>內層推理</think>\n剩餘推理\n</think>\n\n最終答案",
+                "最終答案",
+            ),
+            ("前文<think>a</think>中<think>b</think>後", "前文中後"),
+            ("答案開頭\n\n<think>沒有結尾的推理\n\n更多\n", "答案開頭"),
+        ];
+        for (md, expected) in cases {
+            assert_eq!(to_telegram_html(md).join(""), expected, "input: {md:?}");
+        }
+    }
+
+    // issue-0031 AC-3（PR #33 審查 P2）：程式碼裡的 think 標籤是內容，照原本跳脫後保留。
+    #[test]
+    fn telegram_keeps_think_tags_inside_code() {
+        let md = "inline `<think>x</think>` 保留\n\n```\n<think>y</think>\n```\n";
+        assert_eq!(
+            to_telegram_html(md).join(""),
+            "inline <code>&lt;think&gt;x&lt;/think&gt;</code> 保留\n\n<pre>&lt;think&gt;y&lt;/think&gt;\n</pre>"
+        );
+    }
+
+    // issue-0031 AC-7：清單項目裡的接續段落與換行，縮到該項文字的位置。
+    #[test]
+    fn telegram_indents_continuation_lines_inside_list_items() {
+        let md = "- 第一項\n\n  第一項第二段\n\n  - 子項\n\n    子項第二段\n\n- 第二項\n";
+        assert_eq!(
+            to_telegram_html(md).join(""),
+            "• 第一項\n\n  第一項第二段\n\n  ◦ 子項\n\n    子項第二段\n\n• 第二項"
+        );
+        let md = "10. 步驟\n    說明\n";
+        assert_eq!(to_telegram_html(md).join(""), "10. 步驟\n    說明");
     }
 }
