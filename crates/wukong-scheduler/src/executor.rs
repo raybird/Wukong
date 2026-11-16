@@ -1454,8 +1454,9 @@ mod tests {
     async fn running_run_shows_phase_and_elapsed_seconds() {
         let memory = open_memory().await;
         let store = open_store().await;
-        // planner 與唯一一棒各 1.6 秒；lease 3 秒時每 1 秒更新一次進度。
-        let backend = SlowBackend::new(1600, vec![Ok("oracle"), Ok("完成")]);
+        // planner 與唯一一棒各 2.5 秒；lease 3 秒時每 1 秒更新一次進度。每個讀取點與它要讀到的
+        // 那次寫入、以及下一次換階段，都至少隔 0.7 秒，CI 上資料庫寫入變慢也不會讀到舊訊息。
+        let backend = SlowBackend::new(2500, vec![Ok("oracle"), Ok("完成")]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory: &memory,
@@ -1468,7 +1469,7 @@ mod tests {
         let probe = async {
             let start = tokio::time::Instant::now();
             let mut messages = Vec::new();
-            for at in [300u64, 1300, 2500] {
+            for at in [800u64, 1800, 3600] {
                 tokio::time::sleep_until(start + std::time::Duration::from_millis(at)).await;
                 let run = only_run(&store, &job).await;
                 assert_eq!(run.status, RunStatus::Running);
