@@ -8,7 +8,7 @@
 use wukong_chat_history::ChatHistoryStore;
 use wukong_runtime::util::now_unix;
 use wukong_scheduler::{ExecutionOutput, Job, JobKind};
-use wukong_tg_client::client::TgClient;
+use wukong_tg_client::client::{send_html_with_plain_fallback, TgClient};
 use wukong_tg_client::error::TgError;
 use wukong_tg_client::parse::chat_id_from_scope;
 
@@ -83,7 +83,7 @@ pub async fn notify_turn_result<C: TgClient + Sync>(
                 .await?;
         } else {
             for c in &chunks {
-                client.send_message_html(chat_id, c).await?;
+                send_html_with_plain_fallback(client, chat_id, c, "schedule").await?;
             }
         }
     } else {
@@ -187,6 +187,55 @@ mod tests {
         assert!(log[0].html);
         assert!(log[0].text.contains("⏰ 晨間報告"));
         assert!(log[0].text.contains("今天一切正常"));
+    }
+
+    const PARSE_ERROR: &str =
+        "Bad Request: can't parse entities: Unsupported start tag \"think\" at byte offset 13";
+
+    /// 超過 4096 bytes，切成兩段；只有第一段帶「⏰ 晨間報告」標頭。
+    fn two_chunk_result() -> ExecutionOutput {
+        ok(&"結果內容\n".repeat(400))
+    }
+
+    #[tokio::test]
+    async fn rejected_html_chunk_is_resent_as_plain_and_later_chunks_still_go_out() {
+        let client = MockTgClient::default().reject_html_containing("⏰", 400, PARSE_ERROR);
+        let sent = notify_turn_result(&client, &turn_job("user:tg-555"), &two_chunk_result())
+            .await
+            .unwrap();
+        assert!(sent);
+        let log = client.sent.lock().unwrap();
+        assert_eq!(log.len(), 2, "{log:?}");
+        assert!(!log[0].html);
+        assert!(log[0].text.starts_with("⏰ 晨間報告\n\n結果內容\n"));
+        assert!(log[1].html);
+        assert!(log[1].text.contains("結果內容"));
+    }
+
+    #[tokio::test]
+    async fn non_parse_error_still_aborts_delivery() {
+        let client = MockTgClient::default().reject_html_containing(
+            "⏰",
+            400,
+            "Bad Request: chat not found",
+        );
+        let err = notify_turn_result(&client, &turn_job("user:tg-555"), &two_chunk_result())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("chat not found"), "{err}");
+        assert!(client.sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_plain_resend_aborts_delivery() {
+        let client = MockTgClient::default()
+            .reject_html_containing("⏰", 400, PARSE_ERROR)
+            .reject_plain_containing("⏰", 429, "Too Many Requests: retry after 5");
+        let err = notify_turn_result(&client, &turn_job("user:tg-555"), &two_chunk_result())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Too Many Requests"), "{err}");
+        assert!(client.sent.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
