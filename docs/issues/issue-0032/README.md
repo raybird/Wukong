@@ -165,9 +165,10 @@ Feature: Telegram 拒收 HTML 時改以純文字送達
 | 2026-11-16 | 實機探測後修訂 SCN-008 樣本列表（不合法的實體不會被拒），SCN-008 待重新核准（TBD-1）；同日重新核准（「照修訂核准」） | - |
 | 2026-11-16 | PR #35 第一輪第三方審查（e353b84）Conditional Approve：https://github.com/raybird/Wukong/pull/35#issuecomment-6907242018 ；P2 ×2、P3 ×1 逐題確認（TBD-2～TBD-4），SCN-004 修訂並核准；後續候選另開 #36（TBD-5） | - |
 | 2026-11-16 | PR #35 第二輪第三方審查（BASE 2f4d914、HEAD e8dc29a，patch-id 9ee79b1f15ae2f094b67751c6c7c0a01e5eefa08）Approve，判定 PASS：https://github.com/raybird/Wukong/pull/35#issuecomment-6908976361 ；第一輪三項 Closed（TBD-2～TBD-4 的處置照收），無新發現；審查限制為靜態審查，未重跑測試與實機；核准 commit 回填 e8dc29a | - |
+| 2026-11-16 | PR #35 squash 合併進 main（380fedf），#32 關閉；結案 | - |
 
 ---
 **建立日期**: 2026-11-16  
 **分級**: Medium — 跨 `wukong-tg-client`、`wukong-telegram`、`wukong-schedulerd`，沿既有相依方向，沒有 schema 變更（project.md 規模判定）  
 **風險**: Medium\
-**狀態**: 待實作
+**狀態**: 已完成
