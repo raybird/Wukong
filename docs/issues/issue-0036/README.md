@@ -84,9 +84,11 @@
 | 2026-11-18 | 建立 issue 文件；三項實跑重現；AC-1～AC-4 核准（Q1～Q4 照建議） | - |
 | 2026-11-18 | 實送發現 Telegram 無聲丟掉網址含雙引號或角括號的連結（寫成實體也一樣）；AC-1 由 `&quot;` 修訂為百分比編碼並納入角括號，重新核准 | - |
 | 2026-11-18 | PR #40 第一輪第三方審查（5acbeaf）COMMENT：https://github.com/raybird/Wukong/pull/40#pullrequestreview-5954980917 ；P2 ×2、P3 ×1，屬已核准 AC 範圍內的補強（步驟 6） | - |
+| 2026-11-18 | PR #40 第二輪第三方審查（bb45c8f）COMMENT、建議合併：https://github.com/raybird/Wukong/pull/40#pullrequestreview-5956073298 ；第一輪 P2、P3 皆已補強或界定，無新發現；非阻擋提醒：`split_chunks` 在極小 `max` 下不保證不超限，屬已記錄的設計限制 | - |
+| 2026-11-18 | PR #40 squash 合併進 main（8cad848），#36 關閉；結案 | - |
 
 ---
 **建立日期**: 2026-11-18  
 **分級**: Small  
 **風險**: Low\
-**狀態**: 實作完成，待提交與審查
+**狀態**: 已完成
