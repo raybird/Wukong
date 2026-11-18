@@ -190,6 +190,13 @@ fn markup_len(s: &str) -> usize {
     1
 }
 
+/// Longest escaped `href` kept as a link. `split_chunks` reopens open tags on
+/// every chunk, so a longer one would leave almost no room for text in a
+/// 4096-byte message; such links are written out as `text (url)` instead.
+/// This is our own budget (about half a message), not a Bot API URL limit:
+/// a 2048-byte href was accepted as a link when sent on 2026-11-18 (#36).
+const MAX_HREF_BYTES: usize = 2048;
+
 /// Walk markdown events and emit a Telegram HTML-subset string.
 fn render_html(markdown: &str) -> String {
     let mut opts = Options::empty();
@@ -206,6 +213,9 @@ fn render_html(markdown: &str) -> String {
     let mut cell = String::new();
     // True while inside a link whose scheme was rejected: emit the text, no anchor.
     let mut link_stripped = false;
+    // Set while inside a link whose href is too long to reopen on every chunk:
+    // the text is emitted, then the URL in parentheses.
+    let mut link_plain: Option<String> = None;
     // One entry per open list: None = bullet list, Some(n) = next item number.
     let mut lists: Vec<Option<u64>> = Vec::new();
     // One entry per open list item: the column where its text starts, so
@@ -293,7 +303,19 @@ fn render_html(markdown: &str) -> String {
             }
             Event::Start(Tag::Link { dest_url, .. }) => {
                 if is_safe_url(&dest_url) {
-                    out.push_str(&format!(r#"<a href="{}">"#, escape_html(&dest_url)));
+                    // Telegram silently drops a link whose URL contains `"`, `<`
+                    // or `>` (even as entities); percent-encoded, it keeps it.
+                    let href = escape_html(
+                        &dest_url
+                            .replace('"', "%22")
+                            .replace('<', "%3C")
+                            .replace('>', "%3E"),
+                    );
+                    if href.len() > MAX_HREF_BYTES {
+                        link_plain = Some(escape_html(&dest_url));
+                    } else {
+                        out.push_str(&format!(r#"<a href="{href}">"#));
+                    }
                 } else {
                     link_stripped = true;
                 }
@@ -301,6 +323,8 @@ fn render_html(markdown: &str) -> String {
             Event::End(TagEnd::Link) => {
                 if link_stripped {
                     link_stripped = false;
+                } else if let Some(url) = link_plain.take() {
+                    out.push_str(&format!(" ({url})"));
                 } else {
                     out.push_str("</a>");
                 }
@@ -441,12 +465,23 @@ fn flush_balanced(cur: &mut String, stack: &[&str], chunks: &mut Vec<String>) {
     }
 }
 
-/// Largest char-boundary cut ≤ `avail`, preferring to break just after the last
-/// newline so we split on line boundaries when possible.
+/// If `cut` falls inside an entity (`&amp;`), the position of its `&`. Every
+/// `&` in rendered text starts an entity, because `escape_html` escapes it.
+fn entity_start(s: &str, cut: usize) -> Option<usize> {
+    let amp = s[..cut].rfind('&')?;
+    (!s[amp..cut].contains(';')).then_some(amp)
+}
+
+/// Largest char-boundary cut ≤ `avail` that does not split an entity,
+/// preferring to break just after the last newline so we split on line
+/// boundaries when possible.
 fn best_break(s: &str, avail: usize) -> usize {
     let mut hard = avail.min(s.len());
     while hard > 0 && !s.is_char_boundary(hard) {
         hard -= 1;
+    }
+    if let Some(amp) = entity_start(s, hard) {
+        hard = amp;
     }
     match s[..hard].rfind('\n') {
         Some(nl) => nl + 1,
@@ -455,8 +490,15 @@ fn best_break(s: &str, avail: usize) -> usize {
 }
 
 /// Split rendered Telegram HTML into chunks ≤ `max` bytes. Never splits a
-/// multi-byte character (Task 2.1) and never leaves a tag unclosed: open tags
-/// are closed at a chunk's end and reopened at the next chunk's start (Task 2.2).
+/// multi-byte character (Task 2.1) or an entity (#36) and never leaves a tag
+/// unclosed: open tags are closed at a chunk's end and reopened at the next
+/// chunk's start (Task 2.2).
+///
+/// The `max` guarantee needs room for the reopened tags, their closing tags
+/// and one character or entity. With less, a chunk takes one character or
+/// entity anyway and goes over `max`, so splitting still ends. For Telegram
+/// (`max` 4096) that cannot happen in practice: the only long tag is a link,
+/// capped by `MAX_HREF_BYTES`.
 fn split_chunks(html: &str, max: usize) -> Vec<String> {
     if html.len() <= max {
         return vec![html.to_string()];
@@ -494,10 +536,12 @@ fn split_chunks(html: &str, max: usize) -> Vec<String> {
                         cur.push_str(remaining);
                         break;
                     }
-                    if avail == 0 {
+                    let cut = best_break(remaining, avail);
+                    if cut == 0 {
                         // On a pathologically small budget the tags alone may fill
-                        // a fresh chunk; hard-slice one char-safe piece to guarantee
-                        // forward progress before flushing.
+                        // a fresh chunk, or leave no room for one char or entity;
+                        // hard-slice one char-safe piece to guarantee forward
+                        // progress before flushing.
                         if cur.len() <= reopen_len(&stack) {
                             let cap = max.saturating_sub(cur.len()).max(1);
                             let mut cut = cap.min(remaining.len());
@@ -507,6 +551,12 @@ fn split_chunks(html: &str, max: usize) -> Vec<String> {
                             if cut == 0 {
                                 cut = remaining.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
                             }
+                            if let Some(amp) = entity_start(remaining, cut) {
+                                cut = match amp {
+                                    0 => remaining.find(';').map_or(remaining.len(), |i| i + 1),
+                                    _ => amp,
+                                };
+                            }
                             if cut == 0 {
                                 break;
                             }
@@ -514,11 +564,6 @@ fn split_chunks(html: &str, max: usize) -> Vec<String> {
                             cur.push_str(head);
                             remaining = tail;
                         }
-                        flush_balanced(&mut cur, &stack, &mut chunks);
-                        continue;
-                    }
-                    let cut = best_break(remaining, avail);
-                    if cut == 0 {
                         flush_balanced(&mut cur, &stack, &mut chunks);
                         continue;
                     }
@@ -1062,5 +1107,178 @@ mod tests {
         );
         let md = "10. 步驟\n    說明\n";
         assert_eq!(to_telegram_html(md).join(""), "10. 步驟\n    說明");
+    }
+
+    // issue-0036 AC-1：href 裡的 " < > 改成百分比編碼（Telegram 會無聲丟掉解碼後含這些
+    // 字元的連結，2026-11-18 實送確認），一般文字照舊。
+    #[test]
+    fn telegram_percent_encodes_quote_and_angle_brackets_inside_href_only() {
+        assert_eq!(
+            to_telegram_html("[docs](https://x.io/a\"b)"),
+            vec![r#"<a href="https://x.io/a%22b">docs</a>"#]
+        );
+        assert_eq!(
+            to_telegram_html("[docs](https://x.io/a<b>c?d=1&e=2)"),
+            vec![r#"<a href="https://x.io/a%3Cb%3Ec?d=1&amp;e=2">docs</a>"#]
+        );
+        assert_eq!(
+            to_telegram_html("他說 \"好\" & <ok>"),
+            vec!["他說 \"好\" &amp; &lt;ok&gt;"]
+        );
+    }
+
+    // issue-0036 AC-2：切點不落在實體中間。
+    #[test]
+    fn telegram_split_never_cuts_an_entity_in_half() {
+        for md in [
+            "a&".repeat(2100),
+            "&".repeat(1500),
+            "a<".repeat(2100),
+            "x>".repeat(2100),
+        ] {
+            let chunks = to_telegram_html(&md);
+            assert!(chunks.len() > 1, "expected a split for {:?}", &md[..4]);
+            for c in &chunks {
+                assert!(c.len() <= 4096, "chunk over limit: {} bytes", c.len());
+                let rest = c
+                    .replace("&amp;", "")
+                    .replace("&lt;", "")
+                    .replace("&gt;", "");
+                assert!(
+                    !rest.contains('&') && !rest.contains(';'),
+                    "partial entity in chunk: head={:?} tail={:?}",
+                    &c[..12],
+                    &c[c.len() - 12..]
+                );
+            }
+            assert_eq!(chunks.join(""), render_html(&md).trim());
+        }
+
+        // 預算比一個實體還小時仍要前進（不能無限迴圈），寧可單段超過預算也不切半個實體。
+        let s = "&amp;&lt;x".repeat(30);
+        let chunks = split_chunks(&s, 4);
+        for c in &chunks {
+            let rest = c.replace("&amp;", "").replace("&lt;", "");
+            assert!(
+                !rest.contains('&') && !rest.contains(';'),
+                "partial entity: {c:?}"
+            );
+        }
+        assert_eq!(chunks.join(""), s);
+    }
+
+    // issue-0036 AC-3：網址超過 2048 bytes 的連結改寫成「文字 (網址)」，每段不超過 4096 bytes。
+    #[test]
+    fn telegram_overlong_link_becomes_plain_text_within_limit() {
+        let url = format!("https://x.io/{}", "a".repeat(5000));
+        let chunks = to_telegram_html(&format!("[link text here]({url})"));
+        assert!(chunks.len() <= 2, "got {} chunks", chunks.len());
+        assert!(chunks.iter().all(|c| c.len() <= 4096 && !c.contains("<a ")));
+        assert_eq!(chunks.join(""), format!("link text here ({url})"));
+
+        let url = format!("https://x.io/{}", "a".repeat(4500));
+        let text = "字".repeat(300);
+        let chunks = to_telegram_html(&format!("[{text}]({url})"));
+        assert!(chunks.len() <= 2, "got {} chunks", chunks.len());
+        assert!(chunks.iter().all(|c| c.len() <= 4096 && !c.contains("<a ")));
+        assert_eq!(chunks.join(""), format!("{text} ({url})"));
+
+        // 對照組：短網址時是 "前文\n\n<a href=\"https://x.io/s\">x</a>\n\n後文"。
+        let url = format!("https://x.io/{}", "a".repeat(4090));
+        // 切段優先在換行處切：前文一段，4103 bytes 的網址本身要兩段。
+        let chunks = to_telegram_html(&format!("前文\n\n[x]({url})\n\n後文"));
+        assert!(chunks.len() <= 3, "got {} chunks", chunks.len());
+        assert!(chunks.iter().all(|c| c.len() <= 4096 && !c.contains("<a ")));
+        assert_eq!(chunks.join(""), format!("前文\n\nx ({url})\n\n後文"));
+    }
+
+    // issue-0036 AC-3：門檻兩側，以及長連結文字配 2048 bytes 網址仍不超過 4096。
+    #[test]
+    fn telegram_link_url_threshold_is_2048_bytes() {
+        let url = format!("https://x.io/{}", "a".repeat(2048 - 13));
+        assert_eq!(url.len(), 2048);
+        assert_eq!(
+            to_telegram_html(&format!("[x]({url})")),
+            vec![format!(r#"<a href="{url}">x</a>"#)]
+        );
+        let url = format!("https://x.io/{}", "a".repeat(2049 - 13));
+        assert_eq!(
+            to_telegram_html(&format!("[x]({url})")),
+            vec![format!("x ({url})")]
+        );
+        // 跳脫後才算：2044 個字元的網址含兩個 &（各變成 5 bytes）就超過門檻。
+        let url = format!("https://x.io/?a=1&b=2&{}", "a".repeat(2044 - 22));
+        assert_eq!(url.len(), 2044);
+        let out = to_telegram_html(&format!("[x]({url})")).join("");
+        assert!(
+            !out.contains("<a "),
+            "escaped href is 2052 bytes: {out:.40}"
+        );
+
+        let url = format!("https://x.io/{}", "a".repeat(2048 - 13));
+        let text = "字".repeat(3000);
+        let chunks = to_telegram_html(&format!("[{text}]({url})"));
+        assert!(chunks.len() > 1);
+        for c in &chunks {
+            assert!(c.len() <= 4096, "chunk over limit: {} bytes", c.len());
+            assert!(c.starts_with(&format!(r#"<a href="{url}">"#)) && c.ends_with("</a>"));
+        }
+        assert_eq!(chunks.join("").matches('字').count(), 3000);
+    }
+
+    // issue-0036 PR #40 第一輪審查：引言、粗體、接近門檻的長連結、斜體、刪除線與實體
+    // 一起跨段時，每段不超過 4096、標籤平衡、實體完整，拿掉標籤後內容與不切段相同。
+    #[test]
+    fn telegram_nested_long_link_with_entities_splits_cleanly() {
+        let url = format!("https://x.io/{}?a=1&b=2", "a".repeat(2000));
+        // 以 & 為主，讓切點幾乎一定落在實體中間。
+        let body = "粗 *斜&&&&&&* ~~刪&&&&&&~~ &&&&<c>&&&& \"q\" ".repeat(150);
+        let md = format!("> **[{body}]({url})** 結尾 &amp; 文字");
+        let href = url.replace('&', "&amp;");
+        assert!(href.len() <= 2048);
+
+        let strip = |s: &str| {
+            let (mut out, mut in_tag) = (String::new(), false);
+            for ch in s.chars() {
+                match ch {
+                    '<' => in_tag = true,
+                    '>' if in_tag => in_tag = false,
+                    c if !in_tag => out.push(c),
+                    _ => {}
+                }
+            }
+            out
+        };
+
+        let chunks = to_telegram_html(&md);
+        assert!(chunks.len() > 2, "got {} chunks", chunks.len());
+        for c in &chunks {
+            assert!(c.len() <= 4096, "chunk over limit: {} bytes", c.len());
+            for (open, close) in [
+                ("<blockquote>", "</blockquote>"),
+                ("<b>", "</b>"),
+                ("<i>", "</i>"),
+                ("<s>", "</s>"),
+                ("<a href=", "</a>"),
+            ] {
+                assert_eq!(c.matches(open).count(), c.matches(close).count(), "{open}");
+            }
+            let rest = c
+                .replace("&amp;", "")
+                .replace("&lt;", "")
+                .replace("&gt;", "");
+            assert!(!rest.contains('&') && !rest.contains(';'), "partial entity");
+        }
+        assert!(chunks
+            .iter()
+            .any(|c| c.contains(&format!(r#"<a href="{href}">"#))));
+        assert!(chunks
+            .iter()
+            .all(|c| c.contains("<i>") && c.contains("<s>")));
+        assert_eq!(
+            strip(&chunks.join("")),
+            strip(render_html(&md).trim()),
+            "text lost or duplicated across chunks"
+        );
     }
 }
