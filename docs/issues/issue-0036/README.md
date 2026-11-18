@@ -70,6 +70,11 @@
 5. ✅ **交付檢查** — 驗證方式：`cargo fmt --all -- --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`；更新 `CHANGELOG.md` `[Unreleased]` Fixed 與 `docs/entrypoints.md`「格式渲染」
    - 完成判準：三道命令全綠，兩份文件已更新
    - 完成證據（2026-11-18，百分比編碼版）：`cargo fmt --all -- --check` 通過；`cargo clippy --all-targets --locked -- -D warnings` 無警告；`cargo test --workspace --locked` 748 passed、0 failed。`CHANGELOG.md` `[Unreleased]` Fixed 新增一則（#36），`docs/entrypoints.md`「格式渲染」補上連結編碼、超長網址與切段
+6. ✅ **PR #40 第一輪審查補強** — 驗證方式：新測試在現行程式通過，並以變異檢查確認抓得到問題
+   - 審查：2026-11-18 第三方審查 https://github.com/raybird/Wukong/pull/40#pullrequestreview-5954980917 （5acbeaf，COMMENT，建議補強後合併）：P2 預算太小時強制切段可能超過 `max`；P2 缺少複合格式跨段測試；P3 註明 2048 的用意。審查者註明未在獨立環境重跑測試
+   - 判斷：第一項屬實，但只發生在新段落連一個字元或實體都放不下的極小預算，強制切一個字元本來就是這樣（`.max(1)`）。Telegram 路徑上唯一的長標籤是連結，由 `MAX_HREF_BYTES` 限制，重開的標籤約 2059 bytes 加數個短標籤，每段仍有約 2000 bytes 給文字，走不到該分支。三項都在 AC-2～AC-4 的範圍內，不需重新核准
+   - 做法：`split_chunks` 的文件寫明 `max` 保證的前提與預算不足時的行為；`MAX_HREF_BYTES` 註解寫明這是自訂預算、不是 Bot API 的網址上限（2048 bytes 已實送可用）；新增 `telegram_nested_long_link_with_entities_splits_cleanly`：引言 + 粗體 + 跳脫後 2025 bytes 的連結，連結文字含斜體、刪除線與大量 `&`、`<`、`>`，斷言段數大於 2、每段不超過 4096 bytes、每段 blockquote／b／i／s／a 開閉數相同、實體完整、每段都有斜體與刪除線，拿掉標籤後串接內容與不切段的輸出相同
+   - 完成證據（2026-11-18）：新測試在現行程式通過，屬回歸保護網、沒有紅燈階段。變異檢查：拿掉 `best_break` 的退回，紅在 `partial entity`；段落結尾不補關閉標籤，紅在標籤開閉數。第一版測試文字的實體太稀疏，拿掉退回時沒紅（切點剛好沒落在實體裡），改成以 `&` 為主後才紅。還原後 `cargo fmt --all -- --check` 通過、`cargo clippy --all-targets --locked -- -D warnings` 無警告、`cargo test --workspace --locked` 749 passed、0 failed
 
 ## Timeline
 
@@ -78,6 +83,7 @@
 | 2026-11-16 | GitHub #36 建立（#32 TBD-5 另開） | - |
 | 2026-11-18 | 建立 issue 文件；三項實跑重現；AC-1～AC-4 核准（Q1～Q4 照建議） | - |
 | 2026-11-18 | 實送發現 Telegram 無聲丟掉網址含雙引號或角括號的連結（寫成實體也一樣）；AC-1 由 `&quot;` 修訂為百分比編碼並納入角括號，重新核准 | - |
+| 2026-11-18 | PR #40 第一輪第三方審查（5acbeaf）COMMENT：https://github.com/raybird/Wukong/pull/40#pullrequestreview-5954980917 ；P2 ×2、P3 ×1，屬已核准 AC 範圍內的補強（步驟 6） | - |
 
 ---
 **建立日期**: 2026-11-18  

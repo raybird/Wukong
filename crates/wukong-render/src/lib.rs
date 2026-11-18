@@ -193,6 +193,8 @@ fn markup_len(s: &str) -> usize {
 /// Longest escaped `href` kept as a link. `split_chunks` reopens open tags on
 /// every chunk, so a longer one would leave almost no room for text in a
 /// 4096-byte message; such links are written out as `text (url)` instead.
+/// This is our own budget (about half a message), not a Bot API URL limit:
+/// a 2048-byte href was accepted as a link when sent on 2026-11-18 (#36).
 const MAX_HREF_BYTES: usize = 2048;
 
 /// Walk markdown events and emit a Telegram HTML-subset string.
@@ -488,8 +490,15 @@ fn best_break(s: &str, avail: usize) -> usize {
 }
 
 /// Split rendered Telegram HTML into chunks ≤ `max` bytes. Never splits a
-/// multi-byte character (Task 2.1) and never leaves a tag unclosed: open tags
-/// are closed at a chunk's end and reopened at the next chunk's start (Task 2.2).
+/// multi-byte character (Task 2.1) or an entity (#36) and never leaves a tag
+/// unclosed: open tags are closed at a chunk's end and reopened at the next
+/// chunk's start (Task 2.2).
+///
+/// The `max` guarantee needs room for the reopened tags, their closing tags
+/// and one character or entity. With less, a chunk takes one character or
+/// entity anyway and goes over `max`, so splitting still ends. For Telegram
+/// (`max` 4096) that cannot happen in practice: the only long tag is a link,
+/// capped by `MAX_HREF_BYTES`.
 fn split_chunks(html: &str, max: usize) -> Vec<String> {
     if html.len() <= max {
         return vec![html.to_string()];
@@ -1215,5 +1224,61 @@ mod tests {
             assert!(c.starts_with(&format!(r#"<a href="{url}">"#)) && c.ends_with("</a>"));
         }
         assert_eq!(chunks.join("").matches('字').count(), 3000);
+    }
+
+    // issue-0036 PR #40 第一輪審查：引言、粗體、接近門檻的長連結、斜體、刪除線與實體
+    // 一起跨段時，每段不超過 4096、標籤平衡、實體完整，拿掉標籤後內容與不切段相同。
+    #[test]
+    fn telegram_nested_long_link_with_entities_splits_cleanly() {
+        let url = format!("https://x.io/{}?a=1&b=2", "a".repeat(2000));
+        // 以 & 為主，讓切點幾乎一定落在實體中間。
+        let body = "粗 *斜&&&&&&* ~~刪&&&&&&~~ &&&&<c>&&&& \"q\" ".repeat(150);
+        let md = format!("> **[{body}]({url})** 結尾 &amp; 文字");
+        let href = url.replace('&', "&amp;");
+        assert!(href.len() <= 2048);
+
+        let strip = |s: &str| {
+            let (mut out, mut in_tag) = (String::new(), false);
+            for ch in s.chars() {
+                match ch {
+                    '<' => in_tag = true,
+                    '>' if in_tag => in_tag = false,
+                    c if !in_tag => out.push(c),
+                    _ => {}
+                }
+            }
+            out
+        };
+
+        let chunks = to_telegram_html(&md);
+        assert!(chunks.len() > 2, "got {} chunks", chunks.len());
+        for c in &chunks {
+            assert!(c.len() <= 4096, "chunk over limit: {} bytes", c.len());
+            for (open, close) in [
+                ("<blockquote>", "</blockquote>"),
+                ("<b>", "</b>"),
+                ("<i>", "</i>"),
+                ("<s>", "</s>"),
+                ("<a href=", "</a>"),
+            ] {
+                assert_eq!(c.matches(open).count(), c.matches(close).count(), "{open}");
+            }
+            let rest = c
+                .replace("&amp;", "")
+                .replace("&lt;", "")
+                .replace("&gt;", "");
+            assert!(!rest.contains('&') && !rest.contains(';'), "partial entity");
+        }
+        assert!(chunks
+            .iter()
+            .any(|c| c.contains(&format!(r#"<a href="{href}">"#))));
+        assert!(chunks
+            .iter()
+            .all(|c| c.contains("<i>") && c.contains("<s>")));
+        assert_eq!(
+            strip(&chunks.join("")),
+            strip(render_html(&md).trim()),
+            "text lost or duplicated across chunks"
+        );
     }
 }
