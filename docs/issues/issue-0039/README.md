@@ -36,6 +36,10 @@ token 由 `docker exec wukong-telegram cat /data/settings.json` 經 stdin 交給
 - 長度探測（`probe39d.py`）：超過 4096 字的 `sendMessageDraft` 回 `Bad Request: MESSAGE_TOO_LONG`。
 - 結論：`bubble_text` 自 2026-06-21 `7b46467`（原本只留最後 200 字）起把整個回合的思考全文放進進度，超過 4096 字後每次更新與重送都被拒收，退回的一般訊息也一樣太長；畫面停在最後一次成功的短文字（「已收到回答，繼續處理…」），約 60 秒後被收掉。群組狀態訊息的編輯有同樣的上限。
 
+## 現況
+
+**現行 review**: review-a8efb1c.md
+
 ## 涉及檔案
 
 - `crates/wukong-telegram/src/dispatch.rs` - 進度顯示工作（回答／取消／逾時後重新顯示、草稿定期重送）、進度文字長度上限（`bubble_text`）、問題回覆路徑與單元測試
@@ -113,4 +117,4 @@ token 由 `docker exec wukong-telegram cat /data/settings.json` 經 stdin 交給
 **建立日期**: 2026-11-19  
 **分級**: Small  
 **風險**: Low\
-**狀態**: AC-5 實作完成，待提交與審查
+**狀態**: AC-5 審查通過（a8efb1c），待推送與建立 PR
