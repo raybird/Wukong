@@ -142,7 +142,9 @@ async fn run_progress<C: TgClient>(
     let mut reasoning = String::new();
     let mut last_reasoning_edit: Option<std::time::Instant> = None;
     let mut last_shown = tokio::time::Instant::now();
-    // While a question waits, the question message stays at the bottom.
+    // While a question waits, the question message stays at the bottom: events
+    // (e.g. another tool call of the same step) only update `status`, which
+    // shows once the question is resolved.
     let mut question_waiting = false;
     loop {
         let keep_alive =
@@ -220,7 +222,7 @@ async fn run_progress<C: TgClient>(
                 true
             }
         };
-        if show {
+        if show && !question_waiting {
             update_progress_display(&c, chat_id, &mut progress_display, &status).await;
             last_shown = tokio::time::Instant::now();
         }
@@ -3088,6 +3090,68 @@ mod tests {
         let ended = draft_log(&client).len();
         tokio::time::sleep(120 * second).await;
         assert_eq!(draft_log(&client).len(), ended);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progress_events_while_a_question_waits_show_only_after_it_is_answered() {
+        for draft in [true, false] {
+            let client = if draft {
+                MockTgClient::default().with_message_drafts()
+            } else {
+                MockTgClient::default()
+            };
+            let display = if draft {
+                ProgressDisplay::Draft { draft_id: 42 }
+            } else {
+                ProgressDisplay::Message {
+                    message_id: Some(1),
+                }
+            };
+            let pending = Arc::new(Mutex::new(PendingQuestions::new()));
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let task = tokio::spawn(run_progress(
+                client.clone(),
+                12,
+                display,
+                "🐵 收到，思考中…".to_string(),
+                rx,
+                tx.downgrade(),
+                pending,
+            ));
+            let shown = |client: &MockTgClient| {
+                (
+                    draft_log(client).len(),
+                    client.sent.lock().unwrap().len(),
+                    client.edits.lock().unwrap().len(),
+                )
+            };
+            let second = std::time::Duration::from_secs(1);
+
+            tx.send(Progress::QuestionRequest(sample_question_request()))
+                .unwrap();
+            tokio::time::sleep(second).await;
+            let asked = shown(&client);
+
+            // Another tool call of the same step may still report while the
+            // question waits; the question message stays at the bottom.
+            tx.send(Progress::Role(Role::Fixer)).unwrap();
+            tx.send(Progress::Reasoning("想一下".to_string())).unwrap();
+            tx.send(Progress::ToolUse("bash".to_string())).unwrap();
+            tokio::time::sleep(second).await;
+            assert_eq!(shown(&client), asked, "shown while a question waits");
+
+            // Once answered, the progress shows again with what it gathered.
+            tx.send(Progress::QuestionAnswered).unwrap();
+            tokio::time::sleep(second).await;
+            let resumed = if draft {
+                draft_log(&client).last().unwrap().1.clone()
+            } else {
+                client.sent.lock().unwrap().last().unwrap().text.clone()
+            };
+            assert_eq!(resumed, "🐵　悟空·fixer 已收到回答，繼續處理…");
+            drop(tx);
+            task.await.unwrap();
+        }
     }
 
     #[tokio::test(start_paused = true)]
