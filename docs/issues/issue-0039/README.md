@@ -80,10 +80,14 @@ token 由 `docker exec wukong-telegram cat /data/settings.json` 經 stdin 交給
    - 實作：`run_progress` 的 `if show` 改為 `if show && !question_waiting`；事件仍更新 `status`，回答、取消或逾時後顯示。重送計時器原本就在等待期間停用
    - GitNexus `impact`：索引早於本 PR，找不到 `run_progress`（UNKNOWN）；唯一呼叫端是 `handle_message_with_responder`（步驟 3 已回報 CRITICAL）。改動只影響等待回答期間進度工作送不送顯示
    - 證據（綠燈，2026-11-19）：`cargo test -p wukong-telegram --locked` lib 42 passed、0 failed；fmt 無差異；clippy 無警告；workspace 757 passed、0 failed；CHANGELOG `[Unreleased]` 與 entrypoints「即時狀態回饋」補上等待期間不更新
-6. 📝 **AC-5：先寫紅燈測試** — 驗證方式：`cargo test -p wukong-telegram --locked`，新測試在改動前失敗，失敗輸出顯示進度文字超過上限
+6. ✅ **AC-5：先寫紅燈測試** — 驗證方式：`cargo test -p wukong-telegram --locked`，新測試在改動前失敗，失敗輸出顯示進度文字超過上限
    - 完成判準：記錄紅燈命令與輸出
-7. 📝 **AC-5：進度文字超過上限時只留思考結尾** — 驗證方式：步驟 6 的測試與既有測試全綠；實送一則達上限長度的草稿；步驟 4 的三道命令
+   - 證據（2026-11-19）：新增 `bubble_text_keeps_the_reasoning_tail_within_the_telegram_limit`（6000 字思考，斷言不超過 4096 個 UTF-16 單位、以「💭　…」開頭、保留結尾、不含開頭）與 `long_reasoning_progress_drafts_stay_within_the_telegram_limit`（paused tokio time，草稿模式送 3 段 3000 字思考與工具事件，再閒置 25 秒讓重送也發生，斷言每則草稿都不超過上限、最後一則以「▸ 使用工具 bash」結尾）。改動前 `-- telegram_limit` 2 failed，分別紅在 `6025 units`、`6046 units`
+7. ✅ **AC-5：進度文字超過上限時只留思考結尾** — 驗證方式：步驟 6 的測試與既有測試全綠；實送一則達上限長度的草稿；步驟 4 的三道命令
    - 完成判準：測試全綠、實送回 `ok`、fmt／clippy／workspace 全綠；修改前對 `bubble_text` 跑 GitNexus `impact`；CHANGELOG 與 entrypoints 更新
+   - GitNexus `impact`（upstream，2026-11-19）：`bubble_text` 為 CRITICAL，每則 Telegram 回合的進度都經過它（`handle_message_with_responder` → `run_progress` → `bubble_text`；索引早於 `run_progress`，列為直接被 `handle_message_with_responder` 呼叫），已向使用者回報；改動只影響超過上限的長文字，短文字照原本全文顯示
+   - 實作（`crates/wukong-telegram/src/dispatch.rs`）：`bubble_text` 組出的全文不超過 `PROGRESS_TEXT_LIMIT`（4000 個 UTF-16 單位）就照原本回傳；超過時保留角色那一行與「💭　…」，從思考內容結尾往前放到上限為止。草稿、群組狀態訊息、閒置重送都用這段文字
+   - 證據（2026-11-19）：`cargo test -p wukong-telegram --locked` lib 44 passed、0 failed，既有 `bubble_text_keeps_full_reasoning` 不改；變異檢查把上限改成 4200，兩個新測試都紅在 `4200 units`，已改回。實送（`probe39e.py`，照實作格式含 emoji）：4000 單位（3750 字）與 4096 單位（3840 字）的草稿都回 `ok`，對照 `probe39d.py` 全為中文的 4097 字回 `MESSAGE_TOO_LONG`，上限以 UTF-16 單位計。fmt 無差異；clippy 無警告；workspace 759 passed、0 failed；CHANGELOG `[Unreleased]` Fixed 與 entrypoints「即時狀態回饋」已更新
 
 ## 待確認事項
 
@@ -109,4 +113,4 @@ token 由 `docker exec wukong-telegram cat /data/settings.json` 經 stdin 交給
 **建立日期**: 2026-11-19  
 **分級**: Small  
 **風險**: Low\
-**狀態**: 實作中（AC-5 後續修正）
+**狀態**: AC-5 實作完成，待提交與審查
