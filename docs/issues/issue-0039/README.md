@@ -38,7 +38,7 @@ token 由 `docker exec wukong-telegram cat /data/settings.json` 經 stdin 交給
 
 ## 現況
 
-**現行 review**: review-a8efb1c.md
+**現行 review**: review-ba4cf59.md
 
 ## 涉及檔案
 
@@ -102,7 +102,7 @@ token 由 `docker exec wukong-telegram cat /data/settings.json` 經 stdin 交給
 | 編號 | 事項 | 狀態 | 影響 |
 |---|---|---|---|
 | TBD-1 | Web Console 送出回答後是否也看不到進度（`chat-question-card.js` 換成「已送出回答。」、問題卡接在進度泡泡之後）。使用者 2026-11-19 Q1 決定只做 Telegram | 未重現；重現後另開 issue | 不影響本 issue |
-| TBD-2 | 實際部署上的端到端觀察：RunWuKong 的 bot 正在 long polling，本機再跑一個會搶 `getUpdates`，所以合併前不做。窗口：包含 3cfe9ab 的版本發版，且 RunWuKong 的 `wukong-telegram` 容器升級到該版（以容器映像檔標籤判斷）。判準：使用者在私人聊天答一次 agent 提問，問題下方出現「已收到回答，繼續處理…」；按一次取消，出現「繼續處理…」；回合中超過 60 秒沒有新事件時進度草稿仍在 | 待確認（2026-11-19 第一次觀察：回答後的文字有出現；取消沒測到；草稿約 60 秒後消失，原因見概述「部署後觀察」，由 AC-5 修正，修正發版、部署後重測三項） | 不阻塞合併；行為由單元測試與實送探測覆蓋 |
+| TBD-2 | 實際部署上的端到端觀察：RunWuKong 的 bot 正在 long polling，本機再跑一個會搶 `getUpdates`，所以合併前不做。窗口：包含 AC-5 修正（本 issue 後續 PR 合併後的提交）的版本發版，且 RunWuKong 的 `wukong-telegram` 容器升級到該版（以容器映像檔標籤判斷）。判準：使用者在私人聊天答一次 agent 提問，問題下方出現「已收到回答，繼續處理…」；按一次取消，出現「繼續處理…」；回合中超過 60 秒沒有新事件時進度草稿仍在 | 待確認（2026-11-19 第一次觀察：回答後的文字有出現；取消沒測到；草稿約 60 秒後消失，原因見概述「部署後觀察」，由 AC-5 修正，修正發版、部署後重測三項） | 不阻塞合併；行為由單元測試與實送探測覆蓋 |
 | TBD-3 | PR #41 第一輪審查 P3：`run_progress` 在 `update_progress_display` 之後就重設計時，不管有沒有送成功；草稿與退回的一般訊息都失敗時，下一次重送要再等 20 秒 | 不影響本次交付（2026-11-19）。追蹤：無。上一次成功的草稿約 60 秒才消失，失敗後 20 秒會再送一次，仍在消失之前；兩個 API 都失敗代表當下連不到 Telegram，提早重試多半也會失敗，下一個事件也會再送 | 最差情況是進度晚 20 秒才重新出現 |
 
 ## Timeline
@@ -121,4 +121,4 @@ token 由 `docker exec wukong-telegram cat /data/settings.json` 經 stdin 交給
 **建立日期**: 2026-11-19  
 **分級**: Small  
 **風險**: Low\
-**狀態**: AC-5 補強測試完成，待重新審查
+**狀態**: AC-5 審查通過（ba4cf59），待推送與建立 PR
