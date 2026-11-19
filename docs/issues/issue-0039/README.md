@@ -92,6 +92,10 @@ token 由 `docker exec wukong-telegram cat /data/settings.json` 經 stdin 交給
    - GitNexus `impact`（upstream，2026-11-19）：`bubble_text` 為 CRITICAL，每則 Telegram 回合的進度都經過它（`handle_message_with_responder` → `run_progress` → `bubble_text`；索引早於 `run_progress`，列為直接被 `handle_message_with_responder` 呼叫），已向使用者回報；改動只影響超過上限的長文字，短文字照原本全文顯示
    - 實作（`crates/wukong-telegram/src/dispatch.rs`）：`bubble_text` 組出的全文不超過 `PROGRESS_TEXT_LIMIT`（4000 個 UTF-16 單位）就照原本回傳；超過時保留角色那一行與「💭　…」，從思考內容結尾往前放到上限為止。草稿、群組狀態訊息、閒置重送都用這段文字
    - 證據（2026-11-19）：`cargo test -p wukong-telegram --locked` lib 44 passed、0 failed，既有 `bubble_text_keeps_full_reasoning` 不改；變異檢查把上限改成 4200，兩個新測試都紅在 `4200 units`，已改回。實送（`probe39e.py`，照實作格式含 emoji）：4000 單位（3750 字）與 4096 單位（3840 字）的草稿都回 `ok`，對照 `probe39d.py` 全為中文的 4097 字回 `MESSAGE_TOO_LONG`，上限以 UTF-16 單位計。fmt 無差異；clippy 無警告；workspace 759 passed、0 failed；CHANGELOG `[Unreleased]` Fixed 與 entrypoints「即時狀態回饋」已更新
+8. ✅ **AC-5：補強長度測試（review-a8efb1c.md SHOULD FIX 1）** — 驗證方式：新斷言在現有實作下綠燈，在報告指出的兩種變異下各紅在新斷言
+   - 完成判準：兩個變異各紅一次後還原；fmt／clippy／workspace 全綠
+   - 改動：`bubble_text_keeps_the_reasoning_tail_within_the_telegram_limit` 加下限斷言（不少於 3990 單位）；新增 `bubble_text_is_cut_only_past_4000_units`（全文剛好 4000 單位時原樣顯示、不加「…」，多 1 字就以「…」開頭；長度由測試裡的前綴字面值算出，不用實作常數）。這次是補強證據、不改行為，所以紅燈用變異取得
+   - 證據（2026-11-19）：變異 (a) 把 `room` 改成 10 → 紅在 `>= 3990` 斷言，`32 units`；變異 (b) 把不截斷的比較由「不超過」改成「小於」→ 紅在 `bubble_text_is_cut_only_past_4000_units` 的 `assert_eq!`；兩者都已還原。fmt 無差異；clippy 無警告；workspace 760 passed、0 failed
 
 ## 待確認事項
 
@@ -117,4 +121,4 @@ token 由 `docker exec wukong-telegram cat /data/settings.json` 經 stdin 交給
 **建立日期**: 2026-11-19  
 **分級**: Small  
 **風險**: Low\
-**狀態**: AC-5 審查通過（a8efb1c），待推送與建立 PR
+**狀態**: AC-5 補強測試完成，待重新審查

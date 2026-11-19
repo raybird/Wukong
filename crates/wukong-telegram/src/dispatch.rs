@@ -3192,6 +3192,20 @@ mod tests {
         );
         assert!(text.ends_with("長結尾"));
         assert!(!text.contains("開頭"));
+        // It keeps as much of the tail as fits (about 4000 units), not a scrap.
+        assert!(telegram_len(&text) >= 3990, "{} units", telegram_len(&text));
+    }
+
+    #[test]
+    fn bubble_text_is_cut_only_past_4000_units() {
+        let prefix = "🐵　悟空·oracle 思考中…\n💭　";
+        let fits = "長".repeat(4000 - telegram_len(prefix));
+        assert_eq!(
+            bubble_text(Some("oracle"), &fits),
+            format!("{prefix}{fits}")
+        );
+        let over = format!("{fits}長");
+        assert!(bubble_text(Some("oracle"), &over).starts_with(&format!("{prefix}…")));
     }
 
     #[tokio::test(start_paused = true)]
