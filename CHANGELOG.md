@@ -11,6 +11,8 @@
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-11-19
+
 ### Changed
 
 - **容器的按需本機模式也會清理 opencode session。** 原本只有共用 server 模式會清，v0.22 起預設的
@@ -1067,7 +1069,8 @@ server 模式補回那個 CLI 免費獲得的週期性重置，同時保留暖�
   不安全綁定（`0.0.0.0` + 空 token）啟動即拒絕（fail-closed，可用
   `WUKONG_WEB_ALLOW_INSECURE=1` 覆寫）；Telegram callback 加白名單檢查。
 
-[Unreleased]: https://github.com/raybird/Wukong/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/raybird/Wukong/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/raybird/Wukong/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/raybird/Wukong/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/raybird/Wukong/compare/v0.22.1...v0.23.0
 [0.22.1]: https://github.com/raybird/Wukong/compare/v0.22.0...v0.22.1
