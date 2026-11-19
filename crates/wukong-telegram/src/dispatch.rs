@@ -734,9 +734,10 @@ fn bubble_text(role: Option<&str>, reasoning: &str) -> String {
     format!("{head}{}", &r[start..])
 }
 
-/// Telegram rejects a draft or message over 4096 characters (UTF-16 units)
-/// with `MESSAGE_TOO_LONG` (real send, 2026-11-19, #39); the progress text
-/// stays a little under that.
+/// Telegram rejects a draft or message over 4096 characters with
+/// `MESSAGE_TOO_LONG` (real send, 2026-11-19, #39). The progress text is
+/// measured in UTF-16 units, never fewer than characters, so staying a little
+/// under 4096 of them keeps it under the limit however Telegram counts.
 const PROGRESS_TEXT_LIMIT: usize = 4000;
 
 /// Log a failed Telegram send instead of silently dropping it, so a rejected
@@ -3175,9 +3176,9 @@ mod tests {
         }
     }
 
-    /// Telegram rejects a draft or message over 4096 characters (counted in
-    /// UTF-16 units) with `MESSAGE_TOO_LONG` (real send, 2026-11-19, #39).
-    fn telegram_len(text: &str) -> usize {
+    /// Length in UTF-16 units, never fewer than characters: at most 4096 of
+    /// them is within Telegram's 4096-character limit (#39).
+    fn utf16_len(text: &str) -> usize {
         text.encode_utf16().count()
     }
 
@@ -3185,7 +3186,7 @@ mod tests {
     fn bubble_text_keeps_the_reasoning_tail_within_the_telegram_limit() {
         let reasoning = format!("開頭{}結尾", "長".repeat(6000));
         let text = bubble_text(Some("oracle"), &reasoning);
-        assert!(telegram_len(&text) <= 4096, "{} units", telegram_len(&text));
+        assert!(utf16_len(&text) <= 4096, "{} units", utf16_len(&text));
         assert!(
             text.starts_with("🐵　悟空·oracle 思考中…\n💭　…"),
             "{text:.40}"
@@ -3193,20 +3194,21 @@ mod tests {
         assert!(text.ends_with("長結尾"));
         assert!(!text.contains("開頭"));
         // It keeps as much of the tail as fits (about 4000 units), not a scrap.
-        assert!(telegram_len(&text) >= 3990, "{} units", telegram_len(&text));
+        assert!(utf16_len(&text) >= 3990, "{} units", utf16_len(&text));
 
-        // An emoji takes 2 UTF-16 units, so counting chars would overshoot.
-        let emoji = format!("開頭{}結尾", "😀".repeat(3000));
+        // An emoji takes 2 UTF-16 units. With one unit left over the next
+        // emoji no longer fits, and the text stays within 4000 units.
+        let emoji = format!("開頭{}結尾。", "😀".repeat(3000));
         let text = bubble_text(Some("oracle"), &emoji);
-        assert!(telegram_len(&text) <= 4096, "{} units", telegram_len(&text));
-        assert!(telegram_len(&text) >= 3990, "{} units", telegram_len(&text));
-        assert!(text.ends_with("😀結尾"));
+        assert!(utf16_len(&text) <= 4000, "{} units", utf16_len(&text));
+        assert!(utf16_len(&text) >= 3990, "{} units", utf16_len(&text));
+        assert!(text.ends_with("😀結尾。"));
     }
 
     #[test]
     fn bubble_text_is_cut_only_past_4000_units() {
         let prefix = "🐵　悟空·oracle 思考中…\n💭　";
-        let fits = "長".repeat(4000 - telegram_len(prefix));
+        let fits = "長".repeat(4000 - utf16_len(prefix));
         assert_eq!(
             bubble_text(Some("oracle"), &fits),
             format!("{prefix}{fits}")
@@ -3243,7 +3245,7 @@ mod tests {
         let drafts = draft_log(&client);
         assert!(drafts.len() >= 5, "{} drafts", drafts.len());
         for (_, text) in &drafts {
-            assert!(telegram_len(text) <= 4096, "{} units", telegram_len(text));
+            assert!(utf16_len(text) <= 4096, "{} units", utf16_len(text));
         }
         assert!(drafts.last().unwrap().1.ends_with("▸ 使用工具 bash2"));
         // The last draft is the idle resend of the long text before it.

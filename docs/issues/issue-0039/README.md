@@ -91,7 +91,7 @@ token 由 `docker exec wukong-telegram cat /data/settings.json` 經 stdin 交給
    - 完成判準：測試全綠、實送回 `ok`、fmt／clippy／workspace 全綠；修改前對 `bubble_text` 跑 GitNexus `impact`；CHANGELOG 與 entrypoints 更新
    - GitNexus `impact`（upstream，2026-11-19）：`bubble_text` 為 CRITICAL，每則 Telegram 回合的進度都經過它（`handle_message_with_responder` → `run_progress` → `bubble_text`；索引早於 `run_progress`，列為直接被 `handle_message_with_responder` 呼叫），已向使用者回報；改動只影響超過上限的長文字，短文字照原本全文顯示
    - 實作（`crates/wukong-telegram/src/dispatch.rs`）：`bubble_text` 組出的全文不超過 `PROGRESS_TEXT_LIMIT`（4000 個 UTF-16 單位）就照原本回傳；超過時保留角色那一行與「💭　…」，從思考內容結尾往前放到上限為止。草稿、群組狀態訊息、閒置重送都用這段文字
-   - 證據（2026-11-19）：`cargo test -p wukong-telegram --locked` lib 44 passed、0 failed，既有 `bubble_text_keeps_full_reasoning` 不改；變異檢查把上限改成 4200，兩個新測試都紅在 `4200 units`，已改回。實送（`probe39e.py`，照實作格式含 emoji）：4000 單位（3750 字）與 4096 單位（3840 字）的草稿都回 `ok`，對照 `probe39d.py` 全為中文的 4097 字回 `MESSAGE_TOO_LONG`，上限以 UTF-16 單位計。fmt 無差異；clippy 無警告；workspace 759 passed、0 failed；CHANGELOG `[Unreleased]` Fixed 與 entrypoints「即時狀態回饋」已更新
+   - 證據（2026-11-19）：`cargo test -p wukong-telegram --locked` lib 44 passed、0 failed，既有 `bubble_text_keeps_full_reasoning` 不改；變異檢查把上限改成 4200，兩個新測試都紅在 `4200 units`，已改回。實送（`probe39e.py`，照實作格式含 emoji）：4000 單位（3750 字）與 4096 單位（3840 字）的草稿都回 `ok`，對照 `probe39d.py` 全為中文的 4097 字回 `MESSAGE_TOO_LONG`。（2026-11-19 更正：原本這裡寫「上限以 UTF-16 單位計」，這兩組實送分不出來，後來的實送也推翻了這個說法，見步驟 10。）fmt 無差異；clippy 無警告；workspace 759 passed、0 failed；CHANGELOG `[Unreleased]` Fixed 與 entrypoints「即時狀態回饋」已更新
 8. ✅ **AC-5：補強長度測試（review-a8efb1c.md SHOULD FIX 1）** — 驗證方式：新斷言在現有實作下綠燈，在報告指出的兩種變異下各紅在新斷言
    - 完成判準：兩個變異各紅一次後還原；fmt／clippy／workspace 全綠
    - 改動：`bubble_text_keeps_the_reasoning_tail_within_the_telegram_limit` 加下限斷言（不少於 3990 單位）；新增 `bubble_text_is_cut_only_past_4000_units`（全文剛好 4000 單位時原樣顯示、不加「…」，多 1 字就以「…」開頭；長度由測試裡的前綴字面值算出，不用實作常數）。這次是補強證據、不改行為，所以紅燈用變異取得
@@ -100,6 +100,11 @@ token 由 `docker exec wukong-telegram cat /data/settings.json` 經 stdin 交給
    - 完成判準：變異各紅一次後還原；fmt／clippy／workspace 全綠
    - 改動：`bubble_text_keeps_the_reasoning_tail_within_the_telegram_limit` 加一組 3000 個「😀」的思考內容（每個佔 2 個 UTF-16 單位），斷言不超過 4096、不少於 3990、以「😀結尾」結束；`long_reasoning_progress_drafts_stay_within_the_telegram_limit` 每輪用不同工具名稱（bash0～bash2），讓每次更新的結尾都不同，並斷言最後一則是前一則長文字的閒置重送；`docs/entrypoints.md` 改成「整則超過約 4000 字（Telegram 上限 4096）時只留最後面放得下的部分」
    - 證據（2026-11-19）：變異 (c) 把反向掃描的 `c.len_utf16()` 兩處改成 1（改數字元）→ 紅在 emoji 的上限斷言，`6026 units`；變異 (d) 把 `keep_alive` 改成恆為 false → 紅在 `the long text was not resent when idle`。第一次做 (d) 時工具名稱都一樣，截到最後 4000 單位後前後兩則本來就相同，變異沒被抓到，改成不同工具名稱後重做才紅；兩個變異都已還原。fmt 無差異；clippy 無警告；workspace 760 passed、0 failed
+10. ✅ **更正「Telegram 以 UTF-16 單位計算長度」的說法（review-4449e20.md NICE TO HAVE 1、2）** — 驗證方式：補一則能分辨兩種算法的實送；更正註解；補奇數剩餘空間的 emoji 邊界，並以變異確認
+   - 完成判準：實送結果記錄；變異紅燈後還原；fmt／clippy／workspace 全綠
+   - 實送（2026-11-19，`probe39f.py`）：2048 個 emoji（4096 個 UTF-16 單位、2048 字）與 2049 個 emoji（4098 個單位、2049 字）的草稿都回 `ok`。所以 Telegram 不是以 UTF-16 單位計算，步驟 7 原本的結論不成立。實作以 UTF-16 單位計算，數值一定不少於字元數，留在 4000 以下就一定在 Telegram 的 4096 字上限內，行為不用改
+   - 改動：`PROGRESS_TEXT_LIMIT` 與測試輔助函式的註解改成上面的說法，輔助函式由 `telegram_len` 改名 `utf16_len`，讓名稱不暗示 Telegram 的算法；emoji 案例的結尾改成「結尾。」（3 個單位），讓剩下的空間是奇數，用到「剩 1 個單位、下一個 emoji 要 2 個單位」就停的分支，並斷言整則不超過 4000
+   - 證據（2026-11-19）：變異 (c) 改數字元 → 紅在 emoji 案例的上限斷言，`6027 units`；變異 (e) 把停止條件改成剩餘空間為 0 才停 → emoji 案例在 `room` 減法溢位 panic（`attempt to subtract with overflow`）；兩者都已還原。fmt 無差異；clippy 無警告；workspace 760 passed、0 failed
 
 ## 待確認事項
 
@@ -125,4 +130,4 @@ token 由 `docker exec wukong-telegram cat /data/settings.json` 經 stdin 交給
 **建立日期**: 2026-11-19  
 **分級**: Small  
 **風險**: Low\
-**狀態**: AC-5 審查通過（4449e20），待推送與建立 PR
+**狀態**: 更正長度說法完成，待重新審查
