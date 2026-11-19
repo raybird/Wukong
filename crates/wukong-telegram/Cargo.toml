@@ -28,6 +28,8 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# `start_paused` tests for the idle draft resend (#39).
+tokio = { workspace = true, features = ["test-util"] }
 # Enables MockTgClient (defined in wukong-tg-client) for this crate's tests.
 wukong-tg-client = { path = "../wukong-tg-client", features = ["mock"] }
 

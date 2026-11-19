@@ -294,6 +294,7 @@ mod tests {
                 waiting_custom_question_index: None,
                 deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
                 message_id: Some(99),
+                resume: Default::default(),
             },
         );
 

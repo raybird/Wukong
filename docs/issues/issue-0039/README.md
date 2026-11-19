@@ -47,14 +47,22 @@ token 由 `docker exec wukong-telegram cat /data/settings.json` 經 stdin 交給
 
 ## 實作與驗證步驟
 
-1. 📝 **AC-4：改動前的回歸基準** — 驗證方式：記錄改動前 `cargo test -p wukong-telegram --locked` 的結果
+1. ✅ **AC-4：改動前的回歸基準** — 驗證方式：記錄改動前 `cargo test -p wukong-telegram --locked` 的結果
    - 完成判準：既有測試在改動前全綠，數量已記錄
-2. 📝 **AC-1～AC-3：先寫紅燈測試** — 驗證方式：`cargo test -p wukong-telegram --locked`，新測試在改動前失敗，失敗輸出對應概述的現況
+   - 證據（2026-11-19，分支起點 2a791e5）：lib 34 passed；`tests/` 3、1 passed；1 ignored
+2. ✅ **AC-1～AC-3：先寫紅燈測試** — 驗證方式：`cargo test -p wukong-telegram --locked`，新測試在改動前失敗，失敗輸出對應概述的現況
    - 完成判準：記錄紅燈命令與輸出
-3. 📝 **AC-1～AC-3：回答／取消／逾時後重新顯示進度，草稿定期重送** — 驗證方式：步驟 1、2 的測試全綠
+   - 證據（AC-1、AC-2）：新增 `answered_question_shows_progress_again_as_draft`、`answered_question_shows_progress_again_as_status_message`、`failed_answer_does_not_show_progress_again`、`cancelled_question_shows_progress_again`、`expired_question_shows_progress_again`。假 backend `AnswerWaitingBackend` 送出提問後等待回答路徑，再在回合結束前檢查進度文字有沒有出現；resolver 照 bot 的更新迴圈送 callback 或觸發逾時清理，送出前先斷言進度文字還沒出現。改動前 `35 passed; 4 failed`，4 個都紅在 `run_question_turn(...)` 回傳 false（回合結束前沒有出現進度文字）；送出失敗那個本來就綠，是防退化用的。第一版把「回答前不出現」的檢查放在 backend 被喚醒之後，那時回答路徑已經跑完，會誤判，所以移到 resolver 送出之前；改完後用拿掉兩處 `notify` 的版本重驗，同樣 4 個紅在同一斷言
+   - 證據（AC-3）：先把進度迴圈原樣抽成 `run_progress`（新增起始文字參數但尚未使用），既有測試全綠；新增 `idle_draft_progress_is_resent_every_20_seconds_except_while_a_question_waits` 與 `status_message_progress_is_not_resent_when_idle`（`#[tokio::test(start_paused = true)]`，`wukong-telegram` dev-dependency 為 tokio 加 `test-util`，`Cargo.lock` 不變）。改動前 `40 passed; 1 failed`，紅在 21 秒時應重送起始文字：`left: []`、`right: [(42, "🐵 收到，思考中…")]`
+3. ✅ **AC-1～AC-3：回答／取消／逾時後重新顯示進度，草稿定期重送** — 驗證方式：步驟 1、2 的測試全綠
    - 完成判準：`cargo test -p wukong-telegram --locked` 全綠；修改前對每個要改的函式跑 GitNexus `impact` 並回報
-4. 📝 **交付檢查** — 驗證方式：`cargo fmt --all -- --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`；更新 `CHANGELOG.md` `[Unreleased]` 與 `docs/entrypoints.md`「即時狀態回饋」
+   - GitNexus `impact`（upstream，2026-11-19）：`handle_message_with_responder`、`advance_or_reply`、`PendingQuestion` 為 CRITICAL（每一則 Telegram 回合都經過 `run_bot` → `dispatch_update_event` → `handle_message_with_responder`），`reject_and_clear_question` 為 LOW；直接呼叫端為 `complete_custom_answer`、`handle_callback_query`、`cleanup_expired_questions` 與 main.rs 自建 `PendingQuestion` 的測試。已向使用者回報；改動只在進度工作與問題結束後的通知，回合、回答送出與最終回答的送法不變
+   - 實作（`crates/wukong-telegram/src/dispatch.rs`）：進度迴圈抽成 `run_progress`，以 `tokio::select!` 同時等事件與 `DRAFT_REFRESH`（20 秒）；草稿模式、沒有問題在等時，超過 20 秒沒有送出就以目前內容重送。`PendingQuestion` 新增 `resume: ProgressResume`，帶進度通道的 weak sender；`advance_or_reply` 送出成功後通知 `QuestionAnswered`，`reject_and_clear_question`（取消與逾時共用）通知 `QuestionClosed`。用 weak 是因為提問後沒回答就結束的回合（既有 `QuestionBackend` 測試就是這樣）會在 `PendingQuestions` 留下一筆，強參照會讓進度工作等不到通道關閉、回合收不了尾
+   - 證據：`cargo test -p wukong-telegram --locked` lib 41 passed、0 failed。變異檢查：(a) 等問題期間也重送 → AC-3 測試紅在 `"resent while a question waits"`；(b) 回答送出失敗也通知 → `failed_answer_does_not_show_progress_again` 紅在 `run_question_turn` 斷言；(c) 狀態訊息模式也重送 → `status_message_progress_is_not_resent_when_idle` 紅在 `edits.len() == 1`
+4. ✅ **交付檢查** — 驗證方式：`cargo fmt --all -- --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`；更新 `CHANGELOG.md` `[Unreleased]` 與 `docs/entrypoints.md`「即時狀態回饋」
    - 完成判準：三道命令全綠，兩份文件已更新
+   - 提交前 GitNexus `detect_changes` 的索引過期，行號位移後把沒改的 `QuestionResponder`、`render_pending_question` 等也列為改動；改以 `git diff -U0` 的 hunk 核對，改動只在 `Progress`、`PendingQuestion`、`advance_or_reply`、`reject_and_clear_question`、`handle_message_with_responder`、新增的 `resumed_text`／`run_progress` 與測試
+   - 證據（2026-11-19）：fmt 無差異；clippy 無警告；workspace 756 passed、0 failed；CHANGELOG `[Unreleased]` Fixed 與 entrypoints「即時狀態回饋」已更新
 
 ## 待確認事項
 
@@ -69,9 +77,10 @@ token 由 `docker exec wukong-telegram cat /data/settings.json` 經 stdin 交給
 |------|------|--------|
 | 2026-11-18 | GitHub #39 建立（討論後不併入 #36）；使用者確認發生在 Telegram | - |
 | 2026-11-19 | 建立 issue 文件；Q1～Q5 照建議；實送探測確認草稿可在訊息後以同編號重新顯示、不刷新約 60 秒消失；AC-1～AC-4 核准 | - |
+| 2026-11-19 | 實作完成：回答／取消／逾時後重新顯示進度、草稿閒置 20 秒重送（步驟 1～4） | - |
 
 ---
 **建立日期**: 2026-11-19  
 **分級**: Small  
 **風險**: Low\
-**狀態**: 待實作
+**狀態**: 實作完成，待提交與審查
