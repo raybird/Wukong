@@ -3194,6 +3194,13 @@ mod tests {
         assert!(!text.contains("開頭"));
         // It keeps as much of the tail as fits (about 4000 units), not a scrap.
         assert!(telegram_len(&text) >= 3990, "{} units", telegram_len(&text));
+
+        // An emoji takes 2 UTF-16 units, so counting chars would overshoot.
+        let emoji = format!("開頭{}結尾", "😀".repeat(3000));
+        let text = bubble_text(Some("oracle"), &emoji);
+        assert!(telegram_len(&text) <= 4096, "{} units", telegram_len(&text));
+        assert!(telegram_len(&text) >= 3990, "{} units", telegram_len(&text));
+        assert!(text.ends_with("😀結尾"));
     }
 
     #[test]
@@ -3223,9 +3230,10 @@ mod tests {
             pending,
         ));
         tx.send(Progress::Role(Role::Oracle)).unwrap();
-        for _ in 0..3 {
+        // Distinct tool names keep each update's tail distinct.
+        for i in 0..3 {
             tx.send(Progress::Reasoning("想".repeat(3000))).unwrap();
-            tx.send(Progress::ToolUse("bash".to_string())).unwrap();
+            tx.send(Progress::ToolUse(format!("bash{i}"))).unwrap();
         }
         // Idle long enough for the keep-alive resend of the long text too.
         tokio::time::sleep(std::time::Duration::from_secs(25)).await;
@@ -3237,7 +3245,12 @@ mod tests {
         for (_, text) in &drafts {
             assert!(telegram_len(text) <= 4096, "{} units", telegram_len(text));
         }
-        assert!(drafts.last().unwrap().1.ends_with("▸ 使用工具 bash"));
+        assert!(drafts.last().unwrap().1.ends_with("▸ 使用工具 bash2"));
+        // The last draft is the idle resend of the long text before it.
+        let [.., shown, resent] = drafts.as_slice() else {
+            panic!("{} drafts", drafts.len());
+        };
+        assert_eq!(resent, shown, "the long text was not resent when idle");
     }
 
     #[tokio::test(start_paused = true)]

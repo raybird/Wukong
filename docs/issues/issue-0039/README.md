@@ -96,6 +96,10 @@ token 由 `docker exec wukong-telegram cat /data/settings.json` 經 stdin 交給
    - 完成判準：兩個變異各紅一次後還原；fmt／clippy／workspace 全綠
    - 改動：`bubble_text_keeps_the_reasoning_tail_within_the_telegram_limit` 加下限斷言（不少於 3990 單位）；新增 `bubble_text_is_cut_only_past_4000_units`（全文剛好 4000 單位時原樣顯示、不加「…」，多 1 字就以「…」開頭；長度由測試裡的前綴字面值算出，不用實作常數）。這次是補強證據、不改行為，所以紅燈用變異取得
    - 證據（2026-11-19）：變異 (a) 把 `room` 改成 10 → 紅在 `>= 3990` 斷言，`32 units`；變異 (b) 把不截斷的比較由「不超過」改成「小於」→ 紅在 `bubble_text_is_cut_only_past_4000_units` 的 `assert_eq!`；兩者都已還原。fmt 無差異；clippy 無警告；workspace 760 passed、0 failed
+9. ✅ **AC-5：補強 emoji 與閒置重送的斷言（review-ba4cf59.md SHOULD FIX 1、NICE TO HAVE 1、2）** — 驗證方式：新斷言在現有實作下綠燈，在對應變異下各紅在新斷言
+   - 完成判準：變異各紅一次後還原；fmt／clippy／workspace 全綠
+   - 改動：`bubble_text_keeps_the_reasoning_tail_within_the_telegram_limit` 加一組 3000 個「😀」的思考內容（每個佔 2 個 UTF-16 單位），斷言不超過 4096、不少於 3990、以「😀結尾」結束；`long_reasoning_progress_drafts_stay_within_the_telegram_limit` 每輪用不同工具名稱（bash0～bash2），讓每次更新的結尾都不同，並斷言最後一則是前一則長文字的閒置重送；`docs/entrypoints.md` 改成「整則超過約 4000 字（Telegram 上限 4096）時只留最後面放得下的部分」
+   - 證據（2026-11-19）：變異 (c) 把反向掃描的 `c.len_utf16()` 兩處改成 1（改數字元）→ 紅在 emoji 的上限斷言，`6026 units`；變異 (d) 把 `keep_alive` 改成恆為 false → 紅在 `the long text was not resent when idle`。第一次做 (d) 時工具名稱都一樣，截到最後 4000 單位後前後兩則本來就相同，變異沒被抓到，改成不同工具名稱後重做才紅；兩個變異都已還原。fmt 無差異；clippy 無警告；workspace 760 passed、0 failed
 
 ## 待確認事項
 
@@ -121,4 +125,4 @@ token 由 `docker exec wukong-telegram cat /data/settings.json` 經 stdin 交給
 **建立日期**: 2026-11-19  
 **分級**: Small  
 **風險**: Low\
-**狀態**: AC-5 審查通過（ba4cf59），待推送與建立 PR
+**狀態**: AC-5 補強測試完成，待重新審查
