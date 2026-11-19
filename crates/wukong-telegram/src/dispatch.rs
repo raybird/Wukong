@@ -24,6 +24,24 @@ enum Progress {
     Reasoning(String),
     ToolUse(String),
     QuestionRequest(QuestionRequest),
+    /// The question's answer was sent; the turn goes on (#39).
+    QuestionAnswered,
+    /// The question was cancelled or timed out; the turn goes on (#39).
+    QuestionClosed,
+}
+
+/// Lets a question's answer, cancel or timeout path tell the turn's progress
+/// task to show progress again. Weak, so a leftover pending question never
+/// keeps the progress task (and the turn's cleanup) waiting.
+#[derive(Debug, Clone, Default)]
+pub struct ProgressResume(Option<tokio::sync::mpsc::WeakUnboundedSender<Progress>>);
+
+impl ProgressResume {
+    fn notify(&self, progress: Progress) {
+        if let Some(tx) = self.0.as_ref().and_then(|weak| weak.upgrade()) {
+            let _ = tx.send(progress);
+        }
+    }
 }
 
 enum ProgressDisplay {
@@ -96,6 +114,122 @@ async fn clear_progress_display<C: TgClient>(
     }
 }
 
+/// Status shown again once a question is resolved and the turn goes on (#39).
+fn resumed_text(role: Option<&str>, status: &str) -> String {
+    match role {
+        Some(r) => format!("🐵　悟空·{r} {status}"),
+        None => format!("🐵　{status}"),
+    }
+}
+
+/// A draft not refreshed for about 60 seconds disappears (seen by real send on
+/// 2026-11-19, #39), so an idle draft is resent well before that.
+const DRAFT_REFRESH: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Drive the turn's single progress display (draft or status message) from
+/// progress events until the turn drops its senders, then clear it. `status` is
+/// what the display shows when this starts.
+async fn run_progress<C: TgClient>(
+    c: C,
+    chat_id: i64,
+    mut progress_display: ProgressDisplay,
+    mut status: String,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<Progress>,
+    resume: tokio::sync::mpsc::WeakUnboundedSender<Progress>,
+    pending_questions: Arc<Mutex<PendingQuestions>>,
+) {
+    let mut role: Option<String> = None;
+    let mut reasoning = String::new();
+    let mut last_reasoning_edit: Option<std::time::Instant> = None;
+    let mut last_shown = tokio::time::Instant::now();
+    // While a question waits, the question message stays at the bottom: events
+    // (e.g. another tool call of the same step) only update `status`, which
+    // shows once the question is resolved.
+    let mut question_waiting = false;
+    loop {
+        let keep_alive =
+            !question_waiting && matches!(progress_display, ProgressDisplay::Draft { .. });
+        let msg = tokio::select! {
+            msg = rx.recv() => match msg {
+                Some(msg) => msg,
+                None => break,
+            },
+            () = tokio::time::sleep_until(last_shown + DRAFT_REFRESH), if keep_alive => {
+                update_progress_display(&c, chat_id, &mut progress_display, &status).await;
+                last_shown = tokio::time::Instant::now();
+                continue;
+            }
+        };
+        let show = match msg {
+            Progress::Role(r) => {
+                role = Some(r.name().to_string());
+                status = bubble_text(role.as_deref(), &reasoning);
+                true
+            }
+            Progress::Reasoning(t) => {
+                reasoning.push_str(&t);
+                status = bubble_text(role.as_deref(), &reasoning);
+                // Throttle reasoning edits (~1.5s) but never block
+                // the first one (so it always shows up promptly).
+                let due = last_reasoning_edit
+                    .is_none_or(|i| i.elapsed() >= std::time::Duration::from_millis(1500));
+                if due {
+                    last_reasoning_edit = Some(std::time::Instant::now());
+                }
+                due
+            }
+            Progress::ToolUse(name) => {
+                reasoning.push_str("\n▸ 使用工具 ");
+                reasoning.push_str(&name);
+                reasoning.push('\n');
+                status = bubble_text(role.as_deref(), &reasoning);
+                true
+            }
+            Progress::QuestionRequest(request) => {
+                clear_progress_display(&c, chat_id, &mut progress_display).await;
+                let pending = PendingQuestion {
+                    chat_id,
+                    session_id: request.session_id.clone(),
+                    request_id: request.request_id.clone(),
+                    answers: vec![Vec::new(); request.questions.len()],
+                    questions: request.questions.clone(),
+                    current_question_index: 0,
+                    waiting_custom_question_index: None,
+                    deadline: std::time::Instant::now() + QUESTION_TIMEOUT,
+                    message_id: None,
+                    resume: ProgressResume(Some(resume.clone())),
+                };
+                let (text, keyboard) = render_pending_question(&pending);
+                if let Ok(message_id) = c
+                    .send_message_with_inline_keyboard(chat_id, &text, keyboard)
+                    .await
+                {
+                    let mut pending = pending;
+                    pending.message_id = Some(message_id);
+                    pending_questions.lock().unwrap().insert(chat_id, pending);
+                    question_waiting = true;
+                }
+                false
+            }
+            Progress::QuestionAnswered => {
+                question_waiting = false;
+                status = resumed_text(role.as_deref(), "已收到回答，繼續處理…");
+                true
+            }
+            Progress::QuestionClosed => {
+                question_waiting = false;
+                status = resumed_text(role.as_deref(), "繼續處理…");
+                true
+            }
+        };
+        if show && !question_waiting {
+            update_progress_display(&c, chat_id, &mut progress_display, &status).await;
+            last_shown = tokio::time::Instant::now();
+        }
+    }
+    clear_progress_display(&c, chat_id, &mut progress_display).await;
+}
+
 const QUESTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +258,7 @@ pub struct PendingQuestion {
     pub waiting_custom_question_index: Option<usize>,
     pub deadline: std::time::Instant,
     pub message_id: Option<i64>,
+    pub resume: ProgressResume,
 }
 
 pub type PendingQuestions = HashMap<i64, PendingQuestion>;
@@ -359,6 +494,7 @@ async fn advance_or_reply<C: TgClient, R: QuestionResponder>(
                 pending.request_id,
                 pending.answers,
                 pending.message_id,
+                pending.resume,
             ));
         }
     }
@@ -366,7 +502,7 @@ async fn advance_or_reply<C: TgClient, R: QuestionResponder>(
     if let Some(pending) = edit_pending {
         edit_pending_question(client, &pending).await;
     }
-    if let Some((session_id, request_id, answers, message_id)) = reply_payload {
+    if let Some((session_id, request_id, answers, message_id, resume)) = reply_payload {
         match responder
             .reply_question(&session_id, &request_id, answers)
             .await
@@ -377,6 +513,7 @@ async fn advance_or_reply<C: TgClient, R: QuestionResponder>(
                         .edit_message_text(chat_id, message_id, "已送出回答。")
                         .await;
                 }
+                resume.notify(Progress::QuestionAnswered);
             }
             Err(err) => {
                 let _ = client
@@ -404,6 +541,7 @@ async fn reject_and_clear_question<C: TgClient, R: QuestionResponder>(
     if let Some(message_id) = pending.message_id {
         let _ = client.edit_message_text(chat_id, message_id, message).await;
     }
+    pending.resume.notify(Progress::QuestionClosed);
 }
 
 async fn complete_custom_answer<C: TgClient, R: QuestionResponder>(
@@ -1297,9 +1435,9 @@ pub async fn handle_message_with_responder<C, B, R>(
             // Prefer Telegram's native ephemeral draft. Chats that don't support
             // drafts (for example groups) fall back to one edited status message.
             let draft_id = if msg.update_id == 0 { 1 } else { msg.update_id };
+            let initial_status = "🐵 收到，思考中…";
             let progress_display =
-                match start_progress_display(client, chat_id, draft_id, "🐵 收到，思考中…").await
-                {
+                match start_progress_display(client, chat_id, draft_id, initial_status).await {
                     Some(display) => display,
                     None => return, // can't post either a draft or fallback status
                 };
@@ -1317,85 +1455,16 @@ pub async fn handle_message_with_responder<C, B, R>(
             };
 
             // Per-role + reasoning progress edits the single status bubble.
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
-            let progress = {
-                let c = client.clone();
-                let pending_questions = pending_questions.clone();
-                tokio::spawn(async move {
-                    let mut progress_display = progress_display;
-                    let mut role: Option<String> = None;
-                    let mut reasoning = String::new();
-                    let mut last_reasoning_edit: Option<std::time::Instant> = None;
-                    while let Some(msg) = rx.recv().await {
-                        match msg {
-                            Progress::Role(r) => {
-                                role = Some(r.name().to_string());
-                                update_progress_display(
-                                    &c,
-                                    chat_id,
-                                    &mut progress_display,
-                                    &bubble_text(role.as_deref(), &reasoning),
-                                )
-                                .await;
-                            }
-                            Progress::Reasoning(t) => {
-                                reasoning.push_str(&t);
-                                // Throttle reasoning edits (~1.5s) but never block
-                                // the first one (so it always shows up promptly).
-                                let due = last_reasoning_edit.is_none_or(|i| {
-                                    i.elapsed() >= std::time::Duration::from_millis(1500)
-                                });
-                                if due {
-                                    update_progress_display(
-                                        &c,
-                                        chat_id,
-                                        &mut progress_display,
-                                        &bubble_text(role.as_deref(), &reasoning),
-                                    )
-                                    .await;
-                                    last_reasoning_edit = Some(std::time::Instant::now());
-                                }
-                            }
-                            Progress::ToolUse(name) => {
-                                reasoning.push_str("\n▸ 使用工具 ");
-                                reasoning.push_str(&name);
-                                reasoning.push('\n');
-                                update_progress_display(
-                                    &c,
-                                    chat_id,
-                                    &mut progress_display,
-                                    &bubble_text(role.as_deref(), &reasoning),
-                                )
-                                .await;
-                            }
-                            Progress::QuestionRequest(request) => {
-                                clear_progress_display(&c, chat_id, &mut progress_display).await;
-                                let pending = PendingQuestion {
-                                    chat_id,
-                                    session_id: request.session_id.clone(),
-                                    request_id: request.request_id.clone(),
-                                    answers: vec![Vec::new(); request.questions.len()],
-                                    questions: request.questions.clone(),
-                                    current_question_index: 0,
-                                    waiting_custom_question_index: None,
-                                    deadline: std::time::Instant::now() + QUESTION_TIMEOUT,
-                                    message_id: None,
-                                };
-                                let (text, keyboard) = render_pending_question(&pending);
-                                if let Ok(message_id) = c
-                                    .send_message_with_inline_keyboard(chat_id, &text, keyboard)
-                                    .await
-                                {
-                                    let mut pending = pending;
-                                    pending.message_id = Some(message_id);
-                                    pending_questions.lock().unwrap().insert(chat_id, pending);
-                                }
-                            }
-                        }
-                    }
-                    clear_progress_display(&c, chat_id, &mut progress_display).await;
-                })
-            };
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
+            let progress = tokio::spawn(run_progress(
+                client.clone(),
+                chat_id,
+                progress_display,
+                initial_status.to_string(),
+                rx,
+                tx.downgrade(),
+                pending_questions.clone(),
+            ));
 
             let tx_ev = tx.clone();
             let mut events_buf: Vec<(i64, String, Option<String>, String, i64)> = Vec::new();
@@ -1667,6 +1736,7 @@ mod tests {
             waiting_custom_question_index: None,
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(600),
             message_id: Some(10),
+            resume: ProgressResume::default(),
         }
     }
 
@@ -2642,5 +2712,470 @@ mod tests {
         assert!(sent
             .iter()
             .any(|s| s.chat_id == 12 && s.text.contains("尚未支援")));
+    }
+
+    /// Asks one question, then waits for the answer path to signal before
+    /// finishing; while waiting after the signal it records whether the
+    /// expected progress text showed up before the turn ended (#39).
+    struct AnswerWaitingBackend {
+        client: MockTgClient,
+        answered: Arc<tokio::sync::Notify>,
+        expect: &'static str,
+        asked: std::sync::atomic::AtomicBool,
+        seen_before_end: std::sync::atomic::AtomicBool,
+    }
+
+    impl AnswerWaitingBackend {
+        fn new(
+            client: &MockTgClient,
+            answered: Arc<tokio::sync::Notify>,
+            expect: &'static str,
+        ) -> Self {
+            Self {
+                client: client.clone(),
+                answered,
+                expect,
+                asked: std::sync::atomic::AtomicBool::new(false),
+                seen_before_end: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        fn progress_texts(&self) -> Vec<String> {
+            let mut texts: Vec<String> = self
+                .client
+                .drafts
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, _, text)| text.clone())
+                .collect();
+            texts.extend(
+                self.client
+                    .sent
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|s| s.text.clone()),
+            );
+            texts
+        }
+    }
+
+    impl AiBackend for AnswerWaitingBackend {
+        async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+            Ok(AgentResponse {
+                text: "done".to_string(),
+                session_id: Some("ses_1".to_string()),
+            })
+        }
+
+        async fn run_streaming(
+            &self,
+            req: AgentRequest,
+            on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
+        ) -> Result<AgentResponse, GatewayError> {
+            if !self.asked.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                on_event(wukong_gateway::StreamEvent::QuestionRequest(
+                    wukong_gateway::stream::QuestionRequest {
+                        request_id: "que_1".to_string(),
+                        session_id: "ses_1".to_string(),
+                        questions: vec![wukong_gateway::stream::QuestionInfo {
+                            question: "選一個".to_string(),
+                            header: "偏好".to_string(),
+                            multiple: false,
+                            custom: true,
+                            options: vec![wukong_gateway::stream::QuestionOption {
+                                label: "A".to_string(),
+                                description: "".to_string(),
+                            }],
+                        }],
+                    },
+                ));
+                tokio::time::timeout(std::time::Duration::from_secs(5), self.answered.notified())
+                    .await
+                    .expect("answer path never signalled the backend");
+                for _ in 0..30 {
+                    if self
+                        .progress_texts()
+                        .iter()
+                        .any(|t| t.contains(self.expect))
+                    {
+                        self.seen_before_end
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }
+            self.run(req).await
+        }
+    }
+
+    /// Signals the backend on reply/reject; `fail_reply` makes the reply fail.
+    struct SignallingResponder {
+        answered: Arc<tokio::sync::Notify>,
+        fail_reply: bool,
+    }
+
+    impl QuestionResponder for SignallingResponder {
+        async fn reply_question(
+            &self,
+            _session_id: &str,
+            _request_id: &str,
+            _answers: Vec<Vec<String>>,
+        ) -> Result<(), GatewayError> {
+            self.answered.notify_one();
+            if self.fail_reply {
+                Err(GatewayError::AgentFailed {
+                    code: None,
+                    stderr: "reply failed".to_string(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn reject_question(
+            &self,
+            _session_id: &str,
+            _request_id: &str,
+        ) -> Result<(), GatewayError> {
+            self.answered.notify_one();
+            Ok(())
+        }
+    }
+
+    enum Resolve {
+        Pick,
+        Cancel,
+        Expire,
+    }
+
+    /// Run one turn that asks a question and resolve it from "outside", the way
+    /// the bot's update loop would; returns whether `expect` appeared while the
+    /// turn was still running.
+    async fn run_question_turn(
+        client: &MockTgClient,
+        expect: &'static str,
+        resolve: Resolve,
+        fail_reply: bool,
+    ) -> bool {
+        let mem = open_memory().await;
+        let answered = Arc::new(tokio::sync::Notify::new());
+        let backend = AnswerWaitingBackend::new(client, answered.clone(), expect);
+        let responder = SignallingResponder {
+            answered,
+            fail_reply,
+        };
+        let pending = Arc::new(Mutex::new(PendingQuestions::new()));
+        let msg = TgMessage {
+            update_id: 42,
+            chat_id: 12,
+            text: "hi".to_string(),
+            attachments: Vec::new(),
+        };
+        let resolver = async {
+            for _ in 0..500 {
+                if pending.lock().unwrap().contains_key(&12) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(
+                !backend.progress_texts().iter().any(|t| t.contains(expect)),
+                "progress text shown before the question was resolved"
+            );
+            let data = match resolve {
+                Resolve::Pick => Some("q:que_1:pick:0:0".to_string()),
+                Resolve::Cancel => Some(question_callback_data("que_1", QuestionAction::Cancel)),
+                Resolve::Expire => None,
+            };
+            match data {
+                Some(data) => {
+                    let mut cb = callback(&data);
+                    cb.chat_id = 12;
+                    handle_callback_query(client, &responder, &[12], pending.clone(), &cb).await;
+                }
+                None => {
+                    pending.lock().unwrap().get_mut(&12).unwrap().deadline =
+                        std::time::Instant::now() - std::time::Duration::from_secs(1);
+                    cleanup_expired_questions(client, &responder, pending.clone()).await;
+                }
+            }
+        };
+        let cfg = base_cfg();
+        tokio::join!(
+            handle_message_with_responder(
+                client,
+                &mem,
+                &cfg,
+                &backend,
+                &responder,
+                None,
+                &[12],
+                pending.clone(),
+                &msg,
+            ),
+            resolver
+        );
+        backend
+            .seen_before_end
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn answered_question_shows_progress_again_as_draft() {
+        let client = MockTgClient::default().with_message_drafts();
+        assert!(run_question_turn(&client, "已收到回答，繼續處理…", Resolve::Pick, false).await);
+        let edits = client.edits.lock().unwrap();
+        assert!(edits.iter().any(|(_, _, text)| text == "已送出回答。"));
+        let drafts = client.drafts.lock().unwrap();
+        let resumed = drafts
+            .iter()
+            .find(|(_, _, text)| text.contains("已收到回答，繼續處理…"))
+            .expect("no resumed draft");
+        assert_eq!(
+            resumed.1, 42,
+            "resumed draft must reuse the turn's draft id"
+        );
+    }
+
+    #[tokio::test]
+    async fn answered_question_shows_progress_again_as_status_message() {
+        let client = MockTgClient::default();
+        assert!(run_question_turn(&client, "已收到回答，繼續處理…", Resolve::Pick, false).await);
+        assert!(client
+            .edits
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, _, text)| text == "已送出回答。"));
+        // The first status message goes when the question is asked, the resumed
+        // one when the turn ends; the answer itself stays.
+        assert_eq!(client.deletes.lock().unwrap().len(), 2);
+        assert!(client
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.text.contains("done")));
+    }
+
+    #[tokio::test]
+    async fn failed_answer_does_not_show_progress_again() {
+        let client = MockTgClient::default().with_message_drafts();
+        assert!(!run_question_turn(&client, "繼續處理…", Resolve::Pick, true).await);
+        assert!(client
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.text.contains("回答送出失敗")));
+    }
+
+    #[tokio::test]
+    async fn cancelled_question_shows_progress_again() {
+        let client = MockTgClient::default().with_message_drafts();
+        assert!(run_question_turn(&client, "繼續處理…", Resolve::Cancel, false).await);
+        assert!(client
+            .edits
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, _, text)| text == "已取消問題。"));
+        assert!(!client
+            .drafts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, _, text)| text.contains("已收到回答")));
+    }
+
+    #[tokio::test]
+    async fn expired_question_shows_progress_again() {
+        let client = MockTgClient::default();
+        assert!(run_question_turn(&client, "繼續處理…", Resolve::Expire, false).await);
+        assert!(client
+            .edits
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, _, text)| text == "問題已逾時，已取消。"));
+        assert!(!client
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.text.contains("已收到回答")));
+    }
+
+    fn sample_question_request() -> QuestionRequest {
+        QuestionRequest {
+            request_id: "que_1".to_string(),
+            session_id: "ses_1".to_string(),
+            questions: sample_pending_question(false).questions,
+        }
+    }
+
+    fn draft_log(client: &MockTgClient) -> Vec<(i64, String)> {
+        client
+            .drafts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, id, text)| (*id, text.clone()))
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_draft_progress_is_resent_every_20_seconds_except_while_a_question_waits() {
+        let client = MockTgClient::default().with_message_drafts();
+        let pending = Arc::new(Mutex::new(PendingQuestions::new()));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(run_progress(
+            client.clone(),
+            12,
+            ProgressDisplay::Draft { draft_id: 42 },
+            "🐵 收到，思考中…".to_string(),
+            rx,
+            tx.downgrade(),
+            pending.clone(),
+        ));
+        let second = std::time::Duration::from_secs(1);
+
+        // No event yet: the opening status is resent with the same draft id.
+        tokio::time::sleep(19 * second).await;
+        assert!(draft_log(&client).is_empty(), "resent too early");
+        tokio::time::sleep(2 * second).await;
+        assert_eq!(
+            draft_log(&client),
+            vec![(42, "🐵 收到，思考中…".to_string())]
+        );
+
+        // After an event, the timer restarts and the current text is resent.
+        tx.send(Progress::ToolUse("read".to_string())).unwrap();
+        tokio::time::sleep(second).await;
+        let shown = draft_log(&client).last().unwrap().clone();
+        assert!(shown.1.contains("使用工具 read"));
+        tokio::time::sleep(18 * second).await;
+        assert_eq!(draft_log(&client).len(), 2, "resent before 20 idle seconds");
+        tokio::time::sleep(2 * second).await;
+        assert_eq!(draft_log(&client).len(), 3);
+        assert_eq!(draft_log(&client).last().unwrap(), &shown);
+
+        // While a question waits for the user, nothing is resent.
+        tx.send(Progress::QuestionRequest(sample_question_request()))
+            .unwrap();
+        tokio::time::sleep(second).await;
+        let asked = draft_log(&client).len();
+        tokio::time::sleep(120 * second).await;
+        assert_eq!(
+            draft_log(&client).len(),
+            asked,
+            "resent while a question waits"
+        );
+
+        // Once answered, the resumed status shows and is kept alive too.
+        tx.send(Progress::QuestionAnswered).unwrap();
+        tokio::time::sleep(second).await;
+        let resumed = draft_log(&client).last().unwrap().clone();
+        assert!(resumed.1.contains("已收到回答，繼續處理…"));
+        tokio::time::sleep(20 * second).await;
+        assert_eq!(draft_log(&client).len(), asked + 2);
+        assert_eq!(draft_log(&client).last().unwrap(), &resumed);
+
+        // After the turn ends, nothing more is sent.
+        drop(tx);
+        task.await.unwrap();
+        let ended = draft_log(&client).len();
+        tokio::time::sleep(120 * second).await;
+        assert_eq!(draft_log(&client).len(), ended);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progress_events_while_a_question_waits_show_only_after_it_is_answered() {
+        for draft in [true, false] {
+            let client = if draft {
+                MockTgClient::default().with_message_drafts()
+            } else {
+                MockTgClient::default()
+            };
+            let display = if draft {
+                ProgressDisplay::Draft { draft_id: 42 }
+            } else {
+                ProgressDisplay::Message {
+                    message_id: Some(1),
+                }
+            };
+            let pending = Arc::new(Mutex::new(PendingQuestions::new()));
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let task = tokio::spawn(run_progress(
+                client.clone(),
+                12,
+                display,
+                "🐵 收到，思考中…".to_string(),
+                rx,
+                tx.downgrade(),
+                pending,
+            ));
+            let shown = |client: &MockTgClient| {
+                (
+                    draft_log(client).len(),
+                    client.sent.lock().unwrap().len(),
+                    client.edits.lock().unwrap().len(),
+                )
+            };
+            let second = std::time::Duration::from_secs(1);
+
+            tx.send(Progress::QuestionRequest(sample_question_request()))
+                .unwrap();
+            tokio::time::sleep(second).await;
+            let asked = shown(&client);
+
+            // Another tool call of the same step may still report while the
+            // question waits; the question message stays at the bottom.
+            tx.send(Progress::Role(Role::Fixer)).unwrap();
+            tx.send(Progress::Reasoning("想一下".to_string())).unwrap();
+            tx.send(Progress::ToolUse("bash".to_string())).unwrap();
+            tokio::time::sleep(second).await;
+            assert_eq!(shown(&client), asked, "shown while a question waits");
+
+            // Once answered, the progress shows again with what it gathered.
+            tx.send(Progress::QuestionAnswered).unwrap();
+            tokio::time::sleep(second).await;
+            let resumed = if draft {
+                draft_log(&client).last().unwrap().1.clone()
+            } else {
+                client.sent.lock().unwrap().last().unwrap().text.clone()
+            };
+            assert_eq!(resumed, "🐵　悟空·fixer 已收到回答，繼續處理…");
+            drop(tx);
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn status_message_progress_is_not_resent_when_idle() {
+        let client = MockTgClient::default();
+        let pending = Arc::new(Mutex::new(PendingQuestions::new()));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(run_progress(
+            client.clone(),
+            12,
+            ProgressDisplay::Message {
+                message_id: Some(1),
+            },
+            "🐵 收到，思考中…".to_string(),
+            rx,
+            tx.downgrade(),
+            pending,
+        ));
+        tx.send(Progress::ToolUse("read".to_string())).unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+        assert_eq!(client.edits.lock().unwrap().len(), 1);
+        assert!(client.sent.lock().unwrap().is_empty());
+        assert!(draft_log(&client).is_empty());
+        drop(tx);
+        task.await.unwrap();
     }
 }
