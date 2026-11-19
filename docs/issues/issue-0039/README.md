@@ -38,7 +38,7 @@ token 由 `docker exec wukong-telegram cat /data/settings.json` 經 stdin 交給
 
 ## 現況
 
-**現行 review**: review-4449e20.md
+**現行 review**: review-489a7f3.md
 
 ## 涉及檔案
 
@@ -130,4 +130,4 @@ token 由 `docker exec wukong-telegram cat /data/settings.json` 經 stdin 交給
 **建立日期**: 2026-11-19  
 **分級**: Small  
 **風險**: Low\
-**狀態**: 更正長度說法完成，待重新審查
+**狀態**: AC-5 審查通過（489a7f3），待推送與建立 PR
