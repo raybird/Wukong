@@ -715,8 +715,30 @@ fn bubble_text(role: Option<&str>, reasoning: &str) -> String {
     if r.is_empty() {
         return base;
     }
-    format!("{base}\n💭　{r}")
+    let full = format!("{base}\n💭　{r}");
+    if full.encode_utf16().count() <= PROGRESS_TEXT_LIMIT {
+        return full;
+    }
+    // Too long for Telegram: keep the tail that fits, after an ellipsis
+    // marking the dropped head.
+    let head = format!("{base}\n💭　…");
+    let mut room = PROGRESS_TEXT_LIMIT.saturating_sub(head.encode_utf16().count());
+    let mut start = r.len();
+    for (i, c) in r.char_indices().rev() {
+        if c.len_utf16() > room {
+            break;
+        }
+        room -= c.len_utf16();
+        start = i;
+    }
+    format!("{head}{}", &r[start..])
 }
+
+/// Telegram rejects a draft or message over 4096 characters with
+/// `MESSAGE_TOO_LONG` (real send, 2026-11-19, #39). The progress text is
+/// measured in UTF-16 units, never fewer than characters, so staying a little
+/// under 4096 of them keeps it under the limit however Telegram counts.
+const PROGRESS_TEXT_LIMIT: usize = 4000;
 
 /// Log a failed Telegram send instead of silently dropping it, so a rejected
 /// message (e.g. a 400 on malformed HTML) is visible rather than lost.
@@ -3152,6 +3174,85 @@ mod tests {
             drop(tx);
             task.await.unwrap();
         }
+    }
+
+    /// Length in UTF-16 units, never fewer than characters: at most 4096 of
+    /// them is within Telegram's 4096-character limit (#39).
+    fn utf16_len(text: &str) -> usize {
+        text.encode_utf16().count()
+    }
+
+    #[test]
+    fn bubble_text_keeps_the_reasoning_tail_within_the_telegram_limit() {
+        let reasoning = format!("開頭{}結尾", "長".repeat(6000));
+        let text = bubble_text(Some("oracle"), &reasoning);
+        assert!(utf16_len(&text) <= 4096, "{} units", utf16_len(&text));
+        assert!(
+            text.starts_with("🐵　悟空·oracle 思考中…\n💭　…"),
+            "{text:.40}"
+        );
+        assert!(text.ends_with("長結尾"));
+        assert!(!text.contains("開頭"));
+        // It keeps as much of the tail as fits (about 4000 units), not a scrap.
+        assert!(utf16_len(&text) >= 3990, "{} units", utf16_len(&text));
+
+        // An emoji takes 2 UTF-16 units. With one unit left over the next
+        // emoji no longer fits, and the text stays within 4000 units.
+        let emoji = format!("開頭{}結尾。", "😀".repeat(3000));
+        let text = bubble_text(Some("oracle"), &emoji);
+        assert!(utf16_len(&text) <= 4000, "{} units", utf16_len(&text));
+        assert!(utf16_len(&text) >= 3990, "{} units", utf16_len(&text));
+        assert!(text.ends_with("😀結尾。"));
+    }
+
+    #[test]
+    fn bubble_text_is_cut_only_past_4000_units() {
+        let prefix = "🐵　悟空·oracle 思考中…\n💭　";
+        let fits = "長".repeat(4000 - utf16_len(prefix));
+        assert_eq!(
+            bubble_text(Some("oracle"), &fits),
+            format!("{prefix}{fits}")
+        );
+        let over = format!("{fits}長");
+        assert!(bubble_text(Some("oracle"), &over).starts_with(&format!("{prefix}…")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn long_reasoning_progress_drafts_stay_within_the_telegram_limit() {
+        let client = MockTgClient::default().with_message_drafts();
+        let pending = Arc::new(Mutex::new(PendingQuestions::new()));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(run_progress(
+            client.clone(),
+            12,
+            ProgressDisplay::Draft { draft_id: 42 },
+            "🐵 收到，思考中…".to_string(),
+            rx,
+            tx.downgrade(),
+            pending,
+        ));
+        tx.send(Progress::Role(Role::Oracle)).unwrap();
+        // Distinct tool names keep each update's tail distinct.
+        for i in 0..3 {
+            tx.send(Progress::Reasoning("想".repeat(3000))).unwrap();
+            tx.send(Progress::ToolUse(format!("bash{i}"))).unwrap();
+        }
+        // Idle long enough for the keep-alive resend of the long text too.
+        tokio::time::sleep(std::time::Duration::from_secs(25)).await;
+        drop(tx);
+        task.await.unwrap();
+
+        let drafts = draft_log(&client);
+        assert!(drafts.len() >= 5, "{} drafts", drafts.len());
+        for (_, text) in &drafts {
+            assert!(utf16_len(text) <= 4096, "{} units", utf16_len(text));
+        }
+        assert!(drafts.last().unwrap().1.ends_with("▸ 使用工具 bash2"));
+        // The last draft is the idle resend of the long text before it.
+        let [.., shown, resent] = drafts.as_slice() else {
+            panic!("{} drafts", drafts.len());
+        };
+        assert_eq!(resent, shown, "the long text was not resent when idle");
     }
 
     #[tokio::test(start_paused = true)]
