@@ -11,6 +11,8 @@
 
 ## [Unreleased]
 
+## [0.25.1] - 2026-11-20
+
 ### Fixed
 
 - **Telegram 的處理進度在思考內容很長時不再停住、消失。** 進度原本會把整個回合的思考全文放進去，超過
@@ -1076,7 +1078,8 @@ server 模式補回那個 CLI 免費獲得的週期性重置，同時保留暖�
   不安全綁定（`0.0.0.0` + 空 token）啟動即拒絕（fail-closed，可用
   `WUKONG_WEB_ALLOW_INSECURE=1` 覆寫）；Telegram callback 加白名單檢查。
 
-[Unreleased]: https://github.com/raybird/Wukong/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/raybird/Wukong/compare/v0.25.1...HEAD
+[0.25.1]: https://github.com/raybird/Wukong/compare/v0.25.0...v0.25.1
 [0.25.0]: https://github.com/raybird/Wukong/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/raybird/Wukong/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/raybird/Wukong/compare/v0.22.1...v0.23.0
