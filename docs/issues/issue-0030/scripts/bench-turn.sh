@@ -4,7 +4,7 @@
 # 用法：bench-turn.sh IMAGE RUN_DIR TASK N
 #   RUN_DIR 要有 data/memory.db、opencode/opencode.db、config/（opencode-config 的複本）、workspace/
 #   TASK：short（只回 OK）或 tool（建立並讀回一個檔案）
-# 每回合輸出一行 JSON；stderr 存在 RUN_DIR/logs/。prompt 是固定的合成內容，不帶任何對話資料。
+# 每回合輸出一行 JSON（tool 任務的 bench_file 是該回合結束時 bench.txt 是否為 hello）；stderr 存在 RUN_DIR/logs/。prompt 是固定的合成內容，不帶任何對話資料。
 set -euo pipefail
 image=$1 run=$2 task=$3 n=$4
 case $task in
@@ -32,8 +32,12 @@ docker run --rm --cpus 1.5 --memory 3g --pids-limit 256 \
       gosu wukong wukong --scope "project:bench-$BENCH_TASK" --no-stream "$BENCH_PROMPT" > /logs/out-$i.txt 2> /logs/err-$i.txt
       rc=$?
       t1=$(date +%s%3N)
-      printf "{\"image\":\"%s\",\"task\":\"%s\",\"run\":%d,\"turn_ms\":%d,\"rc\":%d,\"out_bytes\":%d,\"nr_throttled\":%d,\"throttled_usec\":%d,\"cpu_usec\":%d,\"memory_peak\":%d,\"opencode_db_delta\":%d,\"memory_db_delta\":%d}\n" \
-        "$BENCH_IMAGE" "$BENCH_TASK" $i $((t1 - t0)) $rc $(wc -c < /logs/out-$i.txt) \
+      bench_file=n/a
+      if [ "$BENCH_TASK" = tool ]; then
+        [ "$(cat /workspace/bench.txt 2>/dev/null)" = hello ] && bench_file=ok || bench_file=missing
+      fi
+      printf "{\"image\":\"%s\",\"task\":\"%s\",\"run\":%d,\"turn_ms\":%d,\"rc\":%d,\"bench_file\":\"%s\",\"out_bytes\":%d,\"nr_throttled\":%d,\"throttled_usec\":%d,\"cpu_usec\":%d,\"memory_peak\":%d,\"opencode_db_delta\":%d,\"memory_db_delta\":%d}\n" \
+        "$BENCH_IMAGE" "$BENCH_TASK" $i $((t1 - t0)) $rc $bench_file $(wc -c < /logs/out-$i.txt) \
         $(( $(stat_of nr_throttled) - thr0 )) $(( $(stat_of throttled_usec) - tus0 )) $(( $(stat_of usage_usec) - cpu0 )) \
         $(cat /sys/fs/cgroup/memory.peak) \
         $(( $(size /home/wukong/.local/share/opencode/opencode.db) - db0 )) $(( $(size /data/memory.db) - mem0 ))

@@ -280,7 +280,7 @@ bash docs/issues/issue-0030/scripts/bench-turn.sh ghcr.io/raybird/wukong:v0.25.1
 - 記憶體峰值是整個容器的累計值，包含 entrypoint 初始化；cgroup 檔案系統唯讀，不能逐回合重設。
 - v0.25.1 short 的 opencode 日誌（bench 副本的 err-1～3.txt）：每回合啟動兩個 opencode 程序，plan 與 build 各一個（不同的 `run=`）。各自從載入設定到第一次呼叫上游分別是 1.25／0.95、1.05／0.97、0.95／0.99 秒，合計每回合 1.9～2.2 秒，占回合耗時的 13～19%。每個程序從 `message=stream`（開始呼叫上游）到 `message=loop … step=1`（這一步結束）就是一次 LLM step：三個回合的 plan／build 分別是 4.6／8.0、8.1／3.9、4.3／2.3 秒，合計 12.6、12.0、6.6 秒，占回合耗時的 78%、78%、66%。LLM step 的時間也包含 opencode 自己處理串流的時間，所以這是上游耗時的上限，不是純粹等待上游的時間。v0.23.0 的日誌沒有時間戳，不能拆階段。
 - 不呼叫模型，單獨量 opencode 的啟動成本（[scripts/boot-cost.sh](scripts/boot-cost.sh)，v0.25.1，同樣 1.5 CPU，5 次）：從啟動到印出 listening 0.89～0.99 秒、1.21～1.32 CPU 秒。每回合啟動兩次，約 2.5 CPU 秒，占每回合 5.3～5.6 CPU 秒的一半左右；其餘約 3 CPU 秒花在串流處理、Wukong 本身或程序結束，這次的量測分不出來。
-- 成功的判準：rc=0、輸出內容符合任務（short 輸出 OK；tool 在 workspace 留下內容為 hello 的 bench.txt）。v0.23.0 tool 三次都留下 bench.txt。三個回合共用同一個 workspace，舊檔可能讓沒寫入的回合也被判成功，所以另查了 bench 副本的 opencode.db：第 2、3 回合的 build 各有一次對 /workspace/bench.txt 的 write 與 read，都是 completed；第 1 回合是新 workspace 的第一個回合，之前沒有舊檔（它的 session 在下一回合被輪替刪除，DB 裡查不到）。2026-11-23 起 bench-turn.sh 每回合開始前先刪掉 bench.txt。
+- 成功的判準：rc=0、輸出內容符合任務（short 輸出 OK；tool 在 workspace 留下內容為 hello 的 bench.txt）。v0.23.0 tool 三次都留下 bench.txt。三個回合共用同一個 workspace，舊檔可能讓沒寫入的回合也被判成功，所以另查了 bench 副本的 opencode.db：三個回合都在同一個 session，build 在 11:08:35、11:08:50、11:09:08（台北時間）各有一次對 /workspace/bench.txt 的 write 與 read，都是 completed，每個回合一次。bench 副本帶著還沒 checkpoint 的 opencode.db-wal，查詢時要把主檔連同 -wal 一起複製出來再開，用 immutable=1 只開主檔會漏掉最後一個回合。2026-11-23 起 bench-turn.sh 每回合開始前先刪掉 bench.txt，結束後檢查內容是不是 hello，結果寫進該回合輸出的 bench_file 欄位（short 任務固定為 n/a）。
 - v0.25.1 tool 任務的 3 次失敗是本次探測與對照把免費模型的額度用完：上游回 Free usage limit reached，Wukong 回報「上游模型錯誤（上游限流）」，2 秒內結束，沒有變成逾時（#24 的修正有效）。這 3 筆保留為失敗樣本，不算進成功回合的耗時。
 - 同一段時間，正式部署的 schedulerd 正在用同一個模型跑排程。查日誌（`docker logs --since 40m`）沒有出現額度錯誤；發現額度用完後，已停止所有會呼叫模型的量測。
 - 量測前試過每回合起一個新容器，結果混入了 entrypoint 的固定開銷（只跑 `wukong --help`：v0.23.0 4.8 秒，v0.25.1 11.2 秒），正式部署的常駐容器不付這筆開銷，所以那組數字棄用。
@@ -306,7 +306,7 @@ bash docs/issues/issue-0030/scripts/bench-turn.sh ghcr.io/raybird/wukong:v0.25.1
 | 假設或既有修正 | 結果 | 證據 |
 |---|---|---|
 | 回合耗時主要在上游模型 | 大致成立：v0.25.1 每回合呼叫上游兩次（plan、build），兩次 LLM step 合計 6.6～12.6 秒，占回合耗時的 66～78%（含 opencode 處理串流的時間，是上游耗時的上限）；本機的 opencode 啟動合計約 2 秒；上游限流時 2 秒內失敗 | 步驟 5 |
-| 長期 session 的事件與工具輸出讓資料量變大 | 資料量確實集中在少數長期 session 的 event 與 part；但在目前規模下，讀取最大 session 約 15 ms，不構成瓶頸 | 步驟 2、3 |
+| 長期 session 的事件與工具輸出讓資料量變大 | 資料量確實集中在少數長期 session 的 event 與 part；但在目前規模與這組測試查詢下，讀取最大 session 的 SQL 約 15 ms，不構成瓶頸；讀出後的反序列化與事件處理沒有單獨量 | 步驟 2、3 |
 | 按需啟動 opencode 的重複成本 | 成立，不可忽略：每回合啟動兩次，合計約 2 秒（回合耗時的 13～19%）、約 2.5 CPU 秒（每回合 CPU 的一半左右） | 步驟 5 |
 | 共用 SQLite 的寫入競爭 | 未驗證，仍是假設 | 步驟 5「沒有量測的項目」 |
 | 1.5 CPU 限制造成 throttling | 有但小：v0.25.1 每回合 11～13 次、0.3～0.4 秒；v0.23.0 約 24 次、0.9 秒 | 步驟 5 |
