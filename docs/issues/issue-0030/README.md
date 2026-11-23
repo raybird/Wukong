@@ -7,7 +7,7 @@
 
 ## 現況
 
-**現行 review**: review-b88a4c4.md
+**現行 review**: review-b708576.md
 
 ## 文件清單
 - [implementation-plan.md](implementation-plan.md)
@@ -62,7 +62,7 @@ Feature: Runtime 效能與升級評估
 | TBD-4 | raybird-desktop 舊部署（v0.23.0）的症狀根因 | 不影響本次交付：追蹤：無。2026-11-23 使用者選擇改盤點 flashaim；那台機器連不到，舊部署停機且早於 #24／#28 的修正，本次只判斷新版是否仍有同類問題 | SCN-001 |
 | TBD-5 | dev-rules-kit 候選版（bd001e6，流程契約 2.7）要不要跟著本 issue 的 squash 進 main（review-4be256c 的 SHOULD FIX 5） | 不影響本次交付：追蹤：無。2026-11-23 使用者選「照現狀合併並在 PR 明列」，PR 說明與 squash 訊息寫明內含候選版；上游發版後若與 da632e9 不同，照每次 kit 發版的例行做法在 main 執行 init-project.py --update，不需另外追蹤 | 未確認時，main 會帶著上游尚未發版的流程契約 2.7，且與本 issue 的盤點文件併在同一個 squash 提交；不影響 SCN-001、SCN-002 |
 | TBD-6 | review-5f2c2d6 的四項建議怎麼處理 | 已解決：2026-11-23 使用者在逐題確認中全選建議答案。建議 1（上游耗時其實拆得出來）、建議 3、4（腳本說明與檢查）修正；建議 2 把 TBD-5 改成追蹤：無並補上影響；修正後重新審查 | 建議 1 影響步驟 5、6 的根因排序；SCN-001、SCN-002 |
-| TBD-7 | review-b88a4c4 的兩項建議怎麼處理 | 已解決：2026-11-23 使用者選「兩項都修正，再審一輪」。LLM step 時間補上是上游耗時上限的限定，判定改回大致成立；v2-migration.sh 改取 part 最多的 session，重跑輸出除標籤外相同 | 影響步驟 5、6 的根因排序；SCN-001 |
+| TBD-7 | review-b88a4c4 的兩項建議怎麼處理 | 已解決：2026-11-23 使用者選「兩項都修正，再審一輪」。LLM step 時間補上是上游耗時上限的限定，判定改回大致成立；v2-migration.sh 改取 part 最多的 session，重跑輸出除標籤外相同 | 影響步驟 5、6 的根因排序；SCN-001、SCN-002 |
 
 ## Gate 豁免紀錄
 
@@ -78,4 +78,4 @@ Feature: Runtime 效能與升級評估
 **建立日期**: 2026-11-11
 **分級**: Medium
 **風險**: High
-**狀態**: 待審查
+**狀態**: 已完成
