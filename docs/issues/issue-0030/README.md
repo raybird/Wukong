@@ -58,8 +58,9 @@ Feature: Runtime 效能與升級評估
 |---|---|---|---|
 | TBD-1 | 容器內 OpenCode binary 版本及 DB 分布 | 已解決：2026-11-23 flashaim 的 v0.25.1 內含 OpenCode 1.19.6，四個資料庫的分布見 inventory.md 步驟 1、2 | SCN-001，於盤點取得 |
 | TBD-2 | V2 API／資料遷移與回復是否相容 | 已解決：2026-11-23 不相容；API、事件、啟動與認證都變了，V2 就地單向遷移 opencode.db，回復要還原備份，見 inventory.md 步驟 4 | SCN-002，先在隔離環境驗證 |
-| TBD-3 | 正式升級與 adapter 改造範圍 | 不影響本次交付：追蹤：無。2026-11-23 go/no-go 為暫緩：V1 仍在維護，release CI 只解析 opencode-ai，不會自動升到改名為 @opencode/cli 的 V2；將來要升級時另開 issue，前提與回復方案在 inventory.md 步驟 6 | 評估後定案，尚未列為實作工作 |
+| TBD-3 | 正式升級與 adapter 改造範圍 | 不影響本次交付：追蹤：無。2026-11-23 go/no-go 為暫緩：V1 仍在維護，release CI 只解析 opencode-ai，不會自動升到改名為 @opencode/cli 的 V2；將來要升級時另開 issue，前提與回復方案在 inventory.md 步驟 6 | 評估後定案，尚未列為實作工作；SCN-002 |
 | TBD-4 | raybird-desktop 舊部署（v0.23.0）的症狀根因 | 不影響本次交付：追蹤：無。2026-11-23 使用者選擇改盤點 flashaim；那台機器連不到，舊部署停機且早於 #24／#28 的修正，本次只判斷新版是否仍有同類問題 | SCN-001 |
+| TBD-5 | dev-rules-kit 候選版（bd001e6，流程契約 2.7）要不要跟著本 issue 的 squash 進 main（review-4be256c 的 SHOULD FIX 5） | 不影響本次交付：追蹤：dev-rules-kit issue #11（候選版試用與發版）。2026-11-23 使用者選「照現狀合併並在 PR 明列」：PR 說明與 squash 訊息寫明內含候選版；上游發版後若與 da632e9 不同，到 main 執行 init-project.py --update | 不影響 SCN-001、SCN-002 |
 
 ## Gate 豁免紀錄
 
@@ -75,4 +76,4 @@ Feature: Runtime 效能與升級評估
 **建立日期**: 2026-11-11
 **分級**: Medium
 **風險**: High
-**狀態**: 修正中（review-4be256c）
+**狀態**: 待審查

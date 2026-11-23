@@ -30,9 +30,7 @@ for src_dir, name, snapshot in SETS:
     shutil.copy2(f"{src_dir}/{name}", with_wal)
     shutil.copy2(f"{src_dir}/{name}-wal", f"{with_wal}-wal")
     shutil.copy2(f"{src_dir}/{name}", main_only)
-    print(
-        name,
-        "snapshot", total_rows(f"file:{snapshot}?immutable=1"),
-        "main+wal", total_rows(f"file:{with_wal}"),
-        "main-only", total_rows(f"file:{main_only}?immutable=1"),
-    )
+    snap, full, main = (total_rows(f"file:{snapshot}?immutable=1"), total_rows(f"file:{with_wal}"),
+                        total_rows(f"file:{main_only}?immutable=1"))
+    verdict = "PASS" if snap == full and full > main else "FAIL"
+    print(name, verdict, "snapshot", snap, "main+wal", full, "main-only", main)

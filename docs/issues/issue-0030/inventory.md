@@ -66,6 +66,8 @@ docker run --rm --user 1000:1000 --network none --entrypoint python3 \
 
 只有主檔時筆數較少，副本與「主檔＋WAL」相等，證明副本包含 WAL 裡尚未 checkpoint 的資料。若副本只抄到主檔，這項檢查會失敗。兩次執行（02:37、02:38）的副本 sha256 相同。
 
+2026-11-23 起腳本自己判定：副本等於「主檔＋WAL」且大於「只有主檔」才印 PASS。正式資料會持續寫入，所以要在取副本後立刻執行；WAL 剛好已全部 checkpoint 時「只有主檔」也會相等，這時會判 FAIL，要換個時間重取。改版後重取副本再檢查，memory.db 與 opencode.db 都是 PASS。
+
 ### 限制
 
 - 這台有排程：副本的 scheduler_jobs 2 筆、scheduler_runs 25 筆，執行量遠少於 raybird-desktop 交接紀錄裡的尾端樣本，兩台的負載不能直接比。
@@ -87,13 +89,15 @@ docker run ...（同上） -I /scripts/inventory.py /dst/opencode.db /dst/memory
 
 對照組（`inventory.py control`）造一個內容已知的資料庫：3 個 session（其中 1 個是子 session）、part 7／3／0 筆、message 2／1／0 筆、event 3 筆（1 筆不屬於任何 session），逐項比對筆數、byte 數、分組排序與查不到的表。結果 PASS。
 
-反向自檢，下列三種改壞的版本都會讓對照組 FAIL：
+反向自檢，用 sed 改出下列三種壞掉的版本，對照組都會 FAIL：
 
-| 改壞的地方 | 對照組結果 |
+| 改壞的地方（sed 指令） | 對照組結果 |
 |---|---|
-| 前幾大 session 的查詢跳過第一名（`offset 1`） | FAIL：top_sessions_by_parts、top_sessions_by_messages 不符 |
-| 查不到的表回傳 0 而不是 unknown | FAIL：missing table 拿到 0 |
-| 「不屬於 session 的 event」條件寫反 | FAIL：events_outside_sessions 拿到 2，應為 1 |
+| 前幾大 session 的查詢跳過第一名（`s/limit ?/limit ? offset 1/`） | FAIL：top_sessions_by_parts、top_sessions_by_messages 不符 |
+| 查不到的表回傳 0 而不是 unknown（`s/return UNKNOWN$/return 0/`） | FAIL：missing table 拿到 0 |
+| 「不屬於 session 的 event」條件寫反（`s/where aggregate_id not in/where aggregate_id in/`） | FAIL：events_outside_sessions 拿到 2，應為 1 |
+
+對照組沒有涵蓋各表占用的 byte 數（dbstat）。另外交叉驗算：opencode.db 各表加總 42,057,728 byte，page_count×page_size 為 42,078,208 byte，相差的 20 KB 是 sqlite_master 等系統頁。
 
 ### 檔案與頁面
 
@@ -180,7 +184,7 @@ memory.db 的 recall_telemetry 是正式部署自己寫的量測：relevant 模�
 
 ### 結論與限制
 
-在 flashaim 目前的資料規模下（opencode.db 42 MB、最大 session 2,114 個 part），資料庫查詢與召回都在毫秒級，跟交接紀錄的整個任務 1,218～2,390 秒差了五個數量級以上，不是 flashaim 上的瓶頸候選。raybird-desktop 的資料規模沒有取得，這個結論不能推到那台。查詢耗時會隨單一 session 的 part 與 event 成長，長期 session 的成長速度留給步驟 5 量測。
+在 flashaim 目前的資料規模下（opencode.db 42 MB、最大 session 2,114 個 part），資料庫查詢與召回都在毫秒級，最慢約 16 ms，比 flashaim 自己的回合耗時（步驟 5，10～25 秒）小了約三個數量級，不是 flashaim 上的瓶頸候選。raybird-desktop 的資料規模沒有取得，這個結論不能推到那台。查詢耗時會隨單一 session 的 part 與 event 成長，長期 session 的成長速度留給步驟 5 量測。
 
 ## 步驟 4：OpenCode V2（2.3.2）最小契約與遷移／回復探測
 
@@ -199,18 +203,25 @@ Wukong 用到的介面取自 crates/wukong-gateway/src/local_process.rs 與 open
 | `opencode serve --hostname 127.0.0.1 --port 0 --print-logs` | 旗標都在，`--port 0` 可用 | 無 |
 | 等待 stdout 出現 `opencode server listening on ` | 印的是 `server listening on http://…` | 啟動偵測永遠等不到，每次都會卡到 agent timeout |
 | 移除 OPENCODE_SERVER_PASSWORD，本機模式不帶認證 | 沒給密碼時自動產生隨機密碼，/api 沒帶認證回 401；給 OPENCODE_SERVER_PASSWORD 就用它。使用者名稱固定為 opencode，OPENCODE_SERVER_USERNAME 不再支援 | 本機模式要自己設密碼再帶 basic auth |
-| GET /global/health | 不存在，但 GET 回 SPA 網頁 HTML、狀態 200；改用 GET /api/info | **假綠燈**：現有健康檢查會判成功 |
+| GET /global/health（gateway 的 health_check；選用的 opencode-server 容器另有 compose healthcheck `curl -fsS http://localhost:4096/global/health`） | 不存在；GET 回 SPA 網頁 HTML、狀態 200，沒帶認證也一樣是 200 與 text/html。替代是 GET /api/info（要認證） | gateway 的 health_check 走 send_json，回應不是 JSON 會判失敗；compose healthcheck 只看狀態碼，server 模式下會顯示 healthy（假綠燈） |
 | POST /session、GET /session?limit=、GET／DELETE /session/{id} | 改到 /api/session…；回應包在 data 裡，列表改成 cursor 分頁 | 路徑與解析都要改；列表要跟著 cursor 走完，不然會重演 W-6 |
 | POST /session/{id}/message（同步）、POST /session/{id}/prompt_async | 只剩 POST /api/session/{id}/prompt，一律非同步排入；body 是 text，不是 parts | 同步呼叫要改成送出後等事件 |
 | GET /session/{id}/message?limit= | GET /api/session/{id}/message，回 data 加 cursor，訊息形狀是 type＋content，沒有 info／parts | 回覆擷取、模型擷取（providerID／modelID）的解析都要改 |
 | GET /event（SSE），事件 message.part.updated、session.idle、permission.* | GET /api/event；V1 的路徑回 HTML。事件全部改名：session.text.delta、session.execution.succeeded／interrupted、session.tool.*、permission.asked／replied 等 | 串流與完成判定要重寫 |
 | POST /session/{id}/abort | POST /api/session/{id}/interrupt，回 interrupted=true | 實測可用，路徑要改 |
-| POST /session/{id}/summarize | POST /api/session/{id}/compact（排入下一個 step 邊界） | 實測可用，路徑要改 |
+| POST /session/{id}/summarize | POST /api/session/{id}/compact（排入下一個 step 邊界） | 端點接受請求（200），有沒有真的壓縮沒有驗證；路徑要改 |
 | POST /permission/{id}/reply | GET /api/session/{id}/permission 取得待決請求，POST …/permission/{requestID}/reply，body 是 decision（once、always、reject） | 實測可用，路徑與 body 要改；權限動作名稱也改了（bash 改成 shell 等，見遷移文件） |
 | POST /api/session/{id}/question/{qid}/reply、reject | 沒有 question，改成 form：POST /api/session/{id}/form/{formID}/reply | 要改 |
-| 模型選擇放在 prompt body | POST /api/session/{id}/model 切換，或建立 session 時帶 model | 要改 |
+| 模型選擇放在 prompt body | POST /api/session/{id}/model 切換，或建立 session 時帶 model | 要改；探測只切到原本的同一個模型（回 204），實際切換沒有驗證 |
 
-[scripts/v2-probe.sh](scripts/v2-probe.sh) 的結果（2026-11-23 第二次執行，模型為 V2 預設的免費模型 opencode/big-pickle）：
+啟動訊息、認證、V1 路徑、/api/info、openapi 與遷移／回復都由 [scripts/v2-migration.sh](scripts/v2-migration.sh) 重現，全程 `--network none`、不呼叫模型。2026-11-23 重跑的輸出與下文相符：
+
+```bash
+# V2_PREFIX 是 npm install -g --prefix 裝 @opencode/cli@2.3.2 的目錄；WORK_DIR 是空目錄
+bash docs/issues/issue-0030/scripts/v2-migration.sh "$DST" "$V2_PREFIX" "$WORK_DIR"
+```
+
+會呼叫模型的契約項目由 [scripts/v2-probe.sh](scripts/v2-probe.sh) 檢查，在有網路、設了 OPENCODE_SERVER_PASSWORD 的 V2 容器裡用 `docker exec -e PW=... 容器 sh v2-probe.sh` 執行，啟動方式同 v2-migration.sh 的 start（不加 `--network none`）。2026-11-23 第二次執行的結果，模型為 V2 預設的免費模型 opencode/big-pickle：
 
 | 項目 | 結果 |
 |---|---|
@@ -218,15 +229,16 @@ Wukong 用到的介面取自 crates/wukong-gateway/src/local_process.rs 與 open
 | V1 路徑 GET /global/health、/session、/event | FAIL，三條都回 200 與網頁 HTML |
 | 權限：shell 設為 ask，出現 permission.asked，回覆 once 後完成 | PASS |
 | 取消：長回答中途 interrupt | PASS，interrupted=true，出現 session.execution.interrupted |
-| 壓縮、換模型、讀訊息、刪除後再讀 | PASS（compact 200、model 204、6 則訊息、delete 204 後 404） |
+| 讀訊息、刪除後再讀 | PASS（6 則訊息；delete 204 後 404） |
+| 壓縮、換模型 | 端點接受請求（compact 200、model 204）；只看狀態碼，壓縮結果與實際切換沒有驗證 |
 
-反向自檢：用錯誤的密碼跑同一個腳本，權限項目就判 FAIL（沒有 permission.asked），探測器不會在請求失敗時假綠燈。第一次執行時取消項目的判定太寬，看到已經出現的 session.execution.started 也算通過；已改成必須看到 session.execution.interrupted，第二次執行才是上表的結果。
+反向自檢：用錯誤的密碼跑同一個腳本，權限項目就判 FAIL（沒有 permission.asked），探測器不會在請求失敗時假綠燈；這次的輸出沒有保存在 repo。第一次執行時取消項目的判定太寬，看到已經出現的 session.execution.started 也算通過；已改成必須看到 session.execution.interrupted，第二次執行才是上表的結果。
 
 ### 遷移與回復
 
 | 動作（同一份副本，依序） | 結果 |
 |---|---|
-| V2 第一次啟動 | 就地遷移同一個 opencode.db（路徑不變）：套用 24 個 migration，新增 session_v2、session_message、session_part、automation、job、blob 等表；V1 的表保留。/api/experimental/migration/v1 回 completed，6 個 session 都看得到 |
+| V2 第一次啟動 | 就地遷移同一個 opencode.db（路徑不變）：套用 24 個 migration，新增 session_v2、session_part、session_inbox、automation、job、blob 等 12 張表，並刪掉 V1 的 data_migration、session_context_epoch、session_input 三張表（這份副本裡三張都是空表）；其餘 V1 的表保留。/api/experimental/migration/v1 回 completed，6 個 session 都看得到 |
 | 停 V2，V1 1.19.6 開同一個檔 | 可以啟動，health 正常，6 個 session、最大 session 523 則 message／2,114 個 part 都讀得到；V1 再建一個 session |
 | 再開 V2 | 沒有再跑 migration，只看得到原本的 6 個 session，V1 剛建的看不到；V2 再建一個 session |
 | 再開 V1 | 看得到 7 個（原本 6 個加上 V1 建的），V2 建的看不到 |
@@ -236,7 +248,7 @@ V2 的歷史遷移只跑一次，之後 V1 與 V2 各寫各的表：
 - 退回 V1 時程式可以跑，但 V2 期間的對話 V1 都看不到。
 - 退回後再升級，V1 期間的對話 V2 也看不到。
 
-所以回復方案是「升級前備份 opencode.db，退回時還原備份」，接受備份之後的對話紀錄會遺失。只換回 V1 版本號而不還原，會留下兩套互不相通的歷史。
+所以回復方案是「升級前備份 opencode.db，退回時還原備份」，接受備份之後的對話紀錄會遺失。只換回 V1 版本號而不還原，會留下兩套互不相通的歷史；而且 V1 少了被 V2 刪掉的三張表，這次探測沒用到它們，用到的 V1 功能可能出錯。
 
 V1 與 V2 預設讀同一個 opencode.db 與同一組設定目錄。正式部署只要有一個容器開了 V2，就會遷移三個入口共用的 runwukong_opencode-state。所以不能用滾動升級，三個入口要同時換版，或先讓 V2 用另一份資料目錄。
 
@@ -246,7 +258,7 @@ V2 的套件名稱從 opencode-ai 改成 @opencode/cli，原生執行檔在各�
 
 ### 結論
 
-SCN-002 的最小契約：V2 的功能面（建立、送出、串流、取消、權限、壓縮、換模型、刪除）都可用，但 Wukong 用到的每一條路徑、事件名稱與回應形狀都變了。啟動偵測與認證也不相容，健康檢查還會假綠燈。不改 adapter 就換版，本機模式每個回合都會卡到逾時，server 模式的健康檢查卻顯示正常。資料遷移是就地、單向的。阻礙與後續範圍交給步驟 6 的 go/no-go。
+SCN-002 的最小契約：V2 的建立、送出、串流、取消、權限、讀訊息、刪除都實測可用，壓縮與換模型的端點接受請求但效果沒有驗證。Wukong 用到的每一條路徑、事件名稱與回應形狀都變了，啟動偵測與認證也不相容。不改 adapter 就換版，本機模式每個回合都會卡到逾時；server 模式的 gateway 健康檢查會失敗，但 compose healthcheck 仍顯示 healthy。資料遷移是就地、單向的，還會刪掉 V1 的三張表。阻礙與後續範圍交給步驟 6 的 go/no-go。
 
 ## 步驟 5：版本對照
 
@@ -266,7 +278,9 @@ bash docs/issues/issue-0030/scripts/bench-turn.sh ghcr.io/raybird/wukong:v0.25.1
 
 - memory.db 每回合增量都是 0：CLI 回合沒有寫入記憶，寫入等待無從量測。
 - 記憶體峰值是整個容器的累計值，包含 entrypoint 初始化；cgroup 檔案系統唯讀，不能逐回合重設。
-- v0.25.1 short 的 opencode 日誌：從 opencode 啟動到第一次呼叫上游約 1 秒（0.95～1.25 秒），每回合呼叫上游兩次（plan 與 build 兩個 agent），其餘時間都在等上游。v0.23.0 的日誌沒有時間戳，不能拆階段。
+- v0.25.1 short 的 opencode 日誌（bench 副本的 err-1～3.txt）：每回合啟動兩個 opencode 程序，plan 與 build 各一個（不同的 `run=`）。各自從載入設定到第一次呼叫上游分別是 1.25／0.95、1.05／0.97、0.95／0.99 秒，合計每回合 1.9～2.2 秒，占回合耗時的 13～19%。plan 開始呼叫上游到 build 程序啟動相隔 5.1～8.7 秒，包含 plan 的上游回應與 Wukong 的處理。日誌沒有記錄串流結束的時間，上游各自花了多久無法直接拆出。v0.23.0 的日誌沒有時間戳，不能拆階段。
+- 不呼叫模型，單獨量 opencode 的啟動成本（[scripts/boot-cost.sh](scripts/boot-cost.sh)，v0.25.1，同樣 1.5 CPU，5 次）：從啟動到印出 listening 0.89～0.99 秒、1.21～1.32 CPU 秒。每回合啟動兩次，約 2.5 CPU 秒，占每回合 5.3～5.6 CPU 秒的一半左右；其餘約 3 CPU 秒花在串流處理、Wukong 本身或程序結束，這次的量測分不出來。
+- 成功的判準：rc=0、輸出內容符合任務（short 輸出 OK；tool 在 workspace 留下內容為 hello 的 bench.txt）。v0.23.0 tool 三次都留下 bench.txt。
 - v0.25.1 tool 任務的 3 次失敗是本次探測與對照把免費模型的額度用完：上游回 Free usage limit reached，Wukong 回報「上游模型錯誤（上游限流）」，2 秒內結束，沒有變成逾時（#24 的修正有效）。這 3 筆保留為失敗樣本，不算進成功回合的耗時。
 - 同一段時間，正式部署的 schedulerd 正在用同一個模型跑排程。查日誌（`docker logs --since 40m`）沒有出現額度錯誤；發現額度用完後，已停止所有會呼叫模型的量測。
 - 量測前試過每回合起一個新容器，結果混入了 entrypoint 的固定開銷（只跑 `wukong --help`：v0.23.0 4.8 秒，v0.25.1 11.2 秒），正式部署的常駐容器不付這筆開銷，所以那組數字棄用。
@@ -291,9 +305,9 @@ bash docs/issues/issue-0030/scripts/bench-turn.sh ghcr.io/raybird/wukong:v0.25.1
 
 | 假設或既有修正 | 結果 | 證據 |
 |---|---|---|
-| 回合耗時主要在上游模型 | 成立：v0.25.1 從 opencode 啟動到第一次呼叫上游約 1 秒，每回合呼叫上游兩次（plan、build），其餘時間都在等上游；上游限流時 2 秒內失敗 | 步驟 5 |
+| 回合耗時主要在上游模型 | 大致成立：v0.25.1 每回合呼叫上游兩次（plan、build），本機的 opencode 啟動合計約 2 秒，其餘 8～14 秒包含上游回應與本機處理，日誌拆不出比例；上游限流時 2 秒內失敗 | 步驟 5 |
 | 長期 session 的事件與工具輸出讓資料量變大 | 資料量確實集中在少數長期 session 的 event 與 part；但在目前規模下，讀取最大 session 約 15 ms，不構成瓶頸 | 步驟 2、3 |
-| 按需啟動 opencode 的重複成本 | 成立但小：每回合約 1 秒 | 步驟 5 |
+| 按需啟動 opencode 的重複成本 | 成立，不可忽略：每回合啟動兩次，合計約 2 秒（回合耗時的 13～19%）、約 2.5 CPU 秒（每回合 CPU 的一半左右） | 步驟 5 |
 | 共用 SQLite 的寫入競爭 | 未驗證，仍是假設 | 步驟 5「沒有量測的項目」 |
 | 1.5 CPU 限制造成 throttling | 有但小：v0.25.1 每回合 11～13 次、0.3～0.4 秒；v0.23.0 約 24 次、0.9 秒 | 步驟 5 |
 | 記憶體壓力 | 這台上限 3 GiB，容器峰值約 600 MiB，沒有壓力；raybird-desktop 的 2 GiB 上限沒有量到 | 步驟 1、5 |
@@ -303,8 +317,8 @@ bash docs/issues/issue-0030/scripts/bench-turn.sh ghcr.io/raybird/wukong:v0.25.1
 
 ### 根因排序（flashaim，v0.25.1）
 
-1. 上游模型：回合時間幾乎都是上游的回應時間，加上每回合兩次呼叫；免費模型的額度與限流會直接讓回合失敗。
-2. 每回合按需啟動 opencode：約 1 秒，加上 CPU throttling 0.3～0.4 秒。
+1. 上游模型：每回合兩次上游呼叫，扣掉本機啟動後的 8～14 秒大部分在這裡（日誌拆不出精確比例）；免費模型的額度與限流會直接讓回合失敗。
+2. 每回合按需啟動 opencode 兩次（plan、build）：合計約 2 秒、約 2.5 CPU 秒，在 1.5 CPU 上限下還有 0.3～0.4 秒的 throttling。改用常駐的 opencode server 可以省掉這筆，但要另外評估。
 3. opencode.db 的成長：新 session 的第一回合增加約 0.8 MB，之後每回合 50～100 KB，大多是 event 表；目前不影響查詢，長期要看單一 session 的大小。
 
 v0.25.1 比 v0.23.0 每回合少用約 33% CPU（short 任務三次平均 8.1 秒對 5.4 秒），throttling 減半。
@@ -313,15 +327,15 @@ v0.25.1 比 v0.23.0 每回合少用約 33% CPU（short 任務三次平均 8.1 �
 
 理由：
 
-- 不相容：Wukong 用到的每一條 server 路徑、事件名稱與回應形狀都變了，啟動偵測與認證也不相容；直接換版，本機模式每個回合都會卡到逾時，健康檢查卻因為 SPA 回 200 而顯示正常（步驟 4）。
-- 資料單向：V2 就地遷移三個入口共用的 opencode.db，遷移後 V1 與 V2 各寫各的表，回復只能還原升級前的備份（步驟 4）。
+- 不相容：Wukong 用到的每一條 server 路徑、事件名稱與回應形狀都變了，啟動偵測與認證也不相容；直接換版，本機模式每個回合都會卡到逾時，server 模式的 compose healthcheck 卻因為 SPA 回 200 而顯示 healthy（步驟 4）。
+- 資料單向：V2 就地遷移三個入口共用的 opencode.db，刪掉 V1 的三張表，遷移後 V1 與 V2 各寫各的表，回復只能還原升級前的備份（步驟 4）。
 - 沒有效能理由：瓶頸在上游模型，換 OpenCode 版本不會改變它；V2 本身是否較快沒有量測（步驟 5）。
 - 不急：V1 仍在維護，1.19.6 於 2026-11-17 發布，是 GitHub 的 Latest。release CI 解析的是 opencode-ai 套件，V2 改名為 @opencode/cli，所以發版不會自動升到 V2；opencode-ai 目前沒有 2.x 版本（`npm view opencode-ai versions`，2026-11-23）。
 
 將來要升級時的前提（另開 issue 定範圍）：
 
 1. adapter 改寫並補回歸測試：/api 路徑與 data 包裝、cursor 分頁（列表要走完，避免重演 W-6）、事件名稱、prompt 一律非同步、interrupt、compact、permission 與 form 回覆、啟動訊息 `server listening on`、本機模式自設密碼並帶 basic auth。
-2. 健康檢查改打 GET /api/info，並斷言回應是 JSON，不能只看狀態碼。
+2. 健康檢查改打 GET /api/info 並帶認證：gateway 的 health_check 改路徑；compose healthcheck（`curl -fsS`，只看狀態碼）也要改，否則 SPA 回 200 會讓它顯示 healthy。
 3. 封裝改用 @opencode/cli 與平台子套件，同步改 release/package.json、scripts/resolve-opencode-version.sh、scripts/test-release-image.sh 的釘選與 integrity。
 4. 三個入口同時換版，換版前備份 runwukong_opencode-state 的 opencode.db。
 5. 回復方案：停三個入口，還原備份的 opencode.db，映像退回前一版；接受備份之後的對話紀錄遺失。
