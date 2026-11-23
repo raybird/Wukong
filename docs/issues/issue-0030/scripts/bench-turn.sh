@@ -25,6 +25,7 @@ docker run --rm --cpus 1.5 --memory 3g --pids-limit 256 \
     size() { echo $(( $(stat -c %s "$1" 2>/dev/null || echo 0) + $(stat -c %s "$1-wal" 2>/dev/null || echo 0) )); }
     for i in $(seq 1 "$BENCH_N"); do
       echo 0 > /sys/fs/cgroup/memory.peak 2>/dev/null || true   # 有支援時重設峰值
+      rm -f /workspace/bench.txt   # tool 任務以 bench.txt 判定成功，不讓上一回合的檔案留下來
       thr0=$(stat_of nr_throttled); tus0=$(stat_of throttled_usec); cpu0=$(stat_of usage_usec)
       db0=$(size /home/wukong/.local/share/opencode/opencode.db); mem0=$(size /data/memory.db)
       t0=$(date +%s%3N)

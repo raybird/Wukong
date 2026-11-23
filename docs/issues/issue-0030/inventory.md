@@ -57,14 +57,14 @@ docker run --rm --user 1000:1000 --network none --entrypoint python3 \
   ghcr.io/raybird/wukong:v0.25.1 -I /scripts/snapshot.py
 ```
 
-反向自檢（[scripts/wal-check.py](scripts/wal-check.py)，另掛 `-v "$WORK":/work`、`-v "$DST":/dst:ro`）：
+WAL 涵蓋性的反向自檢（[scripts/wal-check.py](scripts/wal-check.py)，另掛 `-v "$WORK":/work`、`-v "$DST":/dst:ro`）：
 
 | 資料庫 | 副本總筆數 | 主檔＋WAL 原始複本 | 只有主檔 |
 |---|---|---|---|
 | memory.db | 2,295 | 2,295 | 2,226 |
 | opencode.db | 19,422 | 19,422 | 19,293 |
 
-只有主檔時筆數較少，副本與「主檔＋WAL」相等，證明副本包含 WAL 裡尚未 checkpoint 的資料。若副本只抄到主檔，這項檢查會失敗。兩次執行（02:37、02:38）的副本 sha256 相同。
+只有主檔時筆數較少，副本與「主檔＋WAL」相等，表示副本涵蓋了 WAL 裡尚未 checkpoint 的資料；若副本只抄到主檔，這項檢查會失敗。這只比對總筆數，而且「主檔＋WAL」是分開複製的兩個檔案，來源持續寫入時兩者的時間點不一定一致，所以它不證明每筆內容都相同。副本的一致性來自 SQLite Backup API 與副本的 integrity_check，這項檢查只確認副本沒有漏掉 WAL。兩次執行（02:37、02:38）的副本 sha256 相同。
 
 2026-11-23 起腳本自己判定：副本等於「主檔＋WAL」且大於「只有主檔」才印 PASS。正式資料會持續寫入，所以要在取副本後立刻執行；WAL 剛好已全部 checkpoint 時「只有主檔」也會相等，這時會判 FAIL，要換個時間重取。改版後重取副本再檢查，memory.db 與 opencode.db 都是 PASS。
 
@@ -184,7 +184,7 @@ memory.db 的 recall_telemetry 是正式部署自己寫的量測：relevant 模�
 
 ### 結論與限制
 
-在 flashaim 目前的資料規模下（opencode.db 42 MB、最大 session 2,114 個 part），資料庫查詢與召回都在毫秒級，最慢約 16 ms，比 flashaim 自己的回合耗時（步驟 5，10～25 秒）小了約三個數量級，不是 flashaim 上的瓶頸候選。raybird-desktop 的資料規模沒有取得，這個結論不能推到那台。查詢耗時會隨單一 session 的 part 與 event 成長，長期 session 的成長速度留給步驟 5 量測。
+在 flashaim 目前的資料規模下（opencode.db 42 MB、最大 session 2,114 個 part），本次量測的 SQL 查詢與召回都在毫秒級，最慢約 16 ms，比 flashaim 自己的回合耗時（步驟 5，10～25 秒）小了約三個數量級，在這個資料規模、這組測試查詢與負載下，看不到明顯的 SQL 查詢延遲。opencode 的查詢形狀是依索引推測的，不是 runtime 的 SQL trace；opencode 讀出資料後的反序列化、物件轉換與事件處理也沒有單獨量，所以這不排除所有與資料庫相關的處理成本。raybird-desktop 的資料規模沒有取得，這個結論不能推到那台。查詢耗時會隨單一 session 的 part 與 event 成長，長期 session 的成長速度留給步驟 5 量測。
 
 ## 步驟 4：OpenCode V2（2.3.2）最小契約與遷移／回復探測
 
@@ -280,7 +280,7 @@ bash docs/issues/issue-0030/scripts/bench-turn.sh ghcr.io/raybird/wukong:v0.25.1
 - 記憶體峰值是整個容器的累計值，包含 entrypoint 初始化；cgroup 檔案系統唯讀，不能逐回合重設。
 - v0.25.1 short 的 opencode 日誌（bench 副本的 err-1～3.txt）：每回合啟動兩個 opencode 程序，plan 與 build 各一個（不同的 `run=`）。各自從載入設定到第一次呼叫上游分別是 1.25／0.95、1.05／0.97、0.95／0.99 秒，合計每回合 1.9～2.2 秒，占回合耗時的 13～19%。每個程序從 `message=stream`（開始呼叫上游）到 `message=loop … step=1`（這一步結束）就是一次 LLM step：三個回合的 plan／build 分別是 4.6／8.0、8.1／3.9、4.3／2.3 秒，合計 12.6、12.0、6.6 秒，占回合耗時的 78%、78%、66%。LLM step 的時間也包含 opencode 自己處理串流的時間，所以這是上游耗時的上限，不是純粹等待上游的時間。v0.23.0 的日誌沒有時間戳，不能拆階段。
 - 不呼叫模型，單獨量 opencode 的啟動成本（[scripts/boot-cost.sh](scripts/boot-cost.sh)，v0.25.1，同樣 1.5 CPU，5 次）：從啟動到印出 listening 0.89～0.99 秒、1.21～1.32 CPU 秒。每回合啟動兩次，約 2.5 CPU 秒，占每回合 5.3～5.6 CPU 秒的一半左右；其餘約 3 CPU 秒花在串流處理、Wukong 本身或程序結束，這次的量測分不出來。
-- 成功的判準：rc=0、輸出內容符合任務（short 輸出 OK；tool 在 workspace 留下內容為 hello 的 bench.txt）。v0.23.0 tool 三次都留下 bench.txt。
+- 成功的判準：rc=0、輸出內容符合任務（short 輸出 OK；tool 在 workspace 留下內容為 hello 的 bench.txt）。v0.23.0 tool 三次都留下 bench.txt。三個回合共用同一個 workspace，舊檔可能讓沒寫入的回合也被判成功，所以另查了 bench 副本的 opencode.db：第 2、3 回合的 build 各有一次對 /workspace/bench.txt 的 write 與 read，都是 completed；第 1 回合是新 workspace 的第一個回合，之前沒有舊檔（它的 session 在下一回合被輪替刪除，DB 裡查不到）。2026-11-23 起 bench-turn.sh 每回合開始前先刪掉 bench.txt。
 - v0.25.1 tool 任務的 3 次失敗是本次探測與對照把免費模型的額度用完：上游回 Free usage limit reached，Wukong 回報「上游模型錯誤（上游限流）」，2 秒內結束，沒有變成逾時（#24 的修正有效）。這 3 筆保留為失敗樣本，不算進成功回合的耗時。
 - 同一段時間，正式部署的 schedulerd 正在用同一個模型跑排程。查日誌（`docker logs --since 40m`）沒有出現額度錯誤；發現額度用完後，已停止所有會呼叫模型的量測。
 - 量測前試過每回合起一個新容器，結果混入了 entrypoint 的固定開銷（只跑 `wukong --help`：v0.23.0 4.8 秒，v0.25.1 11.2 秒），正式部署的常駐容器不付這筆開銷，所以那組數字棄用。
@@ -311,7 +311,7 @@ bash docs/issues/issue-0030/scripts/bench-turn.sh ghcr.io/raybird/wukong:v0.25.1
 | 共用 SQLite 的寫入競爭 | 未驗證，仍是假設 | 步驟 5「沒有量測的項目」 |
 | 1.5 CPU 限制造成 throttling | 有但小：v0.25.1 每回合 11～13 次、0.3～0.4 秒；v0.23.0 約 24 次、0.9 秒 | 步驟 5 |
 | 記憶體壓力 | 這台上限 3 GiB，容器峰值約 600 MiB，沒有壓力；raybird-desktop 的 2 GiB 上限沒有量到 | 步驟 1、5 |
-| 資料庫查詢與召回成本 | 不成立：毫秒級，召回 p95 32 ms | 步驟 3 |
+| 資料庫查詢與召回成本 | 在本次資料規模與測試查詢下不成立：SQL 查詢毫秒級，召回 p95 32 ms；反序列化與事件處理沒有單獨量 | 步驟 3 |
 | #24 上游錯誤不再被掩蓋成逾時 | 已修復：額度用完時回報「上游模型錯誤（上游限流）」 | 步驟 5 |
 | #28 保留期清理 | 已修復且在運作：每 6 小時一次，過期但被 scope 指向的 session 保留 | 步驟 2 |
 

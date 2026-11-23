@@ -10,7 +10,7 @@
 2. ✅ SCN-001：DB/WAL、頁面、各表、最大 session 與工具事件量盤點。依賴 1；產出聚合數值與 SQL。完成判準：用已知筆數對照組證明取數有效，未知不當零值。
    - 證據（2026-11-23）：[inventory.md「步驟 2」](inventory.md#步驟-2資料庫聚合盤點)。對照組 PASS，三種改壞的版本都 FAIL；opencode.db 42 MB 中 event 表占 66%、part 表占 32%，只有 6 個 session，tool part 占 part data 的 81%；保留期清理照設計運作（stale_protected=1、expired=0）；vectors.db 未盤點，列為未知。
 3. ✅ SCN-001：EXPLAIN QUERY PLAN 與查詢耗時。依賴 2；產出可重跑命令、資料規模與冷暖測量。
-   - 證據（2026-11-23）：[inventory.md「步驟 3」](inventory.md#步驟-3查詢計畫與耗時)。核心查詢都走索引；最貴的是載入最大 session 的 part／event，約 15 ms；正式部署的召回 p95 32 ms。在目前規模下不是瓶頸候選，raybird-desktop 的規模未知。
+   - 證據（2026-11-23）：[inventory.md「步驟 3」](inventory.md#步驟-3查詢計畫與耗時)。核心查詢都走索引；最貴的是載入最大 session 的 part／event，約 15 ms；正式部署的召回 p95 32 ms。在目前規模與這組測試查詢下看不到明顯的 SQL 查詢延遲（opencode 的查詢形狀是推測的，反序列化與事件處理沒有單獨量），raybird-desktop 的規模未知。
 4. ✅ SCN-002：候選 V2（2.3.2）最小契約與副本遷移／回復探測。依賴 1；涵蓋啟動、health、session、串流、取消、權限、模型、壓縮及清理；產出差異矩陣。失敗即記錄阻礙，不直接更換正式版本。
    - 證據（2026-11-23）：[inventory.md「步驟 4」](inventory.md#步驟-4opencode-v2232最小契約與遷移回復探測)。Wukong 用到的路徑、事件名稱、回應形狀全部改變；啟動訊息與認證不相容；V1 路徑回 200 的網頁 HTML，gateway 的健康檢查會因為不是 JSON 而失敗，compose healthcheck 卻會顯示 healthy。壓縮與換模型只確認端點接受請求。V2 就地、單向遷移同一個 opencode.db，刪掉 V1 的三張表，之後 V1 與 V2 互相看不到對方新寫的 session；回復要還原升級前的備份。遷移與回復由 scripts/v2-migration.sh 重現（不呼叫模型）；契約探測有錯誤密碼的負向對照。
 5. ✅ SCN-001／002：同資料、模型與任務的版本對照。依賴 3、4；在 flashaim 的副本上比較 v0.23.0 映像（raybird-desktop 當時的版本）、v0.25.1＋V1、可運作的 V2 路徑。產出分階段耗時、RSS、throttling、寫入等待、DB 增量與全部失敗樣本。V2 契約未通過則記不可比較，不編造效能結果。
