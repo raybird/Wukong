@@ -181,3 +181,69 @@ memory.db 的 recall_telemetry 是正式部署自己寫的量測：relevant 模�
 ### 結論與限制
 
 在 flashaim 目前的資料規模下（opencode.db 42 MB、最大 session 2,114 個 part），資料庫查詢與召回都在毫秒級，跟交接紀錄的整個任務 1,218～2,390 秒差了五個數量級以上，不是 flashaim 上的瓶頸候選。raybird-desktop 的資料規模沒有取得，這個結論不能推到那台。查詢耗時會隨單一 session 的 part 與 event 成長，長期 session 的成長速度留給步驟 5 量測。
+
+## 步驟 4：OpenCode V2（2.3.2）最小契約與遷移／回復探測
+
+取樣：2026-11-23。V2 以 `npm install -g --prefix` 裝在暫存目錄（@opencode/cli 2.3.2，原生執行檔在 @opencode/cli-linux-x64，約 253 MB），在 wukong:v0.25.1 映像的一次性容器裡執行，HOME 與 XDG 目錄都指向暫存目錄。遷移探測用步驟 1 副本的再複製，原副本的 sha256 探測前後都是 2d2f3518…，正式容器沒有重啟或改動。
+
+### 官方文件
+
+https://opencode.ai/docs/migrate-v1/ 只寫「V1 server API 的整合要改用 V2 API」，指向的 API 參考頁（https://opencode.ai/api）回 404。端點對照全部是實測結果，V2 server 自己提供的 /openapi.json（142 條路徑，標示 Experimental）是格式來源。
+
+### Wukong 用到的介面對照
+
+Wukong 用到的介面取自 crates/wukong-gateway/src/local_process.rs 與 opencode_server.rs。
+
+| Wukong 現在的用法（V1） | V2 2.3.2 實測 | 影響 |
+|---|---|---|
+| `opencode serve --hostname 127.0.0.1 --port 0 --print-logs` | 旗標都在，`--port 0` 可用 | 無 |
+| 等待 stdout 出現 `opencode server listening on ` | 印的是 `server listening on http://…` | 啟動偵測永遠等不到，每次都會卡到 agent timeout |
+| 移除 OPENCODE_SERVER_PASSWORD，本機模式不帶認證 | 沒給密碼時自動產生隨機密碼，/api 沒帶認證回 401；給 OPENCODE_SERVER_PASSWORD 就用它。使用者名稱固定為 opencode，OPENCODE_SERVER_USERNAME 不再支援 | 本機模式要自己設密碼再帶 basic auth |
+| GET /global/health | 不存在，但 GET 回 SPA 網頁 HTML、狀態 200；改用 GET /api/info | **假綠燈**：現有健康檢查會判成功 |
+| POST /session、GET /session?limit=、GET／DELETE /session/{id} | 改到 /api/session…；回應包在 data 裡，列表改成 cursor 分頁 | 路徑與解析都要改；列表要跟著 cursor 走完，不然會重演 W-6 |
+| POST /session/{id}/message（同步）、POST /session/{id}/prompt_async | 只剩 POST /api/session/{id}/prompt，一律非同步排入；body 是 text，不是 parts | 同步呼叫要改成送出後等事件 |
+| GET /session/{id}/message?limit= | GET /api/session/{id}/message，回 data 加 cursor，訊息形狀是 type＋content，沒有 info／parts | 回覆擷取、模型擷取（providerID／modelID）的解析都要改 |
+| GET /event（SSE），事件 message.part.updated、session.idle、permission.* | GET /api/event；V1 的路徑回 HTML。事件全部改名：session.text.delta、session.execution.succeeded／interrupted、session.tool.*、permission.asked／replied 等 | 串流與完成判定要重寫 |
+| POST /session/{id}/abort | POST /api/session/{id}/interrupt，回 interrupted=true | 實測可用，路徑要改 |
+| POST /session/{id}/summarize | POST /api/session/{id}/compact（排入下一個 step 邊界） | 實測可用，路徑要改 |
+| POST /permission/{id}/reply | GET /api/session/{id}/permission 取得待決請求，POST …/permission/{requestID}/reply，body 是 decision（once、always、reject） | 實測可用，路徑與 body 要改；權限動作名稱也改了（bash 改成 shell 等，見遷移文件） |
+| POST /api/session/{id}/question/{qid}/reply、reject | 沒有 question，改成 form：POST /api/session/{id}/form/{formID}/reply | 要改 |
+| 模型選擇放在 prompt body | POST /api/session/{id}/model 切換，或建立 session 時帶 model | 要改 |
+
+[scripts/v2-probe.sh](scripts/v2-probe.sh) 的結果（2026-11-23 第二次執行，模型為 V2 預設的免費模型 opencode/big-pickle）：
+
+| 項目 | 結果 |
+|---|---|
+| 認證：沒帶密碼 | PASS，401 |
+| V1 路徑 GET /global/health、/session、/event | FAIL，三條都回 200 與網頁 HTML |
+| 權限：shell 設為 ask，出現 permission.asked，回覆 once 後完成 | PASS |
+| 取消：長回答中途 interrupt | PASS，interrupted=true，出現 session.execution.interrupted |
+| 壓縮、換模型、讀訊息、刪除後再讀 | PASS（compact 200、model 204、6 則訊息、delete 204 後 404） |
+
+反向自檢：用錯誤的密碼跑同一個腳本，權限項目就判 FAIL（沒有 permission.asked），探測器不會在請求失敗時假綠燈。第一次執行時取消項目的判定太寬，看到已經出現的 session.execution.started 也算通過；已改成必須看到 session.execution.interrupted，第二次執行才是上表的結果。
+
+### 遷移與回復
+
+| 動作（同一份副本，依序） | 結果 |
+|---|---|
+| V2 第一次啟動 | 就地遷移同一個 opencode.db（路徑不變）：套用 24 個 migration，新增 session_v2、session_message、session_part、automation、job、blob 等表；V1 的表保留。/api/experimental/migration/v1 回 completed，6 個 session 都看得到 |
+| 停 V2，V1 1.19.6 開同一個檔 | 可以啟動，health 正常，6 個 session、最大 session 523 則 message／2,114 個 part 都讀得到；V1 再建一個 session |
+| 再開 V2 | 沒有再跑 migration，只看得到原本的 6 個 session，V1 剛建的看不到；V2 再建一個 session |
+| 再開 V1 | 看得到 7 個（原本 6 個加上 V1 建的），V2 建的看不到 |
+
+V2 的歷史遷移只跑一次，之後 V1 與 V2 各寫各的表：
+
+- 退回 V1 時程式可以跑，但 V2 期間的對話 V1 都看不到。
+- 退回後再升級，V1 期間的對話 V2 也看不到。
+
+所以回復方案是「升級前備份 opencode.db，退回時還原備份」，接受備份之後的對話紀錄會遺失。只換回 V1 版本號而不還原，會留下兩套互不相通的歷史。
+
+V1 與 V2 預設讀同一個 opencode.db 與同一組設定目錄。正式部署只要有一個容器開了 V2，就會遷移三個入口共用的 runwukong_opencode-state。所以不能用滾動升級，三個入口要同時換版，或先讓 V2 用另一份資料目錄。
+
+### 封裝
+
+V2 的套件名稱從 opencode-ai 改成 @opencode/cli，原生執行檔在各平台的子套件裡。release/package.json、scripts/resolve-opencode-version.sh（`npm view opencode-ai version`）與 scripts/test-release-image.sh（檢查 package.json 釘的是 opencode-ai）都寫死舊套件名稱；換版要一起改，integrity 也要釘在 @opencode/cli 與平台子套件上。
+
+### 結論
+
+SCN-002 的最小契約：V2 的功能面（建立、送出、串流、取消、權限、壓縮、換模型、刪除）都可用，但 Wukong 用到的每一條路徑、事件名稱與回應形狀都變了。啟動偵測與認證也不相容，健康檢查還會假綠燈。不改 adapter 就換版，本機模式每個回合都會卡到逾時，server 模式的健康檢查卻顯示正常。資料遷移是就地、單向的。阻礙與後續範圍交給步驟 6 的 go/no-go。
