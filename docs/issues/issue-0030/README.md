@@ -10,7 +10,7 @@
 - [inventory.md](inventory.md)：盤點報告與可重跑的取數腳本（scripts/）
 
 ## 涉及檔案
-- 本目錄與交接紀錄：盤點證據與決策。
+- 本目錄與交接紀錄：盤點證據與決策；交接紀錄只加 2026-11-23 的追補段落。
 - 唯讀評估：release/runtime-inputs.env、Dockerfile、scripts/resolve-opencode-version.sh、crates/wukong-gateway/src/local_process.rs、crates/wukong-gateway/src/opencode_server.rs、crates/wukong-runtime/src/session_retention.rs、crates/wukong-memory/src/store/mod.rs。
 - 盤點對象：flashaim 的 ~/Documents/RunWuKong（compose 專案 runwukong）；本 issue 只讀取，量測在一致性副本上做。
 
@@ -52,16 +52,23 @@ Feature: Runtime 效能與升級評估
 ## 待確認事項
 | 編號 | 事項 | 狀態 | 影響 |
 |---|---|---|---|
-| TBD-1 | 容器內 OpenCode binary 版本及 DB 分布 | 待確認 | SCN-001，於盤點取得 |
-| TBD-2 | V2 API／資料遷移與回復是否相容 | 待確認 | SCN-002，先在隔離環境驗證 |
-| TBD-3 | 正式升級與 adapter 改造範圍 | 待確認 | 評估後定案，尚未列為實作工作 |
+| TBD-1 | 容器內 OpenCode binary 版本及 DB 分布 | 已解決：2026-11-23 flashaim 的 v0.25.1 內含 OpenCode 1.19.6，四個資料庫的分布見 inventory.md 步驟 1、2 | SCN-001，於盤點取得 |
+| TBD-2 | V2 API／資料遷移與回復是否相容 | 已解決：2026-11-23 不相容；API、事件、啟動與認證都變了，V2 就地單向遷移 opencode.db，回復要還原備份，見 inventory.md 步驟 4 | SCN-002，先在隔離環境驗證 |
+| TBD-3 | 正式升級與 adapter 改造範圍 | 不影響本次交付：追蹤：無。2026-11-23 go/no-go 為暫緩：V1 仍在維護，release CI 只解析 opencode-ai，不會自動升到改名為 @opencode/cli 的 V2；將來要升級時另開 issue，前提與回復方案在 inventory.md 步驟 6 | 評估後定案，尚未列為實作工作 |
 | TBD-4 | raybird-desktop 舊部署（v0.23.0）的症狀根因 | 不影響本次交付：追蹤：無。2026-11-23 使用者選擇改盤點 flashaim；那台機器連不到，舊部署停機且早於 #24／#28 的修正，本次只判斷新版是否仍有同類問題 | SCN-001 |
+
+## Gate 豁免紀錄
+
+| 日期 | 豁免項目 | 使用者原話 | 殘餘風險 |
+|---|---|---|---|
+| 2026-11-23 | 計畫步驟 5 的部分量測：v0.25.1 tool 任務的成功樣本、OpenCode V1 與 V2 本身的效能對照、大型 session 的完整回合、多入口同時寫入的 SQLite 等待 | 免費模型額度用完後的逐題確認，選「以現有資料收尾」 | v0.25.1 跑工具的回合耗時、V2 本身是否較快、上游處理長上下文的耗時、寫入競爭都仍未知；go/no-go 不依賴這些項目 |
 
 ## Timeline
 - 2026-11-11：依使用者要求建立 GitHub #30 與盤點／評估計畫。
 - 2026-11-23：規格修訂，SCN-001 改盤點 flashaim 並重新核准，V2 候選版改為 2.3.2；舊核准基線 c4f2e9e（核准 commit 當時為待提交，依核准來源行推導）。
+- 2026-11-23：免費模型額度用完，使用者決定步驟 5 以現有資料收尾，未量測項目記入 Gate 豁免紀錄。
 
 **建立日期**: 2026-11-11
 **分級**: Medium
 **風險**: High
-**狀態**: 盤點中
+**狀態**: 待審查

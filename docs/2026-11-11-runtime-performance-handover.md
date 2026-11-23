@@ -37,3 +37,7 @@
 - 需驗證封裝／版本解析／integrity、啟動偵測、health、session CRUD、prompt／串流事件、取消、壓縮、模型選擇、權限回覆與 retention 契約。
 - V1／V2 設定位置共用；用獨立設定與資料副本測試，保留原始備份。不得假設 V2 寫入後可由 V1 直接回退。
 - 建議安排為本 issue 的評估工作；實際 adapter 改造與正式升級在相容性／效能證據後另定範圍，不以升級代替根因調查。
+
+## 追補：2026-11-23
+
+raybird-desktop 從 flashaim 連不到，盤點改在 flashaim 的 RunWuKong（v0.25.1）上做。盤點結果、根因排序與 OpenCode 2 的 go/no-go 見 [issue-0030 README](issues/issue-0030/README.md)。

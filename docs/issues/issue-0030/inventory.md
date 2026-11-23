@@ -248,7 +248,7 @@ V2 的套件名稱從 opencode-ai 改成 @opencode/cli，原生執行檔在各�
 
 SCN-002 的最小契約：V2 的功能面（建立、送出、串流、取消、權限、壓縮、換模型、刪除）都可用，但 Wukong 用到的每一條路徑、事件名稱與回應形狀都變了。啟動偵測與認證也不相容，健康檢查還會假綠燈。不改 adapter 就換版，本機模式每個回合都會卡到逾時，server 模式的健康檢查卻顯示正常。資料遷移是就地、單向的。阻礙與後續範圍交給步驟 6 的 go/no-go。
 
-## 步驟 5：版本對照（進行中）
+## 步驟 5：版本對照
 
 取樣：2026-11-23 03:05～03:09 UTC，flashaim。每個映像各用一份步驟 1 副本的再複製，容器限制與正式部署相同（1.5 CPU、3 GiB、256 PID）。[scripts/bench-turn.sh](scripts/bench-turn.sh) 只跑一次 entrypoint，之後在同一個容器連跑 3 個回合：第 1 回合算冷，第 2、3 回合算暖。prompt 是固定的合成內容，模型是設定檔沒有指定時的預設免費模型 opencode/big-pickle。
 
@@ -270,3 +270,59 @@ bash docs/issues/issue-0030/scripts/bench-turn.sh ghcr.io/raybird/wukong:v0.25.1
 - v0.25.1 tool 任務的 3 次失敗是本次探測與對照把免費模型的額度用完：上游回 Free usage limit reached，Wukong 回報「上游模型錯誤（上游限流）」，2 秒內結束，沒有變成逾時（#24 的修正有效）。這 3 筆保留為失敗樣本，不算進成功回合的耗時。
 - 同一段時間，正式部署的 schedulerd 正在用同一個模型跑排程。查日誌（`docker logs --since 40m`）沒有出現額度錯誤；發現額度用完後，已停止所有會呼叫模型的量測。
 - 量測前試過每回合起一個新容器，結果混入了 entrypoint 的固定開銷（只跑 `wukong --help`：v0.23.0 4.8 秒，v0.25.1 11.2 秒），正式部署的常駐容器不付這筆開銷，所以那組數字棄用。
+
+### 沒有量測的項目
+
+2026-11-23 使用者決定以現有資料收尾（見 README 的 Gate 豁免紀錄），下列項目沒有量測：
+
+| 項目 | 原因 | 對結論的影響 |
+|---|---|---|
+| v0.25.1 的 tool 任務成功樣本 | 3 次都碰到免費模型額度用完 | 不知道 v0.25.1 跑工具的回合耗時；同版 short 任務與 v0.23.0 tool 任務都顯示耗時主要在上游 |
+| OpenCode V1 與 V2 本身（不經 Wukong）的效能對照 | 需要再呼叫模型 | V2 有沒有比較快仍是未知；不影響 go/no-go，因為不論快慢都要先改 adapter |
+| Wukong＋V2 | 步驟 4 契約不相容，接不起來 | 依計畫記為不可比較 |
+| 大型 session 的完整回合 | 要把對話副本送到外部模型，所以沒跑；改用步驟 3 的本機載入時間（最大 session 約 15 ms）代替 | 上游處理長上下文的耗時未知 |
+| 多個入口同時寫入的 SQLite 等待 | 對照是單一回合，CLI 回合不寫 memory.db | 寫入競爭仍是假設 |
+
+## 步驟 6：根因排序與升級 go/no-go
+
+依據步驟 1～5，結論只適用 flashaim 上的 v0.25.1。raybird-desktop 的根因不在範圍內（README 的 TBD-4）。
+
+### 交接紀錄的假設在 flashaim 上的結果
+
+| 假設或既有修正 | 結果 | 證據 |
+|---|---|---|
+| 回合耗時主要在上游模型 | 成立：v0.25.1 從 opencode 啟動到第一次呼叫上游約 1 秒，每回合呼叫上游兩次（plan、build），其餘時間都在等上游；上游限流時 2 秒內失敗 | 步驟 5 |
+| 長期 session 的事件與工具輸出讓資料量變大 | 資料量確實集中在少數長期 session 的 event 與 part；但在目前規模下，讀取最大 session 約 15 ms，不構成瓶頸 | 步驟 2、3 |
+| 按需啟動 opencode 的重複成本 | 成立但小：每回合約 1 秒 | 步驟 5 |
+| 共用 SQLite 的寫入競爭 | 未驗證，仍是假設 | 步驟 5「沒有量測的項目」 |
+| 1.5 CPU 限制造成 throttling | 有但小：v0.25.1 每回合 11～13 次、0.3～0.4 秒；v0.23.0 約 24 次、0.9 秒 | 步驟 5 |
+| 記憶體壓力 | 這台上限 3 GiB，容器峰值約 600 MiB，沒有壓力；raybird-desktop 的 2 GiB 上限沒有量到 | 步驟 1、5 |
+| 資料庫查詢與召回成本 | 不成立：毫秒級，召回 p95 32 ms | 步驟 3 |
+| #24 上游錯誤不再被掩蓋成逾時 | 已修復：額度用完時回報「上游模型錯誤（上游限流）」 | 步驟 5 |
+| #28 保留期清理 | 已修復且在運作：每 6 小時一次，過期但被 scope 指向的 session 保留 | 步驟 2 |
+
+### 根因排序（flashaim，v0.25.1）
+
+1. 上游模型：回合時間幾乎都是上游的回應時間，加上每回合兩次呼叫；免費模型的額度與限流會直接讓回合失敗。
+2. 每回合按需啟動 opencode：約 1 秒，加上 CPU throttling 0.3～0.4 秒。
+3. opencode.db 的成長：新 session 的第一回合增加約 0.8 MB，之後每回合 50～100 KB，大多是 event 表；目前不影響查詢，長期要看單一 session 的大小。
+
+v0.25.1 比 v0.23.0 每回合少用約 33% CPU（short 任務三次平均 8.1 秒對 5.4 秒），throttling 減半。
+
+### 升級 go/no-go：暫緩（no-go）
+
+理由：
+
+- 不相容：Wukong 用到的每一條 server 路徑、事件名稱與回應形狀都變了，啟動偵測與認證也不相容；直接換版，本機模式每個回合都會卡到逾時，健康檢查卻因為 SPA 回 200 而顯示正常（步驟 4）。
+- 資料單向：V2 就地遷移三個入口共用的 opencode.db，遷移後 V1 與 V2 各寫各的表，回復只能還原升級前的備份（步驟 4）。
+- 沒有效能理由：瓶頸在上游模型，換 OpenCode 版本不會改變它；V2 本身是否較快沒有量測（步驟 5）。
+- 不急：V1 仍在維護，1.19.6 於 2026-11-17 發布，是 GitHub 的 Latest。release CI 解析的是 opencode-ai 套件，V2 改名為 @opencode/cli，所以發版不會自動升到 V2；opencode-ai 目前沒有 2.x 版本（`npm view opencode-ai versions`，2026-11-23）。
+
+將來要升級時的前提（另開 issue 定範圍）：
+
+1. adapter 改寫並補回歸測試：/api 路徑與 data 包裝、cursor 分頁（列表要走完，避免重演 W-6）、事件名稱、prompt 一律非同步、interrupt、compact、permission 與 form 回覆、啟動訊息 `server listening on`、本機模式自設密碼並帶 basic auth。
+2. 健康檢查改打 GET /api/info，並斷言回應是 JSON，不能只看狀態碼。
+3. 封裝改用 @opencode/cli 與平台子套件，同步改 release/package.json、scripts/resolve-opencode-version.sh、scripts/test-release-image.sh 的釘選與 integrity。
+4. 三個入口同時換版，換版前備份 runwukong_opencode-state 的 opencode.db。
+5. 回復方案：停三個入口，還原備份的 opencode.db，映像退回前一版；接受備份之後的對話紀錄遺失。
+
