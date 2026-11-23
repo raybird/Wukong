@@ -1,6 +1,6 @@
 #!/bin/sh
 # 步驟 4：OpenCode V2 最小契約探測。在跑著 `opencode serve`（V2）的隔離容器裡執行：
-#   docker exec -e PW=... oc2-live sh /scripts/v2-probe.sh
+#   docker exec -e PW=... 容器名稱 sh /scripts/v2-probe.sh（容器要掛上本目錄到 /scripts）
 # 每項印出 PASS／FAIL 與實際 HTTP 狀態；FAIL 不中斷，後面的項目照跑。
 # 會送三個極短的 prompt 給預設的免費模型；不帶任何專案或使用者資料。
 B=${B:-http://127.0.0.1:4096}
@@ -15,7 +15,7 @@ wait_for() { # 等事件檔出現指定字串，最多 $2 秒
 code=$(curl -s -o /dev/null -w '%{http_code}' "$B/api/session")
 [ "$code" = 401 ] && result PASS auth.required "no-auth=$code" || result FAIL auth.required "no-auth=$code"
 
-# V1 路徑：GET 應該失敗；回 200 代表 SPA 吞掉了路徑（健康檢查會誤判）
+# V1 路徑：GET 應該失敗；回 200 代表 SPA 吞掉了路徑（只看狀態碼的 compose healthcheck 會誤判）
 for p in /global/health "/session?limit=10" /event; do
   code=$(curl -s -o /tmp/v1body -w '%{http_code}' --max-time 3 -u "opencode:$PW" "$B$p")
   if [ "$code" = 200 ] && grep -qi '<!doctype html' /tmp/v1body; then

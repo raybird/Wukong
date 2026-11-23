@@ -214,14 +214,14 @@ Wukong 用到的介面取自 crates/wukong-gateway/src/local_process.rs 與 open
 | POST /api/session/{id}/question/{qid}/reply、reject | 沒有 question，改成 form：POST /api/session/{id}/form/{formID}/reply | 要改 |
 | 模型選擇放在 prompt body | POST /api/session/{id}/model 切換，或建立 session 時帶 model | 要改；探測只切到原本的同一個模型（回 204），實際切換沒有驗證 |
 
-啟動訊息、認證、V1 路徑、/api/info、openapi 與遷移／回復都由 [scripts/v2-migration.sh](scripts/v2-migration.sh) 重現，全程 `--network none`、不呼叫模型。2026-11-23 重跑的輸出與下文相符：
+啟動訊息、認證（含 OPENCODE_SERVER_USERNAME 不再生效）、V1 路徑、/api/info、openapi 與遷移／回復（含 V1 讀回最大 session 的 message 與 part 數）都由 [scripts/v2-migration.sh](scripts/v2-migration.sh) 重現，全程 `--network none`、不呼叫模型。2026-11-23 重跑的輸出與下文相符：
 
 ```bash
 # V2_PREFIX 是 npm install -g --prefix 裝 @opencode/cli@2.3.2 的目錄；WORK_DIR 是空目錄
 bash docs/issues/issue-0030/scripts/v2-migration.sh "$DST" "$V2_PREFIX" "$WORK_DIR"
 ```
 
-會呼叫模型的契約項目由 [scripts/v2-probe.sh](scripts/v2-probe.sh) 檢查，在有網路、設了 OPENCODE_SERVER_PASSWORD 的 V2 容器裡用 `docker exec -e PW=... 容器 sh v2-probe.sh` 執行，啟動方式同 v2-migration.sh 的 start（不加 `--network none`）。2026-11-23 第二次執行的結果，模型為 V2 預設的免費模型 opencode/big-pickle：
+會呼叫模型的契約項目由 [scripts/v2-probe.sh](scripts/v2-probe.sh) 檢查，在有網路、設了 OPENCODE_SERVER_PASSWORD 的 V2 容器裡用 `docker exec -e PW=... 容器 sh v2-probe.sh` 執行，啟動方式同 v2-migration.sh 的 start，但不加 `--network none`，並另外掛上腳本目錄（例如 `-v "$PWD/docs/issues/issue-0030/scripts":/scripts:ro`，再執行 `sh /scripts/v2-probe.sh`）。2026-11-23 第二次執行的結果，模型為 V2 預設的免費模型 opencode/big-pickle：
 
 | 項目 | 結果 |
 |---|---|
@@ -278,7 +278,7 @@ bash docs/issues/issue-0030/scripts/bench-turn.sh ghcr.io/raybird/wukong:v0.25.1
 
 - memory.db 每回合增量都是 0：CLI 回合沒有寫入記憶，寫入等待無從量測。
 - 記憶體峰值是整個容器的累計值，包含 entrypoint 初始化；cgroup 檔案系統唯讀，不能逐回合重設。
-- v0.25.1 short 的 opencode 日誌（bench 副本的 err-1～3.txt）：每回合啟動兩個 opencode 程序，plan 與 build 各一個（不同的 `run=`）。各自從載入設定到第一次呼叫上游分別是 1.25／0.95、1.05／0.97、0.95／0.99 秒，合計每回合 1.9～2.2 秒，占回合耗時的 13～19%。plan 開始呼叫上游到 build 程序啟動相隔 5.1～8.7 秒，包含 plan 的上游回應與 Wukong 的處理。日誌沒有記錄串流結束的時間，上游各自花了多久無法直接拆出。v0.23.0 的日誌沒有時間戳，不能拆階段。
+- v0.25.1 short 的 opencode 日誌（bench 副本的 err-1～3.txt）：每回合啟動兩個 opencode 程序，plan 與 build 各一個（不同的 `run=`）。各自從載入設定到第一次呼叫上游分別是 1.25／0.95、1.05／0.97、0.95／0.99 秒，合計每回合 1.9～2.2 秒，占回合耗時的 13～19%。每個程序從 `message=stream`（開始呼叫上游）到 `message=loop … step=1`（這一步結束）就是一次 LLM step：三個回合的 plan／build 分別是 4.6／8.0、8.1／3.9、4.3／2.3 秒，合計 12.6、12.0、6.6 秒，占回合耗時的 78%、78%、66%。v0.23.0 的日誌沒有時間戳，不能拆階段。
 - 不呼叫模型，單獨量 opencode 的啟動成本（[scripts/boot-cost.sh](scripts/boot-cost.sh)，v0.25.1，同樣 1.5 CPU，5 次）：從啟動到印出 listening 0.89～0.99 秒、1.21～1.32 CPU 秒。每回合啟動兩次，約 2.5 CPU 秒，占每回合 5.3～5.6 CPU 秒的一半左右；其餘約 3 CPU 秒花在串流處理、Wukong 本身或程序結束，這次的量測分不出來。
 - 成功的判準：rc=0、輸出內容符合任務（short 輸出 OK；tool 在 workspace 留下內容為 hello 的 bench.txt）。v0.23.0 tool 三次都留下 bench.txt。
 - v0.25.1 tool 任務的 3 次失敗是本次探測與對照把免費模型的額度用完：上游回 Free usage limit reached，Wukong 回報「上游模型錯誤（上游限流）」，2 秒內結束，沒有變成逾時（#24 的修正有效）。這 3 筆保留為失敗樣本，不算進成功回合的耗時。
@@ -305,7 +305,7 @@ bash docs/issues/issue-0030/scripts/bench-turn.sh ghcr.io/raybird/wukong:v0.25.1
 
 | 假設或既有修正 | 結果 | 證據 |
 |---|---|---|
-| 回合耗時主要在上游模型 | 大致成立：v0.25.1 每回合呼叫上游兩次（plan、build），本機的 opencode 啟動合計約 2 秒，其餘 8～14 秒包含上游回應與本機處理，日誌拆不出比例；上游限流時 2 秒內失敗 | 步驟 5 |
+| 回合耗時主要在上游模型 | 成立：v0.25.1 每回合呼叫上游兩次（plan、build），兩次 LLM step 合計 6.6～12.6 秒，占回合耗時的 66～78%；本機的 opencode 啟動合計約 2 秒；上游限流時 2 秒內失敗 | 步驟 5 |
 | 長期 session 的事件與工具輸出讓資料量變大 | 資料量確實集中在少數長期 session 的 event 與 part；但在目前規模下，讀取最大 session 約 15 ms，不構成瓶頸 | 步驟 2、3 |
 | 按需啟動 opencode 的重複成本 | 成立，不可忽略：每回合啟動兩次，合計約 2 秒（回合耗時的 13～19%）、約 2.5 CPU 秒（每回合 CPU 的一半左右） | 步驟 5 |
 | 共用 SQLite 的寫入競爭 | 未驗證，仍是假設 | 步驟 5「沒有量測的項目」 |
@@ -317,7 +317,7 @@ bash docs/issues/issue-0030/scripts/bench-turn.sh ghcr.io/raybird/wukong:v0.25.1
 
 ### 根因排序（flashaim，v0.25.1）
 
-1. 上游模型：每回合兩次上游呼叫，扣掉本機啟動後的 8～14 秒大部分在這裡（日誌拆不出精確比例）；免費模型的額度與限流會直接讓回合失敗。
+1. 上游模型：每回合兩次 LLM step，合計 6.6～12.6 秒，占回合耗時的 66～78%；免費模型的額度與限流會直接讓回合失敗。
 2. 每回合按需啟動 opencode 兩次（plan、build）：合計約 2 秒、約 2.5 CPU 秒，在 1.5 CPU 上限下還有 0.3～0.4 秒的 throttling。改用常駐的 opencode server 可以省掉這筆，但要另外評估。
 3. opencode.db 的成長：新 session 的第一回合增加約 0.8 MB，之後每回合 50～100 KB，大多是 event 表；目前不影響查詢，長期要看單一 session 的大小。
 
