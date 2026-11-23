@@ -5,6 +5,10 @@
 
 2026-11-23 範圍修訂：盤點與對照改在 flashaim 的 RunWuKong（v0.25.1）上做，raybird-desktop 只保留交接紀錄的既有觀測，不再取數；根因結論限定在 flashaim 上的新版。V2 候選版改為 2.3.2。
 
+## 現況
+
+**現行 review**: review-4be256c.md
+
 ## 文件清單
 - [implementation-plan.md](implementation-plan.md)
 - [inventory.md](inventory.md)：盤點報告與可重跑的取數腳本（scripts/）
@@ -71,4 +75,4 @@ Feature: Runtime 效能與升級評估
 **建立日期**: 2026-11-11
 **分級**: Medium
 **風險**: High
-**狀態**: 待審查
+**狀態**: 修正中（review-4be256c）
