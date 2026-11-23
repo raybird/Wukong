@@ -7,7 +7,8 @@
 ## 實作步驟
 1. ✅ SCN-001：辨識 flashaim RunWuKong 的版本與資料卷，取得一致性副本。產出版本矩陣／副本驗證；無相依。完成判準：主機名稱、image digest、binary 版本與原始碼分列，副本可讀且不觸發正式資料遷移。
    - 證據（2026-11-23）：[inventory.md「步驟 1」](inventory.md#步驟-1版本矩陣與一致性副本)。映像 v0.25.1（digest 898b73a1…）內含 OpenCode 1.19.6，原始碼釘選 1.17.18 是 release CI 改寫前的值；四個 DB 以唯讀掛載取副本，WAL 反向自檢通過（只有主檔時筆數較少）。
-2. 📝 SCN-001：DB/WAL、頁面、各表、最大 session 與工具事件量盤點。依賴 1；產出聚合數值與 SQL。完成判準：用已知筆數對照組證明取數有效，未知不當零值。
+2. ✅ SCN-001：DB/WAL、頁面、各表、最大 session 與工具事件量盤點。依賴 1；產出聚合數值與 SQL。完成判準：用已知筆數對照組證明取數有效，未知不當零值。
+   - 證據（2026-11-23）：[inventory.md「步驟 2」](inventory.md#步驟-2資料庫聚合盤點)。對照組 PASS，三種改壞的版本都 FAIL；opencode.db 42 MB 中 event 表占 66%、part 表占 32%，只有 6 個 session，tool part 占 part data 的 81%；保留期清理照設計運作（stale_protected=1、expired=0）；vectors.db 未盤點，列為未知。
 3. 📝 SCN-001：EXPLAIN QUERY PLAN 與查詢耗時。依賴 2；產出可重跑命令、資料規模與冷暖測量。
 4. 📝 SCN-002：候選 V2（2.3.2）最小契約與副本遷移／回復探測。依賴 1；涵蓋啟動、health、session、串流、取消、權限、模型、壓縮及清理；產出差異矩陣。失敗即記錄阻礙，不直接更換正式版本。
 5. 📝 SCN-001／002：同資料、模型與任務的版本對照。依賴 3、4；在 flashaim 的副本上比較 v0.23.0 映像（raybird-desktop 當時的版本）、v0.25.1＋V1、可運作的 V2 路徑。產出分階段耗時、RSS、throttling、寫入等待、DB 增量與全部失敗樣本。V2 契約未通過則記不可比較，不編造效能結果。

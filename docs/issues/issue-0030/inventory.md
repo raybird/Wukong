@@ -70,3 +70,78 @@ docker run --rm --user 1000:1000 --network none --entrypoint python3 \
 
 - 這台有排程：副本的 scheduler_jobs 2 筆、scheduler_runs 25 筆，執行量遠少於 raybird-desktop 交接紀錄裡的尾端樣本，兩台的負載不能直接比。
 - 容器於 2026-11-23 00:54 UTC 重啟，cgroup 的 cpu.stat 只涵蓋重啟之後，留給步驟 5 在負載下量測。
+
+## 步驟 2：資料庫聚合盤點
+
+取樣：2026-11-23，步驟 1 的副本（02:38 UTC）。腳本 [scripts/inventory.py](scripts/inventory.py)，只輸出筆數與 byte 數。
+
+```bash
+docker run --rm --user 1000:1000 --network none --entrypoint python3 \
+  -v "$DST":/dst:ro -v "$PWD/docs/issues/issue-0030/scripts":/scripts:ro \
+  ghcr.io/raybird/wukong:v0.25.1 -I /scripts/inventory.py control
+# 對照組通過後再盤點副本
+docker run ...（同上） -I /scripts/inventory.py /dst/opencode.db /dst/memory.db /dst/memoria-sessions.db
+```
+
+### 取數方法的驗證
+
+對照組（`inventory.py control`）造一個內容已知的資料庫：3 個 session（其中 1 個是子 session）、part 7／3／0 筆、message 2／1／0 筆、event 3 筆（1 筆不屬於任何 session），逐項比對筆數、byte 數、分組排序與查不到的表。結果 PASS。
+
+反向自檢，下列三種改壞的版本都會讓對照組 FAIL：
+
+| 改壞的地方 | 對照組結果 |
+|---|---|
+| 前幾大 session 的查詢跳過第一名（`offset 1`） | FAIL：top_sessions_by_parts、top_sessions_by_messages 不符 |
+| 查不到的表回傳 0 而不是 unknown | FAIL：missing table 拿到 0 |
+| 「不屬於 session 的 event」條件寫反 | FAIL：events_outside_sessions 拿到 2，應為 1 |
+
+### 檔案與頁面
+
+| 資料庫 | 副本 byte | page_size | page_count | freelist_count |
+|---|---|---|---|---|
+| opencode.db | 42,078,208 | 4096 | 10,273 | 0 |
+| memory.db | 1,925,120 | 4096 | 470 | 101 |
+| Memoria sessions.db | 450,560 | 4096 | 110 | 0 |
+
+memory.db 的 freelist 占 21%（101／470 頁，約 0.4 MB），總量小，不影響效能判斷。vectors.db 要 libsql 才讀得了索引，沒有盤點，列為未知。
+
+### opencode.db
+
+| 表 | 筆數 | 占用 byte（含索引） | 占全檔 |
+|---|---|---|---|
+| event | 14,033 | 27,701,248 | 66% |
+| part | 4,254 | 13,496,320 | 32% |
+| message | 1,056 | 675,840 | 2% |
+| session | 6 | 20,480 | 低於 1% |
+
+其餘 16 張表都在 25 KB 以下。
+
+- session 6 個，沒有子 session；最早建立於 2026-09-08，最新於 2026-11-19。
+- 最大的 session 有 2,114 個 part、data 共 4.8 MB；第二、三名是 1,161 個 part（1.2 MB）、767 個 part（1.2 MB）。依 message 數排是 523、279、201 則。
+- part 依類型：tool 1,147 筆占 6.2 MB（part data 總量的 81%），reasoning 691 筆 0.9 MB，text 439 筆 0.4 MB，compaction 14 筆。
+- event 依類型：message.part.updated 9,931 筆 14.4 MB，message.updated 3,016 筆 1.4 MB，session.updated 1,080 筆 0.6 MB，session.created 6 筆。所有 event 都屬於現存的 6 個 session（不屬於 session 的 0 筆）。
+- event 表是 part 更新的事件紀錄：message.part.updated 的 data 總量（14.4 MB）比 part 表本身的 data（7.7 MB）還大，佔用量主要在這裡，不在 session 數。
+
+### Wukong memory.db
+
+| 表 | 筆數 | 占用 byte（含索引） |
+|---|---|---|
+| turn_events | 1,800 | 749,568 |
+| memories | 84 | 356,352 |
+| chat_messages | 82 | 135,168 |
+| memories_fts_data | 34 | 126,976 |
+| recall_telemetry | 52 | 12,288 |
+| scheduler_runs | 25 | 20,480 |
+| chat_live_events | 0 | 8,192 |
+
+agent_sessions、agent_session_state 各 4 筆，chat_threads 2 筆。chat_live_events 為 0，#28 的 live events 清理之後沒有殘留。
+
+### Memoria sessions.db
+
+全庫 110 頁，最大的表 memory_nodes 3 筆、sessions 1 筆；最後修改在 2026-10-07，這台的 Memoria 幾乎沒有使用，不列入瓶頸候選。
+
+### 保留期清理的實際行為
+
+schedulerd 日誌（`docker logs wukong-schedulerd`，2026-11-20 起動後）每 6 小時一筆，最近 5 筆都是 `listed=6 protected=4 stale_protected=1 expired=0 deleted=0 failed=0`。
+
+2026-09-08 建立、之後沒再更新的那個 session 已超過 30 天，但仍被某個 scope 指向，所以列在 stale_protected 而沒有刪。另一個 2026-09-08 建立的 session 在 2026-11-19 仍有更新，不算過期。保留期清理照 #28 的設計運作，opencode.db 的大小來自少數幾個長期 session 的 part 與 event，不是過期 session 沒清。
