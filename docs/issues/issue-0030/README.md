@@ -7,6 +7,7 @@
 
 ## 文件清單
 - [implementation-plan.md](implementation-plan.md)
+- [inventory.md](inventory.md)：盤點報告與可重跑的取數腳本（scripts/）
 
 ## 涉及檔案
 - 本目錄與交接紀錄：盤點證據與決策。
@@ -33,7 +34,7 @@ Feature: Runtime 效能與升級評估
 ```
 
 ## Gherkin 核准紀錄
-- **核准 commit**: 待提交
+- **核准 commit**: 83d3670
 - **核准來源**: 2026-11-11 使用者：「這個盤點開一個 github issue 把目前這台機器的緣由放上去，然後 opencopde 有 2 版看是否順勢安排升級」；涵蓋盤點與評估計畫，非正式部署升級授權。2026-11-23 逐題確認，使用者兩題都選建議答案：第 1 題「改盤點 flashaim（範圍修訂）」，SCN-001 改盤點 flashaim 的 RunWuKong（v0.25.1），raybird-desktop 只保留交接紀錄的既有觀測、不再取數，根因結論限定在新版（SCN-001 重新核准）；第 2 題「改用 2.3.2」，V2 候選版由 2.2.7 改為 2.3.2（SCN-002 文字不變）。
 
 | Scenario | 核准日期 | 狀態 |
@@ -63,4 +64,4 @@ Feature: Runtime 效能與升級評估
 **建立日期**: 2026-11-11
 **分級**: Medium
 **風險**: High
-**狀態**: 待盤點
+**狀態**: 盤點中

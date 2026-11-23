@@ -5,7 +5,8 @@
 盤點對象是 flashaim 的 ~/Documents/RunWuKong；raybird-desktop 只引用交接紀錄的既有觀測。V2 候選版為 @opencode/cli 2.3.2（2026-11-23 查 npm latest；GitHub 的 Latest 標記在 v1.19.6）。
 
 ## 實作步驟
-1. 📝 SCN-001：辨識 flashaim RunWuKong 的版本與資料卷，取得一致性副本。產出版本矩陣／副本驗證；無相依。完成判準：主機名稱、image digest、binary 版本與原始碼分列，副本可讀且不觸發正式資料遷移。
+1. ✅ SCN-001：辨識 flashaim RunWuKong 的版本與資料卷，取得一致性副本。產出版本矩陣／副本驗證；無相依。完成判準：主機名稱、image digest、binary 版本與原始碼分列，副本可讀且不觸發正式資料遷移。
+   - 證據（2026-11-23）：[inventory.md「步驟 1」](inventory.md#步驟-1版本矩陣與一致性副本)。映像 v0.25.1（digest 898b73a1…）內含 OpenCode 1.19.6，原始碼釘選 1.17.18 是 release CI 改寫前的值；四個 DB 以唯讀掛載取副本，WAL 反向自檢通過（只有主檔時筆數較少）。
 2. 📝 SCN-001：DB/WAL、頁面、各表、最大 session 與工具事件量盤點。依賴 1；產出聚合數值與 SQL。完成判準：用已知筆數對照組證明取數有效，未知不當零值。
 3. 📝 SCN-001：EXPLAIN QUERY PLAN 與查詢耗時。依賴 2；產出可重跑命令、資料規模與冷暖測量。
 4. 📝 SCN-002：候選 V2（2.3.2）最小契約與副本遷移／回復探測。依賴 1；涵蓋啟動、health、session、串流、取消、權限、模型、壓縮及清理；產出差異矩陣。失敗即記錄阻礙，不直接更換正式版本。
