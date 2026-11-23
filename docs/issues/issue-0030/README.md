@@ -65,6 +65,7 @@ Feature: Runtime 效能與升級評估
 | TBD-7 | review-b88a4c4 的兩項建議怎麼處理 | 已解決：2026-11-23 使用者選「兩項都修正，再審一輪」。LLM step 時間補上是上游耗時上限的限定，判定改回大致成立；v2-migration.sh 改取 part 最多的 session，重跑輸出除標籤外相同 | 影響步驟 5、6 的根因排序；SCN-001、SCN-002 |
 | TBD-8 | PR #43 第三方審查（pullrequestreview-6018454389）的三項建議怎麼處理 | 已解決：2026-11-23 使用者在逐題確認中全選建議答案。P2 WAL 自檢改稱涵蓋性檢查並寫明一致性的依據；P2 資料庫結論限定在本次資料規模與測試查詢；P3 bench-turn.sh 每回合先刪 bench.txt，並補上 v0.23.0 tool 回合確實寫入的 DB 證據。修正後重新審查 | 影響步驟 1、3、5 的結論措辭與根因排序的依據；SCN-001 |
 | TBD-9 | review-ace1a3a 的三項建議怎麼處理 | 已解決：2026-11-23 使用者選「三項都修正，再審一輪」。DB 證據改成連同 WAL 查詢的結果（三個回合各寫入一次）；bench-turn.sh 每回合結束後檢查 bench.txt，結果寫進輸出；長期 session 那列補上量測範圍的限定 | 影響步驟 5 的證據與步驟 6 的判定措辭；SCN-001 |
+| TBD-10 | PR #43 第二輪第三方審查（pullrequestreview-6018947869）的 P3：CLI 失敗時 set -e 會不會讓 bench-turn.sh 提前結束 | 已解決：2026-11-23 使用者選不修。外層的 set -euo pipefail 不會傳進 bash -c 起的內層 shell（內層 $- 為 hBc），v0.25.1 tool 三次 rc=1 的失敗都照常輸出 JSON 並跑完三個回合 | 不影響 SCN-001、SCN-002 |
 
 ## Gate 豁免紀錄
 
