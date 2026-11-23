@@ -278,7 +278,7 @@ bash docs/issues/issue-0030/scripts/bench-turn.sh ghcr.io/raybird/wukong:v0.25.1
 
 - memory.db 每回合增量都是 0：CLI 回合沒有寫入記憶，寫入等待無從量測。
 - 記憶體峰值是整個容器的累計值，包含 entrypoint 初始化；cgroup 檔案系統唯讀，不能逐回合重設。
-- v0.25.1 short 的 opencode 日誌（bench 副本的 err-1～3.txt）：每回合啟動兩個 opencode 程序，plan 與 build 各一個（不同的 `run=`）。各自從載入設定到第一次呼叫上游分別是 1.25／0.95、1.05／0.97、0.95／0.99 秒，合計每回合 1.9～2.2 秒，占回合耗時的 13～19%。每個程序從 `message=stream`（開始呼叫上游）到 `message=loop … step=1`（這一步結束）就是一次 LLM step：三個回合的 plan／build 分別是 4.6／8.0、8.1／3.9、4.3／2.3 秒，合計 12.6、12.0、6.6 秒，占回合耗時的 78%、78%、66%。v0.23.0 的日誌沒有時間戳，不能拆階段。
+- v0.25.1 short 的 opencode 日誌（bench 副本的 err-1～3.txt）：每回合啟動兩個 opencode 程序，plan 與 build 各一個（不同的 `run=`）。各自從載入設定到第一次呼叫上游分別是 1.25／0.95、1.05／0.97、0.95／0.99 秒，合計每回合 1.9～2.2 秒，占回合耗時的 13～19%。每個程序從 `message=stream`（開始呼叫上游）到 `message=loop … step=1`（這一步結束）就是一次 LLM step：三個回合的 plan／build 分別是 4.6／8.0、8.1／3.9、4.3／2.3 秒，合計 12.6、12.0、6.6 秒，占回合耗時的 78%、78%、66%。LLM step 的時間也包含 opencode 自己處理串流的時間，所以這是上游耗時的上限，不是純粹等待上游的時間。v0.23.0 的日誌沒有時間戳，不能拆階段。
 - 不呼叫模型，單獨量 opencode 的啟動成本（[scripts/boot-cost.sh](scripts/boot-cost.sh)，v0.25.1，同樣 1.5 CPU，5 次）：從啟動到印出 listening 0.89～0.99 秒、1.21～1.32 CPU 秒。每回合啟動兩次，約 2.5 CPU 秒，占每回合 5.3～5.6 CPU 秒的一半左右；其餘約 3 CPU 秒花在串流處理、Wukong 本身或程序結束，這次的量測分不出來。
 - 成功的判準：rc=0、輸出內容符合任務（short 輸出 OK；tool 在 workspace 留下內容為 hello 的 bench.txt）。v0.23.0 tool 三次都留下 bench.txt。
 - v0.25.1 tool 任務的 3 次失敗是本次探測與對照把免費模型的額度用完：上游回 Free usage limit reached，Wukong 回報「上游模型錯誤（上游限流）」，2 秒內結束，沒有變成逾時（#24 的修正有效）。這 3 筆保留為失敗樣本，不算進成功回合的耗時。
@@ -305,7 +305,7 @@ bash docs/issues/issue-0030/scripts/bench-turn.sh ghcr.io/raybird/wukong:v0.25.1
 
 | 假設或既有修正 | 結果 | 證據 |
 |---|---|---|
-| 回合耗時主要在上游模型 | 成立：v0.25.1 每回合呼叫上游兩次（plan、build），兩次 LLM step 合計 6.6～12.6 秒，占回合耗時的 66～78%；本機的 opencode 啟動合計約 2 秒；上游限流時 2 秒內失敗 | 步驟 5 |
+| 回合耗時主要在上游模型 | 大致成立：v0.25.1 每回合呼叫上游兩次（plan、build），兩次 LLM step 合計 6.6～12.6 秒，占回合耗時的 66～78%（含 opencode 處理串流的時間，是上游耗時的上限）；本機的 opencode 啟動合計約 2 秒；上游限流時 2 秒內失敗 | 步驟 5 |
 | 長期 session 的事件與工具輸出讓資料量變大 | 資料量確實集中在少數長期 session 的 event 與 part；但在目前規模下，讀取最大 session 約 15 ms，不構成瓶頸 | 步驟 2、3 |
 | 按需啟動 opencode 的重複成本 | 成立，不可忽略：每回合啟動兩次，合計約 2 秒（回合耗時的 13～19%）、約 2.5 CPU 秒（每回合 CPU 的一半左右） | 步驟 5 |
 | 共用 SQLite 的寫入競爭 | 未驗證，仍是假設 | 步驟 5「沒有量測的項目」 |
@@ -317,7 +317,7 @@ bash docs/issues/issue-0030/scripts/bench-turn.sh ghcr.io/raybird/wukong:v0.25.1
 
 ### 根因排序（flashaim，v0.25.1）
 
-1. 上游模型：每回合兩次 LLM step，合計 6.6～12.6 秒，占回合耗時的 66～78%；免費模型的額度與限流會直接讓回合失敗。
+1. 上游模型：每回合兩次 LLM step，合計 6.6～12.6 秒，占回合耗時的 66～78%，這是上游耗時的上限（含 opencode 處理串流的時間）；免費模型的額度與限流會直接讓回合失敗。
 2. 每回合按需啟動 opencode 兩次（plan、build）：合計約 2 秒、約 2.5 CPU 秒，在 1.5 CPU 上限下還有 0.3～0.4 秒的 throttling。改用常駐的 opencode server 可以省掉這筆，但要另外評估。
 3. opencode.db 的成長：新 session 的第一回合增加約 0.8 MB，之後每回合 50～100 KB，大多是 event 表；目前不影響查詢，長期要看單一 session 的大小。
 

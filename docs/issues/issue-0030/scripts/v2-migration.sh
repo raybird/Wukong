@@ -47,7 +47,15 @@ echo "== 2. V1 開遷移後的檔案"
 start m-v1a v1
 x m-v1a "curl -s http://127.0.0.1:4096/global/health; echo"
 echo "v1 sessions: $(x m-v1a "$count_v1")"
-x m-v1a "curl -s 'http://127.0.0.1:4096/session?limit=10000' | python3 -c \"import json,sys; d=json.load(sys.stdin); print(max(d, key=lambda s: s['time']['updated'])['id'])\" > /tmp/latest; curl -s \"http://127.0.0.1:4096/session/\$(cat /tmp/latest)/message?limit=100000\" | python3 -c \"import json,sys; d=json.load(sys.stdin); print('v1 latest session: messages', len(d), 'parts', sum(len(m.get('parts', [])) for m in d))\""
+# 最大的 session：逐一讀各 session 的訊息，取 part 最多的那個
+x m-v1a "curl -s 'http://127.0.0.1:4096/session?limit=10000' | python3 -c \"
+import json, sys, urllib.request
+best = (0, 0)
+for s in json.load(sys.stdin):
+    msgs = json.load(urllib.request.urlopen('http://127.0.0.1:4096/session/%s/message?limit=100000' % s['id']))
+    best = max(best, (sum(len(m.get('parts', [])) for m in msgs), len(msgs)))
+print('v1 largest session: messages', best[1], 'parts', best[0])
+\""
 x m-v1a "curl -s -X POST -H 'content-type: application/json' -d '{}' http://127.0.0.1:4096/session > /dev/null && echo 'v1 created a session'"
 stop m-v1a
 
