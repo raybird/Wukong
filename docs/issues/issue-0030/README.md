@@ -7,7 +7,7 @@
 
 ## 現況
 
-**現行 review**: review-4be256c.md
+**現行 review**: review-5f2c2d6.md
 
 ## 文件清單
 - [implementation-plan.md](implementation-plan.md)
