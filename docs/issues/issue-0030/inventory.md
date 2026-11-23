@@ -145,3 +145,39 @@ agent_sessions、agent_session_state 各 4 筆，chat_threads 2 筆。chat_live_
 schedulerd 日誌（`docker logs wukong-schedulerd`，2026-11-20 起動後）每 6 小時一筆，最近 5 筆都是 `listed=6 protected=4 stale_protected=1 expired=0 deleted=0 failed=0`。
 
 2026-09-08 建立、之後沒再更新的那個 session 已超過 30 天，但仍被某個 scope 指向，所以列在 stale_protected 而沒有刪。另一個 2026-09-08 建立的 session 在 2026-11-19 仍有更新，不算過期。保留期清理照 #28 的設計運作，opencode.db 的大小來自少數幾個長期 session 的 part 與 event，不是過期 session 沒清。
+
+## 步驟 3：查詢計畫與耗時
+
+取樣：2026-11-23，步驟 1 的副本。腳本 [scripts/queries.py](scripts/queries.py)；容器加上與正式部署相同的 `--cpus 1.5 --memory 3g`，連跑兩次。
+
+```bash
+docker run --rm --user 1000:1000 --network none --cpus 1.5 --memory 3g --entrypoint python3 \
+  -v "$DST":/dst:ro -v "$PWD/docs/issues/issue-0030/scripts":/scripts:ro \
+  ghcr.io/raybird/wukong:v0.25.1 -I /scripts/queries.py /dst/memory.db /dst/opencode.db
+```
+
+冷是開新連線後第一次執行，暖是同一連線 20 次的中位數。作業系統的檔案快取沒有清（清快取要 root），所以「冷」只排除了 SQLite 自己的頁快取。opencode 的查詢是依 opencode.db 的索引推測它載入 session 時會用的形狀，不是從 opencode 原始碼抄出來的。
+
+| 查詢 | 資料規模 | 回傳筆數 | 冷 ms（兩次） | 暖 ms（兩次） | 計畫 |
+|---|---|---|---|---|---|
+| recall.keyword_candidates（FTS5） | memories 84 筆 | 20 | 0.64／0.60 | 0.20／0.20 | FTS 索引＋主鍵，排序用暫存 B-tree |
+| recall.cjk_fallback_candidates | 同上 | 20 | 0.25／0.29 | 0.06／0.07 | 走 memories_created_at_idx 掃描 |
+| recall.recent_candidates | 同上 | 20 | 0.15／0.15 | 0.005／0.005 | 覆蓋索引 |
+| session.state_by_scope | agent_session_state 4 筆 | 1 | 0.14／0.15 | 0.002／0.002 | 主鍵索引 |
+| chat.messages_by_thread | 最大的 thread 82 則 | 82 | 0.17／0.22 | 0.02／0.02 | 覆蓋索引 |
+| opencode.session_list | session 6 個 | 6 | 0.17／0.21 | 0.005／0.007 | 全表掃描，排序用暫存 B-tree |
+| opencode.messages_of_session | 最大的 session | 523 | 0.66／0.60 | 0.21／0.22 | message_session_time_created_id_idx |
+| opencode.parts_of_session | 同上 | 2,114 | 11.8／12.4 | 8.4／8.4 | part_session_idx |
+| opencode.parts_by_message | 同上 | 2,114 | 16.3／15.4 | 13.8／13.7 | 兩個索引，排序用暫存 B-tree |
+| opencode.events_of_session | 同上 | 6,550 | 15.1／15.3 | 14.5／14.9 | event_aggregate_seq_idx |
+| 對照：part 依 json 類型全表掃描 | part 4,254 筆 | 1 | 10.8／10.9 | 10.8／11.3 | SCAN part |
+
+核心查詢都走索引，只有 session_list 是全表掃描，而它只有 6 筆。最貴的是載入最大 session 的全部 part 或 event，約 15 ms，跟全表掃描 part 的對照組同一個量級，因為那個 session 本來就占了 part 的一半。耗時大致跟 session 的資料量成正比，不是缺索引造成的。
+
+### 正式部署的召回耗時（recall_telemetry）
+
+memory.db 的 recall_telemetry 是正式部署自己寫的量測：relevant 模式 49 次，p50 7 ms、p95 32 ms、最大 42 ms；hybrid 模式 3 次，最大 3 ms。沒有被略過的召回。
+
+### 結論與限制
+
+在 flashaim 目前的資料規模下（opencode.db 42 MB、最大 session 2,114 個 part），資料庫查詢與召回都在毫秒級，跟交接紀錄的整個任務 1,218～2,390 秒差了五個數量級以上，不是 flashaim 上的瓶頸候選。raybird-desktop 的資料規模沒有取得，這個結論不能推到那台。查詢耗時會隨單一 session 的 part 與 event 成長，長期 session 的成長速度留給步驟 5 量測。
