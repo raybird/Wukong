@@ -104,17 +104,12 @@ impl LocalProcessBackend {
         if let Some(workspace) = &self.workspace {
             command.current_dir(workspace).env("PWD", workspace);
         }
+        // 每次啟動自設一組隨機密碼，只經環境變數交給 server：loopback 埠同一台機器的其他
+        // 使用者也連得到，命令列參數又看得到（/proc/<pid>/cmdline）。V2 的帳號固定為 opencode。
+        let password = random_password();
         command
-            .env_remove("OPENCODE_SERVER_PASSWORD")
+            .env("OPENCODE_SERVER_PASSWORD", &password)
             .env_remove("OPENCODE_SERVER_USERNAME");
-        for (source, target) in [
-            ("WUKONG_AGENT_SERVER_PASSWORD", "OPENCODE_SERVER_PASSWORD"),
-            ("WUKONG_AGENT_SERVER_USERNAME", "OPENCODE_SERVER_USERNAME"),
-        ] {
-            if let Ok(value) = std::env::var(source) {
-                command.env(target, value);
-            }
-        }
         #[cfg(unix)]
         command.process_group(0);
         let child = command.spawn()?;
@@ -140,7 +135,7 @@ impl LocalProcessBackend {
                     .next_line()
                     .await?
                     .ok_or_else(|| failed("本機 OpenCode 未回報啟動位址便結束。"))?;
-                if let Some(url) = line.strip_prefix("opencode server listening on ") {
+                if let Some(url) = line.strip_prefix("server listening on ") {
                     let parsed = reqwest::Url::parse(url.trim())
                         .map_err(|_| failed("本機 OpenCode 啟動位址無效。"))?;
                     if parsed.scheme() != "http"
@@ -159,6 +154,7 @@ impl LocalProcessBackend {
             let backend = Arc::new(OpencodeServerBackend::for_local_process(
                 url,
                 self.workspace.clone(),
+                password,
             ));
             backend.health_check().await?;
             let (req, ephemeral, interactive) = match operation {
@@ -366,6 +362,14 @@ impl Drop for Process {
     }
 }
 
+fn random_password() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
 fn failed(message: &str) -> GatewayError {
     GatewayError::AgentFailed {
         code: None,
@@ -510,7 +514,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_listener_releases_child() {
         let (dir, backend) =
-            fixture("echo 'opencode server listening on http://0.0.0.0:1234'\nexec sleep 30");
+            fixture("echo 'server listening on http://0.0.0.0:1234'\nexec sleep 30");
         let error = backend.run(request()).await.unwrap_err();
         assert!(error.to_string().contains("loopback"));
         assert_stopped(dir.path()).await;
@@ -519,7 +523,7 @@ mod tests {
     #[tokio::test]
     async fn health_failure_releases_child() {
         let (dir, backend) =
-            fixture("echo 'opencode server listening on http://127.0.0.1:1'\nexec sleep 30");
+            fixture("echo 'server listening on http://127.0.0.1:1'\nexec sleep 30");
         let error = backend.run(request()).await.unwrap_err();
         assert!(error.to_string().contains("health_check"));
         assert_stopped(dir.path()).await;
@@ -594,6 +598,73 @@ mod tests {
         }
     }
 
+    // issue-0044 SCN-002：每次啟動自設隨機密碼，只經環境變數交給 server，請求帶 basic auth。
+    #[tokio::test]
+    async fn each_launch_gets_its_own_password_through_the_environment() {
+        if !can_bind_loopback() {
+            eprintln!("skipping test: sandbox forbids binding socket");
+            return;
+        }
+        let script = r#"
+echo "$@" >> argv
+exec python3 -c '
+import base64, http.server, os, socketserver, sys, signal
+signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+socketserver.ThreadingTCPServer.daemon_threads = True
+password = os.environ.get("OPENCODE_SERVER_PASSWORD", "")
+with open("passwords", "a") as seen:
+    seen.write(password + "\n")
+expected = "Basic " + base64.b64encode(("opencode:" + password).encode()).decode()
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if not password or self.headers.get("Authorization") != expected:
+            self.send_response(401)
+            self.end_headers()
+            self.wfile.write(b"{\"_tag\":\"UnauthorizedError\"}")
+            return
+        if self.path == "/api/info":
+            body = b"{\"version\":\"2.3.2\"}"
+        elif self.path == "/api/session?limit=1000":
+            body = b"{\"data\":[],\"cursor\":{\"next\":null}}"
+        else:
+            self.send_response(404)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+print(f"server listening on http://127.0.0.1:{server.server_address[1]}", flush=True)
+server.serve_forever()
+'
+"#;
+        let (dir, backend) = fixture(script);
+
+        backend.list_sessions().await.unwrap();
+        assert_stopped(dir.path()).await;
+        backend.list_sessions().await.unwrap();
+        assert_stopped(dir.path()).await;
+
+        let passwords = std::fs::read_to_string(dir.path().join("passwords")).unwrap();
+        let passwords: Vec<&str> = passwords.lines().collect();
+        assert_eq!(passwords.len(), 2, "{passwords:?}");
+        assert!(passwords.iter().all(|password| password.len() >= 32));
+        assert_ne!(passwords[0], passwords[1]);
+        let argv = std::fs::read_to_string(dir.path().join("argv")).unwrap();
+        for password in &passwords {
+            assert!(
+                !argv.contains(password),
+                "password leaked into argv: {argv}"
+            );
+        }
+    }
+
     /// issue-0028 SCN-001：本機模式的保留期清理要能列出 session。列表在按需啟動的
     /// serve 上執行，帶上取回全部的 limit（W-6），列完就回收程序。
     #[tokio::test]
@@ -627,7 +698,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
-print(f"opencode server listening on http://127.0.0.1:{server.server_address[1]}", flush=True)
+print(f"server listening on http://127.0.0.1:{server.server_address[1]}", flush=True)
 server.serve_forever()
 '
 "#;
@@ -684,7 +755,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
-print(f"opencode server listening on http://127.0.0.1:{server.server_address[1]}", flush=True)
+print(f"server listening on http://127.0.0.1:{server.server_address[1]}", flush=True)
 server.serve_forever()
 '
 "#;
@@ -750,7 +821,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
 port = server.server_address[1]
-print(f"opencode server listening on http://127.0.0.1:{port}", flush=True)
+print(f"server listening on http://127.0.0.1:{port}", flush=True)
 server.serve_forever()
 '
 "#;
@@ -844,7 +915,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
 port = server.server_address[1]
-print(f"opencode server listening on http://127.0.0.1:{port}", flush=True)
+print(f"server listening on http://127.0.0.1:{port}", flush=True)
 server.serve_forever()
 '
 "#;
@@ -927,7 +998,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
 port = server.server_address[1]
-print(f"opencode server listening on http://127.0.0.1:{port}", flush=True)
+print(f"server listening on http://127.0.0.1:{port}", flush=True)
 server.serve_forever()
 '
 "#;

@@ -150,8 +150,21 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 驗收編號：SCN-002
 - 完成判準：以真實 V2 2.3.2 跑整合測試：單棒、多棒、附件、指定模型的回合都得到回覆並記錄 session；回合結束後沒有殘留的 opencode 程序（前後 `ps` 比對）；密碼不出現在命令列參數
 - 驗證：外迴圈為接真實 V2 的整合測試（需要模型的項目用預設免費模型）；單元測試覆蓋啟動偵測與逾時
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成
+- 證據：2026-11-24
+  - 實測：V2 `serve` 接受原本的旗標（`--port 0`、`--print-logs`），啟動字串改為 `server listening on`；斷網重試期間 stderr 沒有 `stream error`，V1 時期的 stderr 判斷保留不會誤判。見 [probe-local.md](probe-local.md)
+  - `local_process.rs` 改動：
+    - 啟動偵測改認 V2 的字串
+    - 每次啟動以兩個 uuid v4 產生 64 字元的隨機密碼，只經 `OPENCODE_SERVER_PASSWORD` 環境變數交給 serve，`for_local_process` 帶同一組密碼送 basic auth
+    - 不再把 `WUKONG_AGENT_SERVER_PASSWORD`／`USERNAME` 帶進本機 serve，文件說明由 Task 6.3 補
+    - gateway 依賴加上 `uuid`（workspace 既有）
+  - 單元：`each_launch_gets_its_own_password_through_the_environment`，以 python 假 server 驗三件事：沒帶正確 basic auth 就回 401、兩次啟動的密碼不同且至少 32 字元、`$@` 不含密碼。其餘假 server 的啟動字串改為 V2 格式；啟動偵測與逾時沿用 `invalid_listener_releases_child`、`health_failure_releases_child`、`cancelled_startup_releases_child`
+  - 紅燈：同日把新的 tests 模組放到改動前的 94926d7（暫存 worktree）上跑，8 支失敗（認不得 V2 啟動字串、沒有密碼）
+  - 綠燈：`cargo test` 全 workspace 774 passed、0 failed、13 ignored；clippy、fmt 通過
+  - 外迴圈：接真實 V2 2.3.2，見 probe-local.md
+    - `local_v2_actual.rs`（`#[ignore]`，以 `scripts/local-v2-actual.sh` 執行）：單棒並串流工具、接續、附件、指定模型、暫時回合、壓縮與刪除都通過；每步之後沒有殘留程序；回合中 serve 的命令列不含密碼
+    - 經 wukong CLI 的多棒回合（Explorer → Fixer）與接續回合通過，session 有記錄，結束後沒有殘留程序
+  - 殘餘：wukong 被外部訊號結束時（例如 `timeout` 的 SIGTERM），自己 process group 裡的 serve 會留下來；V1 時就是如此，不在本 Task 範圍
 
 ### Task 2.5 — 提問與權限回覆
 - 產出與範圍：gateway 的回覆路由改 V2 的 form 與 permission 端點（事件轉成提問已在 Task 2.2 完成）；Telegram（`dispatch.rs`）與 Web 的呼叫端跟著改，使用者操作不變

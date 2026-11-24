@@ -134,10 +134,15 @@ struct PermissionReplyBody<'a> {
 }
 
 impl OpencodeServerBackend {
-    pub(crate) fn for_local_process(base_url: String, workspace: Option<PathBuf>) -> Self {
+    pub(crate) fn for_local_process(
+        base_url: String,
+        workspace: Option<PathBuf>,
+        password: String,
+    ) -> Self {
         let mut backend = Self::from_env(base_url, workspace.clone());
         backend.file_mode = FileTransportMode::Shared;
         backend.server_workspace = workspace;
+        backend.password = Some(password);
         backend
     }
 
