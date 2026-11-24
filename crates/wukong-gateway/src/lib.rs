@@ -6,6 +6,7 @@ pub mod config;
 pub mod error;
 pub mod local_process;
 pub mod opencode_server;
+mod opencode_version;
 pub mod prompt;
 pub mod stream;
 pub mod summarize;

@@ -89,6 +89,7 @@ impl LocalProcessBackend {
         operation: Operation,
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> Result<Outcome, GatewayError> {
+        crate::opencode_version::ensure_v2(&self.binary).await?;
         let deadline = tokio::time::Instant::now() + agent_timeout();
         let mut command = Command::new(&self.binary);
         command
@@ -477,7 +478,14 @@ mod tests {
     fn fixture(body: &str) -> (tempfile::TempDir, LocalProcessBackend) {
         let dir = tempfile::tempdir().unwrap();
         let binary = dir.path().join("agent");
-        std::fs::write(&binary, format!("#!/bin/sh\necho $$ > pid\n{body}\n")).unwrap();
+        // 啟動前的版本檢查（issue-0044 Task 2.7）照 V2 回答。
+        std::fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 2.3.2; exit 0; }}\necho $$ > pid\n{body}\n"
+            ),
+        )
+        .unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
         let backend = LocalProcessBackend::new(
             binary.to_string_lossy().into_owned(),

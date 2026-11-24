@@ -233,8 +233,25 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 驗收編號：SCN-011
 - 完成判準：PATH 上放回報 1.x 的假 opencode 時，回合立即失敗，錯誤含「需要 OpenCode V2」與偵測到的版本，耗時遠低於 agent timeout；2.x 時通過
 - 驗證：單一迴圈：整合測試以假 opencode 執行檔覆蓋這一層，沒有另外的底層失敗面
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成
+- 證據：2026-11-24
+  - 實際的 `opencode --version` 輸出：V1 1.19.6 印 `1.19.6`，V2 2.3.2 印 `opencode v2.3.2`
+  - 改動：新增 `opencode_version.rs` 的 `ensure_v2`，放在 CLI backend 的 opencode 回合（`run_streaming_with_retry_limit`，非串流的 `run` 也走這裡）與本機模式 `execute`（回合、列表、刪除、壓縮共用）的最前面
+    - 以 `<執行檔> --version` 取最後一段的主版號，小於 2 時回 `AgentFailed`：「需要 OpenCode V2（2.x），<執行檔> 回報的版本是 <版本>…」
+    - 確認是 V2 的執行檔記在程序內，之後不再檢查
+    - 執行不了、逾時（10 秒）、非 0 結束或輸出看不懂時照常呼叫，讓原本的錯誤浮出來。所以 `sh` 做的假 opencode 不受影響
+    - 假 agent（`printf fixer`）不是 opencode，不檢查
+  - 測試：
+    - 整合測試 `crates/wukong-cli/tests/opencode_version.rs`，以 wukong CLI binary 加假 opencode 執行：
+      - 回報 `1.19.6` 時，本機按需模式（`opencode run`）與 CLI backend（多帶一個旗標）都在 10 秒內失敗，錯誤含「需要 OpenCode V2」與 `1.19.6`，`run` 一次都沒被呼叫
+      - 回報 `opencode v2.3.2` 時照常完成
+    - 單元測試 `reads_the_major_version_of_real_outputs` 以兩版的實際輸出為輸入
+    - 本機模式既有測試的假執行檔改為回答 `--version`
+  - 紅燈：改動前整合測試失敗，本機模式只報「本機 OpenCode 未回報啟動位址便結束。」，看不出版本
+  - 綠燈：`cargo test` 全 workspace 785 passed、0 failed、14 ignored；clippy、fmt 通過
+  - 實測：wukong CLI 經 wrapper 接映像內建的真實 V1 1.19.6（斷網容器）。兩條路徑都在約 0.5 秒內以上述訊息失敗，opencode 只被呼叫 `--version` 一次
+    - 第一次實測時發現 V2 印的是 `opencode v2.3.2`，原本的解析看不懂這個格式。照失效方向不會擋下 V2，但也不會記成已確認，每次呼叫都會多跑一次 `--version`；已改為取最後一段並補進單元測試
+  - 範圍外：server 模式連的是另一個容器的 server，不經過 PATH 上的 opencode，不在本 Task 檢查
 
 ## Phase 3 — 容器設定
 

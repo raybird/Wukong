@@ -592,6 +592,9 @@ impl AgentCliBackend {
         on_event: &mut dyn FnMut(StreamEvent),
         retry_limit: std::time::Duration,
     ) -> Result<AgentResponse, GatewayError> {
+        if is_opencode(&self.command) {
+            crate::opencode_version::ensure_v2(opencode_binary(&self.command)).await?;
+        }
         // Build argv then insert `--format json` before the prompt (last arg).
         let mut argv = assemble_argv(
             &self.command,
