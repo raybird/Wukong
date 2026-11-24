@@ -610,10 +610,10 @@ socketserver.ThreadingTCPServer.daemon_threads = True
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/global/health":
+        if self.path == "/api/info":
             body = b"{}"
-        elif self.path == "/session?limit=10000":
-            body = b"[{\"id\":\"ses_new\",\"time\":{\"created\":1793677006691,\"updated\":1793677027641}},{\"id\":\"ses_child\",\"parentID\":\"ses_new\",\"time\":{\"created\":1793677006000,\"updated\":1793677006000}}]"
+        elif self.path == "/api/session?limit=1000":
+            body = b"{\"data\":[{\"id\":\"ses_new\",\"time\":{\"created\":1793677006691,\"updated\":1793677027641}},{\"id\":\"ses_child\",\"parentID\":\"ses_new\",\"time\":{\"created\":1793677006000,\"updated\":1793677006000}}],\"cursor\":{\"next\":null}}"
         else:
             self.send_response(404)
             self.end_headers()
@@ -667,10 +667,10 @@ socketserver.ThreadingTCPServer.daemon_threads = True
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/global/health":
+        if self.path == "/api/info":
             body = b"{}"
-        elif self.path == "/session/ses_1":
-            body = b"{\"id\":\"ses_1\",\"time\":{\"created\":1793677006691,\"updated\":1793677027641}}"
+        elif self.path == "/api/session/ses_1":
+            body = b"{\"data\":{\"id\":\"ses_1\",\"time\":{\"created\":1793677006691,\"updated\":1793677027641}}}"
         else:
             self.send_response(404)
             self.end_headers()
@@ -715,7 +715,7 @@ socketserver.ThreadingTCPServer.daemon_threads = True
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/global/health":
+        if self.path == "/api/info":
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"{}")
@@ -730,11 +730,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
-        if self.path == "/session":
+        if self.path == "/api/session":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(b"{\"id\":\"ses_probe\"}")
+            self.wfile.write(b"{\"data\":{\"id\":\"ses_probe\"}}")
         elif "/prompt_async" in self.path:
             self.send_response(204)
             self.end_headers()
@@ -792,7 +792,7 @@ socketserver.ThreadingTCPServer.daemon_threads = True
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/global/health":
+        if self.path == "/api/info":
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"{}")
@@ -823,11 +823,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(b"true")
 
     def do_POST(self):
-        if self.path == "/session":
+        if self.path == "/api/session":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(b"{\"id\":\"ses_probe\"}")
+            self.wfile.write(b"{\"data\":{\"id\":\"ses_probe\"}}")
         elif "/prompt_async" in self.path:
             self.send_response(204)
             self.end_headers()
@@ -874,7 +874,7 @@ socketserver.ThreadingTCPServer.daemon_threads = True
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/global/health":
+        if self.path == "/api/info":
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"{}")
@@ -905,11 +905,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(b"true")
 
     def do_POST(self):
-        if self.path == "/session":
+        if self.path == "/api/session":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(b"{\"id\":\"ses_probe\"}")
+            self.wfile.write(b"{\"data\":{\"id\":\"ses_probe\"}}")
         elif "/prompt_async" in self.path:
             self.send_response(204)
             self.end_headers()

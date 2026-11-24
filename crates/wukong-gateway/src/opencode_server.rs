@@ -1,4 +1,6 @@
 mod event_map;
+#[cfg(test)]
+mod fake_v2;
 mod sse;
 
 use crate::backend::{
@@ -17,8 +19,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 const INLINE_ATTACHMENT_MAX_BYTES: u64 = 10 * 1024 * 1024;
-/// 列表一次取回的上限。回傳筆數達到它就視為被截斷。
-const SESSION_LIST_LIMIT: usize = 10_000;
+/// V2 的 basic auth 使用者名稱固定是 opencode，`OPENCODE_SERVER_USERNAME` 已不支援，
+/// 用別的名稱會被拒（2026-11-24 對 2.3.2 實測）。
+const SERVER_USERNAME: &str = "opencode";
+/// 列表每頁要求的筆數。V2 不帶 limit 只回最新 50 筆（地雷 W-6），所以一定要照 cursor 走完。
+const SESSION_PAGE_SIZE: usize = 1000;
+/// 走到這麼多頁還有下一頁就停下來，回報清單被截斷，不讓壞掉的 cursor 卡住呼叫端。
+const SESSION_LIST_MAX_PAGES: usize = 100;
 
 pub struct OpencodeServerBackend {
     pub base_url: String,
@@ -27,7 +34,6 @@ pub struct OpencodeServerBackend {
     server_workspace: Option<PathBuf>,
     client: reqwest::Client,
     stream_client: reqwest::Client,
-    username: Option<String>,
     password: Option<String>,
     session_attachments: Mutex<HashMap<String, Vec<crate::backend::AgentAttachment>>>,
 }
@@ -141,9 +147,6 @@ impl OpencodeServerBackend {
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .build()
                 .expect("reqwest client builder should not fail"),
-            username: std::env::var("WUKONG_AGENT_SERVER_USERNAME")
-                .ok()
-                .filter(|s| !s.is_empty()),
             password: std::env::var("WUKONG_AGENT_SERVER_PASSWORD")
                 .ok()
                 .filter(|s| !s.is_empty()),
@@ -152,7 +155,7 @@ impl OpencodeServerBackend {
     }
 
     async fn create_session(&self) -> Result<String, GatewayError> {
-        let url = format!("{}/session", self.base_url);
+        let url = format!("{}/api/session", self.base_url);
         let value = self
             .send_json(
                 "create_session",
@@ -175,11 +178,23 @@ impl OpencodeServerBackend {
         }
     }
 
+    /// V2 對 `/api` 以外的路徑都回網頁（200），只看狀態碼會把任何東西判成健康；
+    /// `/api/info` 回的是 JSON，`send_json` 解析不了就是失敗。
     pub(crate) async fn health_check(&self) -> Result<(), GatewayError> {
-        let url = format!("{}/global/health", self.base_url);
-        self.send_json("health_check", self.client.get(url))
-            .await
-            .map(|_| ())
+        let url = format!("{}/api/info", self.base_url);
+        match self.send_json("health_check", self.client.get(url)).await {
+            Ok(_) => Ok(()),
+            Err(GatewayError::AgentFailed {
+                code: Some(401),
+                stderr,
+            }) => Err(GatewayError::AgentFailed {
+                code: Some(401),
+                stderr: format!(
+                    "opencode server 認證被拒：WUKONG_AGENT_SERVER_PASSWORD 與 server 的 OPENCODE_SERVER_PASSWORD 不同或沒有設定（{stderr}）"
+                ),
+            }),
+            Err(error) => Err(error),
+        }
     }
 
     async fn build_message_parts(
@@ -494,10 +509,7 @@ impl OpencodeServerBackend {
 
     fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match self.password.as_deref() {
-            Some(password) => request.basic_auth(
-                self.username.as_deref().unwrap_or("opencode"),
-                Some(password),
-            ),
+            Some(password) => request.basic_auth(SERVER_USERNAME, Some(password)),
             None => request,
         }
     }
@@ -723,7 +735,7 @@ impl AiBackend for OpencodeServerBackend {
     }
 
     async fn delete_session(&self, session_id: &str) -> Result<(), GatewayError> {
-        let url = format!("{}/session/{session_id}", self.base_url);
+        let url = format!("{}/api/session/{session_id}", self.base_url);
         let result = self
             .send_empty("delete_session", self.client.delete(url))
             .await;
@@ -743,13 +755,12 @@ impl AiBackend for OpencodeServerBackend {
     }
 
     async fn session_created_ms(&self, session_id: &str) -> Result<i64, GatewayError> {
-        let url = format!("{}/session/{session_id}", self.base_url);
+        let url = format!("{}/api/session/{session_id}", self.base_url);
         let value = self
             .send_json("session_created_ms", self.client.get(url))
             .await?;
         value
-            .get("time")
-            .and_then(|time| time.get("created"))
+            .pointer("/data/time/created")
             .and_then(Value::as_i64)
             .ok_or_else(|| GatewayError::AgentFailed {
                 code: None,
@@ -760,14 +771,36 @@ impl AiBackend for OpencodeServerBackend {
     }
 
     async fn list_sessions(&self) -> Result<SessionListing, GatewayError> {
-        // opencode 沒有「早於某時間」的過濾（`start` 是下界），所以整批取回再由
-        // 呼叫端挑。不帶 limit 時它只回最新的 100 筆。子 session 也要：呼叫端靠它們
-        // 判斷哪個根 session 底下還有人接著。
-        let url = format!("{}/session?limit={SESSION_LIST_LIMIT}", self.base_url);
-        let value = self
-            .send_json("list_sessions", self.client.get(url))
-            .await?;
-        parse_session_listing(&value, SESSION_LIST_LIMIT)
+        // opencode 沒有「早於某時間」的過濾，所以整批取回再由呼叫端挑；列表由新到舊，
+        // 只取一頁的話被截掉的正是最舊、最該清的那些。子 session 也要：呼叫端靠它們
+        // 判斷哪個根 session 底下還有人接著。V2 在最後一頁之後仍給 `cursor.next`，
+        // 再取一次才是空頁（2026-11-24 實測），兩種結尾都要認。
+        let url = format!("{}/api/session", self.base_url);
+        let mut sessions = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..SESSION_LIST_MAX_PAGES {
+            let mut query = vec![("limit", SESSION_PAGE_SIZE.to_string())];
+            if let Some(cursor) = cursor.take() {
+                query.push(("cursor", cursor));
+            }
+            let value = self
+                .send_json("list_sessions", self.client.get(&url).query(&query))
+                .await?;
+            let (page, next) = parse_session_page(&value)?;
+            let last = page.is_empty() || next.is_none();
+            sessions.extend(page);
+            if last {
+                return Ok(SessionListing {
+                    sessions,
+                    truncated: false,
+                });
+            }
+            cursor = next;
+        }
+        Ok(SessionListing {
+            sessions,
+            truncated: true,
+        })
     }
 
     async fn run_ephemeral(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
@@ -908,7 +941,10 @@ fn supported_attachment_mime(
 }
 
 fn extract_session_id(value: &Value) -> Option<String> {
-    value.get("id").and_then(Value::as_str).map(str::to_string)
+    value
+        .pointer("/data/id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// 取出回應中最後一則 assistant message 的 `info.error`（見 opencode `/doc` 的
@@ -924,16 +960,18 @@ fn extract_message_error(value: &Value) -> Option<crate::upstream_error::Upstrea
     })
 }
 
-/// 任何一筆看不懂就整份失敗：這份清單決定哪些 session 會被刪，寧可這一輪不清，
-/// 也不要拿一份殘缺的清單去比對。
-fn parse_session_listing(value: &Value, limit: usize) -> Result<SessionListing, GatewayError> {
+/// 一頁的 session 與下一頁的 cursor。任何一筆看不懂就整份失敗：這份清單決定哪些
+/// session 會被刪，寧可這一輪不清，也不要拿一份殘缺的清單去比對。
+fn parse_session_page(
+    value: &Value,
+) -> Result<(Vec<SessionSummary>, Option<String>), GatewayError> {
     let malformed = |detail: String| GatewayError::AgentFailed {
         code: None,
         stderr: format!("opencode server list_sessions returned an unexpected payload: {detail}"),
     };
-    let items = value.as_array().ok_or_else(|| {
+    let items = value.get("data").and_then(Value::as_array).ok_or_else(|| {
         let shown: String = value.to_string().chars().take(200).collect();
-        malformed(format!("not an array: {shown}"))
+        malformed(format!("no data array: {shown}"))
     })?;
     let sessions = items
         .iter()
@@ -958,10 +996,11 @@ fn parse_session_listing(value: &Value, limit: usize) -> Result<SessionListing, 
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(SessionListing {
-        truncated: sessions.len() >= limit,
-        sessions,
-    })
+    let next = value
+        .pointer("/cursor/next")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Ok((sessions, next))
 }
 
 fn extract_text(value: &Value) -> String {
@@ -1300,8 +1339,8 @@ mod tests {
                         )
                     }
                     let response = match path.as_str() {
-                        "/global/health" => json_response("{\"healthy\":true}"),
-                        "/session" => json_response("{\"id\":\"ses_ab\"}"),
+                        "/api/info" => json_response("{\"version\":\"2.3.2\"}"),
+                        "/api/session" => json_response("{\"data\":{\"id\":\"ses_ab\"}}"),
                         "/session/ses_ab/prompt_async" => json_response("{}"),
                         "/session/ses_ab/abort" => json_response("true"),
                         "/event" => {
@@ -1346,17 +1385,17 @@ mod tests {
                     let request = format!("{method} {path}");
                     hits.lock().unwrap().push(request.clone());
                     let body = match request.as_str() {
-                        "GET /global/health" => "{\"healthy\":true}".to_string(),
-                        "POST /session" => "{\"id\":\"ses_ephemeral\"}".to_string(),
+                        "GET /api/info" => "{\"version\":\"2.3.2\"}".to_string(),
+                        "POST /api/session" => "{\"data\":{\"id\":\"ses_ephemeral\"}}".to_string(),
                         "POST /session/ses_ephemeral/message" => {
                             "{\"parts\":[{\"type\":\"text\",\"text\":\"helper\"}]}".to_string()
                         }
-                        "DELETE /session/ses_ephemeral" => "true".to_string(),
+                        "DELETE /api/session/ses_ephemeral" => String::new(),
                         "GET /session/ses_1/message?limit=1" => {
                             "[{\"info\":{\"role\":\"assistant\",\"providerID\":\"opencode\",\"modelID\":\"deepseek\"},\"parts\":[{\"type\":\"text\",\"text\":\"latest\"}]}]".to_string()
                         }
                         "POST /session/ses_1/summarize" => "true".to_string(),
-                        "DELETE /session/ses_1" => "true".to_string(),
+                        "DELETE /api/session/ses_1" => String::new(),
                         _ => {
                             let response =
                                 "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
@@ -1561,7 +1600,7 @@ mod tests {
             "expected abort call, saw {seen:?}"
         );
         assert!(
-            seen.iter().any(|path| path == "/session/ses_ab"),
+            seen.iter().any(|path| path == "/api/session/ses_ab"),
             "expected ephemeral session cleanup, saw {seen:?}"
         );
     }
@@ -1581,13 +1620,13 @@ mod tests {
         backend.delete_session("ses_1").await.unwrap();
 
         let seen = hits.lock().unwrap().clone();
-        assert!(seen.iter().any(|request| request == "GET /global/health"));
+        assert!(seen.iter().any(|request| request == "GET /api/info"));
         assert!(seen
             .iter()
             .any(|request| request == "POST /session/ses_1/summarize"));
         assert!(seen
             .iter()
-            .any(|request| request == "DELETE /session/ses_1"));
+            .any(|request| request == "DELETE /api/session/ses_1"));
     }
 
     /// Answers every request with the same status and body, recording what was asked.
@@ -1638,70 +1677,135 @@ mod tests {
         (result, seen)
     }
 
+    fn v2_backend(fake: &fake_v2::FakeV2) -> OpencodeServerBackend {
+        let mut backend = OpencodeServerBackend::from_env(fake.url.clone(), None);
+        backend.password = Some(fake_v2::PASSWORD.to_string());
+        backend
+    }
+
+    // issue-0044 SCN-004：就緒檢查問 `/api/info`，使用者名稱固定 opencode。
     #[tokio::test]
-    async fn list_sessions_asks_for_every_session_with_an_explicit_limit() {
+    async fn health_check_asks_api_info() {
+        let fake = fake_v2::FakeV2::start().await;
+        v2_backend(&fake).health_check().await.unwrap();
+        assert_eq!(fake.requests(), ["GET /api/info"]);
+    }
+
+    #[tokio::test]
+    async fn health_check_reports_a_rejected_password() {
+        let fake = fake_v2::FakeV2::start().await;
+        let mut backend = v2_backend(&fake);
+        backend.password = Some("wrong".to_string());
+        let stderr = agent_failed_stderr(backend.health_check().await.unwrap_err());
+        assert!(stderr.contains("認證被拒"), "{stderr}");
+        assert!(stderr.contains("WUKONG_AGENT_SERVER_PASSWORD"), "{stderr}");
+
+        backend.password = None;
+        let stderr = agent_failed_stderr(backend.health_check().await.unwrap_err());
+        assert!(stderr.contains("認證被拒"), "{stderr}");
+    }
+
+    #[tokio::test]
+    async fn health_check_does_not_take_the_web_page_for_a_healthy_server() {
+        // V2 對 `/api` 以外的路徑都回網頁 200，只看狀態碼的檢查會把它判成健康。
+        let hits = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let backend = OpencodeServerBackend::from_env(
+            canned_server(hits, "200 OK", "<!doctype html><html></html>").await,
+            None,
+        );
+        let stderr = agent_failed_stderr(backend.health_check().await.unwrap_err());
+        assert!(stderr.contains("health_check"), "{stderr}");
+    }
+
+    // 地雷 W-6、issue-0044 SCN-008：最舊的 session 在最後一頁，只取一頁就看不到它們。
+    #[tokio::test]
+    async fn list_sessions_follows_the_cursor_to_the_oldest_session() {
+        let fake = fake_v2::FakeV2::start().await;
+        for i in 0..150 {
+            fake.add_session(&format!("ses_{i:03}"), i, 1000 + i, None);
+        }
+        fake.add_session("ses_child", 200, 2000, Some("ses_000"));
+
+        let listing = v2_backend(&fake).list_sessions().await.unwrap();
+
+        assert!(!listing.truncated);
+        let mut ids: Vec<&str> = listing.sessions.iter().map(|s| s.id.as_str()).collect();
+        ids.sort_unstable();
+        let mut expected = fake.session_ids();
+        expected.sort_unstable();
+        assert_eq!(ids, expected);
+        let oldest = listing.sessions.iter().find(|s| s.id == "ses_000").unwrap();
+        assert_eq!(oldest.updated_ms, 1000);
+        let child = listing
+            .sessions
+            .iter()
+            .find(|s| s.id == "ses_child")
+            .unwrap();
+        assert_eq!(child.parent_id.as_deref(), Some("ses_000"));
+        let pages: Vec<String> = fake
+            .requests()
+            .into_iter()
+            .filter(|request| request.starts_with("GET /api/session?"))
+            .collect();
+        assert!(pages.len() > 151 / fake_v2::PAGE_CAP, "{pages:?}");
+        assert!(
+            pages[1..].iter().all(|page| page.contains("cursor=")),
+            "{pages:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_sessions_stops_when_the_cursor_never_ends() {
         let (result, seen) = list_sessions_against(
             "200 OK",
-            r#"[
-                {"id":"ses_new","time":{"created":5,"updated":3000}},
-                {"id":"ses_child","parentID":"ses_new","time":{"created":4,"updated":2000}},
-                {"id":"ses_old","time":{"created":1,"updated":1000}}
-            ]"#,
+            r#"{"data":[{"id":"ses_1","time":{"updated":1}}],"cursor":{"next":"again"}}"#,
         )
         .await;
+        assert!(result.unwrap().truncated);
+        assert_eq!(seen.len(), SESSION_LIST_MAX_PAGES);
+    }
 
-        // opencode 不帶 limit 時只回 100 筆，而且由新到舊排：被截掉的正是最舊、
-        // 最該被清理的那些。所以這個請求的形狀本身就是行為的一部分。不帶 roots：
-        // 呼叫端要看得到子 session，才知道哪個根 session 底下還有人接著。
-        assert_eq!(seen, ["GET /session?limit=10000"]);
+    #[tokio::test]
+    async fn list_sessions_ends_on_a_page_without_a_next_cursor() {
+        let (result, seen) = list_sessions_against(
+            "200 OK",
+            r#"{"data":[{"id":"ses_1","time":{"updated":1}}],"cursor":{"previous":null,"next":null}}"#,
+        )
+        .await;
+        assert_eq!(
+            seen,
+            [format!("GET /api/session?limit={SESSION_PAGE_SIZE}")]
+        );
         assert_eq!(
             result.unwrap(),
             SessionListing {
-                sessions: vec![
-                    SessionSummary {
-                        id: "ses_new".to_string(),
-                        updated_ms: 3000,
-                        parent_id: None,
-                    },
-                    SessionSummary {
-                        id: "ses_child".to_string(),
-                        updated_ms: 2000,
-                        parent_id: Some("ses_new".to_string()),
-                    },
-                    SessionSummary {
-                        id: "ses_old".to_string(),
-                        updated_ms: 1000,
-                        parent_id: None,
-                    },
-                ],
+                sessions: vec![SessionSummary {
+                    id: "ses_1".to_string(),
+                    updated_ms: 1,
+                    parent_id: None,
+                }],
                 truncated: false,
             }
         );
     }
 
-    // issue-0028 SCN-004～006：session 年齡取自 `GET /session/{id}` 的 `time.created`
-    // （毫秒，步驟 1 對 opencode 1.19.4 實測）；看不懂的回應是錯誤，不是 0。
+    // issue-0028 SCN-004～006、issue-0044 SCN-008：session 年齡取自
+    // `GET /api/session/{id}` 的 `data.time.created`（毫秒）；看不懂的回應是錯誤，不是 0。
     #[tokio::test]
     async fn session_created_ms_reads_time_created_from_the_session() {
-        let hits = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
-        let backend = OpencodeServerBackend::from_env(
-            canned_server(
-                hits.clone(),
-                "200 OK",
-                r#"{"id":"ses_1","time":{"created":1793677006691,"updated":1793677027641}}"#,
-            )
-            .await,
-            None,
-        );
+        let fake = fake_v2::FakeV2::start().await;
+        fake.add_session("ses_1", 1793677006691, 1793677027641, None);
+        let backend = v2_backend(&fake);
         assert_eq!(
             backend.session_created_ms("ses_1").await.unwrap(),
             1793677006691
         );
-        assert_eq!(hits.lock().unwrap().clone(), ["GET /session/ses_1"]);
+        assert_eq!(fake.requests(), ["GET /api/session/ses_1"]);
+        assert!(backend.session_created_ms("ses_missing").await.is_err());
 
         for body in [
-            r#"{"id":"ses_1","time":{"updated":1}}"#,
-            r#"{"id":"ses_1"}"#,
+            r#"{"data":{"id":"ses_1","time":{"updated":1}}}"#,
+            r#"{"id":"ses_1","time":{"created":1}}"#,
         ] {
             let backend = OpencodeServerBackend::from_env(
                 canned_server(std::sync::Arc::new(Mutex::new(Vec::new())), "200 OK", body).await,
@@ -1713,16 +1817,37 @@ mod tests {
         }
     }
 
+    // 保留期清理、輪替與 `--new` 都經由這裡刪 session；已經不在的 session 不算失敗。
+    #[tokio::test]
+    async fn sessions_are_created_and_deleted_through_the_api_routes() {
+        let fake = fake_v2::FakeV2::start().await;
+        let backend = v2_backend(&fake);
+        let id = backend.create_session().await.unwrap();
+        assert_eq!(fake.session_ids(), std::slice::from_ref(&id));
+        backend.delete_session(&id).await.unwrap();
+        assert!(fake.session_ids().is_empty());
+        backend.delete_session(&id).await.unwrap();
+        assert_eq!(
+            fake.requests(),
+            [
+                "POST /api/session".to_string(),
+                format!("DELETE /api/session/{id}"),
+                format!("DELETE /api/session/{id}"),
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn list_sessions_fails_instead_of_returning_a_partial_list() {
         // 清理靠這份清單決定刪誰；任何看不懂的回應都必須是錯誤，不能是「沒有 session」。
         for (status, body) in [
             ("200 OK", r#"{"name":"UnknownError"}"#),
-            ("200 OK", r#"[{"id":"ses_1"}]"#),
-            ("200 OK", r#"[{"time":{"updated":1}}]"#),
+            ("200 OK", r#"[{"id":"ses_1","time":{"updated":1}}]"#),
+            ("200 OK", r#"{"data":[{"id":"ses_1"}],"cursor":{}}"#),
+            ("200 OK", r#"{"data":[{"time":{"updated":1}}],"cursor":{}}"#),
             (
                 "200 OK",
-                r#"[{"id":"ses_1","time":{"updated":1}},{"id":"ses_2","time":{}}]"#,
+                r#"{"data":[{"id":"ses_1","time":{"updated":1}},{"id":"ses_2","time":{}}],"cursor":{}}"#,
             ),
         ] {
             let (result, _) = list_sessions_against(status, body).await;
@@ -1735,30 +1860,20 @@ mod tests {
     fn a_malformed_listing_is_reported_without_dumping_its_contents() {
         // 這些錯誤每一輪都會進 schedulerd 的日誌。session 物件帶著標題，整份回應
         // 可能有幾 MB——錯誤訊息只需要說得出是哪一筆、哪裡不對。
-        let missing_time = json!([{"id":"ses_1","title":"quarterly salary review"}]);
-        let stderr = agent_failed_stderr(parse_session_listing(&missing_time, 10).unwrap_err());
+        let missing_time = json!({"data":[{"id":"ses_1","title":"quarterly salary review"}]});
+        let stderr = agent_failed_stderr(parse_session_page(&missing_time).unwrap_err());
         assert!(stderr.contains("ses_1"), "{stderr}");
         assert!(!stderr.contains("quarterly salary review"), "{stderr}");
 
-        let missing_id = json!([{"title":"quarterly salary review","time":{"updated":1}}]);
-        let stderr = agent_failed_stderr(parse_session_listing(&missing_id, 10).unwrap_err());
+        let missing_id = json!({"data":[{"title":"quarterly salary review","time":{"updated":1}}]});
+        let stderr = agent_failed_stderr(parse_session_page(&missing_id).unwrap_err());
         assert!(!stderr.contains("quarterly salary review"), "{stderr}");
 
-        // serde_json 依鍵名排序輸出，所以把大欄位放在 name 之後。
-        let not_a_list = json!({"name":"UnknownError","stack":"x".repeat(5000)});
-        let stderr = agent_failed_stderr(parse_session_listing(&not_a_list, 10).unwrap_err());
+        // serde_json 依鍵名排序輸出，所以把大欄位放在 _tag 之後。
+        let not_a_list = json!({"_tag":"UnknownError","stack":"x".repeat(5000)});
+        let stderr = agent_failed_stderr(parse_session_page(&not_a_list).unwrap_err());
         assert!(stderr.contains("UnknownError"), "{stderr}");
         assert!(stderr.len() < 500, "{} bytes", stderr.len());
-    }
-
-    #[test]
-    fn a_full_page_is_reported_as_truncated() {
-        let page = json!([
-            {"id":"ses_2","time":{"updated":2}},
-            {"id":"ses_1","time":{"updated":1}}
-        ]);
-        assert!(parse_session_listing(&page, 2).unwrap().truncated);
-        assert!(!parse_session_listing(&page, 3).unwrap().truncated);
     }
 
     #[tokio::test]
@@ -1811,13 +1926,13 @@ mod tests {
         assert_eq!(response.text, "helper");
         assert_eq!(response.session_id, None);
         let seen = hits.lock().unwrap().clone();
-        assert!(seen.iter().any(|request| request == "POST /session"));
+        assert!(seen.iter().any(|request| request == "POST /api/session"));
         assert!(seen
             .iter()
             .any(|request| request == "POST /session/ses_ephemeral/message"));
         assert!(seen
             .iter()
-            .any(|request| request == "DELETE /session/ses_ephemeral"));
+            .any(|request| request == "DELETE /api/session/ses_ephemeral"));
     }
 
     fn request_with_attachment(path: PathBuf, name: &str, mime: &str) -> AgentRequest {
@@ -2073,7 +2188,7 @@ mod tests {
 
     #[test]
     fn extracts_session_id_from_session_response() {
-        let value = json!({ "id": "ses_123", "title": "New Session" });
+        let value = json!({ "data": { "id": "ses_123", "title": "New Session" } });
         assert_eq!(extract_session_id(&value).as_deref(), Some("ses_123"));
     }
 

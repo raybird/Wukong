@@ -33,9 +33,9 @@ fn recording_server(delete_status: &'static str) -> (String, Arc<Mutex<Vec<Strin
                 words.next().unwrap_or_default(),
                 words.next().unwrap_or_default()
             );
-            let response = if request.starts_with("DELETE /session/") {
+            let response = if request.starts_with("DELETE /api/session/") {
                 format!(
-                    "HTTP/1.1 {delete_status}\r\nContent-Type: application/json\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntrue"
+                    "HTTP/1.1 {delete_status}\r\nContent-Type: application/json\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                 )
             } else {
                 "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -90,7 +90,7 @@ async fn new_flag_deletes_the_session_the_scope_pointed_at() {
 
     assert!(
         seen.iter()
-            .any(|request| request == "DELETE /session/ses_old"),
+            .any(|request| request == "DELETE /api/session/ses_old"),
         "the old session was never deleted; server saw {seen:?}\nstderr: {stderr}"
     );
     assert_eq!(pointed_at, None);
@@ -105,7 +105,7 @@ async fn new_flag_starts_a_fresh_context_even_when_the_delete_fails() {
 
     assert!(
         seen.iter()
-            .any(|request| request == "DELETE /session/ses_old"),
+            .any(|request| request == "DELETE /api/session/ses_old"),
         "the delete was never attempted; server saw {seen:?}"
     );
     assert_eq!(pointed_at, None, "stderr: {stderr}");

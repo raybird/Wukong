@@ -82,13 +82,18 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 驗收編號：SCN-004、SCN-008
 - 完成判準：錯誤密碼時就緒檢查失敗並指出認證被拒，V2 網頁的 200 不算健康；假 server 造 150 個 session 分兩頁以上，最舊的仍被列出（地雷 W-6）；保留期清理與輪替刪除走新的刪除端點
 - 驗證：外迴圈為 gateway 整合測試（假 V2 server）；單元測試覆蓋分頁與錯誤解析
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成
+- 證據：2026-11-24。先以 [probe-list.md](probe-list.md)（[scripts/probe-list.sh](scripts/probe-list.sh)）確認 V2 的分頁、認證與網頁 200 行為，再改 `opencode_server.rs`：就緒檢查打 `GET /api/info`、401 時回報「認證被拒」並指出 `WUKONG_AGENT_SERVER_PASSWORD`；basic auth 使用者名稱固定 opencode（V2 不認其他名稱，`WUKONG_AGENT_SERVER_USERNAME` 在 server backend 不再讀取，本機模式的對應由 Task 2.4 處理、說明由 Task 6.3 補）；session 建立、查詢建立時間、刪除改走 `/api/session`，回應讀 `data`；列表每頁 1000 筆照 cursor 走到空頁或沒有 `next`，100 頁仍未結束就停下並標記截斷。測試用的假 V2 server 在 `crates/wukong-gateway/src/opencode_server/fake_v2.rs`（每頁最多 50 筆，逼呼叫端照 cursor 走）。
+  - 外迴圈：`crates/wukong-schedulerd/tests/retention_daemon.rs` 跑真的 schedulerd，假 V2 server 有 120 個 session、過期的兩個在最後一頁，日誌 `listed=120 truncated=false`、`deleted=1`，只刪 `DELETE /api/session/ses_orphan`，仍被 scope 指向的 `ses_kept` 保留（SCN-008）；`crates/wukong-cli/tests/opencode_prune.rs`、`new_session_flag.rs` 的刪除改走 `/api/session/{id}`
+  - 單元／整合：`opencode_server` 的 `health_check_asks_api_info`、`health_check_reports_a_rejected_password`（錯誤密碼與沒有密碼，SCN-004）、`health_check_does_not_take_the_web_page_for_a_healthy_server`、`list_sessions_follows_the_cursor_to_the_oldest_session`（151 個 session、4 頁以上、最舊的與子 session 都列出，W-6）、`list_sessions_stops_when_the_cursor_never_ends`、`list_sessions_ends_on_a_page_without_a_next_cursor`、`session_created_ms_reads_time_created_from_the_session`、`sessions_are_created_and_deleted_through_the_api_routes`
+  - 紅燈：同日把新測試放到改動前的 f3c9f1d 上跑（暫存 worktree），gateway 4 支、retention_daemon 2 支、opencode_prune 5 支、new_session_flag 2 支全部失敗（V1 路徑 404、`/global/health` 回 404 或網頁）
+  - 綠燈：`cargo test` 全 workspace 765 passed、0 failed；`cargo clippy --all-targets -- -D warnings`、`cargo fmt --all -- --check` 通過
+  - SCN-008 的「壓縮照常執行」走 compact 端點，隨 Task 2.2 改寫與驗證；輪替的建立時間查詢與刪除在本 Task 驗證
 
 ### Task 2.2 — prompt 與事件串流
 - 產出與範圍：`opencode_server.rs`、`opencode_server/event_map.rs`：prompt 改 `POST /api/session/{id}/prompt` 後等事件，文字、思考、工具事件對應到既有 `StreamEvent`，完成判定改用 V2 的 execution 事件；附件、換模型（`POST /api/session/{id}/model`）；壓縮改 `compact`
 - 相依：2.1
-- 驗收編號：支援 SCN-002
+- 驗收編號：支援 SCN-002、SCN-008（壓縮）
 - 完成判準：以真實樣本重播，入口收到的 `StreamEvent` 序列與回覆文字與 V1 同情境相同；附件與模型參數出現在送出的請求裡
 - 驗證：單元測試（樣本重播）加整合測試
 - 狀態：📝 待實作
