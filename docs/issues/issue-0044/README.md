@@ -183,7 +183,7 @@ Feature: Wukong 在 OpenCode V2 上維持 V1 時的行為
 ```
 
 ## Gherkin 核准紀錄
-- **核准 commit**: `待提交`
+- **核准 commit**: 94aaa40
 - **核准來源**: 使用者 2026-11-24 對話決定「如果 #30 重新拿出來改成 v2 版本，然後 Wukong 指專注在 harness 做不到的就好，其他回規給 opencode v2 處理」，接受拆成兩個 issue 的建議後要求「先在 github 把這兩個 issue 開起來」，再要求「那是否可以開始 #44」→ 範圍與 SCN-002～SCN-010（行為與 V1 相同）。同日逐題確認：Q1「只支援 V2 (Recommended)」→ 概述、關鍵差異；Q2「固定 2.3.2 (Recommended)」→ SCN-012；Q3「自動備份並支援 rollback (Recommended)」→ SCN-013～SCN-015；Q4「不算，合併即結案」→ 概述（正式換版不在範圍）。同日總結確認推導行為 (a)～(f) 選「照建議全部接受」：(a) 回合結束不留 V2 背景 service → SCN-002、SCN-010；(b) PATH 上是 V1 時明確報錯 → SCN-011；(c) 升級前停服務備份、啟用失敗與 rollback 連 opencode.db 還原、接受備份後對話遺失 → SCN-013～SCN-015；(d) binary 模式 installer 不管 opencode、docs 說明自行升級與備份 → 實作計畫 Phase 5；(e) 首要驗證為 V1 session 能否接續，不能就停下來改規格 → SCN-001 與風險；(f) compose healthcheck 帶認證打 /api/info → SCN-003。同日 Task 1.2 後逐題確認：TBD-3「重試超過 90 秒就中止 (Recommended)」（任何 retry 持續超過 90 秒就中止回合，依 retry 的錯誤類型回報；容得下短暫的網路抖動）→ SCN-007 第三列、SCN-016；TBD-2「在 .env 設定 (Recommended)」（沿用 WUKONG_AGENT_SERVER_PASSWORD，compose 同時傳給 opencode-server 與三個入口，沒設時 server 模式啟動就明確報錯，installer 升級時偵測到 server 模式未設密碼就先備份 .env 再自動產生）→ SCN-003、SCN-017
 
 | Scenario | 核准日期 | 狀態 |
@@ -210,7 +210,7 @@ Feature: Wukong 在 OpenCode V2 上維持 V1 時的行為
 
 任務權威來源為 [implementation-plan.md](./implementation-plan.md)；Phase／Task 由 decompose 細化。
 
-1. 📝 **Phase 1** - 首要驗證：V1 session 在 V2 遷移後能否接續，以及 V2 CLI 路徑的契約
+1. ✅ **Phase 1** - 首要驗證：V1 session 在 V2 遷移後能否接續，以及 V2 CLI 路徑的契約
 2. 📝 **Phase 2** - gateway adapter 改寫與回歸測試
 3. 📝 **Phase 3** - 容器設定：baseline、server 密碼、healthcheck
 4. 📝 **Phase 4** - 打包與 release 釘選

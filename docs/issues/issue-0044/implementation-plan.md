@@ -69,8 +69,8 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 驗收編號：支援 SCN-002、SCN-005、SCN-006、SCN-007
 - 完成判準：每種事件至少一份真實樣本存進 fixture，記取得命令與 V2 版本；上游錯誤樣本來自真實錯誤（額度用完或無效模型），不手寫
 - 驗證：等價證據（樣本是之後測試的獨立真相來源，避免同義反覆）
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成
+- 證據：2026-11-24 [probe-events.md](probe-events.md)，[scripts/capture-events.sh](scripts/capture-events.sh)、[scripts/capture-scenario.py](scripts/capture-scenario.py)。六個 server 情境都在真實 V2 上通過（文字加工具、權限、form、中止、模型不存在、上游連不到的 retry），樣本存在 `crates/wukong-gateway/tests/fixtures/opencode-v2/`（6 份 server、5 份 CLI）；V1 到 V2 的事件對照表在 probe-events.md。上游錯誤樣本為真實的 provider.no-route 與 provider.transport；限流與模型下架沒有真實樣本，改以 openapi 的 `status` 欄位判定，列為 Task 2.3 的已知缺口
 
 ## Phase 2 — gateway adapter 改用 V2
 
