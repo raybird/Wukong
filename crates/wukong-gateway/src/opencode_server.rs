@@ -8,6 +8,7 @@ use crate::backend::{
 };
 use crate::error::GatewayError;
 use crate::stream::StreamEvent;
+use crate::upstream_error::RetryWatch;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use event_map::{event_type_of, ServerEventAction, ServerEventMapper};
 use reqwest::{StatusCode, Url};
@@ -36,6 +37,8 @@ pub struct OpencodeServerBackend {
     stream_client: reqwest::Client,
     password: Option<String>,
     session_attachments: Mutex<HashMap<String, Vec<crate::backend::AgentAttachment>>>,
+    /// 重試持續多久就中止回合；只有測試會改。
+    retry_give_up_after: std::time::Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +54,34 @@ struct CreateSessionBody {
     title: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     permissions: Vec<PermissionRule>,
+}
+
+/// 見 [`OpencodeServerBackend::interrupt_on_drop`]。
+struct InterruptOnDrop(Option<reqwest::RequestBuilder>);
+
+impl InterruptOnDrop {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for InterruptOnDrop {
+    fn drop(&mut self) {
+        let Some(request) = self.0.take() else {
+            return;
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                match request.send().await {
+                    Ok(response) => eprintln!(
+                        "turn_cancelled_interrupt status={}",
+                        response.status().as_u16()
+                    ),
+                    Err(err) => eprintln!("turn_cancelled_interrupt_failed: {err}"),
+                }
+            });
+        }
+    }
 }
 
 /// V2 的權限規則（openapi 的 `Permission.Rule`）。
@@ -151,6 +182,7 @@ impl OpencodeServerBackend {
                 .ok()
                 .filter(|s| !s.is_empty()),
             session_attachments: Mutex::new(HashMap::new()),
+            retry_give_up_after: crate::upstream_error::RETRY_GIVE_UP_AFTER,
         }
     }
 
@@ -417,6 +449,13 @@ impl OpencodeServerBackend {
     /// Best-effort：事件串流中斷後，server 端的 prompt 仍會繼續執行並佔住
     /// session，讓後續回合永遠等不到 `session.idle`；這裡主動要求 opencode
     /// 中止，失敗也不影響原本要回傳的錯誤。
+    /// 回合的 future 在完成前被丟掉（入口取消、排程中止）時，V2 的執行仍會繼續佔住 session，
+    /// 下一則 prompt 也會被併進這次執行；所以 drop 時在背景送 interrupt。
+    fn interrupt_on_drop(&self, session_id: &str) -> InterruptOnDrop {
+        let url = format!("{}/api/session/{}/interrupt", self.base_url, session_id);
+        InterruptOnDrop(Some(self.authorize(self.client.post(url))))
+    }
+
     async fn abort_session(&self, session_id: &str) {
         let url = format!("{}/api/session/{}/interrupt", self.base_url, session_id);
         let _ = self
@@ -510,7 +549,8 @@ impl OpencodeServerBackend {
         // 以 bytes 緩衝、只在整行（不會切在多位元組字元中間）時才解碼，
         // 避免 chunk 邊界落在 UTF-8 字元中間時產生 U+FFFD 亂碼。
         let mut buffer: Vec<u8> = Vec::new();
-        let mut mapper = ServerEventMapper::new(session_id);
+        let mut mapper =
+            ServerEventMapper::new(session_id, RetryWatch::new(self.retry_give_up_after));
         let mut progress = StreamProgress::default();
         let deadline = tokio::time::sleep(agent_timeout());
         tokio::pin!(deadline);
@@ -528,6 +568,8 @@ impl OpencodeServerBackend {
                         ),
                     });
                 }
+                // V2 對上游錯誤會一直重試、不結束執行；呼叫端收到錯誤後會送 interrupt。
+                () = mapper.retry.expired() => return Err(mapper.retry.give_up()),
             };
             let Some(chunk) = chunk else {
                 return Err(GatewayError::AgentFailed {
@@ -618,10 +660,12 @@ impl AiBackend for OpencodeServerBackend {
             }
         }
 
-        match self
+        let mut interrupt = self.interrupt_on_drop(&session_id);
+        let consumed = self
             .consume_event_stream(response, &session_id, on_event)
-            .await
-        {
+            .await;
+        interrupt.disarm();
+        match consumed {
             Ok(text) => Ok(AgentResponse {
                 text,
                 session_id: Some(session_id),
@@ -1440,6 +1484,146 @@ mod tests {
         assert!(
             fake.session_ids().is_empty(),
             "owned session was not cleaned up"
+        );
+    }
+
+    /// 真實重試樣本裡，到第 `retries` 次 `session.retry.scheduled` 為止的事件。
+    fn events_until_retry(session: &str, retries: usize) -> Vec<String> {
+        let mut seen = 0;
+        let mut events = Vec::new();
+        for event in fake_v2::fixture_events("server-retry", session) {
+            let is_retry = event.contains("\"session.retry.scheduled\"");
+            events.push(event);
+            if is_retry {
+                seen += 1;
+                if seen == retries {
+                    break;
+                }
+            }
+        }
+        assert_eq!(seen, retries);
+        events
+    }
+
+    // 真實 I/O 下不能暫停 tokio 時間（reqwest 的逾時會被快轉觸發），整合測試改用縮短的時限；
+    // 90 秒本身由 upstream_error 以暫停的時間驗證。
+    const SHORT_RETRY_LIMIT: std::time::Duration = std::time::Duration::from_millis(400);
+
+    // issue-0044 SCN-007 第三列：連不到上游時 V2 一直重試，超過時限由 Wukong 中止並送 interrupt。
+    #[tokio::test]
+    async fn a_retry_lasting_too_long_is_interrupted_as_unreachable() {
+        let fake = fake_v2::FakeV2::start().await;
+        let mut events = events_until_retry("ses_fake1", 2);
+        events.push("hold".to_string());
+        fake.script_events(events);
+        let mut backend = v2_backend(&fake);
+        backend.retry_give_up_after = SHORT_RETRY_LIMIT;
+        let started = tokio::time::Instant::now();
+
+        let error = backend
+            .run_streaming(plain_request("hi"), &mut |_| {})
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("Can't reach opencode.ai"),
+            "{error}"
+        );
+        assert_eq!(
+            upstream_failure_kind(error),
+            crate::upstream_error::UpstreamFailure::Unreachable
+        );
+        let waited = started.elapsed();
+        assert!(
+            waited >= SHORT_RETRY_LIMIT && waited < SHORT_RETRY_LIMIT * 5,
+            "{waited:?}"
+        );
+        assert!(fake
+            .requests()
+            .contains(&"POST /api/session/ses_fake1/interrupt".to_string()));
+    }
+
+    // issue-0044 SCN-016：重試開始後、時限之前恢復，回合照常完成。
+    #[tokio::test]
+    async fn a_retry_that_recovers_in_time_lets_the_turn_finish() {
+        let fake = fake_v2::FakeV2::start().await;
+        // 重試後 300ms 恢復輸出，再 300ms 才結束：從第一次重試算起超過時限，恢復時沒有重新
+        // 起算就會被中止。
+        let turn = fake_v2::fixture_events("server-text-tool", "ses_fake1");
+        let end = turn
+            .iter()
+            .position(|event| event.contains("\"session.execution.succeeded\""))
+            .unwrap();
+        let mut events = events_until_retry("ses_fake1", 1);
+        events.push("pause:300".to_string());
+        events.extend(turn[..end].iter().cloned());
+        events.push("pause:300".to_string());
+        events.extend(turn[end..].iter().cloned());
+        fake.script_events(events);
+        let mut backend = v2_backend(&fake);
+        backend.retry_give_up_after = SHORT_RETRY_LIMIT;
+
+        let response = backend
+            .run_streaming(plain_request("hi"), &mut |_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(response.text, "DONE");
+        assert!(!fake
+            .requests()
+            .iter()
+            .any(|request| request.ends_with("/interrupt")));
+    }
+
+    // issue-0044 SCN-005：入口取消（回合的 future 被丟掉）時送 interrupt，V2 不再繼續執行。
+    #[tokio::test]
+    async fn dropping_the_turn_interrupts_the_session() {
+        let fake = fake_v2::FakeV2::start().await;
+        let mut events = fake_v2::fixture_events("server-text-tool", "ses_fake1");
+        let step = events
+            .iter()
+            .position(|event| event.contains("\"session.step.started\""))
+            .unwrap();
+        events.truncate(step + 1);
+        events.push("hold".to_string());
+        fake.script_events(events);
+        let backend = v2_backend(&fake);
+
+        let mut sink = |_| {};
+        let turn = backend.run_streaming(plain_request("hi"), &mut sink);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(500), turn)
+                .await
+                .is_err(),
+            "the held turn should still be running"
+        );
+
+        let interrupt = "POST /api/session/ses_fake1/interrupt".to_string();
+        for _ in 0..50 {
+            if fake.requests().contains(&interrupt) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!(
+            "no interrupt after the turn was dropped: {:?}",
+            fake.requests()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_execution_reports_the_turn_as_aborted() {
+        let fake = fake_v2::FakeV2::start().await;
+        fake.script_events(fake_v2::fixture_events("server-interrupt", "ses_fake1"));
+
+        let error = v2_backend(&fake)
+            .run_streaming(plain_request("hi"), &mut |_| {})
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            upstream_failure_kind(error),
+            crate::upstream_error::UpstreamFailure::Aborted
         );
     }
 

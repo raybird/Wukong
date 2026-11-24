@@ -44,6 +44,15 @@ impl FakeV2 {
                     let Some((method, path, auth, body)) = read_request(&mut socket).await else {
                         return;
                     };
+                    if method == "GET" && path == "/api/event" && authorized(auth.as_deref()) {
+                        let events = {
+                            let mut state = state.lock().unwrap();
+                            state.requests.push("GET /api/event".to_string());
+                            state.events.clone()
+                        };
+                        stream_events(&mut socket, events).await;
+                        return;
+                    }
                     let (status, content_type, body) = handle(&state, &method, &path, auth, &body);
                     let response = format!(
                         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -78,7 +87,8 @@ impl FakeV2 {
         self.state.lock().unwrap().sessions.push(session);
     }
 
-    /// 之後每次連上 `/api/event` 送出的事件（每項一個 JSON）。
+    /// 之後每次連上 `/api/event` 依序送出的事件（每項一個 JSON）。`pause:<毫秒>` 先停一段
+    /// 時間再送下一項，`hold` 讓串流停在那裡不再前進也不斷線；其他情況送完即斷線。
     pub fn script_events(&self, events: Vec<String>) {
         self.state.lock().unwrap().events = events;
     }
@@ -121,6 +131,37 @@ pub(super) fn fixture_events(name: &str, session_id: &str) -> Vec<String> {
         .filter(|line| !line.trim().is_empty())
         .map(|line| line.replace(&original, session_id))
         .collect()
+}
+
+fn authorized(auth: Option<&str>) -> bool {
+    let expected = format!(
+        "Basic {}",
+        BASE64_STANDARD.encode(format!("opencode:{PASSWORD}"))
+    );
+    auth == Some(expected.as_str())
+}
+
+async fn stream_events(socket: &mut tokio::net::TcpStream, events: Vec<String>) {
+    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+    if socket.write_all(head.as_bytes()).await.is_err() {
+        return;
+    }
+    for event in events {
+        if event == "hold" {
+            std::future::pending::<()>().await;
+        }
+        if let Some(ms) = event.strip_prefix("pause:") {
+            tokio::time::sleep(std::time::Duration::from_millis(ms.parse().unwrap())).await;
+            continue;
+        }
+        if socket
+            .write_all(format!("data: {event}\n\n").as_bytes())
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
 }
 
 async fn read_request(
@@ -179,11 +220,7 @@ fn handle(
             "<!doctype html><html></html>".to_string(),
         );
     }
-    let expected = format!(
-        "Basic {}",
-        BASE64_STANDARD.encode(format!("opencode:{PASSWORD}"))
-    );
-    if auth.as_deref() != Some(expected.as_str()) {
+    if !authorized(auth.as_deref()) {
         return (
             "401 Unauthorized",
             JSON,
@@ -206,14 +243,6 @@ fn handle(
             r#"{"version":"2.3.2","pid":1,"urls":["http://127.0.0.1:4096"],"paths":{"tmp":"/tmp/opencode"}}"#
                 .to_string(),
         ),
-        ("GET", "/api/event") => {
-            let stream: String = state
-                .events
-                .iter()
-                .map(|event| format!("data: {event}\n\n"))
-                .collect();
-            ("200 OK", "text/event-stream", stream)
-        }
         ("POST", "/api/session") => {
             state.created += 1;
             let id = format!("ses_fake{}", state.created);

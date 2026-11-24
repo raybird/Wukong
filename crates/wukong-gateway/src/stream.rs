@@ -119,6 +119,16 @@ pub fn parse_upstream_error_line(line: &str) -> Option<crate::upstream_error::Up
     crate::upstream_error::parse_error_field(&value)
 }
 
+/// OpenCode V2 CLI 的重試事件 `{"type":"retry","attempt":…,"error":{…}}`：外層 `Some` 表示這行
+/// 是重試，內層為重試的錯誤（缺 `error` 時為 `None`）。
+pub fn parse_retry_line(line: &str) -> Option<Option<crate::upstream_error::UpstreamError>> {
+    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    if value.get("type")?.as_str()? != "retry" {
+        return None;
+    }
+    Some(crate::upstream_error::parse_error_field(&value))
+}
+
 /// Extract the opencode session id from one NDJSON line (top-level `sessionID`).
 pub fn parse_session_id(line: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;

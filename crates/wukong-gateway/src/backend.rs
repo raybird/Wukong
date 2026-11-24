@@ -1,5 +1,7 @@
 use crate::error::GatewayError;
-use crate::stream::{parse_event, parse_session_id, parse_upstream_error_line, StreamEvent};
+use crate::stream::{
+    parse_event, parse_retry_line, parse_session_id, parse_upstream_error_line, StreamEvent,
+};
 use crate::upstream_error::classify_text;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -477,6 +479,46 @@ impl OpencodeUtility {
 
 impl AiBackend for AgentCliBackend {
     async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+        self.run_with_retry_limit(req, crate::upstream_error::RETRY_GIVE_UP_AFTER)
+            .await
+    }
+
+    async fn run_streaming(
+        &self,
+        req: AgentRequest,
+        on_event: &mut dyn FnMut(StreamEvent),
+    ) -> Result<AgentResponse, GatewayError> {
+        self.run_streaming_with_retry_limit(
+            req,
+            on_event,
+            crate::upstream_error::RETRY_GIVE_UP_AFTER,
+        )
+        .await
+    }
+}
+
+impl AgentCliBackend {
+    /// opencode 的非串流回合也讀 `--format json` 事件：V2 對上游錯誤會一直重試，純文字輸出
+    /// 沒有任何訊號，只能等到 agent timeout（issue-0044 TBD-3）。session ID 照舊不回傳，
+    /// 路由與規劃這類非串流呼叫的行為不變。其他指令（自訂的 agent）維持讀純文字輸出。
+    async fn run_with_retry_limit(
+        &self,
+        req: AgentRequest,
+        retry_limit: std::time::Duration,
+    ) -> Result<AgentResponse, GatewayError> {
+        if is_opencode(&self.command) {
+            let response = self
+                .run_streaming_with_retry_limit(req, &mut |_| {}, retry_limit)
+                .await?;
+            return Ok(AgentResponse {
+                session_id: None,
+                ..response
+            });
+        }
+        self.run_plain(req).await
+    }
+
+    async fn run_plain(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
         let argv = assemble_argv(
             &self.command,
             req.session_id.as_deref(),
@@ -535,10 +577,13 @@ impl AiBackend for AgentCliBackend {
         })
     }
 
-    async fn run_streaming(
+    /// `retry_limit`：重試持續多久就結束子程序（見 [`crate::upstream_error::RetryWatch`]）；
+    /// 只有測試會傳其他值。
+    async fn run_streaming_with_retry_limit(
         &self,
         req: AgentRequest,
         on_event: &mut dyn FnMut(StreamEvent),
+        retry_limit: std::time::Duration,
     ) -> Result<AgentResponse, GatewayError> {
         // Build argv then insert `--format json` before the prompt (last arg).
         let mut argv = assemble_argv(
@@ -576,6 +621,7 @@ impl AiBackend for AgentCliBackend {
         let mut full = String::new();
         let mut session_id: Option<String> = None;
         let mut text_filter = DsmlToolCallFilter::default();
+        let mut retry = crate::upstream_error::RetryWatch::new(retry_limit);
         let deadline = tokio::time::sleep(agent_timeout());
         tokio::pin!(deadline);
         loop {
@@ -586,6 +632,13 @@ impl AiBackend for AgentCliBackend {
                     let _ = child.wait().await;
                     stderr_task.abort();
                     return Err(agent_timeout_error(""));
+                }
+                // V2 對上游錯誤會一直重試、子程序不結束（issue-0044 TBD-3）。
+                () = retry.expired() => {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    stderr_task.abort();
+                    return Err(retry.give_up());
                 }
             };
             let Some(line) = line else {
@@ -602,7 +655,15 @@ impl AiBackend for AgentCliBackend {
                 stderr_task.abort();
                 return Err(error.to_gateway_error());
             }
+            if let Some(error) = parse_retry_line(&line) {
+                retry.retrying(error);
+                continue;
+            }
             if let Some(ev) = parse_event(&line) {
+                // 重試前後都會有 step_start；有了實際輸出才算恢復。
+                if !matches!(ev, StreamEvent::StepStart) {
+                    retry.recovered();
+                }
                 match ev {
                     StreamEvent::Text(t) => {
                         let clean = text_filter.feed(&t);
@@ -1488,6 +1549,168 @@ mod tests {
                 StreamEvent::StepFinish,
             ]
         );
+    }
+
+    fn v2_cli_fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/opencode-v2")
+            .join(format!("{name}.ndjson"))
+    }
+
+    /// 以 `sh -c` 當假 agent；argv 後面附加的旗標與提示詞成為 `$1`… 被忽略。
+    fn shell_agent(script: String) -> AgentCliBackend {
+        AgentCliBackend {
+            command: vec!["sh".to_string(), "-c".to_string(), script, "sh".to_string()],
+            workspace: None,
+        }
+    }
+
+    fn plain_request() -> AgentRequest {
+        AgentRequest {
+            prompt: "ignored".into(),
+            session_id: None,
+            thinking: false,
+            model: None,
+            agent: None,
+            tool_overrides: BTreeMap::new(),
+            attachments: Vec::new(),
+        }
+    }
+
+    const SHORT_RETRY_LIMIT: std::time::Duration = std::time::Duration::from_millis(400);
+
+    // issue-0044 SCN-007 第三列（CLI）：V2 一直送 retry、子程序不結束，超過時限就結束它。
+    #[tokio::test]
+    async fn agent_cli_gives_up_on_retries_that_last_too_long() {
+        let retry = v2_cli_fixture("cli-retry-transport");
+        let backend = shell_agent(format!("head -n 3 '{}'; exec sleep 30", retry.display()));
+        let started = std::time::Instant::now();
+
+        let error = backend
+            .run_streaming_with_retry_limit(plain_request(), &mut |_| {}, SHORT_RETRY_LIMIT)
+            .await
+            .unwrap_err();
+
+        let waited = started.elapsed();
+        assert!(
+            waited >= SHORT_RETRY_LIMIT && waited < std::time::Duration::from_secs(5),
+            "{waited:?}"
+        );
+        match error {
+            GatewayError::UpstreamFailed { kind, detail, .. } => {
+                assert_eq!(kind, crate::upstream_error::UpstreamFailure::Unreachable);
+                assert!(detail.contains("重試 2 次"), "{detail}");
+            }
+            other => panic!("expected UpstreamFailed, got {other:?}"),
+        }
+    }
+
+    // issue-0044 SCN-016（CLI）：重試後恢復輸出就重新起算；從第一次重試到結束超過時限也照常完成。
+    #[tokio::test]
+    async fn agent_cli_finishes_a_turn_that_recovers_from_retries() {
+        let retry = v2_cli_fixture("cli-retry-transport");
+        let answer = v2_cli_fixture("cli-text-reasoning");
+        let expected = std::fs::read_to_string(&answer)
+            .unwrap()
+            .lines()
+            .find_map(|line| match parse_event(line) {
+                Some(StreamEvent::Text(text)) => Some(text),
+                _ => None,
+            })
+            .unwrap();
+        let backend = shell_agent(format!(
+            "head -n 2 '{retry}'; sleep 0.3; cat '{answer}'; sleep 0.3",
+            retry = retry.display(),
+            answer = answer.display()
+        ));
+
+        let response = backend
+            .run_streaming_with_retry_limit(plain_request(), &mut |_| {}, SHORT_RETRY_LIMIT)
+            .await
+            .unwrap();
+
+        assert_eq!(response.text, expected.trim());
+    }
+
+    /// 名為 `opencode` 的假 agent（`is_opencode` 看檔名）：指向 sh 的符號連結執行 `body`。
+    /// 不直接 exec 剛寫好的腳本，避開平行測試 fork 時的 ETXTBSY。
+    fn fake_opencode(dir: &std::path::Path, body: &str) -> AgentCliBackend {
+        let link = dir.join("opencode");
+        std::os::unix::fs::symlink("/bin/sh", &link).unwrap();
+        let script = dir.join("agent.sh");
+        std::fs::write(&script, body).unwrap();
+        AgentCliBackend {
+            command: vec![link.display().to_string(), script.display().to_string()],
+            workspace: None,
+        }
+    }
+
+    // 路由與規劃走非串流的 run；opencode 的 run 也要看得到重試，否則只能等 agent timeout。
+    #[tokio::test]
+    async fn opencode_plain_run_also_gives_up_on_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let retry = v2_cli_fixture("cli-retry-transport");
+        let backend = fake_opencode(
+            dir.path(),
+            &format!("head -n 3 '{}'; exec sleep 30", retry.display()),
+        );
+
+        let error = backend
+            .run_with_retry_limit(plain_request(), SHORT_RETRY_LIMIT)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                GatewayError::UpstreamFailed {
+                    kind: crate::upstream_error::UpstreamFailure::Unreachable,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn opencode_plain_run_reads_the_answer_from_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let answer = v2_cli_fixture("cli-text-reasoning");
+        let backend = fake_opencode(dir.path(), &format!("cat '{}'", answer.display()));
+
+        let response = backend.run(plain_request()).await.unwrap();
+
+        let expected = std::fs::read_to_string(&answer)
+            .unwrap()
+            .lines()
+            .find_map(|line| match parse_event(line) {
+                Some(StreamEvent::Text(text)) => Some(text),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(response.text, expected.trim());
+        assert_eq!(response.session_id, None);
+    }
+
+    #[tokio::test]
+    async fn agent_cli_reports_the_v2_error_type() {
+        let backend = shell_agent(format!(
+            "cat '{}'; exec sleep 30",
+            v2_cli_fixture("cli-no-route").display()
+        ));
+
+        let error = backend
+            .run_streaming(plain_request(), &mut |_| {})
+            .await
+            .unwrap_err();
+
+        match error {
+            GatewayError::UpstreamFailed { kind, detail, .. } => {
+                assert_eq!(kind, crate::upstream_error::UpstreamFailure::ModelEol);
+                assert!(detail.contains("provider.no-route"), "{detail}");
+            }
+            other => panic!("expected UpstreamFailed, got {other:?}"),
+        }
     }
 
     #[tokio::test]

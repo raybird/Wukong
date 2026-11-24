@@ -7,7 +7,7 @@ use crate::stream::{
     QuestionInfo, QuestionOption, QuestionRequest, StreamEvent, PERMISSION_ALLOW_ALWAYS_LABEL,
     PERMISSION_ALLOW_ONCE_LABEL, PERMISSION_REJECT_LABEL, PERMISSION_REQUEST_PREFIX,
 };
-use crate::upstream_error::{parse_v2_error, UpstreamError};
+use crate::upstream_error::{parse_v2_error, RetryWatch, UpstreamError};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -36,15 +36,17 @@ pub(super) struct ServerEventMapper {
     tool_names: HashMap<String, String>,
     last_message: Option<String>,
     texts: Vec<(String, String)>,
+    pub(super) retry: RetryWatch,
 }
 
 impl ServerEventMapper {
-    pub(super) fn new(session_id: &str) -> Self {
+    pub(super) fn new(session_id: &str, retry: RetryWatch) -> Self {
         Self {
             session_id: session_id.to_string(),
             tool_names: HashMap::new(),
             last_message: None,
             texts: Vec::new(),
+            retry,
         }
     }
 
@@ -84,7 +86,24 @@ impl ServerEventMapper {
             }
         }
 
+        // 重試之後模型有了實際輸出才算恢復；重試前後都會有 step.started，不能拿來判斷。
+        if matches!(
+            event_type,
+            "session.step.ended"
+                | "session.reasoning.delta"
+                | "session.text.delta"
+                | "session.text.ended"
+                | "session.tool.called"
+        ) {
+            self.retry.recovered();
+        }
+
         match event_type {
+            "session.retry.scheduled" => {
+                self.retry
+                    .retrying(data.get("error").and_then(parse_v2_error));
+                ServerEventAction::Ignore
+            }
             "session.execution.succeeded" => ServerEventAction::Idle,
             "session.execution.failed" | "session.compaction.failed" => {
                 ServerEventAction::Failed(data.get("error").and_then(parse_v2_error).unwrap_or(
@@ -332,7 +351,7 @@ mod tests {
             .and_then(|event| event["data"]["sessionID"].as_str())
             .unwrap()
             .to_string();
-        let mut mapper = ServerEventMapper::new(&session);
+        let mut mapper = ServerEventMapper::new(&session, RetryWatch::default());
         let mut emitted = Vec::new();
         for event in &events {
             match mapper.map(event) {
@@ -479,7 +498,7 @@ mod tests {
 
     #[test]
     fn events_of_other_sessions_are_ignored() {
-        let mut mapper = ServerEventMapper::new("ses_mine");
+        let mut mapper = ServerEventMapper::new("ses_mine", RetryWatch::default());
         for event in [
             json!({"type":"session.execution.failed","data":{"sessionID":"ses_child","error":{"type":"provider.transport","message":"x"}}}),
             json!({"type":"session.execution.succeeded","data":{"sessionID":"ses_child"}}),
@@ -498,7 +517,7 @@ mod tests {
 
     #[test]
     fn final_text_is_empty_when_the_last_step_said_nothing() {
-        let mut mapper = ServerEventMapper::new("ses_1");
+        let mut mapper = ServerEventMapper::new("ses_1", RetryWatch::default());
         for event in [
             json!({"type":"session.step.started","data":{"sessionID":"ses_1","assistantMessageID":"msg_1"}}),
             json!({"type":"session.text.ended","data":{"sessionID":"ses_1","assistantMessageID":"msg_1","ordinal":0,"text":"Let me check."}}),

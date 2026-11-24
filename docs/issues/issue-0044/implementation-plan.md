@@ -113,8 +113,36 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 驗收編號：SCN-005、SCN-007、SCN-016
 - 完成判準：取消後回合回報已取消，不等 agent timeout；額度用完分類為上游限流、模型下架分類為模型已下架、重試超過 90 秒分類為上游連不到，exit 0 或降級文字不被當成功（地雷 W-7）；重試在 90 秒內恢復時回合照常完成；拿掉分類或中止邏輯時測試會紅
 - 驗證：單元測試以 Task 1.2、1.3 的真實 retry 樣本與暫停的 tokio 時間推進；整合測試以 `--network none` 的真實 V2 確認約 90 秒內結束（V1 對照約 65 秒）
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成
+- 證據：2026-11-24
+  - 錯誤類型：從 2.3.2 執行檔取出 V2 的 provider 錯誤對應（`jn()` 同時帶上游的 `http.status`），`upstream_error.rs` 的 `classify` 對應如下，410、429 仍先依狀態碼判定。新增「上游連不到」分類（`Unreachable`）
+    - `rate-limit`、`quota`、`free-limit`、`go-limit`、`budget-limit`、`model-budget-limit`、`chatgpt-limit` → 上游限流
+    - `no-route` → 模型已下架
+    - `transport`、`connect`、`timeout` → 上游連不到
+  - 錯誤解析：`parse_error_field` 遇到 V2 的 `{type, message, status}` 改用 `parse_v2_error`，CLI 的 `error` 行因此分得出類型
+  - 重試中止：新增 `RetryWatch`（`upstream_error.rs`）
+    - 計時：第一次重試起算，有實際輸出（思考、文字、工具、步驟結束）就重新起算；`step.started`／`step_start` 重試前後都有，不算恢復。超過 90 秒時以最後一次重試的錯誤回報
+    - 兩條路徑：server 的事件串流讀 `session.retry.scheduled`，CLI 讀 `retry` 行，都在 `select!` 等時限。server 中止後由呼叫端送 interrupt，CLI 結束子程序
+    - CLI 的非串流 `run`：遇到 opencode 指令也改讀 `--format json` 事件。路由與規劃走這條，原本純文字輸出看不到重試；session ID 照舊不回傳。自訂的非 opencode 指令仍讀純文字
+  - 取消（SCN-005）：Wukong 的取消是丟掉回合的 future（例如排程的提問回覆失敗時中止回合）。server 後端在送出 prompt 後掛上 `InterruptOnDrop`，future 在完成前被丟掉時，背景送 `POST …/interrupt`；`execution.interrupted` 回報為「回合被中止」
+  - 單元：分類與時限各一組
+    - `v2_error_types_keep_their_categories`、`parses_the_v2_cli_error_line`（真實 `cli-no-route` 樣本）
+    - `retries_that_last_too_long_give_up_as_unreachable`、`a_recovery_restarts_the_clock`、`not_retrying_never_expires`：以暫停的 tokio 時間驗證 90 秒，錯誤取自真實 `cli-retry-transport` 樣本；gateway 的 dev-dependency 加上 tokio `test-util`
+  - 整合：server 與 CLI 各一組
+    - server（假 V2 送真實樣本）：`a_retry_lasting_too_long_is_interrupted_as_unreachable`、`a_retry_that_recovers_in_time_lets_the_turn_finish`（第一次重試到結束超過時限，中間恢復輸出）、`dropping_the_turn_interrupts_the_session`、`an_interrupted_execution_reports_the_turn_as_aborted`
+    - CLI（`sh` 重播真實樣本）：`agent_cli_gives_up_on_retries_that_last_too_long`、`agent_cli_finishes_a_turn_that_recovers_from_retries`、`agent_cli_reports_the_v2_error_type`、`opencode_plain_run_also_gives_up_on_retries`、`opencode_plain_run_reads_the_answer_from_events`
+    - 真實 I/O 下暫停 tokio 時間會快轉觸發 reqwest 的逾時（實測健康檢查以 operation timed out 失敗），所以整合測試改用縮短的時限（400ms），90 秒本身由單元測試驗證
+  - 紅燈：新測試用到的介面在 e165545 不存在，改用同日拿掉單一行為的方式，在暫存 worktree 各跑一次相關測試，每項都紅
+    - 拿掉 server 的重試中止 → 1 支紅；拿掉 CLI 的重試中止 → 1 支紅
+    - 拿掉 V2 類型分類 → 5 支紅；拿掉 V2 錯誤形狀解析 → 3 支紅
+    - drop 時不送 interrupt → 1 支紅
+    - 非串流 `run` 不讀事件 → 2 支紅
+    - 恢復時不重新起算 → server 與 CLI 的恢復測試各紅
+  - 綠燈：`cargo test` 全 workspace 771 passed、0 failed，gateway 連跑 3 次都通過；clippy、fmt 通過
+  - 端到端：見 [probe-retry.md](probe-retry.md)
+    - 真實 V2 斷網時 server 與 CLI 都在 91 秒以「上游連不到」結束；改動前 CLI 在 400 秒的外部 timeout 時仍沒有輸出
+    - 斷網後 30 秒恢復網路，回合 51 秒照常回覆（SCN-016）
+  - 殘餘：沒有真實的 429、410 樣本，限流與下架的判定依 V2 原始碼的對應與 `status`，沒有實際觸發過
 
 ### Task 2.4 — 本機按需模式
 - 產出與範圍：`local_process.rs`：等 `server listening on`，每次啟動自設隨機密碼並帶 basic auth，操作結束後關閉程序
