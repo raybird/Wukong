@@ -326,7 +326,7 @@ impl AgentBackend {
         let backend = self.question_backend("回答")?;
         match question_reply_route(request_id, &answers)? {
             QuestionReplyRoute::Permission { id, reply } => {
-                backend.reply_permission(id, reply).await
+                backend.reply_permission(session_id, id, reply).await
             }
             QuestionReplyRoute::Question => {
                 backend
@@ -348,7 +348,7 @@ impl AgentBackend {
         let backend = self.question_backend("取消")?;
         match question_reject_route(request_id) {
             QuestionReplyRoute::Permission { id, reply } => {
-                backend.reply_permission(id, reply).await
+                backend.reply_permission(session_id, id, reply).await
             }
             QuestionReplyRoute::Question => backend.reject_question(session_id, request_id).await,
         }
@@ -922,7 +922,7 @@ mod tests {
 
         let request = rx.await.unwrap();
         assert!(
-            request.starts_with("POST /permission/per_1/reply "),
+            request.starts_with("POST /api/session/ses_1/permission/per_1/reply "),
             "{request}"
         );
     }
@@ -941,7 +941,7 @@ mod tests {
 
         let request = rx.await.unwrap();
         assert!(
-            request.starts_with("POST /api/session/ses_1/question/que_1/reply "),
+            request.starts_with("POST /api/session/ses_1/form/que_1/reply "),
             "{request}"
         );
     }
@@ -960,7 +960,24 @@ mod tests {
 
         let request = rx.await.unwrap();
         assert!(
-            request.starts_with("POST /permission/per_1/reply "),
+            request.starts_with("POST /api/session/ses_1/permission/per_1/reply "),
+            "{request}"
+        );
+    }
+
+    // issue-0044 SCN-006：V2 沒有 question 的 reject，取消提問改為刪除 form。
+    #[tokio::test]
+    async fn plain_question_cancel_deletes_the_form() {
+        let (url, rx) = recording_server().await;
+        let backend = AgentBackend::Server(
+            crate::opencode_server::OpencodeServerBackend::from_env(url, None),
+        );
+
+        backend.cancel_question("ses_1", "frm_1").await.unwrap();
+
+        let request = rx.await.unwrap();
+        assert!(
+            request.starts_with("DELETE /api/session/ses_1/form/frm_1 "),
             "{request}"
         );
     }

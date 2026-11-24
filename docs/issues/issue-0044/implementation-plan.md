@@ -172,8 +172,32 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 驗收編號：SCN-006
 - 完成判準：回答、自訂回答、取消各送到正確端點且回合繼續或結束；無法辨識的權限選項仍視為錯誤；無人值守路徑在 baseline 權限下不出現詢問（地雷 W-8）；既有 Telegram 問答測試不改期望值
 - 驗證：gateway 單元測試加 Telegram／Web 既有測試
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成
+- 證據：2026-11-24
+  - 實測：在真實 V2 2.3.2 上試了五種回覆：自訂回答、多選、取消提問、允許一次、拒絕權限。對照組是 V1 1.19.6 的取消與拒絕。見 [probe-reply.md](probe-reply.md)。結論：
+    - 回答送 `POST /api/session/{sid}/form/{id}/reply`，body 為 `{"answer":{<key>: 值}}`，多選送陣列
+    - 取消提問改為 `DELETE …/form/{id}`，V2 沒有 reject 端點
+    - 權限送 `POST /api/session/{sid}/permission/{id}/reply`，body 為 `{"decision": …}`
+    - 取消與拒絕之後，V2 以 `execution.interrupted`（reason `shutdown`）結束執行；V1 則是不帶錯誤的 `session.idle`
+  - 改動：
+    - `opencode_server.rs`：
+      - 串流看到 `form.created` 時記下欄位（key、是否多選、選項的 label 與 value），該 session 的事件串流結束時清掉（drop guard，提早回傳錯誤也會清）
+      - `reply_question` 把入口的選項標籤換成 value，對不到的當成自訂文字；多選送陣列；沒看過的 form 用 `q{i}` 鍵
+      - `reject_question` 改為 DELETE form
+      - `reply_permission` 多帶 session，body 改為 `decision`
+      - 移除本機模式專用的 `reply_local_question`，本機與 server 模式走同一組 V2 端點
+    - `event_map.rs`：看到 `form.cancelled`，或 reply 為 `reject` 的 `permission.replied` 之後，再收到 `execution.interrupted` 時視為正常結束，與 V1 相同。使用者按停止（reason `user`）仍是中止
+    - `backend.rs`、`local_process.rs`：權限回覆傳入 session。Telegram、Web 與排程的呼叫端簽章不變，沒有改動（`git diff --stat` 在這三個 crate 為空）
+    - 假 V2 加上 form、permission 的回覆路由與 DELETE form；新增四個真實樣本 fixture
+  - 單元與元件測試：
+    - `answers_follow_the_fields_of_the_real_form`、`option_labels_are_sent_as_their_values`、`reply_routes_follow_the_v2_contract`：取代原本 V1 的 body 與 URL 測試
+    - `plain_question_cancel_deletes_the_form`
+    - 重播真實樣本、經 `AgentBackend` 回覆的五支測試：`an_answer_is_sent_to_the_form_and_the_turn_goes_on`（另驗回合結束後 form 已清掉）、`a_custom_answer_is_sent_as_text`、`a_cancelled_question_ends_the_turn_like_v1`、`an_allowed_permission_lets_the_turn_finish`、`a_rejected_permission_ends_the_turn_like_v1`
+    - 無法辨識的權限選項仍是錯誤：`unrecognized_permission_answer_is_an_error` 未改
+    - 地雷 W-8：排程的無人值守處置（預設拒絕、可設為允許一次）走同一組 `answer_question`／`cancel_question`。拒絕與允許一次的 V2 行為由上面兩支權限測試驗證；排程既有測試照過
+  - 紅燈：同日把新測試與 fixture 放到改動前的 d98a28b（暫存 worktree）上跑，9 支失敗。另做兩項消融：拿掉清除 form 的 guard，`an_answer_is_sent…` 失敗；拿掉 interrupted 視為正常結束的對應，兩支 `…_like_v1` 失敗
+  - 綠燈：`cargo test` 全 workspace 780 passed、0 failed、13 ignored；其中 Telegram、Web、排程 195 passed，期望值未改。clippy、fmt 通過
+  - 經 gateway 接真實 V2 的回合未完成：新增 `local_question_and_permission_replies_against_real_v2`（`#[ignore]`，以 `scripts/local-v2-actual.sh … replies` 執行）。17:36（台北）執行時，免費模型額度已用完，第一個回合就收到真實的 `provider.free-limit` 429，Wukong 正確分類為「上游限流」，這也是 SCN-007 第一次取得的真實 429。這個測試不在本 Task 的必要驗證內，額度恢復後重跑，最遲在 Task 6.1 演練時補上
 
 ### Task 2.6 — CLI backend
 - 產出與範圍：`backend.rs` 的 `assemble_argv` 與 `stream.rs`：opencode 路徑加 `--standalone`，NDJSON 改 V2 形狀；TBD-1 的結論要求的處理

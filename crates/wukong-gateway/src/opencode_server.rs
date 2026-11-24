@@ -39,6 +39,8 @@ pub struct OpencodeServerBackend {
     session_attachments: Mutex<HashMap<String, Vec<crate::backend::AgentAttachment>>>,
     /// 重試持續多久就中止回合；只有測試會改。
     retry_give_up_after: std::time::Duration,
+    /// 串流中看到的 form：form ID →（session ID, 欄位）。該 session 的事件串流結束時清掉。
+    forms: Forms,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,13 +126,35 @@ struct AgentBody<'a> {
 }
 
 #[derive(Debug, Serialize)]
-struct QuestionReplyBody {
-    answers: Vec<Vec<String>>,
+struct PermissionReplyBody<'a> {
+    decision: &'a str,
 }
 
-#[derive(Debug, Serialize)]
-struct PermissionReplyBody<'a> {
-    reply: &'a str,
+type Forms = Mutex<HashMap<String, (String, Vec<FormField>)>>;
+
+/// 事件串流結束（含提早回傳錯誤）時，清掉這個 session 記下的 form。
+struct ForgetForms<'a> {
+    forms: &'a Forms,
+    session_id: &'a str,
+}
+
+impl Drop for ForgetForms<'_> {
+    fn drop(&mut self) {
+        self.forms
+            .lock()
+            .unwrap()
+            .retain(|_, (session_id, _)| session_id != self.session_id);
+    }
+}
+
+/// 一則 V2 form 的欄位，回覆時要用：答案以欄位的 `key` 為鍵，選項送 `value`（入口看到的
+/// 是 `label`），多選送陣列。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FormField {
+    key: String,
+    multiselect: bool,
+    /// (label, value)
+    options: Vec<(String, String)>,
 }
 
 impl OpencodeServerBackend {
@@ -144,20 +168,6 @@ impl OpencodeServerBackend {
         backend.server_workspace = workspace;
         backend.password = Some(password);
         backend
-    }
-
-    pub(crate) async fn reply_local_question(
-        &self,
-        request_id: &str,
-        answers: Option<Vec<Vec<String>>>,
-    ) -> Result<(), GatewayError> {
-        let action = if answers.is_some() { "reply" } else { "reject" };
-        let url = format!("{}/question/{request_id}/{action}", self.base_url);
-        let mut request = self.client.post(url);
-        if let Some(answers) = answers {
-            request = request.json(&question_reply_body(answers));
-        }
-        self.send_empty("question_reply", request).await
     }
 
     pub fn from_env(base_url: String, workspace: Option<PathBuf>) -> Self {
@@ -188,6 +198,7 @@ impl OpencodeServerBackend {
                 .filter(|s| !s.is_empty()),
             session_attachments: Mutex::new(HashMap::new()),
             retry_give_up_after: crate::upstream_error::RETRY_GIVE_UP_AFTER,
+            forms: Mutex::new(HashMap::new()),
         }
     }
 
@@ -408,32 +419,43 @@ impl OpencodeServerBackend {
         .await
     }
 
+    /// 回答一則提問（V2 的 form）。`request_id` 為 form ID；`answers` 依題目順序，每題為
+    /// 選到的選項標籤或自訂文字。
     pub async fn reply_question(
         &self,
         session_id: &str,
         request_id: &str,
         answers: Vec<Vec<String>>,
     ) -> Result<(), GatewayError> {
-        let url = question_reply_url(&self.base_url, session_id, request_id);
+        let fields = self
+            .forms
+            .lock()
+            .unwrap()
+            .get(request_id)
+            .map(|(_, fields)| fields.clone());
+        let body = serde_json::json!({ "answer": form_answer(fields.as_deref(), answers) });
+        let url = form_url(&self.base_url, session_id, request_id);
         self.send_empty(
             "question_reply",
-            self.client.post(url).json(&question_reply_body(answers)),
+            self.client.post(format!("{url}/reply")).json(&body),
         )
         .await
     }
 
+    /// 取消一則提問：V2 沒有 reject，刪除 form 後提問工具以「使用者略過」失敗，執行結束。
     pub async fn reject_question(
         &self,
         session_id: &str,
         request_id: &str,
     ) -> Result<(), GatewayError> {
-        let url = question_reject_url(&self.base_url, session_id, request_id);
-        self.send_empty("question_reject", self.client.post(url))
+        let url = form_url(&self.base_url, session_id, request_id);
+        self.send_empty("question_reject", self.client.delete(url))
             .await
     }
 
     pub async fn reply_permission(
         &self,
+        session_id: &str,
         request_id: &str,
         reply: &str,
     ) -> Result<(), GatewayError> {
@@ -443,12 +465,58 @@ impl OpencodeServerBackend {
                 stderr: format!("無效的 OpenCode permission reply：{reply}"),
             });
         }
-        let url = permission_reply_url(&self.base_url, request_id);
+        let url = permission_reply_url(&self.base_url, session_id, request_id);
         self.send_empty(
             "permission_reply",
-            self.client.post(url).json(&PermissionReplyBody { reply }),
+            self.client
+                .post(url)
+                .json(&PermissionReplyBody { decision: reply }),
         )
         .await
+    }
+
+    /// 記下本 session 的 form 欄位，回覆時才知道 key、選項的 value 與是否多選。
+    fn remember_form(&self, session_id: &str, value: &Value) {
+        let Some(form) = value.get("data").and_then(|data| data.get("form")) else {
+            return;
+        };
+        if form.get("sessionID").and_then(Value::as_str) != Some(session_id) {
+            return;
+        }
+        let Some(id) = form.get("id").and_then(Value::as_str) else {
+            return;
+        };
+        let fields = form
+            .get("fields")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|field| {
+                Some(FormField {
+                    key: field.get("key")?.as_str()?.to_string(),
+                    multiselect: field.get("type").and_then(Value::as_str) == Some("multiselect"),
+                    options: field
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|option| {
+                            let value = option.get("value")?.as_str()?.to_string();
+                            let label = option
+                                .get("label")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                                .unwrap_or_else(|| value.clone());
+                            Some((label, value))
+                        })
+                        .collect(),
+                })
+            })
+            .collect();
+        self.forms
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), (session_id.to_string(), fields));
     }
 
     /// Best-effort：事件串流中斷後，server 端的 prompt 仍會繼續執行並佔住
@@ -559,6 +627,10 @@ impl OpencodeServerBackend {
         let mut progress = StreamProgress::default();
         let deadline = tokio::time::sleep(agent_timeout());
         tokio::pin!(deadline);
+        let _forget_forms = ForgetForms {
+            forms: &self.forms,
+            session_id,
+        };
 
         loop {
             let chunk = tokio::select! {
@@ -598,6 +670,9 @@ impl OpencodeServerBackend {
                         Err(_) => continue,
                     };
                     let event_type = event_type_of(&value).to_string();
+                    if event_type == "form.created" {
+                        self.remember_form(session_id, &value);
+                    }
                     match mapper.map(&value) {
                         ServerEventAction::Emit(event) => {
                             progress.record(&event_type, &event);
@@ -969,8 +1044,42 @@ fn http_error(phase: &'static str, err: reqwest::Error) -> GatewayError {
     GatewayError::AgentFailed { code: None, stderr }
 }
 
-fn question_reply_body(answers: Vec<Vec<String>>) -> QuestionReplyBody {
-    QuestionReplyBody { answers }
+/// 入口的答案轉成 V2 的 `Form.Answer`。選到的標籤換成選項的 value，對不到的視為自訂文字；
+/// 多選欄位送陣列，其他欄位送第一個答案。沒看過這則 form 時（例如事件串流已斷）以 V2
+/// 題目的預設鍵 `q0`、`q1`… 送文字。
+fn form_answer(
+    fields: Option<&[FormField]>,
+    answers: Vec<Vec<String>>,
+) -> serde_json::Map<String, Value> {
+    answers
+        .into_iter()
+        .enumerate()
+        .map(|(index, selected)| {
+            let Some(field) = fields.and_then(|fields| fields.get(index)) else {
+                return (
+                    format!("q{index}"),
+                    Value::String(selected.into_iter().next().unwrap_or_default()),
+                );
+            };
+            let values: Vec<String> = selected
+                .into_iter()
+                .map(|answer| {
+                    field
+                        .options
+                        .iter()
+                        .find(|(label, _)| *label == answer)
+                        .map(|(_, value)| value.clone())
+                        .unwrap_or(answer)
+                })
+                .collect();
+            let value = if field.multiselect {
+                Value::from(values)
+            } else {
+                Value::String(values.into_iter().next().unwrap_or_default())
+            };
+            (field.key.clone(), value)
+        })
+        .collect()
 }
 
 /// 本次串流看到多少進度，只用於組錯誤訊息。
@@ -1014,22 +1123,12 @@ impl StreamProgress {
     }
 }
 
-fn question_reply_url(base_url: &str, session_id: &str, request_id: &str) -> String {
-    format!(
-        "{}/api/session/{}/question/{}/reply",
-        base_url, session_id, request_id
-    )
+fn form_url(base_url: &str, session_id: &str, form_id: &str) -> String {
+    format!("{base_url}/api/session/{session_id}/form/{form_id}")
 }
 
-fn question_reject_url(base_url: &str, session_id: &str, request_id: &str) -> String {
-    format!(
-        "{}/api/session/{}/question/{}/reject",
-        base_url, session_id, request_id
-    )
-}
-
-fn permission_reply_url(base_url: &str, request_id: &str) -> String {
-    format!("{}/permission/{}/reply", base_url, request_id)
+fn permission_reply_url(base_url: &str, session_id: &str, request_id: &str) -> String {
+    format!("{base_url}/api/session/{session_id}/permission/{request_id}/reply")
 }
 
 #[cfg(test)]
@@ -1632,6 +1731,162 @@ mod tests {
         );
     }
 
+    enum Reply {
+        Answer(&'static str),
+        Cancel,
+    }
+
+    /// 重播真實的提問或權限樣本：事件停在詢問之後 300ms，期間經 `AgentBackend`（入口共用的
+    /// 分派）回覆，之後送出樣本剩下的事件。
+    async fn turn_with_reply(
+        fixture: &str,
+        reply: Reply,
+    ) -> (
+        Result<AgentResponse, GatewayError>,
+        fake_v2::FakeV2,
+        crate::backend::AgentBackend,
+    ) {
+        let fake = fake_v2::FakeV2::start().await;
+        fake.add_session("ses_1", 1, 1, None);
+        let events = fake_v2::fixture_events(fixture, "ses_1");
+        let asked = events
+            .iter()
+            .position(|event| {
+                let value: Value = serde_json::from_str(event).unwrap();
+                value["type"] == "form.created" || value["type"] == "permission.asked"
+            })
+            .unwrap();
+        let mut script = events[..=asked].to_vec();
+        script.push("pause:300".to_string());
+        script.extend(events[asked + 1..].iter().cloned());
+        fake.script_events(script);
+        let backend = crate::backend::AgentBackend::Server(v2_backend(&fake));
+        let (questions, mut asked_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut sink = |event| {
+            if let StreamEvent::QuestionRequest(question) = event {
+                questions.send(question).unwrap();
+            }
+        };
+        let mut req = plain_request("ask me");
+        req.session_id = Some("ses_1".to_string());
+        let turn = backend.run_streaming(req, &mut sink);
+        let answer = async {
+            let question = asked_rx.recv().await.unwrap();
+            match reply {
+                Reply::Answer(text) => backend
+                    .answer_question(
+                        &question.session_id,
+                        &question.request_id,
+                        vec![vec![text.to_string()]],
+                    )
+                    .await
+                    .unwrap(),
+                Reply::Cancel => backend
+                    .cancel_question(&question.session_id, &question.request_id)
+                    .await
+                    .unwrap(),
+            }
+        };
+        let (result, ()) = tokio::join!(turn, answer);
+        (result, fake, backend)
+    }
+
+    fn form_id(fixture: &str) -> String {
+        fake_v2::fixture_events(fixture, "ses_1")
+            .iter()
+            .find_map(|event| {
+                let value: Value = serde_json::from_str(event).ok()?;
+                (value["type"] == "form.created")
+                    .then(|| value["data"]["form"]["id"].as_str().unwrap().to_string())
+            })
+            .unwrap()
+    }
+
+    // issue-0044 SCN-006：回答、自訂回答、取消與權限回覆送到 V2 的端點，回合依樣本繼續或結束。
+    #[tokio::test]
+    async fn an_answer_is_sent_to_the_form_and_the_turn_goes_on() {
+        let (result, fake, backend) = turn_with_reply("server-form", Reply::Answer("A")).await;
+        assert_eq!(result.unwrap().text, "A");
+        let crate::backend::AgentBackend::Server(server) = &backend else {
+            unreachable!()
+        };
+        assert!(
+            server.forms.lock().unwrap().is_empty(),
+            "forms kept after the turn"
+        );
+        let reply = format!(
+            "POST /api/session/ses_1/form/{}/reply",
+            form_id("server-form")
+        );
+        assert_eq!(
+            fake.body_of(&reply),
+            Some(json!({ "answer": { "q0": "A" } }))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_custom_answer_is_sent_as_text() {
+        let (result, fake, _) =
+            turn_with_reply("server-form-custom", Reply::Answer("CUSTOM-42")).await;
+        assert_eq!(result.unwrap().text, "CUSTOM-42");
+        let reply = format!(
+            "POST /api/session/ses_1/form/{}/reply",
+            form_id("server-form-custom")
+        );
+        assert_eq!(
+            fake.body_of(&reply),
+            Some(json!({ "answer": { "q0": "CUSTOM-42" } }))
+        );
+    }
+
+    // V1 1.19.6 取消提問後是不帶錯誤的 idle（回合照常結束、沒有新回覆）；V2 改送
+    // execution.interrupted，不能因此回報成「回合被中止」。
+    #[tokio::test]
+    async fn a_cancelled_question_ends_the_turn_like_v1() {
+        let (result, fake, _) = turn_with_reply("server-form-cancel", Reply::Cancel).await;
+        assert_eq!(result.unwrap().text, "");
+        let form = format!(
+            "DELETE /api/session/ses_1/form/{}",
+            form_id("server-form-cancel")
+        );
+        assert!(fake.requests().contains(&form), "{:?}", fake.requests());
+    }
+
+    #[tokio::test]
+    async fn an_allowed_permission_lets_the_turn_finish() {
+        let (result, fake, _) = turn_with_reply(
+            "server-permission",
+            Reply::Answer(crate::stream::PERMISSION_ALLOW_ONCE_LABEL),
+        )
+        .await;
+        assert_eq!(result.unwrap().text, "DONE");
+        let request = fake
+            .requests()
+            .into_iter()
+            .find(|request| request.contains("/permission/"))
+            .unwrap();
+        assert!(
+            request.starts_with("POST /api/session/ses_1/permission/per_"),
+            "{request}"
+        );
+        assert_eq!(fake.body_of(&request), Some(json!({ "decision": "once" })));
+    }
+
+    #[tokio::test]
+    async fn a_rejected_permission_ends_the_turn_like_v1() {
+        let (result, fake, _) = turn_with_reply("server-permission-reject", Reply::Cancel).await;
+        assert_eq!(result.unwrap().text, "");
+        let request = fake
+            .requests()
+            .into_iter()
+            .find(|request| request.contains("/permission/"))
+            .unwrap();
+        assert_eq!(
+            fake.body_of(&request),
+            Some(json!({ "decision": "reject" }))
+        );
+    }
+
     // issue-0044 SCN-008（壓縮）：compact 排進佇列後等到執行結束；樣本為真實的壓縮過程。
     #[tokio::test]
     async fn compaction_waits_for_the_compaction_to_finish() {
@@ -2091,41 +2346,77 @@ mod tests {
         );
     }
 
-    #[test]
-    fn question_reply_body_serializes_answers() {
-        let body = question_reply_body(vec![
-            vec!["A".to_string()],
-            vec!["B".to_string(), "C".to_string()],
-        ]);
+    fn real_form_fields(fixture: &str) -> Vec<FormField> {
+        let backend = OpencodeServerBackend::from_env("http://127.0.0.1:1".to_string(), None);
+        for event in fake_v2::fixture_events(fixture, "ses_1") {
+            let value: Value = serde_json::from_str(&event).unwrap();
+            if value["type"] == "form.created" {
+                backend.remember_form("ses_1", &value);
+            }
+        }
+        let forms = backend.forms.lock().unwrap();
+        assert_eq!(forms.len(), 1);
+        forms.values().next().unwrap().1.clone()
+    }
 
+    // issue-0044 SCN-006：答案依真實 form 的欄位轉成 V2 的 Form.Answer。
+    #[test]
+    fn answers_follow_the_fields_of_the_real_form() {
+        let single = real_form_fields("server-form");
         assert_eq!(
-            serde_json::to_value(body).unwrap(),
-            json!({ "answers": [["A"], ["B", "C"]] })
+            Value::Object(form_answer(Some(&single), vec![vec!["A".to_string()]])),
+            json!({ "q0": "A" })
+        );
+        // 自訂回答原樣送出。
+        assert_eq!(
+            Value::Object(form_answer(
+                Some(&single),
+                vec![vec!["我自己的答案".to_string()]]
+            )),
+            json!({ "q0": "我自己的答案" })
+        );
+        let multi = real_form_fields("server-form-multi");
+        assert!(multi[0].multiselect);
+        assert_eq!(
+            Value::Object(form_answer(
+                Some(&multi),
+                vec![vec!["Red".to_string(), "Blue".to_string()]]
+            )),
+            json!({ "q0": ["Red", "Blue"] })
         );
     }
 
     #[test]
-    fn question_api_urls_target_session_scoped_routes() {
+    fn option_labels_are_sent_as_their_values() {
+        let fields = [FormField {
+            key: "color".to_string(),
+            multiselect: false,
+            options: vec![("紅色".to_string(), "red".to_string())],
+        }];
         assert_eq!(
-            question_reply_url("http://server", "ses_1", "que_1"),
-            "http://server/api/session/ses_1/question/que_1/reply"
+            Value::Object(form_answer(Some(&fields), vec![vec!["紅色".to_string()]])),
+            json!({ "color": "red" })
         );
+        // 沒看過的 form 以預設鍵送文字。
         assert_eq!(
-            question_reject_url("http://server", "ses_1", "que_1"),
-            "http://server/api/session/ses_1/question/que_1/reject"
+            Value::Object(form_answer(None, vec![vec!["A".to_string()], vec![]])),
+            json!({ "q0": "A", "q1": "" })
         );
     }
 
     #[test]
-    fn permission_api_uses_current_reply_contract() {
+    fn reply_routes_follow_the_v2_contract() {
         assert_eq!(
-            permission_reply_url("http://server", "per_1"),
-            "http://server/permission/per_1/reply"
+            form_url("http://server", "ses_1", "frm_1"),
+            "http://server/api/session/ses_1/form/frm_1"
         );
-        let body = PermissionReplyBody { reply: "always" };
         assert_eq!(
-            serde_json::to_value(body).unwrap(),
-            json!({ "reply": "always" })
+            permission_reply_url("http://server", "ses_1", "per_1"),
+            "http://server/api/session/ses_1/permission/per_1/reply"
+        );
+        assert_eq!(
+            serde_json::to_value(PermissionReplyBody { decision: "always" }).unwrap(),
+            json!({ "decision": "always" })
         );
     }
 

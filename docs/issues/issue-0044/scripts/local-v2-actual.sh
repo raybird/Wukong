@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Task 2.4（SCN-002）：本機按需模式接真實的 OpenCode V2 2.3.2。
-# 用法：local-v2-actual.sh V2_PREFIX WORK_DIR [MODEL]
+# Task 2.4（SCN-002）與 Task 2.5（SCN-006）：本機按需模式接真實的 OpenCode V2 2.3.2。
+# 用法：local-v2-actual.sh V2_PREFIX WORK_DIR [MODEL] [TEST_FILTER]
 #   V2_PREFIX：`npm install -g --prefix V2_PREFIX @opencode/cli@2.3.2` 的目錄
 #   WORK_DIR：空目錄，放隔離的 HOME 與 workspace
 #   MODEL：指定模型的那一回合用的模型，預設 opencode/deepseek-v4.1-flash-free（V2 2.3.2 預設模型為 big-pickle）
+#   TEST_FILTER：只跑名稱含這段文字的測試，例如 replies；省略時全部執行
 # 測試程式先在一般環境建好，再以只含隔離 HOME 的環境執行，不碰使用者的 opencode 資料。
 # 只送固定的合成提示詞給免費模型。
 set -euo pipefail
@@ -20,4 +21,4 @@ for line in sys.stdin:
 
 env -i HOME="$work/home" PATH=/usr/bin:/bin \
   WUKONG_V2_OPENCODE="$v2/bin/opencode" WUKONG_V2_ROOT="$work/workspace" WUKONG_V2_MODEL="$model" \
-  "$bin" --ignored --nocapture --test-threads 1
+  "$bin" --ignored --nocapture --test-threads 1 ${4:+"$4"}

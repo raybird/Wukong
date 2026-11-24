@@ -293,6 +293,16 @@ fn handle(
             match (method, action, index) {
                 (_, _, None) => not_found(id),
                 ("POST", "agent" | "model", Some(_)) => ("204 No Content", JSON, String::new()),
+                // 提問與權限的回覆：只記錄請求，事件由腳本決定。
+                ("POST", action, Some(_))
+                    if (action.starts_with("form/") || action.starts_with("permission/"))
+                        && action.ends_with("/reply") =>
+                {
+                    ("204 No Content", JSON, String::new())
+                }
+                ("DELETE", action, Some(_)) if action.starts_with("form/") => {
+                    ("204 No Content", JSON, String::new())
+                }
                 ("POST", "prompt", Some(_)) => (
                     "200 OK",
                     JSON,

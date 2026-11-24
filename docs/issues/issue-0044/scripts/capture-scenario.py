@@ -122,6 +122,57 @@ elif name == "form":
     end = wait_for(finished, 120)
     done(bool(end and end["type"] == "session.execution.succeeded"), f"reply={status} {str(body)[:120]} end={end and end['type']}")
 
+elif name in ("form-custom", "form-cancel"):
+    # Task 2.5：自訂回答與取消（V2 沒有 reject 端點，取消改刪除 form）。
+    sid = new_session()
+    prompt(sid, "Use the question tool to ask me to choose between the options A and B. "
+                "After I answer, reply with exactly what I answered, or with the word NONE if I gave no answer.")
+    created = wait_for(of_type("form.created"), 120)
+    if not created:
+        done(False, "no form.created")
+    form = created["data"]["form"]
+    key = form["fields"][0]["key"]
+    if name == "form-custom":
+        status, body = call("POST", f"/api/session/{sid}/form/{form['id']}/reply", {"answer": {key: "CUSTOM-42"}})
+    else:
+        status, body = call("DELETE", f"/api/session/{sid}/form/{form['id']}")
+    end = wait_for(finished, 120)
+    after = [e["type"] for e in events if e.get("type", "").startswith(("form.", "session.tool."))]
+    texts = [e["data"].get("text", "") for e in events if e.get("type") == "session.text.ended"]
+    done(bool(end and end["type"] == "session.execution.succeeded"),
+         f"call={status} {str(body)[:80]} end={end and end['type']} events={after} last_text={texts[-1:]!r}")
+
+elif name == "form-multi":
+    sid = new_session()
+    prompt(sid, "Use the question tool to ask me which of the colors red, green and blue I like. "
+                "Allow selecting multiple options. After I answer, reply with only the colors I chose.")
+    created = wait_for(of_type("form.created"), 120)
+    if not created:
+        done(False, "no form.created")
+    form = created["data"]["form"]
+    field = form["fields"][0]
+    values = [o["value"] for o in field.get("options", [])][:2]
+    answer = values if field.get("type") == "multiselect" else (values[0] if values else "red")
+    status, body = call("POST", f"/api/session/{sid}/form/{form['id']}/reply", {"answer": {field["key"]: answer}})
+    end = wait_for(finished, 120)
+    texts = [e["data"].get("text", "") for e in events if e.get("type") == "session.text.ended"]
+    done(bool(end and end["type"] == "session.execution.succeeded"),
+         f"type={field.get('type')} options={[(o['value'], o['label']) for o in field.get('options', [])]} "
+         f"answer={answer} reply={status} end={end and end['type']} last_text={texts[-1:]!r}")
+
+elif name == "permission-reject":
+    sid = new_session(permissions=[{"action": "shell", "resource": "*", "effect": "ask"}])
+    prompt(sid, "Use the shell tool to run exactly: echo probe. If it is not allowed, reply with exactly the word DENIED.")
+    asked = wait_for(of_type("permission.asked"), 120)
+    if not asked:
+        done(False, "no permission.asked")
+    rid = asked["data"]["id"]
+    status, _ = call("POST", f"/api/session/{sid}/permission/{rid}/reply", {"decision": "reject"})
+    end = wait_for(finished, 120)
+    after = [e["type"] for e in events if e.get("type", "").startswith(("permission.", "session.tool."))]
+    texts = [e["data"].get("text", "") for e in events if e.get("type") == "session.text.ended"]
+    done(bool(end), f"reply={status} end={end and end['type']} events={after} last_text={texts[-1:]!r}")
+
 elif name == "interrupt":
     sid = new_session()
     prompt(sid, "Count from 1 to 400, one number per line.")

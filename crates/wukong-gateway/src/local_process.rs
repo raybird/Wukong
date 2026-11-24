@@ -73,11 +73,14 @@ impl LocalProcessBackend {
             Some(answers) => question_reply_route(request, answers)?,
             None => question_reject_route(request),
         };
-        match route {
-            QuestionReplyRoute::Permission { id, reply } => {
-                backend.reply_permission(id, reply).await
+        match (route, answers) {
+            (QuestionReplyRoute::Permission { id, reply }, _) => {
+                backend.reply_permission(session, id, reply).await
             }
-            QuestionReplyRoute::Question => backend.reply_local_question(request, answers).await,
+            (QuestionReplyRoute::Question, Some(answers)) => {
+                backend.reply_question(session, request, answers).await
+            }
+            (QuestionReplyRoute::Question, None) => backend.reject_question(session, request).await,
         }
     }
 

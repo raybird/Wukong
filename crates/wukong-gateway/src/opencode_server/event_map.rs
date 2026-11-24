@@ -37,6 +37,10 @@ pub(super) struct ServerEventMapper {
     last_message: Option<String>,
     texts: Vec<(String, String)>,
     pub(super) retry: RetryWatch,
+    /// 使用者取消了提問或拒絕了權限。V2 之後會以 `execution.interrupted`（reason
+    /// `shutdown`）結束執行；V1 1.19.6 同樣情況是不帶錯誤的 `session.idle`，回合照常收尾
+    /// （2026-11-24 兩版實測，見 docs/issues/issue-0044/probe-reply.md）。
+    declined: bool,
 }
 
 impl ServerEventMapper {
@@ -47,6 +51,7 @@ impl ServerEventMapper {
             last_message: None,
             texts: Vec::new(),
             retry,
+            declined: false,
         }
     }
 
@@ -114,6 +119,17 @@ impl ServerEventMapper {
                     },
                 ))
             }
+            "form.cancelled" => {
+                self.declined = true;
+                ServerEventAction::Ignore
+            }
+            "permission.replied" => {
+                if data.get("reply").and_then(Value::as_str) == Some("reject") {
+                    self.declined = true;
+                }
+                ServerEventAction::Ignore
+            }
+            "session.execution.interrupted" if self.declined => ServerEventAction::Idle,
             "session.execution.interrupted" => ServerEventAction::Failed(UpstreamError {
                 name: "aborted".to_string(),
                 status_code: None,
