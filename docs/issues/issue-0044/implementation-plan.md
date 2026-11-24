@@ -205,8 +205,27 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 驗收編號：SCN-010
 - 完成判準：帶額外旗標的 `opencode run` 取得回覆與 session，結束後沒有背景 service 程序；`printf fixer` 假 agent 的既有測試照過，argv 不含任何 opencode 旗標
 - 驗證：單元測試（argv 與 NDJSON 樣本）加接真實 V2 的整合測試
-- 狀態：📝 待實作
-- 證據：
+- 狀態：🚧 進行中（只差接真實模型的回合，等免費額度恢復）
+- 證據：2026-11-24
+  - 實測：見 [probe-cli.md](probe-cli.md)「Task 2.6」一節
+    - 容器裡有背景 service 時，不加 `--standalone` 的 `run` 會連上它；加了才起私有 `serve --stdio`
+    - `--log-level error` 傳不到私有 serve，stderr 每次約 43 行 INFO
+    - V2 `--format json` 的事件名稱與 V1 相同（`text`、`reasoning`、`tool_use`、`step_start`、`step_finish`，`part.tool`，最上層 `sessionID`），`stream.rs` 的解析不必改；錯誤與重試的解析已在 Task 2.3 完成
+  - 改動（`backend.rs`）：
+    - `assemble_argv` 在 opencode 命令後加 `--standalone --print-logs --log-level error`；`WUKONG_AGENT_CMD` 已有 `--standalone` 或 `--server` 時不加 `--standalone`
+    - `run` 以非 0 結束時，回報的 stderr 先濾掉 INFO 以下的日誌行
+  - TBD-1 的結論：`--dangerously-skip-permissions` 照常可用，不改寫使用者的命令
+  - 測試：
+    - 6 支 `assemble_argv` 測試改為新旗標
+    - 新增 `assemble_argv_keeps_the_server_choice_of_a_custom_command`：改動前也會通過，因為舊碼從不加 `--standalone`；它防的是之後重複加，或蓋掉使用者的 `--server`
+    - 新增 `v2_run_output_streams_steps_reasoning_tools_and_text`：重播 V2 真實輸出 `cli-text-reasoning`、`cli-tool-completed`。改動前也會通過，證明解析不必改
+    - 新增 `a_failed_v2_run_reports_stderr_without_info_logs`：重播真實 stderr `cli-stderr-offline.txt`
+    - `printf fixer`、`echo` 假 agent 的既有測試照過，argv 不含任何 opencode 旗標（`assemble_argv_omits_opencode_flags_for_fake_agents`，以及各入口 crate 的 `tests/cli_backend.rs`）
+  - 紅燈：改動前同一組測試 8 支失敗（7 支 argv、1 支 stderr）
+  - 綠燈：`cargo test` 全 workspace 783 passed、0 failed、14 ignored；clippy、fmt 通過
+  - 外迴圈（部分）：
+    - wukong CLI 經 wrapper 接斷網容器裡的真實 V2，容器裡有背景 service。V2 接受新 argv 並起了私有 serve；規劃那一棒重試超過 90 秒後以「上游連不到」中止
+    - 尚缺：帶額外旗標的 `opencode run` 取得回覆與 session、以 `-s` 接續、結束後沒有背景 service 程序。這幾項需要模型，免費額度用完（見 Task 2.5），恢復後補跑才能標已完成
 
 ### Task 2.7 — V1 版本偵測
 - 產出與範圍：在 opencode 類 backend 第一次呼叫前檢查版本，1.x 時回傳明確錯誤

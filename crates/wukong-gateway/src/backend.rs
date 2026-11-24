@@ -168,16 +168,23 @@ pub fn assemble_argv(
     prompt: &str,
 ) -> Vec<String> {
     let mut argv: Vec<String> = strip_model_args(command);
-    // 沒有這兩個旗標，opencode 只把上游錯誤寫進 ~/.local/share/opencode/log/，stderr
-    // 一個字都沒有——想檢查也拿不到資料。`ERROR` 不可省：預設 INFO 會把每次 bus
-    // publish 都灌進 stderr（實測健康回合的 stderr 只有 32 bytes）。
-    //
     // 只在真的是 opencode 時才加：`--agent-cmd "printf fixer"` / `echo` 的假 agent
     // 測試法是既有的除錯手段（見 AGENTS.md），把 opencode 專屬旗標塞給它會弄壞它。
     if is_opencode(command) {
+        // V2 的 run 預設連背景 service；主機上那可能是使用者自己的 opencode，回合會跑進
+        // 他的資料裡。使用者在命令裡自己指定了 --standalone 或 --server 就照他的
+        // （issue-0044 Task 2.6）。
+        let chosen = command
+            .iter()
+            .any(|arg| arg == "--standalone" || arg == "--server" || arg.starts_with("--server="));
+        if !chosen {
+            argv.push("--standalone".to_string());
+        }
+        // 沒有 --print-logs，失敗時 stderr 沒有任何線索。V2 只收小寫的等級，而且等級傳不到
+        // 私有 serve，INFO 照樣會印，回報前由 `without_info_logs` 濾掉。
         argv.push("--print-logs".to_string());
         argv.push("--log-level".to_string());
-        argv.push("ERROR".to_string());
+        argv.push("error".to_string());
     }
     if let Some(id) = session_id {
         argv.push("-s".to_string());
@@ -702,7 +709,7 @@ impl AgentCliBackend {
         if !status.success() {
             return Err(GatewayError::AgentFailed {
                 code: status.code(),
-                stderr: stderr_buf.trim().to_string(),
+                stderr: without_info_logs(&stderr_buf).trim().to_string(),
             });
         }
         Ok(AgentResponse {
@@ -710,6 +717,22 @@ impl AgentCliBackend {
             session_id,
         })
     }
+}
+
+/// 去掉 opencode `--print-logs` 的 INFO 以下日誌行（`timestamp=… level=INFO …`），其他行原樣保留。
+fn without_info_logs(stderr: &str) -> String {
+    stderr
+        .lines()
+        .filter(|line| {
+            let level = line
+                .strip_prefix("timestamp=")
+                .and_then(|rest| rest.split_once(' '))
+                .and_then(|(_, rest)| rest.strip_prefix("level="))
+                .and_then(|rest| rest.split(' ').next());
+            !matches!(level, Some("TRACE" | "DEBUG" | "INFO"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 async fn read_pipe(mut pipe: impl tokio::io::AsyncRead + Unpin) -> String {
@@ -1100,12 +1123,30 @@ mod tests {
             vec![
                 "opencode",
                 "run",
+                "--standalone",
                 "--print-logs",
                 "--log-level",
-                "ERROR",
+                "error",
                 "hi"
             ]
         );
+    }
+
+    // issue-0044 SCN-010：V2 的 run 預設連背景 service（主機上可能是使用者自己的），
+    // 一律加 --standalone；使用者自己指定了 --standalone 或 --server 就照他的。
+    #[test]
+    fn assemble_argv_keeps_the_server_choice_of_a_custom_command() {
+        for command in [
+            vec!["opencode", "run", "--standalone"],
+            vec!["opencode", "run", "--server", "http://127.0.0.1:4096"],
+            vec!["opencode", "run", "--server=http://127.0.0.1:4096"],
+        ] {
+            let command: Vec<String> = command.into_iter().map(String::from).collect();
+            let argv = assemble_argv(&command, None, false, None, None, &[], "hi");
+            let standalone = argv.iter().filter(|arg| *arg == "--standalone").count();
+            let expected = usize::from(command.iter().any(|arg| arg == "--standalone"));
+            assert_eq!(standalone, expected, "{argv:?}");
+        }
     }
 
     #[test]
@@ -1136,8 +1177,9 @@ mod tests {
             &[],
             "hi",
         );
+        assert!(argv.contains(&"--standalone".to_string()));
         assert!(argv.contains(&"--print-logs".to_string()));
-        assert!(argv.contains(&"ERROR".to_string()));
+        assert!(argv.contains(&"error".to_string()));
     }
 
     #[test]
@@ -1156,9 +1198,10 @@ mod tests {
             vec![
                 "opencode",
                 "run",
+                "--standalone",
                 "--print-logs",
                 "--log-level",
-                "ERROR",
+                "error",
                 "-s",
                 "ses_x",
                 "--thinking",
@@ -1183,9 +1226,10 @@ mod tests {
             vec![
                 "opencode",
                 "run",
+                "--standalone",
                 "--print-logs",
                 "--log-level",
-                "ERROR",
+                "error",
                 "--model",
                 "opencode/deepseek-v4-flash-free",
                 "hi"
@@ -1214,9 +1258,10 @@ mod tests {
             vec![
                 "opencode",
                 "run",
+                "--standalone",
                 "--print-logs",
                 "--log-level",
-                "ERROR",
+                "error",
                 "-s",
                 "ses_x",
                 "--thinking",
@@ -1255,9 +1300,10 @@ mod tests {
             vec![
                 "opencode",
                 "run",
+                "--standalone",
                 "--print-logs",
                 "--log-level",
-                "ERROR",
+                "error",
                 "--file",
                 "/tmp/report.pdf",
                 "--file",
@@ -1283,9 +1329,10 @@ mod tests {
             vec![
                 "opencode",
                 "run",
+                "--standalone",
                 "--print-logs",
                 "--log-level",
-                "ERROR",
+                "error",
                 "--agent",
                 "plan",
                 "hi"
@@ -1660,6 +1707,87 @@ mod tests {
             command: vec![link.display().to_string(), script.display().to_string()],
             workspace: None,
         }
+    }
+
+    fn v2_cli_session(name: &str) -> String {
+        let text = std::fs::read_to_string(v2_cli_fixture(name)).unwrap();
+        let first: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        first["sessionID"].as_str().unwrap().to_string()
+    }
+
+    // issue-0044 SCN-010：V2 `run --format json` 的真實輸出照常轉成步驟、思考、工具與文字，
+    // 並取得 session。
+    #[tokio::test]
+    async fn v2_run_output_streams_steps_reasoning_tools_and_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let answer = v2_cli_fixture("cli-text-reasoning");
+        let backend = fake_opencode(dir.path(), &format!("cat '{}'", answer.display()));
+        let mut events = Vec::new();
+        let response = backend
+            .run_streaming(plain_request(), &mut |event| events.push(event))
+            .await
+            .unwrap();
+        assert_eq!(response.text, "OK");
+        assert_eq!(
+            response.session_id,
+            Some(v2_cli_session("cli-text-reasoning"))
+        );
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::StepStart,
+                StreamEvent::Reasoning("The user wants exactly the word OK.".to_string()),
+                StreamEvent::Text("OK".to_string()),
+                StreamEvent::StepFinish,
+            ]
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let tools = v2_cli_fixture("cli-tool-completed");
+        let backend = fake_opencode(dir.path(), &format!("cat '{}'", tools.display()));
+        let mut events = Vec::new();
+        let response = backend
+            .run_streaming(plain_request(), &mut |event| events.push(event))
+            .await
+            .unwrap();
+        assert_eq!(response.text, "DONE");
+        let used: Vec<_> = events
+            .iter()
+            .filter(|event| matches!(event, StreamEvent::ToolUse(_)))
+            .collect();
+        assert_eq!(
+            used,
+            vec![
+                &StreamEvent::ToolUse("read".to_string()),
+                &StreamEvent::ToolUse("read".to_string())
+            ]
+        );
+    }
+
+    // V2 的 --log-level 傳不到私有 serve，stderr 每次都有幾十行 INFO；失敗時回報的
+    // stderr 只留錯誤，與 V1 傳 ERROR 時相同。
+    #[tokio::test]
+    async fn a_failed_v2_run_reports_stderr_without_info_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let stderr = v2_cli_fixture("cli-stderr-offline").with_extension("txt");
+        let backend = fake_opencode(
+            dir.path(),
+            &format!(
+                "cat '{}' >&2; echo 'plain failure' >&2; exit 1",
+                stderr.display()
+            ),
+        );
+        let error = backend
+            .run_streaming(plain_request(), &mut |_| {})
+            .await
+            .unwrap_err();
+        let GatewayError::AgentFailed { code, stderr } = error else {
+            panic!("{error:?}");
+        };
+        assert_eq!(code, Some(1));
+        assert!(!stderr.contains("level=INFO"), "{stderr}");
+        assert!(stderr.contains("Failed to fetch models.dev"), "{stderr}");
+        assert!(stderr.ends_with("plain failure"), "{stderr}");
     }
 
     // 路由與規劃走非串流的 run；opencode 的 run 也要看得到重試，否則只能等 agent timeout。

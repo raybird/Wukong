@@ -41,3 +41,32 @@ bash docs/issues/issue-0044/scripts/probe-cli.sh "$V2" "$WORK"
 同一映像的 V1（1.19.6），`--network none`、預設模型、`opencode run --format json`：65 秒後以 rc=1 結束，事件是一筆 `{"type":"error","error":{"name":"UnknownError",…"getaddrinfo EAI_AGAIN opencode.ai"}}`。
 
 V2 在同樣條件下 120 秒仍在重試，Task 1.1 的 server 路徑也是 60 秒後 session 仍在執行。V1 會回錯誤，V2 不會；Wukong 照現在的寫法要等到 agent timeout（預設 20 分鐘）才失敗。這是換版造成的行為差異，Wukong 要自己收斂，收斂的條件與回報方式待決定（README TBD-3）。
+
+## Task 2.6：Wukong 改傳的旗標（2026-11-24）
+
+容器用 wukong:v0.25.1 映像，`--network none`，全新的 HOME 與 workspace。
+
+### `--standalone` 與背景 service
+
+V2 的 `run --help` 說明 `--standalone`：「Run with a private server instead of the background service」。在容器裡先執行 `opencode serve --service`，再執行 `run --print-logs --log-level error --format json`：
+
+| 旗標 | stderr | 解讀 |
+|---|---|---|
+| 不加 `--standalone` | 只有 1 行（收到 SIGTERM） | 連上了背景 service，沒有自己起 server |
+| 加 `--standalone` | 44 行，第一行為 `cli starting … args="[\"serve\",\"--stdio\",\"--port\",\"0\"]"` | 起了私有的 `serve --stdio` |
+
+Task 1.2 的容器裡沒有背景 service，所以兩者看起來一樣。主機上使用者自己跑著 V2 managed service（`opencode serve --service`）時，CLI backend 不加 `--standalone` 就會把回合跑進使用者的 service 與資料。所以 opencode 命令一律加 `--standalone`，只有使用者在 `WUKONG_AGENT_CMD` 裡自己指定了 `--standalone` 或 `--server` 時例外。
+
+### `--log-level error` 的 stderr
+
+不論有沒有 `--standalone`，stderr 都約有 43 行 INFO，只有 1 行 ERROR（斷網時是 `Failed to fetch models.dev`）。等級傳不到私有 serve。這份 stderr 存成 fixture `cli-stderr-offline.txt`。V1 傳 `ERROR` 時 stderr 只有錯誤，為了維持這個行為，`run` 以非 0 結束時，回報的 stderr 會濾掉 INFO 以下的日誌行。
+
+### 經 wukong CLI 的回合
+
+`--agent-cmd "<wrapper>/opencode run --dangerously-skip-permissions"`。wrapper 把 Wukong 傳來的 argv 原樣交給容器裡的 V2，容器裡同樣先起背景 service：
+
+- 規劃那一棒的 argv：`run --dangerously-skip-permissions --standalone --print-logs --log-level error --agent plan --format json <prompt>`。V2 接受了所有旗標，起了私有 serve。改動前傳 `ERROR` 時 V2 直接 rc=1 拒絕，見上方「結果」表
+- 斷網時規劃那一棒用預設模型，重試超過 90 秒後中止，rc=1：`上游模型錯誤（上游連不到）…（重試 7 次、超過 90 秒仍未成功，已中止）`，96 秒結束
+- 結束後殘留 1 個容器（Task 2.3 記過：被結束的是 docker client），已依 ID 確認掛的是本次探測的目錄後刪除
+
+要模型回覆的部分（取得回覆與 session、以 `-s` 接續）這次沒有跑。2026-11-24 17:36 起免費模型額度已用完（見 probe-reply.md），額度恢復後補上。

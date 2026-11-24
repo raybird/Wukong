@@ -1,0 +1,44 @@
+timestamp=2026-11-24T09:45:23.540Z level=INFO run=eb07ae08 message="cli starting" version=2.3.2 channel=latest local=false args="[\"serve\",\"--stdio\",\"--port\",\"0\"]" role=cli
+timestamp=2026-11-24T09:45:23.710Z level=INFO run=eb07ae08 message="watcher subscribe" path=/p/home/.config/opencode type=directory ignores=6 http.span=16 role=server
+timestamp=2026-11-24T09:45:23.712Z level=INFO run=eb07ae08 message="watcher subscribe" path=/etc type=entries ignores=0 http.span=18 role=server
+timestamp=2026-11-24T09:45:23.712Z level=INFO run=eb07ae08 message="watcher started" path=/etc type=entries backend=node ignores=0 http.span=18 role=server
+timestamp=2026-11-24T09:45:23.713Z level=INFO run=eb07ae08 message="watcher subscribe" path=/ type=entries ignores=0 http.span=19 role=server
+timestamp=2026-11-24T09:45:23.713Z level=INFO run=eb07ae08 message="watcher started" path=/ type=entries backend=node ignores=0 http.span=19 role=server
+timestamp=2026-11-24T09:45:23.713Z level=INFO run=eb07ae08 message="watcher subscribe" path=/p type=entries ignores=0 http.span=19 role=server
+timestamp=2026-11-24T09:45:23.713Z level=INFO run=eb07ae08 message="watcher started" path=/p type=entries backend=node ignores=0 http.span=19 role=server
+timestamp=2026-11-24T09:45:23.713Z level=INFO run=eb07ae08 message="watcher subscribe" path=/p/ws type=entries ignores=0 http.span=19 role=server
+timestamp=2026-11-24T09:45:23.714Z level=INFO run=eb07ae08 message="watcher started" path=/p/ws type=entries backend=node ignores=0 http.span=20 role=server
+timestamp=2026-11-24T09:45:23.714Z level=INFO run=eb07ae08 message="watcher subscribe" path=/p/home type=entries ignores=0 http.span=20 role=server
+timestamp=2026-11-24T09:45:23.714Z level=INFO run=eb07ae08 message="watcher started" path=/p/home type=entries backend=node ignores=0 http.span=20 role=server
+timestamp=2026-11-24T09:45:23.727Z level=INFO run=eb07ae08 message="watcher started" path=/p/home/.config/opencode type=directory backend=inotify ignores=6 http.span=33 role=server
+timestamp=2026-11-24T09:45:23.742Z level=INFO run=eb07ae08 message="location services booted" directory=/p/ws workspaceID=undefined durationMs=47 http.span=48 role=server
+timestamp=2026-11-24T09:45:24.285Z level=INFO run=eb07ae08 message="watcher subscribe" path=/p/home/.config/opencode/AGENTS.md type=file ignores=0
+timestamp=2026-11-24T09:45:24.286Z level=INFO run=eb07ae08 message="watcher started" path=/p/home/.config/opencode/AGENTS.md type=file backend=node ignores=0 role=server
+timestamp=2026-11-24T09:45:24.286Z level=INFO run=eb07ae08 message="watcher subscribe" path=/p/home/.claude/CLAUDE.md type=file ignores=0
+timestamp=2026-11-24T09:45:24.287Z level=INFO run=eb07ae08 message="watcher subscribe" path=/p/ws/AGENTS.md type=file ignores=0
+timestamp=2026-11-24T09:45:24.288Z level=INFO run=eb07ae08 message="watcher started" path=/p/ws/AGENTS.md type=file backend=node ignores=0 role=server
+timestamp=2026-11-24T09:45:24.288Z level=INFO run=eb07ae08 message="watcher subscribe" path=/p/ws/CLAUDE.md type=file ignores=0
+timestamp=2026-11-24T09:45:24.288Z level=INFO run=eb07ae08 message="watcher started" path=/p/ws/CLAUDE.md type=file backend=node ignores=0 role=server
+timestamp=2026-11-24T09:45:24.299Z level=INFO run=eb07ae08 message="watcher subscribe" path=/p/home/.config/opencode/skill type=file ignores=0
+timestamp=2026-11-24T09:45:24.299Z level=INFO run=eb07ae08 message="watcher started" path=/p/home/.config/opencode/skill type=file backend=node ignores=0 role=server
+timestamp=2026-11-24T09:45:24.300Z level=INFO run=eb07ae08 message="watcher subscribe" path=/p/home/.config/opencode/skills type=file ignores=0
+timestamp=2026-11-24T09:45:24.300Z level=INFO run=eb07ae08 message="watcher started" path=/p/home/.config/opencode/skills type=file backend=node ignores=0 role=server
+timestamp=2026-11-24T09:45:24.317Z level=INFO run=eb07ae08 message=event event.id=evt_20cf2205d0011p0E2Ab2ZPXJKW event.created=1795513524317 event.type=provider.updated event.location.directory=/p/ws event.location.workspaceID=undefined event.data={} http.span=623 role=server
+timestamp=2026-11-24T09:45:24.326Z level=INFO run=eb07ae08 message=event event.id=evt_20cf22066001dC5ae5xkeWgiIV event.created=1795513524326 event.type=model.updated event.location.directory=/p/ws event.location.workspaceID=undefined event.data={} http.span=632 role=server
+timestamp=2026-11-24T09:45:24.328Z level=INFO run=eb07ae08 message=event event.id=evt_20cf22068001umqS1bOWuNnpdN event.created=1795513524328 event.type=agent.updated event.location.directory=/p/ws event.location.workspaceID=undefined event.data={} http.span=634 role=server
+timestamp=2026-11-24T09:45:24.329Z level=INFO run=eb07ae08 message=event event.id=evt_20cf22069001BfMHFTU8OKIeMf event.created=1795513524329 event.type=command.updated event.location.directory=/p/ws event.location.workspaceID=undefined event.data={} http.span=635 role=server
+timestamp=2026-11-24T09:45:24.694Z level=ERROR run=eb07ae08 message="Failed to fetch models.dev" cause="Cause([Fail(HttpClientError: Transport error (GET https://models.opencode.ai/experimental/v2.0/api.json?type=chat,decision,image,video) (cause: TypeError: getaddrinfo EAI_AGAIN models.opencode.ai))])" http.span=1000 role=server
+timestamp=2026-11-24T09:45:33.399Z level=INFO run=d5a5202a message="shutdown started" signal=SIGTERM role=cli
+timestamp=2026-11-24T09:45:33.419Z level=INFO run=eb07ae08 message="Sent HTTP response" http.span=9261 role=server http.method=GET http.url=/api/event http.status=200
+timestamp=2026-11-24T09:45:33.436Z level=INFO run=eb07ae08 message="shutdown started" signal=SIGTERM role=cli
+timestamp=2026-11-24T09:45:33.437Z level=INFO run=eb07ae08 message="watcher stopped" path=/p/home/.config/opencode/skill type=file role=server
+timestamp=2026-11-24T09:45:33.437Z level=INFO run=eb07ae08 message="watcher stopped" path=/p/home/.config/opencode/skills type=file role=server
+timestamp=2026-11-24T09:45:33.439Z level=INFO run=eb07ae08 message="watcher stopped" path=/p/ws/CLAUDE.md type=file role=server
+timestamp=2026-11-24T09:45:33.439Z level=INFO run=eb07ae08 message="watcher stopped" path=/p/ws/AGENTS.md type=file role=server
+timestamp=2026-11-24T09:45:33.439Z level=INFO run=eb07ae08 message="watcher stopped" path=/p/home/.config/opencode/AGENTS.md type=file role=server
+timestamp=2026-11-24T09:45:33.447Z level=INFO run=eb07ae08 message="watcher stopped" path=/etc type=entries http.span=9753 role=server
+timestamp=2026-11-24T09:45:33.447Z level=INFO run=eb07ae08 message="watcher stopped" path=/ type=entries http.span=9753 role=server
+timestamp=2026-11-24T09:45:33.447Z level=INFO run=eb07ae08 message="watcher stopped" path=/p type=entries http.span=9753 role=server
+timestamp=2026-11-24T09:45:33.447Z level=INFO run=eb07ae08 message="watcher stopped" path=/p/ws type=entries http.span=9753 role=server
+timestamp=2026-11-24T09:45:33.447Z level=INFO run=eb07ae08 message="watcher stopped" path=/p/home type=entries http.span=9753 role=server
+timestamp=2026-11-24T09:45:33.447Z level=INFO run=eb07ae08 message="watcher stopped" path=/p/home/.config/opencode type=directory http.span=9753 role=server

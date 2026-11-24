@@ -1,6 +1,6 @@
 # OpenCode V2 真實事件樣本
 
-2026-11-24 由 issue-0044 Task 1.2、1.3、2.2 從 @opencode/cli 2.3.2 實際取得，取法見 `docs/issues/issue-0044/probe-events.md` 與 `probe-prompt.md`。只含固定的合成提示詞與全新的 HOME，沒有正式對話。測試以這些樣本當輸入，期望值不得從被測程式碼推導。
+2026-11-24 由 issue-0044 Task 1.2、1.3、2.2、2.5、2.6 從 @opencode/cli 2.3.2 實際取得，取法見 `docs/issues/issue-0044/probe-events.md` 與 `probe-prompt.md`。只含固定的合成提示詞與全新的 HOME，沒有正式對話。測試以這些樣本當輸入，期望值不得從被測程式碼推導。
 
 | 檔案 | 來源 | 情境 |
 |---|---|---|
@@ -17,3 +17,4 @@
 | cli-retry-transport.ndjson | `opencode run --format json`（`--network none`） | 上游連不到，retry 持續到被 timeout 結束 |
 | cli-tool-completed.ndjson | `opencode run --format json --dangerously-skip-permissions` | read 工具完成 |
 | cli-tool-permission-rejected.ndjson | `opencode run --format json`（read 設為 ask） | 非互動執行拒絕權限，工具 error |
+| cli-stderr-offline.txt | `opencode run --standalone --print-logs --log-level error --format json`（`--network none`）的 stderr | 斷網時的 stderr：43 行 INFO、1 行 ERROR（`--log-level` 沒傳給私有 serve） |
