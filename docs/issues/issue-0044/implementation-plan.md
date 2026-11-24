@@ -58,8 +58,8 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 驗收編號：支援 SCN-010；TBD-1
 - 完成判準：每項都有實際命令與輸出；殘留程序以 `ps` 比對前後；TBD-1 記下結論與日期
 - 驗證：契約探測，隔離 HOME 與 XDG 目錄
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成
+- 證據：2026-11-24 [probe-cli.md](probe-cli.md)，[scripts/probe-cli.sh](scripts/probe-cli.sh)。V2 拒絕 `--log-level ERROR`（只收小寫）；`--format json` 的文字、思考、步驟事件與 V1 同名，錯誤改為 `error.type`；`-s` 接續同一 session；`--standalone` 結束後沒有殘留程序；TBD-1 已解決（`--dangerously-skip-permissions` 仍可用，效果同 `--auto`）；上游連不到時 V2 一直送 `retry` 不結束，V1 則 65 秒後回錯誤（TBD-3）
 
 ### Task 1.3 — V2 事件與互動樣本
 - 產出與範圍：`crates/wukong-gateway` 測試 fixture 用的 V2 原始樣本（文字串流、思考、工具、完成、中止、上游具名錯誤、permission.asked、form），取自真實 V2 server 的 `/api/event`；以 #30 的 v2-probe.sh 為起點

@@ -196,9 +196,9 @@ Feature: Wukong 在 OpenCode V2 上維持 V1 時的行為
 
 | 編號 | 事項 | 狀態 | 影響 |
 |------|------|------|------|
-| TBD-1 | 使用者自訂的 WUKONG_AGENT_CMD 若仍帶 V1 才有的旗標（例如 --dangerously-skip-permissions），V2 的 opencode run 會拒絕還是忽略；installer 現有的 .env 遷移只改寫原封未動的舊範本那一行 | 待確認 | 未確認時，自訂命令的使用者升級後回合可能一律失敗；關聯 SCN-010、Phase 1 |
+| TBD-1 | 使用者自訂的 WUKONG_AGENT_CMD 若仍帶 V1 才有的旗標（例如 --dangerously-skip-permissions），V2 的 opencode run 會拒絕還是忽略；installer 現有的 .env 遷移只改寫原封未動的舊範本那一行 | 已解決（2026-11-24 Task 1.2，probe-cli.md）：V2 2.3.2 接受該旗標，效果與 --auto 相同，自訂命令不需改寫；另發現 V2 拒絕大寫的 --log-level ERROR，由 Task 2.6 改成小寫 | 未確認時，自訂命令的使用者升級後回合可能一律失敗；關聯 SCN-010、Phase 1 |
 | TBD-2 | 常駐 server 模式的密碼怎麼提供：V2 沒設密碼時會自己產生隨機密碼，入口無從得知；要沿用 WUKONG_AGENT_SERVER_PASSWORD 由使用者在 .env 設定，還是由 entrypoint 產生並存在共用 volume | 待確認 | 決定前不實作 Phase 3 的 server 密碼接線；影響 server 模式使用者升級時要不要改 .env；關聯 SCN-003、SCN-004 |
-| TBD-3 | 上游連不到時 V2 會不會回錯誤：2026-11-24 Task 1.1 在沒有網路的容器送 prompt，日誌只有一筆 Failed to fetch models.dev，60 秒後 session 仍在執行、沒有任何錯誤事件 | 待確認 | 若 V2 一直等而不回錯誤，上游故障會變成等到 agent timeout；關聯 SCN-007、Task 1.3、Task 2.3 |
+| TBD-3 | 上游連不到時 V2 不回錯誤：2026-11-24 Task 1.1（server 路徑）60 秒後 session 仍在執行；Task 1.2（CLI 路徑）一直送 retry 事件（error.type 為 provider.transport），120 秒內 7 次仍未結束。同條件下 V1 1.19.6 約 65 秒以 UnknownError 結束。Wukong 要自己收斂，收斂條件與回報方式待使用者決定 | 待確認 | 不處理時，上游連不到的回合要等到 agent timeout（預設 20 分鐘）才失敗；關聯 SCN-007、Task 1.3、Task 2.3 |
 
 ## Timeline
 
