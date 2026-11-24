@@ -96,8 +96,16 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 驗收編號：支援 SCN-002、SCN-008（壓縮）
 - 完成判準：以真實樣本重播，入口收到的 `StreamEvent` 序列與回覆文字與 V1 同情境相同；附件與模型參數出現在送出的請求裡
 - 驗證：單元測試（樣本重播）加整合測試
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成
+- 證據：2026-11-24。先以 [probe-prompt.md](probe-prompt.md) 實測附件（file 與 data URI）、選 agent、換模型、以權限關掉 question 工具、閒置時壓縮的事件流程，再改：
+  - `opencode_server/event_map.rs` 改寫成 V2 對應器（`ServerEventMapper`）：`step.started`／`step.ended` → 步驟、`reasoning.delta` → 思考、`tool.input.started` 記名稱後在 `tool.called` 送出工具（question 工具不送，由 form 顯示）、`text.ended` 記到回合結束取最後一則 assistant 訊息的文字（文字不在串流中送出，與 V1 server 路徑相同）、`execution.succeeded` 結束、`execution.failed`／`compaction.failed`／`execution.interrupted` 讓回合失敗、`form.created` 與 `permission.asked` 轉成既有的 `QuestionRequest`；其他 session 的事件一律忽略
+  - `opencode_server.rs`：prompt 前依需要 `POST …/agent`、`POST …/model`，再 `POST …/prompt`（文字與 `files[].uri`）；`tool_overrides` 只在建立 session 時轉成權限規則（V2 的 session 權限會一直留著，帶覆寫的呼叫都用新的暫時 session）；非串流的 `run` 與 `run_ephemeral` 改走事件串流；串流中斷時改送 `interrupt`；壓縮改 `POST …/compact` 後等事件，不再需要模型；`upstream_error.rs` 加 `parse_v2_error`，`aborted` 分類為回合被中止（完整的 V2 錯誤分類由 Task 2.3 處理）
+  - 單元：`event_map` 以真實樣本重播（`server-text-tool`、`server-permission`、`server-form`、`server-interrupt`、`server-no-route`），期望值取自樣本內容（shell 指令 `echo probe`、回覆 DONE、form 的題目與選項）
+  - 整合（假 V2 server 送真實樣本）：`run_streaming_replays_a_real_v2_turn`、`run_waits_for_the_events_too`、`agent_and_model_are_selected_before_the_prompt`、`attachments_are_sent_as_file_uris_in_the_prompt`、`tool_overrides_become_permissions_of_the_ephemeral_session`、`a_missing_session_is_replaced_by_a_new_one`、`run_streaming_interrupts_the_session_when_the_event_stream_dies`、`compaction_waits_for_the_compaction_to_finish`（SCN-008 的壓縮）、`a_failed_compaction_is_an_error`
+  - 紅燈：同日把上列 9 支整合測試放到改動前的 8e9dee9 上跑（暫存 worktree），9 支全部失敗
+  - 綠燈：`cargo test` 全 workspace 759 passed、0 failed（移除 6 支只驗 V1 回應形狀的測試：`/session/{id}/message` 列表、同步回應的文字與模型擷取、summarize）；clippy、fmt 通過
+  - 端到端：probe-prompt.md「端到端」一節，真實 V2 上兩個回合與一次壓縮都成功，暫時 session 都刪除
+  - 範圍調整：`form.created`、`permission.asked` 轉成 `QuestionRequest` 屬於事件串流，在本 Task 完成；Task 2.5 只剩回覆端點與呼叫端。本機模式測試的 python 假 server 只換了路由與事件，stderr 錯誤行的判斷是否仍適用 V2 由 Task 2.4 實測
 
 ### Task 2.3 — 取消與上游錯誤分類
 - 產出與範圍：取消改 `interrupt` 並辨認 interrupted 事件；`upstream_error.rs`、`stream.rs` 改讀 V2 錯誤的 `error.type`；server 與 CLI 兩條路徑追蹤 `retry` 事件，從第一次 retry 起持續超過 90 秒就中止回合（server 送 interrupt、CLI 結束子程序），依 retry 的錯誤類型回報，新增「上游連不到」分類
@@ -118,7 +126,7 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 證據：
 
 ### Task 2.5 — 提問與權限回覆
-- 產出與範圍：gateway 的回覆路由改 V2 的 form 與 permission 端點；Telegram（`dispatch.rs`）與 Web 的呼叫端跟著改，使用者操作不變
+- 產出與範圍：gateway 的回覆路由改 V2 的 form 與 permission 端點（事件轉成提問已在 Task 2.2 完成）；Telegram（`dispatch.rs`）與 Web 的呼叫端跟著改，使用者操作不變
 - 相依：2.2
 - 驗收編號：SCN-006
 - 完成判準：回答、自訂回答、取消各送到正確端點且回合繼續或結束；無法辨識的權限選項仍視為錯誤；無人值守路徑在 baseline 權限下不出現詢問（地雷 W-8）；既有 Telegram 問答測試不改期望值

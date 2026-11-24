@@ -719,7 +719,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"{}")
-        elif self.path == "/event":
+        elif self.path == "/api/event":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
@@ -735,7 +735,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b"{\"data\":{\"id\":\"ses_probe\"}}")
-        elif "/prompt_async" in self.path:
+        elif self.path.endswith("/prompt"):
             self.send_response(204)
             self.end_headers()
             # 模擬 OpenCode 1.19.3：上游拒絕時在 stderr 印出 stream error，但 SSE 靜默掛起
@@ -796,16 +796,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"{}")
-        elif self.path == "/event":
+        elif self.path == "/api/event":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
             time.sleep(0.05)
             # 送出主要回合的文字與完成事件
-            self.wfile.write(b"data: {\"type\":\"message.part.updated\",\"properties\":{\"sessionID\":\"ses_probe\",\"part\":{\"type\":\"text\",\"text\":\"hello from main\"}}}\n\n")
+            self.wfile.write(b"data: {\"type\":\"session.step.started\",\"data\":{\"sessionID\":\"ses_probe\",\"assistantMessageID\":\"msg_1\"}}\n\n")
+            self.wfile.write(b"data: {\"type\":\"session.text.ended\",\"data\":{\"sessionID\":\"ses_probe\",\"assistantMessageID\":\"msg_1\",\"ordinal\":0,\"text\":\"hello from main\"}}\n\n")
             self.wfile.flush()
             time.sleep(0.05)
-            self.wfile.write(b"data: {\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"ses_probe\"}}\n\n")
+            self.wfile.write(b"data: {\"type\":\"session.execution.succeeded\",\"data\":{\"sessionID\":\"ses_probe\"}}\n\n")
             self.wfile.flush()
             time.sleep(10)
         elif "/message" in self.path:
@@ -828,7 +829,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b"{\"data\":{\"id\":\"ses_probe\"}}")
-        elif "/prompt_async" in self.path:
+        elif self.path.endswith("/prompt"):
             self.send_response(204)
             self.end_headers()
             # 模擬 OpenCode 標題生成失敗：背景輸出 small=true agent=title 的 stream error
@@ -878,16 +879,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"{}")
-        elif self.path == "/event":
+        elif self.path == "/api/event":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
             time.sleep(0.05)
             # 主要回合正常送出文字與 idle
-            self.wfile.write(b"data: {\"type\":\"message.part.updated\",\"properties\":{\"sessionID\":\"ses_probe\",\"part\":{\"type\":\"text\",\"text\":\"completed after subagent retry\"}}}\n\n")
+            self.wfile.write(b"data: {\"type\":\"session.step.started\",\"data\":{\"sessionID\":\"ses_probe\",\"assistantMessageID\":\"msg_1\"}}\n\n")
+            self.wfile.write(b"data: {\"type\":\"session.text.ended\",\"data\":{\"sessionID\":\"ses_probe\",\"assistantMessageID\":\"msg_1\",\"ordinal\":0,\"text\":\"completed after subagent retry\"}}\n\n")
             self.wfile.flush()
             time.sleep(0.05)
-            self.wfile.write(b"data: {\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"ses_probe\"}}\n\n")
+            self.wfile.write(b"data: {\"type\":\"session.execution.succeeded\",\"data\":{\"sessionID\":\"ses_probe\"}}\n\n")
             self.wfile.flush()
             time.sleep(10)
         elif "/message" in self.path:
@@ -910,7 +912,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b"{\"data\":{\"id\":\"ses_probe\"}}")
-        elif "/prompt_async" in self.path:
+        elif self.path.endswith("/prompt"):
             self.send_response(204)
             self.end_headers()
             # 模擬 OpenCode task 子代理可恢復錯誤：輸出 mode=subagent 的 stream error

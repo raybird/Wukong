@@ -1,6 +1,6 @@
 # OpenCode V2 真實事件樣本
 
-2026-11-24 由 issue-0044 Task 1.2、1.3 從 @opencode/cli 2.3.2 實際取得，取法見 `docs/issues/issue-0044/probe-events.md`。只含固定的合成提示詞與全新的 HOME，沒有正式對話。測試以這些樣本當輸入，期望值不得從被測程式碼推導。
+2026-11-24 由 issue-0044 Task 1.2、1.3、2.2 從 @opencode/cli 2.3.2 實際取得，取法見 `docs/issues/issue-0044/probe-events.md` 與 `probe-prompt.md`。只含固定的合成提示詞與全新的 HOME，沒有正式對話。測試以這些樣本當輸入，期望值不得從被測程式碼推導。
 
 | 檔案 | 來源 | 情境 |
 |---|---|---|
@@ -9,6 +9,8 @@
 | server-form.ndjson | `GET /api/event` | question 工具產生 form，回覆後完成 |
 | server-interrupt.ndjson | `GET /api/event` | 長回答中途 interrupt |
 | server-no-route.ndjson | `GET /api/event` | 模型不存在，execution.failed（provider.no-route） |
+| server-compact.ndjson | `GET /api/event` | 回覆一次後 `POST /compact`，壓縮完成 |
+| server-attach-file.ndjson | `GET /api/event` | prompt 帶 `file://` 附件，回覆附件內的字 |
 | server-retry.ndjson | `GET /api/event`（`--network none`） | 上游連不到，retry.scheduled 兩次後 interrupt |
 | cli-text-reasoning.ndjson | `opencode run --format json --thinking` | 正常回覆，含思考 |
 | cli-no-route.ndjson | `opencode run --format json` | 模型不存在，error（provider.no-route） |

@@ -3,7 +3,7 @@
 //! 行為照 2026-11-24 對 @opencode/cli 2.3.2 的實測（`docs/issues/issue-0044/probe-*.md`）：
 //! `/api` 以外的路徑一律回網頁（200，text/html），`/api` 要帶 basic auth 且使用者名稱
 //! 固定為 opencode，列表由新到舊、照 cursor 分頁，最後一頁之後還要再取一次空頁才沒有
-//! `cursor.next`。
+//! `cursor.next`。`/api/event` 一連上就送出預先排好的事件（多半是真實樣本），送完即斷線。
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde_json::{json, Value};
@@ -20,6 +20,9 @@ struct State {
     /// 由舊到新。
     sessions: Vec<Value>,
     requests: Vec<String>,
+    /// 帶 JSON body 的請求：`METHOD path` 與 body。
+    bodies: Vec<(String, Value)>,
+    events: Vec<String>,
     created: usize,
 }
 
@@ -38,10 +41,10 @@ impl FakeV2 {
             while let Ok((mut socket, _)) = listener.accept().await {
                 let state = shared.clone();
                 tokio::spawn(async move {
-                    let Some((method, path, auth)) = read_request(&mut socket).await else {
+                    let Some((method, path, auth, body)) = read_request(&mut socket).await else {
                         return;
                     };
-                    let (status, content_type, body) = handle(&state, &method, &path, auth);
+                    let (status, content_type, body) = handle(&state, &method, &path, auth, &body);
                     let response = format!(
                         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
@@ -75,6 +78,22 @@ impl FakeV2 {
         self.state.lock().unwrap().sessions.push(session);
     }
 
+    /// 之後每次連上 `/api/event` 送出的事件（每項一個 JSON）。
+    pub fn script_events(&self, events: Vec<String>) {
+        self.state.lock().unwrap().events = events;
+    }
+
+    /// 最後一次 `request`（`METHOD path`）的 JSON body。
+    pub fn body_of(&self, request: &str) -> Option<Value> {
+        let state = self.state.lock().unwrap();
+        state
+            .bodies
+            .iter()
+            .rev()
+            .find(|(seen, _)| seen == request)
+            .map(|(_, body)| body.clone())
+    }
+
     pub fn session_ids(&self) -> Vec<String> {
         let state = self.state.lock().unwrap();
         state
@@ -85,9 +104,28 @@ impl FakeV2 {
     }
 }
 
+/// 讀一份 `tests/fixtures/opencode-v2/` 的真實樣本，把樣本裡的 session 換成 `session_id`。
+pub(super) fn fixture_events(name: &str, session_id: &str) -> Vec<String> {
+    let path = format!(
+        "{}/tests/fixtures/opencode-v2/{name}.ndjson",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let raw = std::fs::read_to_string(path).unwrap();
+    let original = raw
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|event| event["type"] == "session.created")
+        .and_then(|event| event["data"]["sessionID"].as_str().map(str::to_string))
+        .unwrap();
+    raw.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.replace(&original, session_id))
+        .collect()
+}
+
 async fn read_request(
     socket: &mut tokio::net::TcpStream,
-) -> Option<(String, String, Option<String>)> {
+) -> Option<(String, String, Option<String>, String)> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     let header_end = loop {
@@ -117,7 +155,8 @@ async fn read_request(
     let mut words = head.split_whitespace();
     let method = words.next()?.to_string();
     let path = words.next()?.to_string();
-    Some((method, path, header("authorization")))
+    let body = String::from_utf8_lossy(&buf[header_end..]).into_owned();
+    Some((method, path, header("authorization"), body))
 }
 
 fn handle(
@@ -125,10 +164,14 @@ fn handle(
     method: &str,
     path: &str,
     auth: Option<String>,
+    body: &str,
 ) -> (&'static str, &'static str, String) {
     const JSON: &str = "application/json";
     let mut state = state.lock().unwrap();
     state.requests.push(format!("{method} {path}"));
+    if let Ok(json) = serde_json::from_str::<Value>(body) {
+        state.bodies.push((format!("{method} {path}"), json));
+    }
     if !path.starts_with("/api/") {
         return (
             "200 OK",
@@ -163,6 +206,14 @@ fn handle(
             r#"{"version":"2.3.2","pid":1,"urls":["http://127.0.0.1:4096"],"paths":{"tmp":"/tmp/opencode"}}"#
                 .to_string(),
         ),
+        ("GET", "/api/event") => {
+            let stream: String = state
+                .events
+                .iter()
+                .map(|event| format!("data: {event}\n\n"))
+                .collect();
+            ("200 OK", "text/event-stream", stream)
+        }
         ("POST", "/api/session") => {
             state.created += 1;
             let id = format!("ses_fake{}", state.created);
@@ -207,18 +258,40 @@ fn handle(
             )
         }
         (method, route) if route.starts_with("/api/session/") => {
-            let id = &route["/api/session/".len()..];
+            let rest = &route["/api/session/".len()..];
+            let (id, action) = rest.split_once('/').unwrap_or((rest, ""));
             let index = state.sessions.iter().position(|s| s["id"] == id);
-            match (method, index) {
-                ("GET", Some(index)) => (
+            match (method, action, index) {
+                (_, _, None) => not_found(id),
+                ("POST", "agent" | "model", Some(_)) => ("204 No Content", JSON, String::new()),
+                ("POST", "prompt", Some(_)) => (
                     "200 OK",
                     JSON,
-                    json!({ "data": state.sessions[index] }).to_string(),
+                    json!({"data": {"id": "msg_fake", "sessionID": id, "type": "user"}}).to_string(),
                 ),
-                ("DELETE", Some(index)) => {
-                    state.sessions.remove(index);
-                    ("204 No Content", JSON, String::new())
-                }
+                ("POST", "compact", Some(_)) => (
+                    "200 OK",
+                    JSON,
+                    json!({"data": {"id": "msg_fake", "sessionID": id, "type": "compaction"}})
+                        .to_string(),
+                ),
+                ("POST", "interrupt", Some(_)) => (
+                    "200 OK",
+                    JSON,
+                    r#"{"data":{"interrupted":true}}"#.to_string(),
+                ),
+                (_, "", Some(index)) => match method {
+                    "GET" => (
+                        "200 OK",
+                        JSON,
+                        json!({ "data": state.sessions[index] }).to_string(),
+                    ),
+                    "DELETE" => {
+                        state.sessions.remove(index);
+                        ("204 No Content", JSON, String::new())
+                    }
+                    _ => not_found(id),
+                },
                 _ => not_found(id),
             }
         }

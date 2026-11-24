@@ -9,12 +9,12 @@ use crate::backend::{
 use crate::error::GatewayError;
 use crate::stream::StreamEvent;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use event_map::{event_type_of, map_server_event, ServerEventAction};
+use event_map::{event_type_of, ServerEventAction, ServerEventMapper};
 use reqwest::{StatusCode, Url};
 use serde::Serialize;
 use serde_json::Value;
 use sse::SseParser;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -49,47 +49,47 @@ enum FileTransportMode {
 #[derive(Debug, Serialize)]
 struct CreateSessionBody {
     title: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    permissions: Vec<PermissionRule>,
+}
+
+/// V2 的權限規則（openapi 的 `Permission.Rule`）。
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct PermissionRule {
+    action: String,
+    resource: &'static str,
+    effect: &'static str,
 }
 
 #[derive(Debug, Serialize)]
-struct MessageBody {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<ModelOverride>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    agent: Option<String>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    tools: BTreeMap<String, bool>,
-    parts: Vec<MessagePart>,
+struct PromptBody {
+    text: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    files: Vec<FileAttachment>,
+}
+
+/// `file://` 或 `data:` URI，兩種 V2 2.3.2 都讀得到內容（2026-11-24 實測）。
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct FileAttachment {
+    uri: String,
+    name: String,
 }
 
 #[derive(Debug, Serialize)]
-struct ModelOverride {
-    #[serde(rename = "providerID")]
-    provider_id: String,
-    #[serde(rename = "modelID")]
-    model_id: String,
-}
-
-#[derive(Debug, Serialize)]
-struct SummarizeBody {
-    #[serde(rename = "providerID")]
-    provider_id: String,
-    #[serde(rename = "modelID")]
-    model_id: String,
-    auto: bool,
+struct ModelBody {
+    model: ModelRef,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "lowercase")]
-enum MessagePart {
-    Text {
-        text: String,
-    },
-    File {
-        mime: String,
-        url: String,
-        filename: String,
-    },
+struct ModelRef {
+    id: String,
+    #[serde(rename = "providerID")]
+    provider_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentBody<'a> {
+    agent: &'a str,
 }
 
 #[derive(Debug, Serialize)]
@@ -154,13 +154,26 @@ impl OpencodeServerBackend {
         }
     }
 
-    async fn create_session(&self) -> Result<String, GatewayError> {
+    /// V2 的 prompt 沒有每則訊息的工具開關，`tool_overrides` 只能在建立 session 時轉成
+    /// 權限規則，而且會一直留在這個 session 上；帶覆寫的呼叫（規劃、路由）都用新的暫時
+    /// session，所以只在這裡套用，不套到既有 session。
+    async fn create_session(&self, req: &AgentRequest) -> Result<String, GatewayError> {
         let url = format!("{}/api/session", self.base_url);
+        let permissions = req
+            .tool_overrides
+            .iter()
+            .map(|(tool, enabled)| PermissionRule {
+                action: tool.clone(),
+                resource: "*",
+                effect: if *enabled { "allow" } else { "deny" },
+            })
+            .collect();
         let value = self
             .send_json(
                 "create_session",
                 self.client.post(url).json(&CreateSessionBody {
                     title: "Wukong".to_string(),
+                    permissions,
                 }),
             )
             .await?;
@@ -197,18 +210,13 @@ impl OpencodeServerBackend {
         }
     }
 
-    async fn build_message_parts(
-        &self,
-        req: &AgentRequest,
-    ) -> Result<Vec<MessagePart>, GatewayError> {
-        let mut parts = vec![MessagePart::Text {
-            text: req.prompt.clone(),
-        }];
+    async fn build_files(&self, req: &AgentRequest) -> Result<Vec<FileAttachment>, GatewayError> {
+        let mut files = Vec::new();
         for attachment in &req.attachments {
             let mime = supported_attachment_mime(attachment)?;
             let filename = safe_display_filename(&attachment.original_name, &attachment.path);
             let path = self.validated_attachment_path(&attachment.path)?;
-            let url = match &self.file_mode {
+            let uri = match &self.file_mode {
                 FileTransportMode::Shared => self.shared_file_url(&path)?,
                 FileTransportMode::Inline => {
                     let metadata = tokio::fs::metadata(&path).await.map_err(|err| {
@@ -237,13 +245,12 @@ impl OpencodeServerBackend {
                     )));
                 }
             };
-            parts.push(MessagePart::File {
-                mime,
-                url,
-                filename,
+            files.push(FileAttachment {
+                uri,
+                name: filename,
             });
         }
-        Ok(parts)
+        Ok(files)
     }
 
     fn validated_attachment_path(&self, attachment: &Path) -> Result<PathBuf, GatewayError> {
@@ -330,62 +337,38 @@ impl OpencodeServerBackend {
         retry
     }
 
-    async fn send_message(
-        &self,
-        session_id: &str,
-        req: &AgentRequest,
-    ) -> Result<Value, GatewayError> {
-        let url = format!("{}/session/{}/message", self.base_url, session_id);
-        let body = MessageBody {
-            model: req.model.as_deref().and_then(parse_model_override),
-            agent: req.agent.clone(),
-            tools: req.tool_overrides.clone(),
-            parts: self.build_message_parts(req).await?,
+    /// 送出一則 prompt。V2 的 agent 與模型是 session 的狀態，要在 prompt 前分別設定；
+    /// prompt 本身只收文字與附件，回 200 就排進佇列，結果由事件串流取得。session 不存在
+    /// 時三個請求都回 404，呼叫端據此重建 session。
+    async fn send_prompt(&self, session_id: &str, req: &AgentRequest) -> Result<(), GatewayError> {
+        let session = format!("{}/api/session/{session_id}", self.base_url);
+        if let Some(agent) = req.agent.as_deref() {
+            self.send_empty(
+                "select_agent",
+                self.client
+                    .post(format!("{session}/agent"))
+                    .json(&AgentBody { agent }),
+            )
+            .await?;
+        }
+        if let Some(model) = req.model.as_deref().and_then(parse_model_ref) {
+            self.send_empty(
+                "select_model",
+                self.client
+                    .post(format!("{session}/model"))
+                    .json(&ModelBody { model }),
+            )
+            .await?;
+        }
+        let body = PromptBody {
+            text: req.prompt.clone(),
+            files: self.build_files(req).await?,
         };
-        self.send_json("send_message", self.client.post(url).json(&body))
-            .await
-    }
-
-    async fn send_message_async(
-        &self,
-        session_id: &str,
-        req: &AgentRequest,
-    ) -> Result<(), GatewayError> {
-        let url = format!("{}/session/{}/prompt_async", self.base_url, session_id);
-        let body = MessageBody {
-            model: req.model.as_deref().and_then(parse_model_override),
-            agent: req.agent.clone(),
-            tools: req.tool_overrides.clone(),
-            parts: self.build_message_parts(req).await?,
-        };
-        self.send_empty("prompt_async", self.client.post(url).json(&body))
-            .await
-    }
-
-    async fn list_messages(&self, session_id: &str, limit: u32) -> Result<Value, GatewayError> {
-        let url = format!("{}/session/{}/message", self.base_url, session_id);
-        self.send_json(
-            "list_messages",
-            self.client.get(url).query(&[("limit", limit)]),
+        self.send_empty(
+            "prompt",
+            self.client.post(format!("{session}/prompt")).json(&body),
         )
         .await
-    }
-
-    async fn resolve_compact_model(
-        &self,
-        session_id: &str,
-        configured_model: Option<&str>,
-    ) -> Result<ModelOverride, GatewayError> {
-        if let Some(model) = configured_model.and_then(parse_model_override) {
-            return Ok(model);
-        }
-        let messages = self.list_messages(session_id, 1).await?;
-        extract_message_model(&messages).ok_or_else(|| GatewayError::AgentFailed {
-            code: None,
-            stderr: format!(
-                "opencode server summarize could not resolve provider/model for session {session_id}"
-            ),
-        })
     }
 
     pub async fn reply_question(
@@ -435,14 +418,14 @@ impl OpencodeServerBackend {
     /// session，讓後續回合永遠等不到 `session.idle`；這裡主動要求 opencode
     /// 中止，失敗也不影響原本要回傳的錯誤。
     async fn abort_session(&self, session_id: &str) {
-        let url = format!("{}/session/{}/abort", self.base_url, session_id);
+        let url = format!("{}/api/session/{}/interrupt", self.base_url, session_id);
         let _ = self
             .send_empty("abort_session", self.client.post(url))
             .await;
     }
 
     async fn open_event_stream(&self) -> Result<reqwest::Response, GatewayError> {
-        let url = format!("{}/event", self.base_url);
+        let url = format!("{}/api/event", self.base_url);
         let response = self
             .authorize(self.stream_client.get(url))
             .send()
@@ -522,12 +505,12 @@ impl OpencodeServerBackend {
         mut response: reqwest::Response,
         session_id: &str,
         on_event: &mut dyn FnMut(StreamEvent),
-    ) -> Result<(), GatewayError> {
+    ) -> Result<String, GatewayError> {
         let mut parser = SseParser::default();
         // 以 bytes 緩衝、只在整行（不會切在多位元組字元中間）時才解碼，
         // 避免 chunk 邊界落在 UTF-8 字元中間時產生 U+FFFD 亂碼。
         let mut buffer: Vec<u8> = Vec::new();
-        let mut seen_tools = std::collections::HashSet::new();
+        let mut mapper = ServerEventMapper::new(session_id);
         let mut progress = StreamProgress::default();
         let deadline = tokio::time::sleep(agent_timeout());
         tokio::pin!(deadline);
@@ -568,12 +551,12 @@ impl OpencodeServerBackend {
                         Err(_) => continue,
                     };
                     let event_type = event_type_of(&value).to_string();
-                    match map_server_event(&value, session_id, &mut seen_tools) {
+                    match mapper.map(&value) {
                         ServerEventAction::Emit(event) => {
                             progress.record(&event_type, &event);
                             on_event(event);
                         }
-                        ServerEventAction::Idle => return Ok(()),
+                        ServerEventAction::Idle => return Ok(mapper.final_text()),
                         ServerEventAction::Failed(error) => {
                             return Err(error.to_gateway_error());
                         }
@@ -586,54 +569,9 @@ impl OpencodeServerBackend {
 }
 
 impl AiBackend for OpencodeServerBackend {
+    /// V2 的 prompt 一律非同步，沒有等到回覆才回應的端點；非串流的回合也走事件串流。
     async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
-        self.health_check().await?;
-
-        let cleanup_on_error = req.session_id.is_none();
-        let mut session_id = match req.session_id.clone() {
-            Some(id) => id,
-            None => self.create_session().await?,
-        };
-
-        let value = match self.send_message(&session_id, &req).await {
-            Ok(value) => {
-                self.remember_attachments(&session_id, &req);
-                value
-            }
-            Err(GatewayError::AgentFailed {
-                code: Some(code), ..
-            }) if code == StatusCode::NOT_FOUND.as_u16() as i32 => {
-                let retry = self.rehydrate_request(&session_id, &req);
-                self.cleanup_session_if_owned(cleanup_on_error, &session_id)
-                    .await;
-                session_id = self.create_session().await?;
-                let value = match self.send_message(&session_id, &retry).await {
-                    Ok(value) => value,
-                    Err(error) => {
-                        self.cleanup_session_if_owned(true, &session_id).await;
-                        return Err(error);
-                    }
-                };
-                self.remember_attachments(&session_id, &retry);
-                value
-            }
-            Err(err) => {
-                self.cleanup_session_if_owned(cleanup_on_error, &session_id)
-                    .await;
-                return Err(err);
-            }
-        };
-
-        // HTTP 200 不代表上游服務了這次請求：opencode server 自己回得好好的，錯誤
-        // 在回應內容裡（assistant message 的 `info.error`）。
-        if let Some(error) = extract_message_error(&value) {
-            return Err(error.to_gateway_error());
-        }
-
-        Ok(AgentResponse {
-            text: extract_text(&value).trim().to_string(),
-            session_id: Some(session_id),
-        })
+        self.run_streaming(req, &mut |_| {}).await
     }
 
     async fn run_streaming(
@@ -646,7 +584,7 @@ impl AiBackend for OpencodeServerBackend {
         let mut cleanup_on_error = req.session_id.is_none();
         let mut session_id = match req.session_id.clone() {
             Some(id) => id,
-            None => self.create_session().await?,
+            None => self.create_session(&req).await?,
         };
 
         let response = match self.open_event_stream().await {
@@ -657,7 +595,7 @@ impl AiBackend for OpencodeServerBackend {
                 return Err(error);
             }
         };
-        match self.send_message_async(&session_id, &req).await {
+        match self.send_prompt(&session_id, &req).await {
             Ok(()) => self.remember_attachments(&session_id, &req),
             Err(GatewayError::AgentFailed {
                 code: Some(code), ..
@@ -665,9 +603,9 @@ impl AiBackend for OpencodeServerBackend {
                 let retry = self.rehydrate_request(&session_id, &req);
                 self.cleanup_session_if_owned(cleanup_on_error, &session_id)
                     .await;
-                session_id = self.create_session().await?;
+                session_id = self.create_session(&retry).await?;
                 cleanup_on_error = true;
-                if let Err(error) = self.send_message_async(&session_id, &retry).await {
+                if let Err(error) = self.send_prompt(&session_id, &retry).await {
                     self.cleanup_session_if_owned(true, &session_id).await;
                     return Err(error);
                 }
@@ -680,53 +618,41 @@ impl AiBackend for OpencodeServerBackend {
             }
         }
 
-        if let Err(err) = self
+        match self
             .consume_event_stream(response, &session_id, on_event)
             .await
         {
-            self.abort_session(&session_id).await;
-            self.cleanup_session_if_owned(cleanup_on_error, &session_id)
-                .await;
-            return Err(err);
-        }
-        let messages = match self.list_messages(&session_id, 8).await {
-            Ok(messages) => messages,
-            Err(error) => {
+            Ok(text) => Ok(AgentResponse {
+                text,
+                session_id: Some(session_id),
+            }),
+            Err(err) => {
+                self.abort_session(&session_id).await;
                 self.cleanup_session_if_owned(cleanup_on_error, &session_id)
                     .await;
-                return Err(error);
+                Err(err)
             }
-        };
-        Ok(AgentResponse {
-            text: extract_latest_assistant_text(&messages),
-            session_id: Some(session_id),
-        })
+        }
     }
 
+    /// V2 的壓縮是排進 session 佇列的一個項目，用 session 目前的模型執行：閒置時立即
+    /// 開始，事件為 execution.started → compaction.started／ended → execution.succeeded
+    /// （2026-11-24 實測），所以與回合一樣等事件結束。`model` 不再需要。
     async fn compact_session(
         &self,
         session_id: &str,
-        model: Option<&str>,
+        _model: Option<&str>,
     ) -> Result<AgentResponse, GatewayError> {
         self.health_check().await?;
-        let model = self.resolve_compact_model(session_id, model).await?;
-        let url = format!("{}/session/{session_id}/summarize", self.base_url);
-        let value = self
-            .send_json(
-                "summarize",
-                self.client.post(url).json(&SummarizeBody {
-                    provider_id: model.provider_id,
-                    model_id: model.model_id,
-                    auto: false,
-                }),
-            )
+        let response = self.open_event_stream().await?;
+        let url = format!("{}/api/session/{session_id}/compact", self.base_url);
+        self.send_json(
+            "compact",
+            self.client.post(url).json(&serde_json::json!({})),
+        )
+        .await?;
+        self.consume_event_stream(response, session_id, &mut |_| {})
             .await?;
-        if value.as_bool() != Some(true) {
-            return Err(GatewayError::AgentFailed {
-                code: None,
-                stderr: format!("opencode server summarize returned unexpected response: {value}"),
-            });
-        }
         eprintln!("session_compacted session_id={session_id}");
         Ok(AgentResponse {
             text: String::new(),
@@ -804,28 +730,7 @@ impl AiBackend for OpencodeServerBackend {
     }
 
     async fn run_ephemeral(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
-        self.health_check().await?;
-        let session_id = self.create_session().await?;
-        let result = self.send_message(&session_id, &req).await;
-        match result {
-            Ok(value) => {
-                self.remember_attachments(&session_id, &req);
-                let response = AgentResponse {
-                    text: extract_text(&value).trim().to_string(),
-                    session_id: None,
-                };
-                if let Err(error) = self.delete_session(&session_id).await {
-                    eprintln!("helper_session_delete_failed session_id={session_id}: {error}");
-                } else {
-                    eprintln!("helper_session_deleted session_id={session_id}");
-                }
-                Ok(response)
-            }
-            Err(error) => {
-                let _ = self.delete_session(&session_id).await;
-                Err(error)
-            }
-        }
+        self.run_streaming_ephemeral(req, &mut |_| {}).await
     }
 
     async fn run_streaming_ephemeral(
@@ -947,19 +852,6 @@ fn extract_session_id(value: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// 取出回應中最後一則 assistant message 的 `info.error`（見 opencode `/doc` 的
-/// `AssistantMessage.error`）。與事件路徑共用同一份解析。
-fn extract_message_error(value: &Value) -> Option<crate::upstream_error::UpstreamError> {
-    let containers: Vec<&Value> = match value.as_array() {
-        Some(messages) => messages.iter().rev().collect(),
-        None => vec![value],
-    };
-    containers.into_iter().find_map(|message| {
-        let info = message.get("info").unwrap_or(message);
-        crate::upstream_error::parse_error_field(info)
-    })
-}
-
 /// 一頁的 session 與下一頁的 cursor。任何一筆看不懂就整份失敗：這份清單決定哪些
 /// session 會被刪，寧可這一輪不清，也不要拿一份殘缺的清單去比對。
 fn parse_session_page(
@@ -1003,88 +895,15 @@ fn parse_session_page(
     Ok((sessions, next))
 }
 
-fn extract_text(value: &Value) -> String {
-    let mut out = Vec::new();
-    collect_text(value, &mut out);
-    out.join("\n")
-}
-
-fn extract_latest_assistant_text(value: &Value) -> String {
-    let Some(messages) = value.as_array() else {
-        return String::new();
-    };
-    messages
-        .iter()
-        .rev()
-        .find(|message| {
-            message
-                .get("info")
-                .and_then(|info| info.get("role"))
-                .and_then(Value::as_str)
-                == Some("assistant")
-        })
-        .map(extract_text)
-        .unwrap_or_default()
-        .trim()
-        .to_string()
-}
-
-fn extract_message_model(value: &Value) -> Option<ModelOverride> {
-    value.as_array()?.iter().rev().find_map(|message| {
-        let info = message.get("info")?;
-        let provider_id = info
-            .get("providerID")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())?;
-        let model_id = info
-            .get("modelID")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())?;
-        Some(ModelOverride {
-            provider_id: provider_id.to_string(),
-            model_id: model_id.to_string(),
-        })
-    })
-}
-
-fn collect_text(value: &Value, out: &mut Vec<String>) {
-    match value {
-        Value::Object(map) => {
-            let is_text_part = map
-                .get("type")
-                .and_then(Value::as_str)
-                .map(|kind| kind == "text" || kind == "assistant_text")
-                .unwrap_or(false);
-            if is_text_part {
-                if let Some(text) = map.get("text").and_then(Value::as_str) {
-                    if !text.trim().is_empty() {
-                        out.push(text.to_string());
-                    }
-                }
-            }
-            for child in map.values() {
-                collect_text(child, out);
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                collect_text(item, out);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn parse_model_override(model: &str) -> Option<ModelOverride> {
-    let (provider_id, model_id) = model.trim().split_once('/')?;
-    if provider_id.is_empty() || model_id.is_empty() {
+/// `provider/model` 轉成 V2 的 `Model.Ref`；寫法不對時不換模型，與 V1 相同。
+fn parse_model_ref(model: &str) -> Option<ModelRef> {
+    let (provider_id, id) = model.trim().split_once('/')?;
+    if provider_id.is_empty() || id.is_empty() {
         return None;
     }
-    Some(ModelOverride {
+    Some(ModelRef {
+        id: id.to_string(),
         provider_id: provider_id.to_string(),
-        model_id: model_id.to_string(),
     })
 }
 
@@ -1169,6 +988,7 @@ mod tests {
     use super::*;
     use crate::backend::AgentAttachment;
     use serde_json::json;
+    use std::collections::BTreeMap;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -1213,11 +1033,9 @@ mod tests {
         format!("http://{addr}")
     }
 
-    /// SSE server 把一個含中文 reasoning 的事件拆在多位元組字元中間分兩段送出，
-    /// 之後送 session.idle 正常收尾。
-    /// 送一則 session.error、緊接著送 session.idle——這是 2026-09-08 實測到的真實
-    /// 順序（abort 實驗中 session.error 之後確實還會收到 session.idle）。舊行為會
-    /// 讀到 idle 就回 Ok，把失敗的回合當成正常結束。
+    /// 送一則事件、緊接著送 execution.succeeded。V1 實測過錯誤之後還會收到 idle
+    /// （2026-09-08），讀到結束就回 Ok 會把失敗的回合當成正常結束；V2 換了事件名稱，
+    /// 失敗事件仍要先於後面的成功事件生效。
     async fn error_then_idle_sse_server(error_json: &'static str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1235,7 +1053,7 @@ mod tests {
                 .unwrap();
             socket
                 .write_all(
-                    b"data: {\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"ses_1\"}}\n\n",
+                    b"data: {\"type\":\"session.execution.succeeded\",\"data\":{\"sessionID\":\"ses_1\"}}\n\n",
                 )
                 .await
                 .unwrap();
@@ -1251,6 +1069,8 @@ mod tests {
         }
     }
 
+    /// SSE server 把一個含中文 reasoning 的事件拆在多位元組字元中間分兩段送出，
+    /// 之後送 execution.succeeded 正常收尾。
     async fn utf8_splitting_sse_server() -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1259,12 +1079,11 @@ mod tests {
             let mut buf = [0; 1024];
             let _ = socket.read(&mut buf).await.unwrap();
             let reasoning = concat!(
-                "data: {\"type\":\"message.part.updated\",\"properties\":{",
-                "\"delta\":\"悟空登場\",\"part\":{\"id\":\"part_1\",\"sessionID\":\"ses_1\",",
-                "\"messageID\":\"msg_1\",\"type\":\"reasoning\",\"text\":\"悟空登場\"}}}\n\n"
+                "data: {\"type\":\"session.reasoning.delta\",\"data\":{",
+                "\"sessionID\":\"ses_1\",\"assistantMessageID\":\"msg_1\",\"delta\":\"悟空登場\"}}\n\n"
             );
             let idle =
-                "data: {\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"ses_1\"}}\n\n";
+                "data: {\"type\":\"session.execution.succeeded\",\"data\":{\"sessionID\":\"ses_1\"}}\n\n";
             let bytes = reasoning.as_bytes();
             let split = reasoning.find('悟').unwrap() + 1;
             socket
@@ -1277,139 +1096,6 @@ mod tests {
             socket.write_all(&bytes[split..]).await.unwrap();
             socket.write_all(idle.as_bytes()).await.unwrap();
             socket.flush().await.unwrap();
-        });
-        format!("http://{addr}")
-    }
-
-    /// 模擬完整 opencode server：記錄收到的 request path；`/event` 回完 headers
-    /// 立刻關閉連線，重現 stream 早夭。
-    async fn scripted_opencode_server(hits: std::sync::Arc<Mutex<Vec<String>>>) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            loop {
-                let Ok((mut socket, _)) = listener.accept().await else {
-                    break;
-                };
-                let hits = hits.clone();
-                tokio::spawn(async move {
-                    let mut buf = Vec::new();
-                    let mut tmp = [0u8; 1024];
-                    let header_end = loop {
-                        let n = match socket.read(&mut tmp).await {
-                            Ok(0) | Err(_) => return,
-                            Ok(n) => n,
-                        };
-                        buf.extend_from_slice(&tmp[..n]);
-                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                            break pos + 4;
-                        }
-                    };
-                    let head = String::from_utf8_lossy(&buf[..header_end]).into_owned();
-                    let content_length = head
-                        .lines()
-                        .find_map(|line| {
-                            let (name, value) = line.split_once(':')?;
-                            if name.eq_ignore_ascii_case("content-length") {
-                                value.trim().parse::<usize>().ok()
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or(0);
-                    while buf.len() < header_end + content_length {
-                        let n = match socket.read(&mut tmp).await {
-                            Ok(0) | Err(_) => break,
-                            Ok(n) => n,
-                        };
-                        buf.extend_from_slice(&tmp[..n]);
-                    }
-                    let path = head
-                        .lines()
-                        .next()
-                        .and_then(|line| line.split_whitespace().nth(1))
-                        .unwrap_or_default()
-                        .to_string();
-                    hits.lock().unwrap().push(path.clone());
-                    fn json_response(body: &str) -> String {
-                        format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            body.len(),
-                            body
-                        )
-                    }
-                    let response = match path.as_str() {
-                        "/api/info" => json_response("{\"version\":\"2.3.2\"}"),
-                        "/api/session" => json_response("{\"data\":{\"id\":\"ses_ab\"}}"),
-                        "/session/ses_ab/prompt_async" => json_response("{}"),
-                        "/session/ses_ab/abort" => json_response("true"),
-                        "/event" => {
-                            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
-                                .to_string()
-                        }
-                        _ => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                            .to_string(),
-                    };
-                    let _ = socket.write_all(response.as_bytes()).await;
-                });
-            }
-        });
-        format!("http://{addr}")
-    }
-
-    async fn session_control_server(hits: std::sync::Arc<Mutex<Vec<String>>>) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            loop {
-                let Ok((mut socket, _)) = listener.accept().await else {
-                    break;
-                };
-                let hits = hits.clone();
-                tokio::spawn(async move {
-                    let mut buf = Vec::new();
-                    let mut tmp = [0u8; 1024];
-                    let header_end = loop {
-                        let n = match socket.read(&mut tmp).await {
-                            Ok(0) | Err(_) => return,
-                            Ok(n) => n,
-                        };
-                        buf.extend_from_slice(&tmp[..n]);
-                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                            break pos + 4;
-                        }
-                    };
-                    let head = String::from_utf8_lossy(&buf[..header_end]);
-                    let method = head.split_whitespace().next().unwrap_or_default();
-                    let path = head.split_whitespace().nth(1).unwrap_or_default();
-                    let request = format!("{method} {path}");
-                    hits.lock().unwrap().push(request.clone());
-                    let body = match request.as_str() {
-                        "GET /api/info" => "{\"version\":\"2.3.2\"}".to_string(),
-                        "POST /api/session" => "{\"data\":{\"id\":\"ses_ephemeral\"}}".to_string(),
-                        "POST /session/ses_ephemeral/message" => {
-                            "{\"parts\":[{\"type\":\"text\",\"text\":\"helper\"}]}".to_string()
-                        }
-                        "DELETE /api/session/ses_ephemeral" => String::new(),
-                        "GET /session/ses_1/message?limit=1" => {
-                            "[{\"info\":{\"role\":\"assistant\",\"providerID\":\"opencode\",\"modelID\":\"deepseek\"},\"parts\":[{\"type\":\"text\",\"text\":\"latest\"}]}]".to_string()
-                        }
-                        "POST /session/ses_1/summarize" => "true".to_string(),
-                        "DELETE /api/session/ses_1" => String::new(),
-                        _ => {
-                            let response =
-                                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                            let _ = socket.write_all(response.as_bytes()).await;
-                            return;
-                        }
-                    };
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(), body
-                    );
-                    let _ = socket.write_all(response.as_bytes()).await;
-                });
-            }
         });
         format!("http://{addr}")
     }
@@ -1442,9 +1128,9 @@ mod tests {
             let mut buf = [0; 1024];
             let _ = socket.read(&mut buf).await.unwrap();
             let event = concat!(
-                "data: {\"payload\":{\"type\":\"permission.asked\",\"properties\":{",
-                "\"id\":\"per_1\",\"sessionID\":\"ses_1\",\"permission\":\"external_directory\",",
-                "\"patterns\":[\"/tmp/*\"]}}}\n\n"
+                "data: {\"type\":\"permission.asked\",\"data\":{",
+                "\"id\":\"per_1\",\"sessionID\":\"ses_1\",\"action\":\"external_directory\",",
+                "\"resources\":[\"/tmp/*\"]}}\n\n"
             );
             socket
                 .write_all(
@@ -1501,7 +1187,7 @@ mod tests {
     #[tokio::test]
     async fn upstream_error_event_fails_the_turn_even_when_idle_follows() {
         let url = error_then_idle_sse_server(
-            r#"{"type":"session.error","properties":{"sessionID":"ses_1","error":{"name":"APIError","data":{"message":"model reached end of life","statusCode":410}}}}"#,
+            r#"{"type":"session.execution.failed","data":{"sessionID":"ses_1","error":{"type":"provider.http","message":"model reached end of life","status":410}}}"#,
         )
         .await;
         let backend = OpencodeServerBackend::from_env(url, None);
@@ -1522,7 +1208,7 @@ mod tests {
     #[tokio::test]
     async fn aborted_turn_does_not_report_success() {
         let url = error_then_idle_sse_server(
-            r#"{"type":"session.error","properties":{"sessionID":"ses_1","error":{"name":"MessageAbortedError","data":{"message":"Aborted"}}}}"#,
+            r#"{"type":"session.execution.interrupted","data":{"sessionID":"ses_1","reason":"user"}}"#,
         )
         .await;
         let backend = OpencodeServerBackend::from_env(url, None);
@@ -1541,7 +1227,7 @@ mod tests {
     #[tokio::test]
     async fn plain_idle_still_succeeds() {
         let url = error_then_idle_sse_server(
-            r#"{"type":"session.status","properties":{"sessionID":"ses_1","status":{"type":"busy"}}}"#,
+            r#"{"type":"session.step.started","data":{"sessionID":"ses_1","assistantMessageID":"msg_1"}}"#,
         )
         .await;
         let backend = OpencodeServerBackend::from_env(url, None);
@@ -1572,61 +1258,234 @@ mod tests {
         assert!(!reasoning.contains('\u{FFFD}'), "{reasoning:?}");
     }
 
-    #[tokio::test]
-    async fn run_streaming_aborts_session_when_event_stream_dies() {
-        let hits = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
-        let backend =
-            OpencodeServerBackend::from_env(scripted_opencode_server(hits.clone()).await, None);
-        let req = AgentRequest {
-            prompt: "hi".to_string(),
+    fn plain_request(prompt: &str) -> AgentRequest {
+        AgentRequest {
+            prompt: prompt.to_string(),
             session_id: None,
             thinking: false,
             model: None,
             agent: None,
             tool_overrides: BTreeMap::new(),
             attachments: Vec::new(),
-        };
+        }
+    }
 
-        let err = backend.run_streaming(req, &mut |_| {}).await.unwrap_err();
+    // issue-0044 Task 2.2：以真實樣本重播一個回合。期望值取自樣本：一次 shell 呼叫後回覆 DONE。
+    #[tokio::test]
+    async fn run_streaming_replays_a_real_v2_turn() {
+        let fake = fake_v2::FakeV2::start().await;
+        fake.script_events(fake_v2::fixture_events("server-text-tool", "ses_fake1"));
+        let mut events = Vec::new();
 
-        let stderr = agent_failed_stderr(err);
-        assert!(
-            stderr.contains("event stream ended before session became idle"),
-            "{stderr}"
+        let response = v2_backend(&fake)
+            .run_streaming(plain_request("hi"), &mut |event| events.push(event))
+            .await
+            .unwrap();
+
+        assert_eq!(response.text, "DONE");
+        assert_eq!(response.session_id.as_deref(), Some("ses_fake1"));
+        assert!(events.contains(&StreamEvent::ToolUse(
+            "shell\n  command: echo probe".to_string()
+        )));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Text(_))));
+        assert_eq!(
+            fake.requests(),
+            [
+                "GET /api/info",
+                "POST /api/session",
+                "GET /api/event",
+                "POST /api/session/ses_fake1/prompt",
+            ]
         );
-        let seen = hits.lock().unwrap().clone();
-        assert!(
-            seen.iter().any(|path| path == "/session/ses_ab/abort"),
-            "expected abort call, saw {seen:?}"
-        );
-        assert!(
-            seen.iter().any(|path| path == "/api/session/ses_ab"),
-            "expected ephemeral session cleanup, saw {seen:?}"
+        assert_eq!(
+            fake.body_of("POST /api/session/ses_fake1/prompt"),
+            Some(json!({ "text": "hi" }))
         );
     }
 
     #[tokio::test]
-    async fn native_session_controls_use_summarize_and_delete_endpoints() {
-        let hits = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
-        let backend =
-            OpencodeServerBackend::from_env(session_control_server(hits.clone()).await, None);
+    async fn run_waits_for_the_events_too() {
+        let fake = fake_v2::FakeV2::start().await;
+        fake.script_events(fake_v2::fixture_events("server-text-tool", "ses_fake1"));
+        let response = v2_backend(&fake).run(plain_request("hi")).await.unwrap();
+        assert_eq!(response.text, "DONE");
+    }
 
-        let compacted = backend
-            .compact_session("ses_1", Some("opencode/deepseek"))
+    #[tokio::test]
+    async fn agent_and_model_are_selected_before_the_prompt() {
+        let fake = fake_v2::FakeV2::start().await;
+        fake.add_session("ses_1", 1, 1, None);
+        fake.script_events(fake_v2::fixture_events("server-text-tool", "ses_1"));
+        let mut req = plain_request("plan this");
+        req.session_id = Some("ses_1".to_string());
+        req.agent = Some("plan".to_string());
+        req.model = Some("opencode/big-pickle".to_string());
+
+        v2_backend(&fake)
+            .run_streaming(req, &mut |_| {})
             .await
             .unwrap();
+
+        let requests = fake.requests();
+        let position = |request: &str| requests.iter().position(|seen| seen == request).unwrap();
+        assert!(
+            position("POST /api/session/ses_1/agent") < position("POST /api/session/ses_1/prompt")
+        );
+        assert!(
+            position("POST /api/session/ses_1/model") < position("POST /api/session/ses_1/prompt")
+        );
+        assert_eq!(
+            fake.body_of("POST /api/session/ses_1/agent"),
+            Some(json!({ "agent": "plan" }))
+        );
+        assert_eq!(
+            fake.body_of("POST /api/session/ses_1/model"),
+            Some(json!({ "model": { "id": "big-pickle", "providerID": "opencode" } }))
+        );
+    }
+
+    #[tokio::test]
+    async fn attachments_are_sent_as_file_uris_in_the_prompt() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("secret.txt");
+        std::fs::write(&path, b"The secret word is PINEAPPLE42.\n").unwrap();
+        let fake = fake_v2::FakeV2::start().await;
+        fake.script_events(fake_v2::fixture_events("server-attach-file", "ses_fake1"));
+        let mut backend = v2_backend(&fake);
+        backend.workspace = Some(workspace.path().to_path_buf());
+        backend.file_mode = FileTransportMode::Shared;
+        backend.server_workspace = Some(PathBuf::from("/p/workspace"));
+
+        let response = backend
+            .run_streaming(
+                request_with_attachment(path, "secret.txt", "text/plain"),
+                &mut |_| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.text, "PINEAPPLE42");
+        assert_eq!(
+            fake.body_of("POST /api/session/ses_fake1/prompt"),
+            Some(json!({
+                "text": "describe",
+                "files": [{ "uri": "file:///p/workspace/secret.txt", "name": "secret.txt" }]
+            }))
+        );
+    }
+
+    // 規劃與路由用 `question: false` 關掉提問；V2 只能在建立 session 時以權限規則套用。
+    #[tokio::test]
+    async fn tool_overrides_become_permissions_of_the_ephemeral_session() {
+        let fake = fake_v2::FakeV2::start().await;
+        fake.script_events(fake_v2::fixture_events("server-text-tool", "ses_fake1"));
+        let mut req = plain_request("route");
+        req.tool_overrides.insert("question".to_string(), false);
+
+        let response = v2_backend(&fake).run_ephemeral(req).await.unwrap();
+
+        assert_eq!(response.text, "DONE");
+        assert_eq!(response.session_id, None);
+        assert_eq!(
+            fake.body_of("POST /api/session"),
+            Some(json!({
+                "title": "Wukong",
+                "permissions": [{ "action": "question", "resource": "*", "effect": "deny" }]
+            }))
+        );
+        assert!(
+            fake.session_ids().is_empty(),
+            "ephemeral session was not deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_session_is_replaced_by_a_new_one() {
+        let fake = fake_v2::FakeV2::start().await;
+        fake.script_events(fake_v2::fixture_events("server-text-tool", "ses_fake1"));
+        let mut req = plain_request("hi");
+        req.session_id = Some("ses_gone".to_string());
+
+        let response = v2_backend(&fake)
+            .run_streaming(req, &mut |_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(response.session_id.as_deref(), Some("ses_fake1"));
+        let requests = fake.requests();
+        assert!(requests.contains(&"POST /api/session/ses_gone/prompt".to_string()));
+        assert!(requests.contains(&"POST /api/session/ses_fake1/prompt".to_string()));
+    }
+
+    #[tokio::test]
+    async fn run_streaming_interrupts_the_session_when_the_event_stream_dies() {
+        let fake = fake_v2::FakeV2::start().await;
+        let stderr = agent_failed_stderr(
+            v2_backend(&fake)
+                .run_streaming(plain_request("hi"), &mut |_| {})
+                .await
+                .unwrap_err(),
+        );
+        assert!(
+            stderr.contains("event stream ended before session became idle"),
+            "{stderr}"
+        );
+        let requests = fake.requests();
+        assert!(
+            requests.contains(&"POST /api/session/ses_fake1/interrupt".to_string()),
+            "{requests:?}"
+        );
+        assert!(
+            fake.session_ids().is_empty(),
+            "owned session was not cleaned up"
+        );
+    }
+
+    // issue-0044 SCN-008（壓縮）：compact 排進佇列後等到執行結束；樣本為真實的壓縮過程。
+    #[tokio::test]
+    async fn compaction_waits_for_the_compaction_to_finish() {
+        let fake = fake_v2::FakeV2::start().await;
+        fake.add_session("ses_1", 1, 1, None);
+        let all = fake_v2::fixture_events("server-compact", "ses_1");
+        // 樣本前段是壓縮前的那一次回覆；只重播 compact 之後的事件。
+        let start = all
+            .iter()
+            .position(|event| {
+                let event: Value = serde_json::from_str(event).unwrap();
+                event["type"] == "session.inbox.enqueued"
+                    && event["data"]["item"]["type"] == "compaction"
+            })
+            .unwrap();
+        fake.script_events(all[start..].to_vec());
+
+        let compacted = v2_backend(&fake)
+            .compact_session("ses_1", Some("opencode/big-pickle"))
+            .await
+            .unwrap();
+
         assert_eq!(compacted.text, "");
         assert_eq!(compacted.session_id.as_deref(), Some("ses_1"));
-        backend.delete_session("ses_1").await.unwrap();
+        assert_eq!(
+            fake.body_of("POST /api/session/ses_1/compact"),
+            Some(json!({}))
+        );
+    }
 
-        let seen = hits.lock().unwrap().clone();
-        assert!(seen.iter().any(|request| request == "GET /api/info"));
-        assert!(seen
-            .iter()
-            .any(|request| request == "POST /session/ses_1/summarize"));
-        assert!(seen
-            .iter()
-            .any(|request| request == "DELETE /api/session/ses_1"));
+    #[tokio::test]
+    async fn a_failed_compaction_is_an_error() {
+        let fake = fake_v2::FakeV2::start().await;
+        fake.add_session("ses_1", 1, 1, None);
+        fake.script_events(vec![
+            r#"{"type":"session.compaction.failed","data":{"sessionID":"ses_1","reason":"manual","error":{"type":"provider.transport","message":"offline"}}}"#.to_string(),
+            r#"{"type":"session.execution.succeeded","data":{"sessionID":"ses_1"}}"#.to_string(),
+        ]);
+        let error = v2_backend(&fake)
+            .compact_session("ses_1", None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("offline"), "{error}");
     }
 
     /// Answers every request with the same status and body, recording what was asked.
@@ -1822,7 +1681,7 @@ mod tests {
     async fn sessions_are_created_and_deleted_through_the_api_routes() {
         let fake = fake_v2::FakeV2::start().await;
         let backend = v2_backend(&fake);
-        let id = backend.create_session().await.unwrap();
+        let id = backend.create_session(&plain_request("x")).await.unwrap();
         assert_eq!(fake.session_ids(), std::slice::from_ref(&id));
         backend.delete_session(&id).await.unwrap();
         assert!(fake.session_ids().is_empty());
@@ -1890,51 +1749,6 @@ mod tests {
         assert!(stderr.contains("err_717b5ac3"), "{stderr}");
     }
 
-    #[tokio::test]
-    async fn list_messages_requests_a_bounded_latest_page() {
-        let hits = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
-        let backend =
-            OpencodeServerBackend::from_env(session_control_server(hits.clone()).await, None);
-
-        let messages = backend.list_messages("ses_1", 1).await.unwrap();
-        assert_eq!(extract_latest_assistant_text(&messages), "latest");
-        assert!(hits
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|request| request == "GET /session/ses_1/message?limit=1"));
-    }
-
-    #[tokio::test]
-    async fn ephemeral_server_request_deletes_created_session() {
-        let hits = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
-        let backend =
-            OpencodeServerBackend::from_env(session_control_server(hits.clone()).await, None);
-        let response = backend
-            .run_ephemeral(AgentRequest {
-                prompt: "route".to_string(),
-                session_id: None,
-                thinking: false,
-                model: None,
-                agent: None,
-                tool_overrides: BTreeMap::new(),
-                attachments: Vec::new(),
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(response.text, "helper");
-        assert_eq!(response.session_id, None);
-        let seen = hits.lock().unwrap().clone();
-        assert!(seen.iter().any(|request| request == "POST /api/session"));
-        assert!(seen
-            .iter()
-            .any(|request| request == "POST /session/ses_ephemeral/message"));
-        assert!(seen
-            .iter()
-            .any(|request| request == "DELETE /api/session/ses_ephemeral"));
-    }
-
     fn request_with_attachment(path: PathBuf, name: &str, mime: &str) -> AgentRequest {
         AgentRequest {
             prompt: "describe".to_string(),
@@ -1952,7 +1766,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn server_backend_builds_shared_file_parts() {
+    async fn server_backend_builds_shared_file_uris() {
         let workspace = tempfile::tempdir().unwrap();
         let upload_dir = workspace.path().join(".wukong/uploads/user/42");
         std::fs::create_dir_all(&upload_dir).unwrap();
@@ -1965,8 +1779,8 @@ mod tests {
         backend.file_mode = FileTransportMode::Shared;
         backend.server_workspace = Some(PathBuf::from("/workspace"));
 
-        let parts = backend
-            .build_message_parts(&request_with_attachment(
+        let files = backend
+            .build_files(&request_with_attachment(
                 path,
                 "../quarter report.pdf",
                 "application/pdf",
@@ -1975,21 +1789,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            serde_json::to_value(parts).unwrap(),
-            json!([
-                { "type": "text", "text": "describe" },
-                {
-                    "type": "file",
-                    "mime": "application/pdf",
-                    "url": "file:///workspace/.wukong/uploads/user/42/quarter%20report.pdf",
-                    "filename": "quarter report.pdf"
-                }
-            ])
+            files,
+            [FileAttachment {
+                uri: "file:///workspace/.wukong/uploads/user/42/quarter%20report.pdf".to_string(),
+                name: "quarter report.pdf".to_string(),
+            }]
         );
     }
 
     #[tokio::test]
-    async fn server_backend_builds_inline_file_parts() {
+    async fn server_backend_builds_inline_data_uris() {
         let workspace = tempfile::tempdir().unwrap();
         let path = workspace.path().join("data.csv");
         std::fs::write(&path, b"a,b\n1,2\n").unwrap();
@@ -1999,22 +1808,17 @@ mod tests {
         );
         backend.file_mode = FileTransportMode::Inline;
 
-        let parts = backend
-            .build_message_parts(&request_with_attachment(path, "data.csv", "text/csv"))
+        let files = backend
+            .build_files(&request_with_attachment(path, "data.csv", "text/csv"))
             .await
             .unwrap();
 
         assert_eq!(
-            serde_json::to_value(parts).unwrap(),
-            json!([
-                { "type": "text", "text": "describe" },
-                {
-                    "type": "file",
-                    "mime": "text/plain",
-                    "url": "data:text/plain;base64,YSxiCjEsMgo=",
-                    "filename": "data.csv"
-                }
-            ])
+            files,
+            [FileAttachment {
+                uri: "data:text/plain;base64,YSxiCjEsMgo=".to_string(),
+                name: "data.csv".to_string(),
+            }]
         );
     }
 
@@ -2028,7 +1832,7 @@ mod tests {
         );
 
         let err = backend
-            .build_message_parts(&request_with_attachment(
+            .build_files(&request_with_attachment(
                 outside.path().to_path_buf(),
                 "outside.txt",
                 "text/plain",
@@ -2137,56 +1941,6 @@ mod tests {
     }
 
     #[test]
-    fn extracts_latest_assistant_text_from_message_list() {
-        let value = json!([
-            {
-                "info": { "id": "msg_user", "role": "user", "sessionID": "ses_1" },
-                "parts": [{ "type": "text", "text": "question" }]
-            },
-            {
-                "info": { "id": "msg_old", "role": "assistant", "sessionID": "ses_1" },
-                "parts": [{ "type": "text", "text": "old" }]
-            },
-            {
-                "info": { "id": "msg_new", "role": "assistant", "sessionID": "ses_1" },
-                "parts": [
-                    { "type": "reasoning", "text": "hidden" },
-                    { "type": "text", "text": "hello" },
-                    { "type": "text", "text": "world" }
-                ]
-            }
-        ]);
-
-        assert_eq!(extract_latest_assistant_text(&value), "hello\nworld");
-    }
-
-    #[test]
-    fn latest_assistant_text_is_empty_when_absent() {
-        let value = json!([
-            {
-                "info": { "id": "msg_user", "role": "user", "sessionID": "ses_1" },
-                "parts": [{ "type": "text", "text": "question" }]
-            }
-        ]);
-
-        assert_eq!(extract_latest_assistant_text(&value), "");
-    }
-
-    #[test]
-    fn extracts_text_from_nested_message_parts() {
-        let value = json!({
-            "info": { "id": "msg_1" },
-            "parts": [
-                { "type": "reasoning", "text": "hidden" },
-                { "type": "text", "text": "hello" },
-                { "type": "text", "text": "world" }
-            ]
-        });
-
-        assert_eq!(extract_text(&value), "hello\nworld");
-    }
-
-    #[test]
     fn extracts_session_id_from_session_response() {
         let value = json!({ "data": { "id": "ses_123", "title": "New Session" } });
         assert_eq!(extract_session_id(&value).as_deref(), Some("ses_123"));
@@ -2201,31 +1955,15 @@ mod tests {
     }
 
     #[test]
-    fn parses_provider_model_override_for_server_api() {
-        let model = parse_model_override("opencode/deepseek-v4-flash-free").unwrap();
-
-        assert_eq!(model.provider_id, "opencode");
-        assert_eq!(model.model_id, "deepseek-v4-flash-free");
-    }
-
-    #[test]
-    fn extracts_provider_and_model_from_latest_message() {
-        let value = json!([
-            {
-                "info": {
-                    "providerID": "opencode",
-                    "modelID": "deepseek-v4-flash-free"
-                },
-                "parts": []
-            }
-        ]);
-        let model = extract_message_model(&value).unwrap();
-        assert_eq!(model.provider_id, "opencode");
-        assert_eq!(model.model_id, "deepseek-v4-flash-free");
-    }
-
-    #[test]
-    fn missing_message_model_returns_none() {
-        assert!(extract_message_model(&json!([])).is_none());
+    fn parses_provider_model_into_a_v2_model_ref() {
+        assert_eq!(
+            parse_model_ref("opencode/deepseek-v4-flash-free"),
+            Some(ModelRef {
+                id: "deepseek-v4-flash-free".to_string(),
+                provider_id: "opencode".to_string(),
+            })
+        );
+        assert_eq!(parse_model_ref("no-provider"), None);
+        assert_eq!(parse_model_ref("/model"), None);
     }
 }

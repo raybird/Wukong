@@ -78,6 +78,25 @@ pub fn parse_error_field(container: &serde_json::Value) -> Option<UpstreamError>
     })
 }
 
+/// OpenCode V2 的錯誤物件 `{type, message, status?, retryAfterMs?}`（openapi 的
+/// `Session.StructuredError`）。`status` 是整數的 HTTP 狀態碼，與 V1 的 `statusCode` 同義。
+pub fn parse_v2_error(error: &serde_json::Value) -> Option<UpstreamError> {
+    use serde_json::Value;
+    let name = error.get("type")?.as_str()?.to_string();
+    Some(UpstreamError {
+        name,
+        status_code: error
+            .get("status")
+            .and_then(Value::as_u64)
+            .and_then(|code| u16::try_from(code).ok()),
+        message: error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
 /// 上游錯誤的分類。決定告警怎麼說、以及是否值得重試。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpstreamFailure {
@@ -119,7 +138,8 @@ pub fn classify(name: &str, status_code: Option<u16>) -> UpstreamFailure {
         _ => {}
     }
     match name {
-        "MessageAbortedError" => UpstreamFailure::Aborted,
+        // V1 的錯誤名與 V2 的錯誤類型（`step.failed` 的 `error.type`、execution 中止）。
+        "MessageAbortedError" | "aborted" => UpstreamFailure::Aborted,
         "ProviderModelNotFoundError" => UpstreamFailure::ModelEol,
         _ => UpstreamFailure::Other,
     }

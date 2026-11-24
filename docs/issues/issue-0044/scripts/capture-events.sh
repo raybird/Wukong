@@ -5,6 +5,7 @@
 #   WORK_DIR：空目錄，當容器的 HOME 與 workspace（全新資料，不含任何正式對話）
 #   OUT_DIR：輸出目錄，每個情境一個 .ndjson（每行一個事件的 JSON）
 # 只送固定的合成提示詞給預設免費模型；retry 情境在 --network none 的另一個容器取。
+# 環境變數 SCENARIOS 有值時，只在有網路的容器跑列出的情境（Task 2.2 的附件、agent、壓縮探測）。
 set -uo pipefail
 v2=$1 work=$2 out=$3
 image=ghcr.io/raybird/wukong:v0.25.1
@@ -24,12 +25,17 @@ start() { # start NAME none|bridge
 scenario() { # scenario BOX NAME：在容器內跑 capture-scenario.py 的同名情境
   docker exec -e PW=$pw "$tag-$1" python3 -I /scripts/capture-scenario.py "$2" > "$out/server-$2.ndjson" 2> "$work/$2.err"
   echo "-- $2: rc=$? events=$(grep -c . "$out/server-$2.ndjson") $(tail -1 "$work/$2.err")"
+  grep -v '^PASS\|^FAIL' "$work/$2.err" | head -5
 }
 
 start net bridge
-for s in text-tool permission form interrupt no-route; do scenario net "$s"; done
-start off none
-scenario off retry
+if [ -n "${SCENARIOS:-}" ]; then
+  for s in $SCENARIOS; do scenario net "$s"; done
+else
+  for s in text-tool permission form interrupt no-route; do scenario net "$s"; done
+  start off none
+  scenario off retry
+fi
 echo "== event types"
 for f in "$out"/server-*.ndjson; do
   printf '%s: ' "$(basename "$f")"
