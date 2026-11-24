@@ -48,9 +48,9 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 相依：無
 - 驗收編號：SCN-001
 - 完成判準：README「完成證據」全部成立：memory.db 的 agent_session_state 指向的每個 session 在 V2 的 `GET /api/session/{id}` 都查得到，`/context` 含遷移前的訊息；對其中一個送 prompt 後 session ID 不變、訊息數增加；不存在的 ID 回查不到（負向對照）
-- 驗證：契約探測（真實 V2 對副本的最小請求）。送 prompt 的那一步需要模型，用預設免費模型；額度用完時記為失敗樣本，改天重試，不以列得到 session 代替接續
-- 狀態：📝 待實作
-- 證據：
+- 驗證：契約探測（真實 V2 對副本的最小請求）。2026-11-24 改為全程 `--network none`：接續與否看 prompt 有沒有進同一個 session、context 有沒有保留原本的訊息，不需要模型回答，對話內容也不必送到外部模型
+- 狀態：✅ 已完成
+- 證據：2026-11-24 [probe-session.md](probe-session.md)，[scripts/probe-session.sh](scripts/probe-session.sh)。4 個 scope 的 session 在 V2 都回 200，`/context` 訊息數與 V1 最後一次壓縮後的訊息數相同（27、66、2、24）；不存在的 ID 回 404；對其中一個送 prompt，回應的 sessionID 等於原 session，context 從 27 則變 29 則且原本的 27 則原樣保留。附帶觀察：沒有網路時 session 60 秒後仍在執行、沒有錯誤（README TBD-3）
 
 ### Task 1.2 — V2 CLI 路徑契約
 - 產出與範圍：probe-cli.md：`opencode run --standalone --format json` 的事件形狀、session ID 取得方式、`--print-logs` 的上游錯誤輸出、結束後有無殘留程序；不加 `--standalone` 時的程序對照；帶 `--dangerously-skip-permissions` 時的行為（解決 TBD-1）

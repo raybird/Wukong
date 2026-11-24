@@ -168,7 +168,7 @@ Feature: Wukong 在 OpenCode V2 上維持 V1 時的行為
 ```
 
 ## Gherkin 核准紀錄
-- **核准 commit**: `待提交`
+- **核准 commit**: abd4b89
 - **核准來源**: 使用者 2026-11-24 對話決定「如果 #30 重新拿出來改成 v2 版本，然後 Wukong 指專注在 harness 做不到的就好，其他回規給 opencode v2 處理」，接受拆成兩個 issue 的建議後要求「先在 github 把這兩個 issue 開起來」，再要求「那是否可以開始 #44」→ 範圍與 SCN-002～SCN-010（行為與 V1 相同）。同日逐題確認：Q1「只支援 V2 (Recommended)」→ 概述、關鍵差異；Q2「固定 2.3.2 (Recommended)」→ SCN-012；Q3「自動備份並支援 rollback (Recommended)」→ SCN-013～SCN-015；Q4「不算，合併即結案」→ 概述（正式換版不在範圍）。同日總結確認推導行為 (a)～(f) 選「照建議全部接受」：(a) 回合結束不留 V2 背景 service → SCN-002、SCN-010；(b) PATH 上是 V1 時明確報錯 → SCN-011；(c) 升級前停服務備份、啟用失敗與 rollback 連 opencode.db 還原、接受備份後對話遺失 → SCN-013～SCN-015；(d) binary 模式 installer 不管 opencode、docs 說明自行升級與備份 → 實作計畫 Phase 5；(e) 首要驗證為 V1 session 能否接續，不能就停下來改規格 → SCN-001 與風險；(f) compose healthcheck 帶認證打 /api/info → SCN-003
 
 全部 Scenario 於 2026-11-24 核准。
@@ -198,6 +198,7 @@ Feature: Wukong 在 OpenCode V2 上維持 V1 時的行為
 |------|------|------|------|
 | TBD-1 | 使用者自訂的 WUKONG_AGENT_CMD 若仍帶 V1 才有的旗標（例如 --dangerously-skip-permissions），V2 的 opencode run 會拒絕還是忽略；installer 現有的 .env 遷移只改寫原封未動的舊範本那一行 | 待確認 | 未確認時，自訂命令的使用者升級後回合可能一律失敗；關聯 SCN-010、Phase 1 |
 | TBD-2 | 常駐 server 模式的密碼怎麼提供：V2 沒設密碼時會自己產生隨機密碼，入口無從得知；要沿用 WUKONG_AGENT_SERVER_PASSWORD 由使用者在 .env 設定，還是由 entrypoint 產生並存在共用 volume | 待確認 | 決定前不實作 Phase 3 的 server 密碼接線；影響 server 模式使用者升級時要不要改 .env；關聯 SCN-003、SCN-004 |
+| TBD-3 | 上游連不到時 V2 會不會回錯誤：2026-11-24 Task 1.1 在沒有網路的容器送 prompt，日誌只有一筆 Failed to fetch models.dev，60 秒後 session 仍在執行、沒有任何錯誤事件 | 待確認 | 若 V2 一直等而不回錯誤，上游故障會變成等到 agent timeout；關聯 SCN-007、Task 1.3、Task 2.3 |
 
 ## Timeline
 
