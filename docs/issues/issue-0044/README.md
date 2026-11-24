@@ -76,10 +76,18 @@ Feature: Wukong 在 OpenCode V2 上維持 V1 時的行為
 
   @SCN-003
   Scenario: 常駐 server 模式
-    Given opencode-server 容器以密碼啟動，入口設定 WUKONG_AGENT_SERVER_URL 與同一組密碼
+    Given .env 設定了 WUKONG_AGENT_SERVER_URL 與 WUKONG_AGENT_SERVER_PASSWORD，compose 把同一組密碼交給 opencode-server 與三個入口
     When 入口啟動並執行回合
     Then 入口的就緒檢查通過，回合成功
     And opencode-server 的 compose healthcheck 帶認證查詢 /api/info，server 實際不可用時判為 unhealthy
+
+  @SCN-017
+  Scenario: server 模式沒有設定密碼
+    Given 啟用 server 模式，但 .env 沒有 WUKONG_AGENT_SERVER_PASSWORD
+    When 以 installer 升級
+    Then installer 先備份 .env，再產生一組密碼寫入 WUKONG_AGENT_SERVER_PASSWORD，並在輸出說明
+    When 不經 installer、直接以沒有密碼的設定啟動
+    Then 入口立即報錯並指出要設定 WUKONG_AGENT_SERVER_PASSWORD，不等到 agent timeout
 
   @SCN-004
   Scenario: server 密碼錯誤
@@ -108,9 +116,16 @@ Feature: Wukong 在 OpenCode V2 上維持 V1 時的行為
     Then Wukong 回報 <分類>，不變成逾時，也不把 exit 0 或降級文字當成成功
 
     Examples:
-      | 錯誤               | 分類                   |
-      | 額度用完或限流     | 上游模型錯誤（上游限流） |
-      | 模型已下架         | 模型下架               |
+      | 錯誤                              | 分類                         |
+      | 額度用完或限流                    | 上游模型錯誤（上游限流）       |
+      | 模型已下架                        | 上游模型錯誤（模型已下架）     |
+      | 連不到上游，V2 持續重試超過 90 秒 | 上游模型錯誤（上游連不到）     |
+
+  @SCN-016
+  Scenario: 上游短暫失敗後恢復
+    Given V2 在回合中因上游錯誤開始重試
+    When 上游在重試開始後 90 秒內恢復
+    Then 回合照常完成並回覆，不被中止
 
   @SCN-008
   Scenario: session 維護
@@ -168,10 +183,28 @@ Feature: Wukong 在 OpenCode V2 上維持 V1 時的行為
 ```
 
 ## Gherkin 核准紀錄
-- **核准 commit**: abd4b89
-- **核准來源**: 使用者 2026-11-24 對話決定「如果 #30 重新拿出來改成 v2 版本，然後 Wukong 指專注在 harness 做不到的就好，其他回規給 opencode v2 處理」，接受拆成兩個 issue 的建議後要求「先在 github 把這兩個 issue 開起來」，再要求「那是否可以開始 #44」→ 範圍與 SCN-002～SCN-010（行為與 V1 相同）。同日逐題確認：Q1「只支援 V2 (Recommended)」→ 概述、關鍵差異；Q2「固定 2.3.2 (Recommended)」→ SCN-012；Q3「自動備份並支援 rollback (Recommended)」→ SCN-013～SCN-015；Q4「不算，合併即結案」→ 概述（正式換版不在範圍）。同日總結確認推導行為 (a)～(f) 選「照建議全部接受」：(a) 回合結束不留 V2 背景 service → SCN-002、SCN-010；(b) PATH 上是 V1 時明確報錯 → SCN-011；(c) 升級前停服務備份、啟用失敗與 rollback 連 opencode.db 還原、接受備份後對話遺失 → SCN-013～SCN-015；(d) binary 模式 installer 不管 opencode、docs 說明自行升級與備份 → 實作計畫 Phase 5；(e) 首要驗證為 V1 session 能否接續，不能就停下來改規格 → SCN-001 與風險；(f) compose healthcheck 帶認證打 /api/info → SCN-003
+- **核准 commit**: `待提交`
+- **核准來源**: 使用者 2026-11-24 對話決定「如果 #30 重新拿出來改成 v2 版本，然後 Wukong 指專注在 harness 做不到的就好，其他回規給 opencode v2 處理」，接受拆成兩個 issue 的建議後要求「先在 github 把這兩個 issue 開起來」，再要求「那是否可以開始 #44」→ 範圍與 SCN-002～SCN-010（行為與 V1 相同）。同日逐題確認：Q1「只支援 V2 (Recommended)」→ 概述、關鍵差異；Q2「固定 2.3.2 (Recommended)」→ SCN-012；Q3「自動備份並支援 rollback (Recommended)」→ SCN-013～SCN-015；Q4「不算，合併即結案」→ 概述（正式換版不在範圍）。同日總結確認推導行為 (a)～(f) 選「照建議全部接受」：(a) 回合結束不留 V2 背景 service → SCN-002、SCN-010；(b) PATH 上是 V1 時明確報錯 → SCN-011；(c) 升級前停服務備份、啟用失敗與 rollback 連 opencode.db 還原、接受備份後對話遺失 → SCN-013～SCN-015；(d) binary 模式 installer 不管 opencode、docs 說明自行升級與備份 → 實作計畫 Phase 5；(e) 首要驗證為 V1 session 能否接續，不能就停下來改規格 → SCN-001 與風險；(f) compose healthcheck 帶認證打 /api/info → SCN-003。同日 Task 1.2 後逐題確認：TBD-3「重試超過 90 秒就中止 (Recommended)」（任何 retry 持續超過 90 秒就中止回合，依 retry 的錯誤類型回報；容得下短暫的網路抖動）→ SCN-007 第三列、SCN-016；TBD-2「在 .env 設定 (Recommended)」（沿用 WUKONG_AGENT_SERVER_PASSWORD，compose 同時傳給 opencode-server 與三個入口，沒設時 server 模式啟動就明確報錯，installer 升級時偵測到 server 模式未設密碼就先備份 .env 再自動產生）→ SCN-003、SCN-017
 
-全部 Scenario 於 2026-11-24 核准。
+| Scenario | 核准日期 | 狀態 |
+|----------|---------|------|
+| SCN-001 | 2026-11-24 | 已核准 |
+| SCN-002 | 2026-11-24 | 已核准 |
+| SCN-003 | 2026-11-24 | 已核准 |
+| SCN-004 | 2026-11-24 | 已核准 |
+| SCN-005 | 2026-11-24 | 已核准 |
+| SCN-006 | 2026-11-24 | 已核准 |
+| SCN-007 | 2026-11-24 | 已核准 |
+| SCN-008 | 2026-11-24 | 已核准 |
+| SCN-009 | 2026-11-24 | 已核准 |
+| SCN-010 | 2026-11-24 | 已核准 |
+| SCN-011 | 2026-11-24 | 已核准 |
+| SCN-012 | 2026-11-24 | 已核准 |
+| SCN-013 | 2026-11-24 | 已核准 |
+| SCN-014 | 2026-11-24 | 已核准 |
+| SCN-015 | 2026-11-24 | 已核准 |
+| SCN-016 | 2026-11-24 | 已核准 |
+| SCN-017 | 2026-11-24 | 已核准 |
 
 ## 重構步驟概要
 
@@ -197,14 +230,15 @@ Feature: Wukong 在 OpenCode V2 上維持 V1 時的行為
 | 編號 | 事項 | 狀態 | 影響 |
 |------|------|------|------|
 | TBD-1 | 使用者自訂的 WUKONG_AGENT_CMD 若仍帶 V1 才有的旗標（例如 --dangerously-skip-permissions），V2 的 opencode run 會拒絕還是忽略；installer 現有的 .env 遷移只改寫原封未動的舊範本那一行 | 已解決（2026-11-24 Task 1.2，probe-cli.md）：V2 2.3.2 接受該旗標，效果與 --auto 相同，自訂命令不需改寫；另發現 V2 拒絕大寫的 --log-level ERROR，由 Task 2.6 改成小寫 | 未確認時，自訂命令的使用者升級後回合可能一律失敗；關聯 SCN-010、Phase 1 |
-| TBD-2 | 常駐 server 模式的密碼怎麼提供：V2 沒設密碼時會自己產生隨機密碼，入口無從得知；要沿用 WUKONG_AGENT_SERVER_PASSWORD 由使用者在 .env 設定，還是由 entrypoint 產生並存在共用 volume | 待確認 | 決定前不實作 Phase 3 的 server 密碼接線；影響 server 模式使用者升級時要不要改 .env；關聯 SCN-003、SCN-004 |
-| TBD-3 | 上游連不到時 V2 不回錯誤：2026-11-24 Task 1.1（server 路徑）60 秒後 session 仍在執行；Task 1.2（CLI 路徑）一直送 retry 事件（error.type 為 provider.transport），120 秒內 7 次仍未結束。同條件下 V1 1.19.6 約 65 秒以 UnknownError 結束。Wukong 要自己收斂，收斂條件與回報方式待使用者決定 | 待確認 | 不處理時，上游連不到的回合要等到 agent timeout（預設 20 分鐘）才失敗；關聯 SCN-007、Task 1.3、Task 2.3 |
+| TBD-2 | 常駐 server 模式的密碼怎麼提供：V2 沒設密碼時會自己產生隨機密碼，入口無從得知；要沿用 WUKONG_AGENT_SERVER_PASSWORD 由使用者在 .env 設定，還是由 entrypoint 產生並存在共用 volume | 已解決（2026-11-24 使用者選「在 .env 設定」）：沿用 WUKONG_AGENT_SERVER_PASSWORD，compose 傳給 opencode-server 與三個入口，沒設時明確報錯，installer 升級時自動產生；見 SCN-003、SCN-017 | 決定前不實作 Phase 3 的 server 密碼接線；影響 server 模式使用者升級時要不要改 .env；關聯 SCN-003、SCN-004 |
+| TBD-3 | 上游連不到時 V2 不回錯誤：2026-11-24 Task 1.1（server 路徑）60 秒後 session 仍在執行；Task 1.2（CLI 路徑）一直送 retry 事件（error.type 為 provider.transport），120 秒內 7 次仍未結束。同條件下 V1 1.19.6 約 65 秒以 UnknownError 結束。Wukong 要自己收斂，收斂條件與回報方式待使用者決定 | 已解決（2026-11-24 使用者選「重試超過 90 秒就中止」）：任何 retry 持續超過 90 秒就中止回合，依錯誤類型回報；見 SCN-007、SCN-016 | 不處理時，上游連不到的回合要等到 agent timeout（預設 20 分鐘）才失敗；關聯 SCN-007、Task 1.3、Task 2.3 |
 
 ## Timeline
 
 | 日期 | 異動 |
 |------|------|
 | 2026-11-24 | 建立；同日逐題確認與總結確認，全部 Scenario 核准 |
+| 2026-11-24 | 規格修訂：Task 1.2 發現 V2 上游連不到時不結束，依 TBD-3 決定修訂 SCN-007、新增 SCN-016；依 TBD-2 決定修訂 SCN-003、新增 SCN-017；同日核准，原基線 abd4b89 |
 
 ---
 **建立日期**: 2026-11-24  

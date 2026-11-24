@@ -15,7 +15,7 @@
 
 ## 實作步驟
 
-2026-11-24 decompose：README 的風險策略（High，首要驗證 SCN-001）仍成立，Phase 1 先於所有實作。Task ID 固定，不重編。
+2026-11-24 decompose：README 的風險策略（High，首要驗證 SCN-001）仍成立，Phase 1 先於所有實作。Task ID 固定，不重編。同日規格修訂（SCN-003、SCN-007 修訂，SCN-016、SCN-017 新增）後補拆：Task 2.3、3.2 的範圍與完成判準跟著更新，兩者都尚未開始，沒有舊證據失效。
 
 ### 責任對照
 
@@ -36,6 +36,8 @@
 | SCN-013 | 5.1 | 6.1 |
 | SCN-014 | 5.2 | — |
 | SCN-015 | 5.3 | 6.1 |
+| SCN-016 | 2.3 | 1.3 |
+| SCN-017 | 3.2 | 5.1 |
 
 推導行為 (d)（binary 模式 docs）由 5.4 負責；GitHub #44 驗收的版本對照由 6.2 負責；常青文件由 6.3 負責。
 
@@ -93,11 +95,11 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 證據：
 
 ### Task 2.3 — 取消與上游錯誤分類
-- 產出與範圍：取消改 `interrupt` 並辨認 interrupted 事件；`upstream_error.rs`、`stream.rs` 改讀 V2 具名錯誤的結構化欄位
+- 產出與範圍：取消改 `interrupt` 並辨認 interrupted 事件；`upstream_error.rs`、`stream.rs` 改讀 V2 錯誤的 `error.type`；server 與 CLI 兩條路徑追蹤 `retry` 事件，從第一次 retry 起持續超過 90 秒就中止回合（server 送 interrupt、CLI 結束子程序），依 retry 的錯誤類型回報，新增「上游連不到」分類
 - 相依：2.2
-- 驗收編號：SCN-005、SCN-007
-- 完成判準：取消後回合回報已取消，不等 agent timeout；額度用完樣本分類為上游限流，模型下架分類為模型下架，exit 0 或降級文字不被當成功（地雷 W-7）；拿掉分類邏輯時測試會紅
-- 驗證：單元測試（真實樣本）加整合測試
+- 驗收編號：SCN-005、SCN-007、SCN-016
+- 完成判準：取消後回合回報已取消，不等 agent timeout；額度用完分類為上游限流、模型下架分類為模型已下架、重試超過 90 秒分類為上游連不到，exit 0 或降級文字不被當成功（地雷 W-7）；重試在 90 秒內恢復時回合照常完成；拿掉分類或中止邏輯時測試會紅
+- 驗證：單元測試以 Task 1.2、1.3 的真實 retry 樣本與暫停的 tokio 時間推進；整合測試以 `--network none` 的真實 V2 確認約 90 秒內結束（V1 對照約 65 秒）
 - 狀態：📝 待實作
 - 證據：
 
@@ -149,10 +151,10 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 證據：
 
 ### Task 3.2 — 常駐 server 模式的密碼與 healthcheck
-- 產出與範圍：compose 三個檔（含 release、memoria overlay）的密碼接線與 opencode-server healthcheck（帶認證打 `/api/info`）、`.env.example`
-- 相依：2.1；TBD-2 的決定（開始前要有結論）
-- 驗收編號：SCN-003
-- 完成判準：入口與 opencode-server 用同一組密碼時就緒檢查通過、回合成功；server 停止或密碼錯誤時 healthcheck 判 unhealthy；每個服務都接到變數（地雷 W-3，`test-docker-runtime.sh`）
+- 產出與範圍：compose 三個檔（含 release、memoria overlay）把 `WUKONG_AGENT_SERVER_PASSWORD` 交給 opencode-server（作為 `OPENCODE_SERVER_PASSWORD`）與三個入口，opencode-server healthcheck 帶認證打 `/api/info`；server 模式沒有密碼時入口啟動即報錯；`scripts/install.sh` 的 `.env` 遷移在 server 模式未設密碼時先備份再產生；`.env.example`
+- 相依：2.1
+- 驗收編號：SCN-003、SCN-017
+- 完成判準：入口與 opencode-server 用同一組密碼時就緒檢查通過、回合成功；server 停止或密碼錯誤時 healthcheck 判 unhealthy；沒有密碼時入口立即報錯並指出變數名稱；installer 測試確認 server 模式未設密碼時產生密碼、已設時不改、非 server 模式不加；每個服務都接到變數（地雷 W-3，`test-docker-runtime.sh`）
 - 驗證：容器層整合測試
 - 狀態：📝 待實作
 - 證據：
