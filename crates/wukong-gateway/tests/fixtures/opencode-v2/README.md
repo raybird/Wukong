@@ -14,6 +14,7 @@
 | server-retry.ndjson | `GET /api/event`（`--network none`） | 上游連不到，retry.scheduled 兩次後 interrupt |
 | cli-text-reasoning.ndjson | `opencode run --format json --thinking` | 正常回覆，含思考 |
 | cli-no-route.ndjson | `opencode run --format json` | 模型不存在，error（provider.no-route） |
+| cli-model-eol.ndjson | `opencode run --standalone --format json`（2026-11-25，nvidia/deepseek-ai/deepseek-v4.1-flash） | 模型已下架，error（provider.invalid-request，status 410） |
 | cli-retry-transport.ndjson | `opencode run --format json`（`--network none`） | 上游連不到，retry 持續到被 timeout 結束 |
 | cli-tool-completed.ndjson | `opencode run --format json --dangerously-skip-permissions` | read 工具完成 |
 | cli-tool-permission-rejected.ndjson | `opencode run --format json`（read 設為 ask） | 非互動執行拒絕權限，工具 error |

@@ -70,3 +70,46 @@ Task 1.2 的容器裡沒有背景 service，所以兩者看起來一樣。主機
 - 結束後殘留 1 個容器（Task 2.3 記過：被結束的是 docker client），已依 ID 確認掛的是本次探測的目錄後刪除
 
 要模型回覆的部分（取得回覆與 session、以 `-s` 接續）這次沒有跑。2026-11-24 17:36 起免費模型額度已用完（見 probe-reply.md），額度恢復後補上。
+
+### 真實模型的回合（2026-11-25）
+
+免費額度仍未恢復，使用者決定改用 NVIDIA 的模型。執行 [scripts/cli-v2-actual.sh](scripts/cli-v2-actual.sh)：
+
+- 映像 `wukong-issue44:v2-local`，內建 `@opencode/cli` 2.3.2，容器有網路
+- 隔離的 HOME 只放 nvidia 一筆憑證，模型由 `OPENCODE_CONFIG_CONTENT` 指定為 `nvidia/nvidia/nemotron-3.5-lightning-30b-a3b`，argv 不另加 `--model`
+- 主機上的 wukong 用 `--agent-cmd "<wrapper>/opencode run --dangerously-skip-permissions"`。帶了額外旗標才走 CLI backend；只寫 `opencode run` 會走按需本機 backend
+- 同一個 scope 跑兩個回合，提示詞是固定的合成字串
+
+Wukong 傳出的 argv（不含提示詞）：
+
+```
+--version
+run --dangerously-skip-permissions --standalone --print-logs --log-level error --agent plan --format json
+run --dangerously-skip-permissions --standalone --print-logs --log-level error --format json
+--version
+run --dangerously-skip-permissions --standalone --print-logs --log-level error --agent plan --format json
+run --dangerously-skip-permissions --standalone --print-logs --log-level error -s ses_dee9d420effeCkUxnypWqUzmB4 --format json
+```
+
+| 檢查 | 結果 |
+|---|---|
+| 第一回合拿到回覆 | PASS，rc=0，輸出 `OK` |
+| 第一回合結束後容器裡的 opencode 程序 | PASS，0 個 |
+| argv 帶 `--standalone --print-logs --log-level error` | PASS |
+| 第一回合把 V2 session 存進 scope | PASS，`agent_session_state` 記 `ses_dee9d420…` |
+| 第二回合拿到回覆 | PASS，rc=0，輸出 `AGAIN` |
+| 第二回合以 `-s` 接續同一個 session | PASS |
+| 第二回合結束後容器裡的 opencode 程序 | PASS，0 個 |
+
+- V2 的 `opencode.db` 裡，該 session 的 `session_message` 依序是 user、assistant、idle、user、assistant、idle，兩個回合接在同一個 session；規劃那一棒用自己的 session
+- 反向自檢：另起一個容器、留著一個 `opencode serve`，同一段程序檢查數到 1 個
+
+### NVIDIA 模型下架（410）的真實樣本
+
+挑模型時，`nvidia/deepseek-ai/deepseek-v4.1-flash` 與 `nvidia/openai/gpt-oss-20b` 都回 410：
+
+```
+{"type":"error",…,"error":{"type":"provider.invalid-request","message":"The model 'deepseek-ai/deepseek-v4.1-flash' has reached its end of life on 2026-11-16T08:00:00Z and is no longer available.","status":410,…}}
+```
+
+V2 的錯誤類型是通用的 `provider.invalid-request`，只能靠 `status` 410 判斷是下架。這份輸出存成 fixture `cli-model-eol.ndjson`，由 `upstream_error.rs` 的 `a_real_end_of_life_410_is_model_eol` 驗證 Wukong 判為「模型已下架」。

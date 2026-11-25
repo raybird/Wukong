@@ -529,6 +529,21 @@ mod tests {
         );
     }
 
+    // issue-0044 SCN-007 第二列：模型下架的真實樣本（2026-11-25，NVIDIA 回 410 end of life）。
+    // V2 的錯誤類型是通用的 provider.invalid-request，靠 status 410 才判得出下架。
+    #[test]
+    fn a_real_end_of_life_410_is_model_eol() {
+        let line = fixture_line("cli-model-eol", "error");
+        let error = parse_error_field(&line).unwrap();
+        assert_eq!(error.name, "provider.invalid-request");
+        assert_eq!(error.status_code, Some(410));
+        assert!(error.message.contains("end of life"), "{}", error.message);
+        assert_eq!(
+            classify(&error.name, error.status_code),
+            UpstreamFailure::ModelEol
+        );
+    }
+
     fn transport_error() -> Option<UpstreamError> {
         parse_error_field(&fixture_line("cli-retry-transport", "retry"))
     }

@@ -211,7 +211,7 @@ Feature: Wukong 在 OpenCode V2 上維持 V1 時的行為
 任務權威來源為 [implementation-plan.md](./implementation-plan.md)；Phase／Task 由 decompose 細化。
 
 1. ✅ **Phase 1** - 首要驗證：V1 session 在 V2 遷移後能否接續，以及 V2 CLI 路徑的契約
-2. 📝 **Phase 2** - gateway adapter 改寫與回歸測試
+2. ✅ **Phase 2** - gateway adapter 改寫與回歸測試
 3. ✅ **Phase 3** - 容器設定：baseline、server 密碼、healthcheck
 4. ✅ **Phase 4** - 打包與 release 釘選
 5. ✅ **Phase 5** - installer 備份、失敗還原與 rollback

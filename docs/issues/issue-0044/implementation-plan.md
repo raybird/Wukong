@@ -143,6 +143,7 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
     - 真實 V2 斷網時 server 與 CLI 都在 91 秒以「上游連不到」結束；改動前 CLI 在 400 秒的外部 timeout 時仍沒有輸出
     - 斷網後 30 秒恢復網路，回合 51 秒照常回覆（SCN-016）
   - 殘餘：沒有真實的 429、410 樣本，限流與下架的判定依 V2 原始碼的對應與 `status`，沒有實際觸發過
+  - 2026-11-25 補：兩種都拿到真實樣本。429 見 Task 2.5（`provider.free-limit`）；410 是 Task 2.6 換用 NVIDIA 模型時遇到的下架（`provider.invalid-request`、`status` 410、「reached its end of life on 2026-11-16」），存成 fixture `cli-model-eol.ndjson`，新增 `a_real_end_of_life_410_is_model_eol`：Wukong 判為「模型已下架」。把 `classify` 的 410 判定改掉時這支測試失敗，還原後通過
 
 ### Task 2.4 — 本機按需模式
 - 產出與範圍：`local_process.rs`：等 `server listening on`，每次啟動自設隨機密碼並帶 basic auth，操作結束後關閉程序
@@ -205,8 +206,8 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 驗收編號：SCN-010
 - 完成判準：帶額外旗標的 `opencode run` 取得回覆與 session，結束後沒有背景 service 程序；`printf fixer` 假 agent 的既有測試照過，argv 不含任何 opencode 旗標
 - 驗證：單元測試（argv 與 NDJSON 樣本）加接真實 V2 的整合測試
-- 狀態：🚧 進行中（只差接真實模型的回合，等免費額度恢復）
-- 證據：2026-11-24
+- 狀態：✅ 已完成
+- 證據：2026-11-24，真實模型的回合於 2026-11-25 補上
   - 實測：見 [probe-cli.md](probe-cli.md)「Task 2.6」一節
     - 容器裡有背景 service 時，不加 `--standalone` 的 `run` 會連上它；加了才起私有 `serve --stdio`
     - `--log-level error` 傳不到私有 serve，stderr 每次約 43 行 INFO
@@ -225,7 +226,12 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
   - 綠燈：`cargo test` 全 workspace 783 passed、0 failed、14 ignored；clippy、fmt 通過
   - 外迴圈（部分）：
     - wukong CLI 經 wrapper 接斷網容器裡的真實 V2，容器裡有背景 service。V2 接受新 argv 並起了私有 serve；規劃那一棒重試超過 90 秒後以「上游連不到」中止
-    - 尚缺：帶額外旗標的 `opencode run` 取得回覆與 session、以 `-s` 接續、結束後沒有背景 service 程序。這幾項需要模型，免費額度用完（見 Task 2.5），恢復後補跑才能標已完成。2026-11-25 Task 4.1 建出 V2 映像後，曾提議改用斷網容器裡的假模型驗證這幾項；使用者選擇照原計畫等真實模型，所以本 Task 維持進行中
+    - 2026-11-24 尚缺的部分：帶額外旗標的 `opencode run` 取得回覆與 session、以 `-s` 接續、結束後沒有背景 service 程序。這幾項需要模型，當時免費額度用完（見 Task 2.5）。2026-11-25 曾提議改用斷網容器裡的假模型，使用者選擇等真實模型
+  - 外迴圈（真實模型，2026-11-25 14:27 台北）：免費額度仍未恢復，使用者決定改用 NVIDIA 的模型（原話「那使用 nvidia 的 模型來測試」）。用 `nvidia/nvidia/nemotron-3.5-lightning-30b-a3b`，以 [scripts/cli-v2-actual.sh](scripts/cli-v2-actual.sh) 執行，結果見 [probe-cli.md](probe-cli.md)「真實模型的回合」
+    - 容器是本機建的 V2 映像 `wukong-issue44:v2-local`；隔離的 HOME 只放 nvidia 一筆憑證，提示詞是固定的合成字串
+    - 7 項全部通過：兩個回合都拿到回覆，rc=0；argv 帶 `--standalone --print-logs --log-level error`；第一回合把 V2 session 存進 scope；第二回合的 argv 帶 `-s <同一個 session>`；每回合結束後容器裡的 opencode 程序是 0 個
+    - V2 那邊：該 session 依序有兩組 user、assistant、idle，兩個回合接在同一個 session 裡；規劃那一棒不帶 `-s`，用自己的 session
+    - 反向自檢：容器裡留一個 `opencode serve` 時，同一個程序檢查數到 1 個
 
 ### Task 2.7 — V1 版本偵測
 - 產出與範圍：在 opencode 類 backend 第一次呼叫前檢查版本，1.x 時回傳明確錯誤
@@ -484,7 +490,7 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 | SCN-012 | 產物檢查：建置後的映像與 manifest |
 | SCN-013～SCN-015 | installer 腳本測試（fixture）加 Phase 6 的副本演練 |
 
-需要模型的項目（多棒回合、上游錯誤的實際觸發）用預設免費模型；額度用完的失敗樣本要保留，不能只算成功樣本（#30 步驟 5）。
+需要模型的項目（多棒回合、上游錯誤的實際觸發）用預設免費模型；額度用完的失敗樣本要保留，不能只算成功樣本（#30 步驟 5）。2026-11-25 起免費額度用完時，改用使用者的 NVIDIA 模型（使用者決定，見 Task 2.6），只放 nvidia 一筆憑證到隔離的 HOME，只送合成提示詞。
 
 ## 檢查清單
 
