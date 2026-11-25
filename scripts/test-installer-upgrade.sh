@@ -12,7 +12,9 @@ DEPLOYMENT="$TMP/deployment"
 RELEASES="$TMP/releases"
 BIN="$TMP/bin"
 LOG="$TMP/commands.log"
-export HOME PATH="$BIN:$PATH" WUKONG_TEST_LOG="$LOG"
+# Docker named volumes the fake docker serves: one directory per volume name.
+VOLUMES="$TMP/volumes"
+export HOME PATH="$BIN:$PATH" WUKONG_TEST_LOG="$LOG" WUKONG_TEST_VOLUMES="$VOLUMES"
 mkdir -p "$HOME" "$DEPLOYMENT" "$RELEASES" "$BIN"
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
@@ -39,7 +41,13 @@ make_release() {
     printf 'services:\n  wukong:\n    image: ghcr.io/raybird/wukong:%s\n  opencode-server:\n    profiles: [server]\n    image: ghcr.io/raybird/wukong:%s\n' "$tag" "$tag" > "$docker_stage/docker-compose.yml"
     printf 'EXAMPLE=1\n' > "$docker_stage/.env.example"
     printf 'MIT\n' > "$docker_stage/LICENSE"
-    printf '%s\n' '{"affectedState":[],"backupRequired":false,"instructionsUrl":null,"irreversibleMigration":false,"rollbackSafeTo":"v0.17.1","schemaVersion":1}' > "$docker_stage/data-compatibility.json"
+    # FIXTURE_STATE_BACKUP=1 makes this release ask for opencode-state to be backed up
+    # before activation, the way the OpenCode V2 release does (issue-0044).
+    python3 - "$docker_stage/data-compatibility.json" <<'PY'
+import json, os, sys
+backup = os.environ.get("FIXTURE_STATE_BACKUP") == "1"
+json.dump({"affectedState": ["opencode-state"] if backup else [], "backupRequired": backup, "instructionsUrl": None, "irreversibleMigration": False, "rollbackSafeTo": os.environ.get("FIXTURE_SAFE_TO", "v0.17.1"), "schemaVersion": 1}, open(sys.argv[1], "w"), sort_keys=True)
+PY
     # The optional Memoria overlay. The fixture must mirror the real bundle's
     # shape: a fixture that is missing files the shipped bundle carries does not
     # merely under-test the installer, it goes green while the shipped installer
@@ -55,7 +63,8 @@ make_release() {
     cp "$INSTALLER" "$docker_stage/scripts/install.sh"
     python3 - "$RELEASES/release-manifest.json" "$tag" <<'PY'
 import json, os, sys
-json.dump({"schemaVersion": 1, "productTag": sys.argv[2], "image": {"reference": "ghcr.io/raybird/wukong:" + sys.argv[2], "digest": "sha256:" + "a" * 64}, "dataCompatibility": {"schemaVersion": 1, "affectedState": [], "backupRequired": False, "instructionsUrl": None, "irreversibleMigration": False, "rollbackSafeTo": os.environ.get("FIXTURE_SAFE_TO", "v0.17.1")}}, open(sys.argv[1], "w"), sort_keys=True)
+backup = os.environ.get("FIXTURE_STATE_BACKUP") == "1"
+json.dump({"schemaVersion": 1, "productTag": sys.argv[2], "image": {"reference": "ghcr.io/raybird/wukong:" + sys.argv[2], "digest": "sha256:" + "a" * 64}, "dataCompatibility": {"schemaVersion": 1, "affectedState": ["opencode-state"] if backup else [], "backupRequired": backup, "instructionsUrl": None, "irreversibleMigration": False, "rollbackSafeTo": os.environ.get("FIXTURE_SAFE_TO", "v0.17.1")}}, open(sys.argv[1], "w"), sort_keys=True)
 PY
     cp "$RELEASES/release-manifest.json" "$docker_stage/release-manifest.json"
     tar -C "$TMP" -czf "$RELEASES/wukong-docker-$tag.tar.gz" wukong-docker
@@ -105,6 +114,40 @@ if [[ "$1" == inspect ]]; then
     printf '%s\n' "$project"
     exit 0
 fi
+# Named volumes live under $WUKONG_TEST_VOLUMES/<name>. `volume ls` answers the
+# compose-label lookup; `run` maps each volume mount onto that directory and runs
+# the container command on the host, so tar really archives and restores files.
+if [[ "$1" == volume && "$2" == ls ]]; then
+    project="" volume=""
+    for arg in "$@"; do
+        case "$arg" in
+            label=com.docker.compose.project=*) project="${arg#label=com.docker.compose.project=}" ;;
+            label=com.docker.compose.volume=*) volume="${arg#label=com.docker.compose.volume=}" ;;
+        esac
+    done
+    [[ ! -d "$WUKONG_TEST_VOLUMES/${project}_$volume" ]] || printf '%s_%s\n' "$project" "$volume"
+    exit 0
+fi
+if [[ "$1" == run ]]; then
+    shift; mounts=(); entrypoint=""
+    while [[ "$1" == -* ]]; do
+        case "$1" in
+            -v) mounts+=("$2"); shift 2 ;;
+            --entrypoint) entrypoint="$2"; shift 2 ;;
+            --network|--user|-u|-w) shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    shift # image
+    args=("$entrypoint" "$@")
+    for mount in "${mounts[@]}"; do
+        IFS=: read -r src dst _ <<< "$mount"
+        [[ -d "$WUKONG_TEST_VOLUMES/$src" ]] || { echo "fake docker: no volume $src" >&2; exit 1; }
+        args=("${args[@]//$dst/$WUKONG_TEST_VOLUMES/$src}")
+    done
+    [[ -z "${FIXTURE_DOCKER_RUN_EXIT:-}" ]] || exit "$FIXTURE_DOCKER_RUN_EXIT"
+    exec "${args[@]}"
+fi
 if [[ "$1" == image && "$2" == inspect ]]; then printf 'ghcr.io/raybird/wukong@sha256:%s\n' "${FIXTURE_IMAGE_DIGEST:-$(printf 'a%.0s' {1..64})}"; exit 0; fi
 if [[ "$1" == compose && "${*: -1}" == ps && -n "${FIXTURE_DOCKER_PS_EXIT:-}" ]]; then exit "$FIXTURE_DOCKER_PS_EXIT"; fi
 exit "${FIXTURE_DOCKER_EXIT:-0}"
@@ -138,7 +181,7 @@ run_piped_installer() {
     )
 }
 
-prepare() { rm -rf "$HOME" "$DEPLOYMENT"; mkdir -p "$HOME" "$DEPLOYMENT"; : > "$LOG"; make_release; make_fakes; }
+prepare() { rm -rf "$HOME" "$DEPLOYMENT" "$VOLUMES"; mkdir -p "$HOME" "$DEPLOYMENT" "$VOLUMES"; : > "$LOG"; make_release; make_fakes; }
 
 test_parsing() {
     prepare
@@ -508,6 +551,70 @@ PY
     assert_same "$TMP/current-before" "$HOME/.local/bin/wukong"
 }
 
+# issue-0044 SCN-013: a release whose dataCompatibility asks for opencode-state to be
+# backed up stops the services first, archives the volume, and records where.
+test_docker_state_backup() {
+    prepare
+    run_installer '' --mode docker --version v9.9.9 >/dev/null
+    mkdir -p "$VOLUMES/wukong_opencode-state/snapshot"
+    head -c 65536 /dev/urandom > "$VOLUMES/wukong_opencode-state/opencode.db"
+    printf 'wal\n' > "$VOLUMES/wukong_opencode-state/opencode.db-wal"
+    cp "$VOLUMES/wukong_opencode-state/opencode.db" "$TMP/opencode.db.before"
+
+    # Control: a release that does not ask for a backup leaves the volume alone.
+    FIXTURE_TAG=v9.9.8 make_release
+    : > "$LOG"
+    run_installer '' --mode docker --upgrade --version v9.9.8 >/dev/null
+    assert_not_contains "$LOG" 'docker run'
+    ! grep -Fxq 'docker compose -p wukong --profile server stop' "$LOG" || fail "services stopped without a required backup"
+    python3 - "$DEPLOYMENT/.wukong-release" <<'PY'
+import json, sys
+assert not json.load(open(sys.argv[1])).get("stateBackups"), "backup recorded without being required"
+PY
+    ! compgen -G "$DEPLOYMENT/.wukong-backups/*/volumes" >/dev/null || fail "volume archived without being required"
+
+    FIXTURE_TAG=v9.9.7 FIXTURE_STATE_BACKUP=1 make_release
+    # A backup that cannot be taken aborts before any release file changes, and starts
+    # the stopped services again.
+    cp "$DEPLOYMENT/.wukong-release" "$TMP/metadata-before"; cp "$DEPLOYMENT/docker-compose.yml" "$TMP/compose-before"
+    : > "$LOG"
+    ! FIXTURE_DOCKER_RUN_EXIT=1 FIXTURE_STATE_BACKUP=1 run_installer '' --mode docker --upgrade --version v9.9.7 >/dev/null 2>&1 ||
+        fail "upgrade went ahead without its required backup"
+    assert_same "$TMP/metadata-before" "$DEPLOYMENT/.wukong-release"
+    assert_same "$TMP/compose-before" "$DEPLOYMENT/docker-compose.yml"
+    grep -Fxq 'docker compose -p wukong start' "$LOG" || fail "stopped services were not started again"
+    assert_not_contains "$LOG" 'up -d --force-recreate'
+
+    : > "$LOG"
+    FIXTURE_STATE_BACKUP=1 run_installer '' --mode docker --upgrade --version v9.9.7 >/dev/null
+    # Order: every service is stopped, then the volume is read, then the new release starts.
+    python3 - "$LOG" <<'PY'
+import sys
+lines = open(sys.argv[1]).read().splitlines()
+def first(pred, what):
+    for i, line in enumerate(lines):
+        if pred(line): return i
+    raise SystemExit(f"never ran: {what}\n" + "\n".join(lines))
+stop = first(lambda l: l == "docker compose -p wukong --profile server stop", "stop every service")
+archive = first(lambda l: l.startswith("docker run ") and "wukong_opencode-state:" in l, "archive opencode-state")
+start = first(lambda l: l.endswith("up -d --force-recreate"), "activate the new release")
+assert stop < archive < start, (stop, archive, start)
+PY
+    path="$(python3 - "$DEPLOYMENT/.wukong-release" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["productTag"] == "v9.9.7"
+print(d["stateBackups"]["opencode-state"])
+PY
+)" || fail "metadata does not record the opencode-state backup"
+    [[ "$path" == .wukong-backups/v9.9.8-*/volumes/opencode-state.tar ]] || fail "unexpected backup location: $path"
+    mkdir "$TMP/restored"
+    tar -C "$TMP/restored" -xf "$DEPLOYMENT/$path"
+    assert_same "$TMP/opencode.db.before" "$TMP/restored/opencode.db"
+    assert_contains "$TMP/restored/opencode.db-wal" 'wal'
+    [[ -d "$TMP/restored/snapshot" ]] || fail "backup lost a directory"
+}
+
 test_docker_rollback() {
     prepare
     run_installer '' --mode docker --version v9.9.9 >/dev/null
@@ -654,13 +761,14 @@ case "$CASE" in
     rollback-metadata) test_rollback_metadata ;;
     legacy-rollback) test_legacy_rollback ;;
     compatibility) test_rollback_guard ;;
+    docker-state-backup) test_docker_state_backup ;;
     docker-rollback) test_docker_rollback ;;
     docker-recovery) test_docker_recovery ;;
     binary-recovery) test_binary_recovery ;;
     docker-project) test_docker_project_resolution ;;
     docker-project-conflicts) test_docker_project_conflicts ;;
     docker-project-persistence) test_docker_project_persistence ;;
-    all) test_parsing; test_verification; test_docker; test_docker_env_migration; test_docker_env_server_password; test_docker_forward_compatible_bundle; test_docker_bundle_missing_required_entry; test_docker_installer_replaces_itself_mid_run; test_stdin_installer; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_docker_compose_repair; test_docker_project_resolution; test_docker_project_conflicts; test_docker_project_persistence; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
+    all) test_parsing; test_verification; test_docker; test_docker_env_migration; test_docker_env_server_password; test_docker_forward_compatible_bundle; test_docker_bundle_missing_required_entry; test_docker_installer_replaces_itself_mid_run; test_stdin_installer; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_docker_compose_repair; test_docker_project_resolution; test_docker_project_conflicts; test_docker_project_persistence; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_state_backup; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
     *) fail "unknown test case: $CASE" ;;
 esac
 

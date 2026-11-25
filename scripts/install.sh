@@ -654,6 +654,40 @@ if changes:
 PY
 }
 
+# 2026-11-25（issue-0044）：新版的 dataCompatibility 要求備份（OpenCode V2 會就地遷移
+# opencode.db）時，啟用前先停掉所有服務，再把 affectedState 列出的 compose volume
+# 逐一打包成 $1/volumes/<名稱>.tar。停服務是為了讓 SQLite 與 WAL 不在寫入中被讀走；
+# 用新版映像（剛拉下、已比對 digest）的 tar 讀 volume，以 root 保留檔案擁有者。
+# stdout 只輸出 {"<名稱>": "<相對路徑>"}，提示走 stderr；這個部署沒有該 volume 時略過。
+required_state_backups() {
+    python3 - "$1" <<'PY'
+import json, re, sys
+c = json.load(open(sys.argv[1], encoding="utf-8"))["dataCompatibility"]
+if c["backupRequired"]:
+    for name in c["affectedState"]:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name): raise SystemExit("invalid affected state name")
+        print(name)
+PY
+}
+
+backup_docker_state() {
+    local backup="$1" image="$2" name volume archive saved="{}"
+    shift 2
+    mkdir -p "$backup/volumes"
+    for name in "$@"; do
+        volume="$(docker volume ls --filter "label=com.docker.compose.project=$DOCKER_PROJECT_NAME" \
+            --filter "label=com.docker.compose.volume=$name" --format '{{.Name}}')" || return
+        if [[ -z "$volume" ]]; then info "no $name volume in this deployment; nothing to back up" >&2; continue; fi
+        [[ "$volume" != *$'\n'* ]] || { info "more than one $name volume matches project $DOCKER_PROJECT_NAME" >&2; return 1; }
+        archive="$backup/volumes/$name.tar"
+        docker run --rm --network none -v "$volume:/state:ro" --entrypoint tar "$image" -C /state -cf - . > "$archive" || return
+        tar -tf "$archive" >/dev/null || { info "backup of $name is not a readable archive" >&2; return 1; }
+        saved="$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); d[sys.argv[2]]=sys.argv[3]; print(json.dumps(d, sort_keys=True))' "$saved" "$name" "$archive")"
+        info "backed up $name to $archive" >&2
+    done
+    printf '%s\n' "$saved"
+}
+
 install_docker() {
     skip_current_upgrade
     command -v docker >/dev/null 2>&1 || abort "Docker is required"
@@ -664,7 +698,8 @@ install_docker() {
         return
     fi
     prepare_release_metadata
-    local archive stage expected actual file previous_version="" previous_digest="" backup="" env_backup env_report line
+    local archive stage expected actual file previous_version="" previous_digest="" backup="" env_backup env_report line state_backups="{}"
+    local -a state_names=()
     if [[ -f .wukong-release ]]; then
         read -r previous_version previous_digest < <(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["productTag"], d["imageDigest"])' .wukong-release) || abort "invalid Docker release metadata"
         backup=".wukong-backups/${previous_version}-$(date +%s)"; mkdir -p "$backup"
@@ -685,6 +720,16 @@ install_docker() {
     docker compose -p "$DOCKER_PROJECT_NAME" --project-directory "$PWD" -f "$stage/wukong-docker/docker-compose.yml" pull
     actual="$(docker image inspect "ghcr.io/raybird/wukong:${VERSION}" --format '{{index .RepoDigests 0}}' | sed -n 's/.*@\(sha256:[0-9a-f]*\).*/\1/p')"
     [[ "$actual" == "$expected" ]] || abort "pulled image digest does not match release manifest"
+    mapfile -t state_names < <(required_state_backups "$RELEASE_DIR/release-manifest.json") || abort "invalid data compatibility in release manifest"
+    if [[ -n "$backup" && ${#state_names[@]} -gt 0 ]]; then
+        # The old release files are still in place here, so `start` brings back exactly
+        # what was running if the backup cannot be taken.
+        docker compose -p "$DOCKER_PROJECT_NAME" --profile server stop || abort "could not stop services before backing up ${state_names[*]}"
+        state_backups="$(backup_docker_state "$backup" "ghcr.io/raybird/wukong:${VERSION}" "${state_names[@]}")" || {
+            docker compose -p "$DOCKER_PROJECT_NAME" start || true
+            abort "could not back up ${state_names[*]}; the previous release was started again"
+        }
+    fi
     for file in "${DOCKER_RELEASE_OWNED[@]}"; do mkdir -p "$(dirname "$file")"; cp "$stage/wukong-docker/$file" "$file"; done
     [[ -f .env ]] || cp .env.example .env
     env_backup="${backup:-.wukong-backups/env-$(date +%s)}"
@@ -701,9 +746,9 @@ install_docker() {
         fi
         abort "Docker activation or health check failed; restored previous release files"
     fi
-    write_json_atomically .wukong-release "$(python3 - "$VERSION" "$expected" "$previous_version" "$previous_digest" "$backup" "$DOCKER_PROJECT_NAME" "$RELEASE_DIR/release-manifest.json" <<'PY'
+    write_json_atomically .wukong-release "$(python3 - "$VERSION" "$expected" "$previous_version" "$previous_digest" "$backup" "$DOCKER_PROJECT_NAME" "$RELEASE_DIR/release-manifest.json" "$state_backups" <<'PY'
 import json,sys
-print(json.dumps({"schemaVersion":1,"productTag":sys.argv[1],"imageDigest":sys.argv[2],"previousVersion":sys.argv[3] or None,"previousImageDigest":sys.argv[4] or None,"previousBackupPath":sys.argv[5] or None,"composeProject":sys.argv[6],"dataCompatibility":json.load(open(sys.argv[7]))["dataCompatibility"]},sort_keys=True))
+print(json.dumps({"schemaVersion":1,"productTag":sys.argv[1],"imageDigest":sys.argv[2],"previousVersion":sys.argv[3] or None,"previousImageDigest":sys.argv[4] or None,"previousBackupPath":sys.argv[5] or None,"composeProject":sys.argv[6],"dataCompatibility":json.load(open(sys.argv[7]))["dataCompatibility"],"stateBackups":json.loads(sys.argv[8])},sort_keys=True))
 PY
 )"
 }

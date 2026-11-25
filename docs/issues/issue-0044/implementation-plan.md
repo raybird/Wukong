@@ -225,7 +225,7 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
   - 綠燈：`cargo test` 全 workspace 783 passed、0 failed、14 ignored；clippy、fmt 通過
   - 外迴圈（部分）：
     - wukong CLI 經 wrapper 接斷網容器裡的真實 V2，容器裡有背景 service。V2 接受新 argv 並起了私有 serve；規劃那一棒重試超過 90 秒後以「上游連不到」中止
-    - 尚缺：帶額外旗標的 `opencode run` 取得回覆與 session、以 `-s` 接續、結束後沒有背景 service 程序。這幾項需要模型，免費額度用完（見 Task 2.5），恢復後補跑才能標已完成
+    - 尚缺：帶額外旗標的 `opencode run` 取得回覆與 session、以 `-s` 接續、結束後沒有背景 service 程序。這幾項需要模型，免費額度用完（見 Task 2.5），恢復後補跑才能標已完成。2026-11-25 Task 4.1 建出 V2 映像後，曾提議改用斷網容器裡的假模型驗證這幾項；使用者選擇照原計畫等真實模型，所以本 Task 維持進行中
 
 ### Task 2.7 — V1 版本偵測
 - 產出與範圍：在 opencode 類 backend 第一次呼叫前檢查版本，1.x 時回傳明確錯誤
@@ -354,8 +354,20 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 驗收編號：SCN-013
 - 完成判準：installer 測試：升級時先停服務再備份，備份內容與升級前的 opencode.db 一致，metadata 記錄位置；backupRequired 為 false 時不備份（對照）
 - 驗證：installer 腳本測試（fixture）
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成
+- 證據：2026-11-25
+  - 改動：
+    - `release/data-compatibility.json`：`affectedState` 為 `["opencode-state"]`、`backupRequired` 為 true（`rollbackSafeTo` 留給 Task 5.3）
+    - `scripts/install.sh`：新增 `required_state_backups`（從 release manifest 的 dataCompatibility 取出要備份的名稱）與 `backup_docker_state`（以 compose 標籤 `com.docker.compose.project`／`com.docker.compose.volume` 找 volume，用剛拉下且比對過 digest 的新版映像 `docker run --rm --network none -v VOL:/state:ro --entrypoint tar … -C /state -cf - .` 打包到 `.wukong-backups/<前一版>-<時間>/volumes/<名稱>.tar`，再以 `tar -tf` 確認可讀）。`install_docker` 在比對 digest 之後、換上新版檔案之前，若有前一版且新版要求備份，先 `docker compose -p P --profile server stop` 停掉所有服務（含已停用 profile 的 opencode-server）再備份；備份失敗時以 `docker compose -p P start` 重新啟動原本的服務並中止，release 檔案與 metadata 不動。成功時 `.wukong-release` 多一個 `stateBackups`（名稱 → 相對路徑）
+    - `docs/docker.md` 補上這個升級行為
+  - 測試：`scripts/test-installer-upgrade.sh` 的 fake docker 加上 named volume 模擬（`$WUKONG_TEST_VOLUMES/<名稱>` 目錄；`volume ls` 依標籤回答，`run` 把 volume 掛載點換成該目錄後在主機上執行，tar 真的打包）；fixture 以 `FIXTURE_STATE_BACKUP=1` 產生要求備份的 release。新增 `docker-state-backup` case（併入 `all`）：
+    - 對照：不要求備份的升級沒有停服務、沒有 `docker run`、metadata 沒有 `stateBackups`、沒有 volumes 目錄
+    - 備份失敗（`docker run` 失敗）：installer 失敗，`.wukong-release` 與 docker-compose.yml 與升級前相同，log 有 `docker compose -p wukong start`、沒有 `up -d --force-recreate`
+    - 要求備份的升級：log 順序為停止所有服務 → 讀 opencode-state → `up -d --force-recreate`；metadata 記錄 `.wukong-backups/v9.9.8-*/volumes/opencode-state.tar`；解開後的 opencode.db（64 KiB 隨機內容）與升級前逐位元組相同，`opencode.db-wal` 與子目錄也在
+    - 紅燈：實作前「never ran: stop every service」。突變自檢：拿掉失敗時的 `start` →「stopped services were not started again」；停服務不帶 `--profile server` →「never ran: stop every service」
+  - 真實 docker：建立帶 compose 標籤的測試 volume `wk44probe_opencode-state`，以 uid 1000 寫入 WAL 模式 SQLite（5000 筆）與子目錄，直接呼叫 installer 的 `backup_docker_state`（映像 `wukong-issue44:v2-local`）。tar 內檔案擁有者保留為 wukong（uid 1000），解開後 `pragma integrity_check` 為 ok、筆數 5000；不存在的 volume 名稱印出提示並略過。測試 volume 已刪除
+  - 其他檢查：`test-installer-upgrade.sh all`、`test-release-manifest.sh`（另以真實 data-compatibility.json 產 manifest 通過）、`test-release-workflow.sh`、`test-release-image.sh all`、`test-docker-runtime.sh` 通過
+  - 限制：SCN-013 的「新版啟用後服務正常」在 fixture 層只確認 `up -d` 與 `ps` 成功；以真實映像走完整升級留給 Task 6.1 的演練
 
 ### Task 5.2 — 新版啟用失敗時還原 opencode.db
 - 產出與範圍：`scripts/install.sh` 的啟用失敗路徑
