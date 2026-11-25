@@ -11,6 +11,12 @@ GitHub #44。2026-11-24 使用者決定 OpenCode 升到 V2，Wukong 只專注在
 
 範圍以 #30 [inventory.md 步驟 6](../issue-0030/inventory.md#步驟-6根因排序與升級-gono-go) 的升級前提為起點，介面差異見同檔步驟 4。換版後只支援 V2（不保留 V1 adapter）；release 映像固定 @opencode/cli 2.3.2；Docker installer 升級時自動備份 opencode-state，`--rollback` 連同 opencode.db 一起還原。正式部署（flashaim 的 RunWuKong）的實際換版不在本 issue，合併即結案。
 
+## 現況
+
+2026-11-25 第一次完整審查判定 RETURN TO execute-task（兩項 MUST FIX），待修正後重新審查。
+
+**現行 review**: [review-0405603.md](review-0405603.md)
+
 ## 快速導覽
 
 ### 當前流程
