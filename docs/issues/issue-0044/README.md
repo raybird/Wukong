@@ -13,9 +13,9 @@ GitHub #44。2026-11-24 使用者決定 OpenCode 升到 V2，Wukong 只專注在
 
 ## 現況
 
-2026-11-25 第一次完整審查判定 RETURN TO execute-task（兩項 MUST FIX）。使用者同日決定兩項 MUST FIX 與 S1～S3、N1～N5 全部在這一輪修正，SCN-005 記入待確認（TBD-4）；修正完成後送增量覆審。
+2026-11-25 第一次完整審查（review-0405603）判定 RETURN TO execute-task；同日修正後增量覆審（0405603..c4d47d8）判定 PASS，沒有 MUST FIX 與 SHOULD FIX，三項 NICE TO HAVE 待決定。
 
-**現行 review**: [review-0405603.md](review-0405603.md)
+**現行 review**: [review-c4d47d8.md](review-c4d47d8.md)
 
 ## 快速導覽
 
