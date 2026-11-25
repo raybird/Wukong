@@ -31,9 +31,10 @@ RUN set -eux; \
 # ── Runtime stage ──
 FROM debian:bookworm-slim
 
-# OPENCODE_VERSION pins the opencode CLI for reproducible builds. Defaults to
-# `latest`; pass --build-arg OPENCODE_VERSION=X.Y.Z to lock a known-good release.
-ARG OPENCODE_VERSION=latest
+# OPENCODE_VERSION pins OpenCode V2 (@opencode/cli). Wukong speaks the V2 protocol
+# only, so this stays on the version release/runtime-inputs.env pins (issue-0044);
+# pass --build-arg OPENCODE_VERSION=X.Y.Z only to try another 2.x release.
+ARG OPENCODE_VERSION=2.3.2
 
 # Install runtime deps + gosu + opencode npm package (pinned via OPENCODE_VERSION)
 # tzdata is required for TZ to resolve: without it the container silently stays on
@@ -41,7 +42,7 @@ ARG OPENCODE_VERSION=latest
 # away from where the operator thinks it is.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl git gh gosu nodejs npm python3 python3-pip pipx ripgrep fzf tzdata && \
-    npm install -g "opencode-ai@${OPENCODE_VERSION}" && \
+    npm install -g "@opencode/cli@${OPENCODE_VERSION}" && \
     opencode --version && \
     rm -rf /var/lib/apt/lists/* /root/.npm
 

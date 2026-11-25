@@ -284,7 +284,7 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
     - 紅燈：改動前的 baseline 有 3 項失敗。「讀入相同」報 `compaction` 被改成 `{"auto": true}`、`permission` 與 `snapshot` 被轉換；兩個反向自檢以 V2 格式改寫規則，對 V1 寫法無效。權限行為本身靠 V2 的自動轉換仍然正確
     - 綠燈：`bash scripts/test-opencode-baseline.sh ghcr.io/raybird/wukong:v0.25.1 <V2 2.3.2 prefix>` 11 passed、0 failed，約 14 秒；`bash scripts/test-docker-runtime.sh` 通過。在 baseline 放回 V1 的 `snapshot` 鍵時，`test-docker-runtime.sh` 失敗並指出該鍵
   - 限制：
-    - V2 正式映像要到 Task 4.1 才有，這次以 v0.25.1 映像加掛 V2 prefix 執行；Task 4.1 建好映像後以不帶 prefix 的方式再跑一次
+    - 最初以 v0.25.1 映像加掛 V2 prefix 執行。2026-11-25 Task 4.1 在本機建出 V2 release 映像（`wukong-issue44:v2-local`）後，以 `bash scripts/test-opencode-baseline.sh wukong-issue44:v2-local`（不加掛）重跑，11 passed、0 failed
     - 權限以 `opencode run` 驗證，本機與 server 模式的 `serve` 用同一份設定與同一套規則比對；`serve` 遇到 ask 會轉給使用者回答，那條路徑屬 Task 2.5
     - 給使用者的文件（`user.json` 可用 V2 的 `permissions`、V1 寫法仍有效、`tail_turns` 不再生效）留給 Task 6.3
 
@@ -315,7 +315,7 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
     - `.env` 沒設密碼（server 拿到空字串、V2 自己產生隨機密碼）時判 unhealthy；同一個 server 上舊的 `/global/health` 檢查仍然成功，證明舊檢查抓不到
     - 沒有 server 回應時同一個 healthcheck 失敗
   - 綠燈：`cargo test --workspace` 786 passed、0 failed、14 ignored；clippy、fmt 通過；`bash scripts/test-docker-runtime.sh`、`bash scripts/test-installer-upgrade.sh all` 通過
-  - 限制：V2 正式映像要到 Task 4.1 才有，容器層實測同 Task 3.1 以加掛 V2 的方式執行；給使用者的升級說明（server 模式要設密碼、installer 會自動產生）留給 Task 6.3
+  - 限制：容器層實測最初同 Task 3.1 以加掛 V2 的方式執行；Task 4.1 建出 V2 release 映像後，腳本改收 `IMAGE [V2_PREFIX]`，以 `bash docs/issues/issue-0044/scripts/server-password.sh wukong-issue44:v2-local` 重跑，8 項全部通過。給使用者的升級說明（server 模式要設密碼、installer 會自動產生）留給 Task 6.3
 
 ## Phase 4 — 打包與 release
 
@@ -325,8 +325,26 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 驗收編號：SCN-012
 - 完成判準：npm 有更新版時解析結果仍是 2.3.2；本機建置的映像內 `opencode --version` 為 2.3.2，與釘選檔、manifest 一致（向產物要答案，地雷 W-1）；`test-release-image.sh` 通過，並在版本不符時失敗
 - 驗證：產物檢查
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成
+- 證據：2026-11-25
+  - 前提：當天 `npm view @opencode/cli version` 是 2.4.1，SCN-012 的「npm 上有比 2.3.2 新的版本」是實際情況
+  - 改動：
+    - `release/package.json` 改依賴 `@opencode/cli` 2.3.2，`package-lock.json` 以 `npm install --package-lock-only --omit=dev` 重產（含 12 個平台子套件與各自的 integrity）；`runtime-inputs.env` 的 `OPENCODE_VERSION=2.3.2`、`OPENCODE_INTEGRITY` 為 npm 上 `@opencode/cli@2.3.2` 的值
+    - `scripts/resolve-opencode-version.sh` 不再取 npm latest：沒有 `OPENCODE_VERSION_PIN` 時沿用 `runtime-inputs.env` 的版本，只重新取 integrity 並重寫三個檔；指定 1.x 時拒絕（「Wukong requires OpenCode V2」）。套件名稱改 `@opencode/cli`
+    - `scripts/test-release-image.sh`：`pins` 改檢查 `@opencode/cli` 且主版號必須是 2；`smoke` 在映像內執行 `opencode --version`，與 `runtime-inputs.env` 不同就失敗（向產物要答案，地雷 W-1）。release CI 在發布 tag 之前就跑 smoke，所以版本不符的映像不會被發布
+    - `Dockerfile`（開發用）改裝 `@opencode/cli`，`OPENCODE_VERSION` 預設 2.3.2（原為 latest）；`Dockerfile.release` 不用改（`node_modules/.bin/opencode` 照舊）；release workflow 的步驟名稱改為「Verify the pinned opencode (V2)」
+    - `docs/release-rehearsal.md` 的「OpenCode 版本」一節改寫成固定釘選、換版流程與只收 2.x 的 pin
+  - 測試：
+    - 新增 `scripts/test-resolve-opencode-version.sh`：在暫存目錄複製 release/ 與腳本，假 npm 回報 latest 為 2.9.9。確認沒指定時釘選不動（runtime-inputs.env 與原檔相同）、指定 1.19.6 時失敗並指出要 V2 且不改檔、指定 2.3.2 時通過。紅燈：改動前的腳本去查 `opencode-ai` 的 latest
+    - 以真的 npm 執行 `bash scripts/resolve-opencode-version.sh`：「keeping the committed pin 2.3.2」，重產的 lockfile 與提交的內容逐位元組相同
+    - `bash scripts/test-release-image.sh smoke ghcr.io/raybird/wukong:v0.25.1`（V1 映像）失敗：「image runs opencode '1.19.6', but release/runtime-inputs.env pins 2.3.2」
+  - 產物檢查：照 release workflow 的方式在本機建映像——musl binaries 在 `rust:1.96-bookworm` 容器裡裝 musl-tools 後以 `cargo build --release --locked --target x86_64-unknown-linux-musl` 建出，release-context 依 workflow 的清單逐檔複製，`docker build -f Dockerfile.release` 帶入 runtime-inputs.env 的 build args，得到 `wukong-issue44:v2-local`（2.09 GB，v0.25.1 為 1.77 GB）
+    - `bash scripts/test-release-image.sh smoke wukong-issue44:v2-local` 通過；映像內 `opencode --version` 為 `opencode v2.3.2`，`/usr/local/bin/opencode` 指向 `@opencode/cli/bin/opencode.exe`
+    - 以 `scripts/generate-release-manifest.sh` 照 workflow 的參數產生 manifest：manifest、映像、package.json、lockfile 的版本都是 2.3.2，lockfile 的 integrity 與 manifest 相同
+    - 開發用 `Dockerfile` 也建過一次（建置中的 `opencode --version` 步驟通過），映像內同樣是 `opencode v2.3.2`；驗完已刪除
+    - 用這個映像重跑 Task 3.1（11 passed）與 Task 3.2（8 項通過）的容器層測試，都不再加掛 V2
+  - 其他檢查：`test-release-image.sh all`、`test-release-workflow.sh`、`test-release-manifest.sh`、`test-docker-runtime.sh`、`test-installer-upgrade.sh all` 通過
+  - 觀察：npm 把四個 linux-x64 變體（glibc／musl × 一般／baseline）全部裝進映像，`node_modules` 969 MB；V1 1.19.6 也是四個都裝（838 MB），所以只多約 130 MB，維持原樣
 
 ## Phase 5 — installer 備份、失敗還原與 rollback
 

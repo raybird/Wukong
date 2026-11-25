@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
-# Re-pin the release image's opencode-ai version.
+# Verify and re-pin the release image's OpenCode (@opencode/cli) version.
 #
 # The release image is built from exact pins (version + npm integrity + a
 # lockfile consumed by `npm ci`), and scripts/test-release-image.sh enforces
-# that. "Ship the newest opencode" therefore does not mean unpinning: it means
-# resolving `latest` to a concrete version and rewriting all three pinned files
-# together, so the build stays reproducible and the manifest stays truthful.
+# that. Wukong supports OpenCode V2 only and holds it at the version committed in
+# release/runtime-inputs.env (issue-0044, SCN-012): a newer @opencode/cli on npm
+# does not move the image. Moving the pin is a deliberate change to that file,
+# made after the new version has been checked against Wukong.
 #
 # Release CI runs this before building the image, and again before generating
 # the manifest (with the already-resolved version pinned) so both describe the
-# same opencode.
+# same opencode. Without a pin it re-reads the committed version's integrity from
+# npm and rewrites the three pinned files together, so they cannot drift apart.
 #
-# Escape hatch: set OPENCODE_VERSION_PIN=X.Y.Z to hold a known-good release
-# instead of taking the newest — the release workflow passes the
-# OPENCODE_VERSION_PIN repository variable straight through.
+# Override: set OPENCODE_VERSION_PIN=X.Y.Z to build a different 2.x release — the
+# release workflow passes the OPENCODE_VERSION_PIN repository variable straight
+# through. A 1.x pin is refused: Wukong no longer speaks the V1 protocol.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -36,12 +38,13 @@ if [[ -n "$pin" ]]; then
     version="$pin"
     printf 'resolve-opencode-version: honouring pin %s\n' "$version"
 else
-    version="$(npm view opencode-ai version)"
-    printf 'resolve-opencode-version: npm latest is %s\n' "$version"
+    version="$previous"
+    printf 'resolve-opencode-version: keeping the committed pin %s\n' "$version"
 fi
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "resolved version '$version' is not exact"
+[[ "${version%%.*}" == 2 ]] || fail "Wukong requires OpenCode V2 (2.x); refusing $version"
 
-integrity="$(npm view "opencode-ai@$version" dist.integrity)"
+integrity="$(npm view "@opencode/cli@$version" dist.integrity)"
 [[ "$integrity" =~ ^sha512- ]] || fail "resolved integrity '$integrity' is not an npm sha512 value"
 
 # runtime-inputs.env drives both the image build and the release manifest.
@@ -69,7 +72,7 @@ import json, pathlib, sys
 
 path, version = pathlib.Path(sys.argv[1]), sys.argv[2]
 data = json.loads(path.read_text())
-data["dependencies"]["opencode-ai"] = version
+data["dependencies"] = {"@opencode/cli": version}
 path.write_text(json.dumps(data, indent=2) + "\n")
 PY
 
@@ -82,12 +85,12 @@ PY
 bash "$root/scripts/test-release-image.sh" pins >/dev/null \
     || fail "regenerated pins do not satisfy the release image contract"
 
-printf 'resolve-opencode-version: opencode-ai %s -> %s\n' "${previous:-unknown}" "$version"
+printf 'resolve-opencode-version: @opencode/cli %s -> %s\n' "${previous:-unknown}" "$version"
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     printf 'version=%s\nintegrity=%s\n' "$version" "$integrity" >> "$GITHUB_OUTPUT"
 fi
 if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
-    printf 'opencode-ai pinned at `%s` (was `%s`)\n' "$version" "${previous:-unknown}" \
+    printf '@opencode/cli pinned at `%s` (was `%s`)\n' "$version" "${previous:-unknown}" \
         >> "$GITHUB_STEP_SUMMARY"
 fi

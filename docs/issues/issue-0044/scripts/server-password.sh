@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Task 3.2（SCN-003、SCN-017）：常駐 server 模式的密碼接線與 healthcheck，對真實 V2 驗證。
-# 用法：server-password.sh V2_PREFIX
-#   V2_PREFIX：`npm install -g --prefix V2_PREFIX @opencode/cli@2.3.2` 的目錄
+# 用法：server-password.sh IMAGE [V2_PREFIX]
+#   IMAGE：Wukong 映像。用它的 opencode，或 V2_PREFIX 的 opencode
+#   V2_PREFIX：`npm install -g --prefix V2_PREFIX @opencode/cli@2.3.2` 的目錄，映像還沒換 V2 時用
 # 在 repo 根目錄執行，先 `cargo build -p wukong-cli`。
 #
 # 密碼、環境變數與 healthcheck 命令都從 `docker compose config`（release compose）取出，驗的是
@@ -9,9 +10,9 @@
 # --network none，模型是容器內只綁 127.0.0.1 的假模型；主機上的 wukong 經 docker exec 的
 # 轉接連進容器，不開任何對外的網路。
 set -uo pipefail
-v2="$(cd "${1:?usage: server-password.sh V2_PREFIX}" && pwd)"
+image="${1:?usage: server-password.sh IMAGE [V2_PREFIX]}"
+v2="${2:+$(cd "$2" && pwd)}"
 repo="$(pwd)"
-image=ghcr.io/raybird/wukong:v0.25.1
 tag="pw-$$"
 work="$(mktemp -d)"
 relay_pid=""
@@ -61,12 +62,16 @@ class H(BaseHTTPRequestHandler):
 ThreadingHTTPServer(("127.0.0.1", 18080), H).serve_forever()
 PY
 provider='{"model":"fake/m","provider":{"fake":{"npm":"@ai-sdk/openai-compatible","name":"Fake","options":{"baseURL":"http://127.0.0.1:18080/v1","apiKey":"unused"},"models":{"m":{"name":"m"}}}}}'
-path="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image" | sed -n 's/^PATH=//p')"
+v2_args=()
+if [[ -n "$v2" ]]; then
+    path="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image" | sed -n 's/^PATH=//p')"
+    v2_args=(-e PATH="/v2prefix/bin:$path" -v "$v2":/v2prefix:ro)
+fi
 
 server() { # server NAME PASSWORD：照 compose 的 command 與 healthcheck 起 V2 server
     docker run -d --name "$tag-$1" --network none -e USER_ID="$(id -u)" -e GROUP_ID="$(id -g)" \
         -e WUKONG_WORKSPACE=/workspace -e OPENCODE_SERVER_PASSWORD="$2" -e OPENCODE_CONFIG_CONTENT="$provider" \
-        -e PATH="/v2prefix/bin:$path" -v "$v2":/v2prefix:ro -v "$work":/probe:ro \
+        "${v2_args[@]}" -v "$work":/probe:ro \
         -v "$repo/scripts/docker-entrypoint.sh":/probe-entrypoint.sh:ro \
         --health-cmd "$health" --health-interval 2s --health-timeout 5s --health-retries 3 \
         --entrypoint bash "$image" /probe-entrypoint.sh opencode serve --hostname 0.0.0.0 --port 4096 > /dev/null
