@@ -450,8 +450,26 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 驗收編號：支援 SCN-001～SCN-003、SCN-005、SCN-006、SCN-008、SCN-009、SCN-013、SCN-015
 - 完成判準：每一步有命令與觀察結果；失敗步驟照實記錄，不寫成通過
 - 驗證：端到端觀測，每項附「失敗時會看到什麼」
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成
+- 證據：2026-11-25 14:41～15:14（台北），[rehearsal.md](rehearsal.md)，腳本 [scripts/rehearsal-env.sh](scripts/rehearsal-env.sh) 與 `scripts/rehearsal-*.sh`
+  - 環境：在獨立的 Docker daemon（dind）裡演練。主機上正式部署用的是 installer 認得的固定容器名稱，在主機演練會被當成同一個部署
+  - 流程：v0.25.1 自己的 installer 全新安裝 → 本分支 installer 升級到本分支映像（假 tag `v0.26.0-rc.44`）→ rollback；改成 server 模式後再升級、rollback 一次。模型是使用者的 NVIDIA 模型，只送合成提示詞
+  - 通過：
+    - SCN-001：V1 時期的 session 在 V2 上沿用同一個，內容含換版前的對話
+    - SCN-002：本機模式的 Web、CLI、排程回合，結束後沒有殘留的 opencode 程序；工具進度；指定模型的排程
+    - SCN-003：帶認證的 healthcheck；server 模式的回合接續
+    - SCN-006：Web 提問的回答與取消，本機與 server 模式都試過
+    - SCN-008：壓縮後接續；保留期清理預覽
+    - SCN-009：絕對路徑的遞迴刪除被 `permission.rejected`，workspace 內允許；`user.json` 指定的模型生效
+    - SCN-013：升級時停服務並備份 opencode-state
+    - SCN-015：兩次 rollback 都還原 opencode.db，V1 時期的對話可接續
+    - SCN-017：server 模式沒有密碼時，installer 備份 .env 並產生 48 字元密碼，輸出不含密碼
+  - 照實記錄的失敗與限制：
+    - rollback 後第一次接續，碰到 NVIDIA 300 秒不回應 header，重跑通過
+    - Telegram 沒有跑回合（沒有專用的測試 bot）
+    - 入口沒有取消執行中回合的操作（SCN-005 由 Task 2.3 的測試涵蓋）
+    - 排程遇到提問自動拒絕、權限回覆，這次都沒觸發
+    - 範圍外的觀察列在 rehearsal.md「觀察」
 
 ### Task 6.2 — V1 與 V2 的版本對照
 - 產出與範圍：用 `docs/issues/issue-0030/scripts/bench-turn.sh` 對 v0.25.1 映像與本版映像各跑一組
