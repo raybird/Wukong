@@ -537,7 +537,7 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
   - `scripts/test-idle-restart-decision.sh` 的假 server 改成 V2 的形狀：`/api/` 要認證，其他路徑回網頁。另加兩個反向案例：列表是網頁、密碼錯誤；兩者都不能重啟，而且 log 要說明原因、不印出密碼。
 - 證據：
   - 先實測 V2 的排序（隔離容器）：先建 A、再建 B，然後對 A 送 prompt；`limit=1` 回的是 A。所以排序依據是 `time.updated`，`limit=1` 可用。不帶密碼或密碼錯誤都回 401。
-  - 紅燈：舊腳本在 V2 形狀的假 server 上，案例二一直印「a session was updated within 1s; skipping」，沒有重啟，跟審查描述的無聲失效相同。改完 5 個案例全部通過。
+  - 紅燈：舊腳本在 V2 形狀的假 server 上，案例一（2026-11-25 增量覆審更正，原本誤寫為案例二）就一直印「a session was updated within 1s; skipping」，沒有重啟，跟審查描述的無聲失效相同。改完 5 個案例全部通過。
   - 真實 V2 端到端：用 entrypoint 啟動 `opencode serve`（opencode 是 PID 1），bind-mount 新腳本，設 `TZ=Asia/Taipei` 與涵蓋現在的窗口。supervisor 判定閒置後送出 SIGINT，V2 結束（exit 130），容器在約 11 秒內退出，交給 compose 的 `restart: unless-stopped`。所以 V1 時「PID 1 只收得到有 handler 的 SIGINT」這個前提，在 V2 仍然成立。
   - 第一次端到端沒設 TZ，容器是 UTC，窗口沒有命中，這正是腳本開頭警告的情況。compose 會設 TZ。
 
@@ -577,6 +577,15 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - N2：`event_map.rs` 只在之前取消提問或拒絕權限、而且 reason 是 `shutdown` 時，才把 `execution.interrupted` 當成正常結束。真實樣本中，取消與拒絕之後都是 `shutdown`，使用者按停止是 `user`。紅燈 `only_the_shutdown_after_a_decline_ends_the_turn_normally`：`user` 那個斷言失敗；改完綠燈。
 - N4：`forms` 的三處 `lock().unwrap()` 改成與同檔一致的 poison 處理。其中一處在 `ForgetForms` 的 Drop 裡，unwind 期間 panic 會讓程序 abort。
 - N5：`AGENTS.md` 的 `rollbackSafeTo` 發版提醒旁邊補上：之後不再遷移的版本，要把 `backupRequired` 改回 false、`affectedState` 清空。
+
+### R7 — 增量覆審的建議（review-c4d47d8 N-B、N-C）
+- 狀態：✅ 已完成
+- 使用者 2026-11-25 決定：N-A 記入 README TBD-6，不修；N-B、N-C 修正。
+- N-B：`CHANGELOG.md` 的 `/providers` 與閒置重啟兩條，改寫成從 v0.25.1 升級時看得到的差異。v0.25.x 的使用者從沒遇過「命令直接失敗」「每天跳過重啟」，那是這個分支上的中間狀態。
+- N-C：
+  - `scripts/test-installer-upgrade.sh` 的 `test_docker` 補上一段：沒有 `.env` 的全新部署，裝完 `.env` 是 0600。
+  - 消融：換回 0405603 的 `install.sh` 時，`test-installer-upgrade.sh docker` 失敗（`a new .env is not 0600`）；換回目前版本後通過。
+  - 另外更正 R2 紅燈的案例編號：最先失敗的是案例一，原本誤寫為案例二。
 
 ### 這一輪的整體檢查（2026-11-25）
 - `cargo fmt --all -- --check` 通過；`cargo clippy --all-targets --locked -- -D warnings` 通過。

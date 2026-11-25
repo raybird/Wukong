@@ -29,13 +29,12 @@
 - **自訂 `WUKONG_AGENT_CMD` 的 opencode 命令會自動加上 `--standalone`。** V2 的 `opencode run` 預設會
   連到背景 service；在主機上那可能是你自己的 opencode，回合會跑進你的資料裡。命令裡已經有
   `--standalone` 或 `--server` 時照你的設定（#44）。
-
-- **`/providers` 改用 `opencode auth list`，`/models` 與 Web 的模型清單、系統診斷不再留下背景程式。** V2 沒有
-  `providers list`，原本的命令會直接失敗；`opencode models` 不加 `--standalone` 時會啟動 V2 的背景 service
-  並一直留著（Docker 裡是 wukong-web 容器，binary 模式則是你的主機）。現在這些命令都用一次性的私有
-  server，`auth list` 只列出 provider 與憑證是否已存，不印密鑰（#44）。
-- **共用 server 模式的每日閒置重啟在 V2 上照常運作。** 判斷閒置時改查 V2 的 `/api/session` 並帶密碼；
-  原本查的 V1 路徑在 V2 回網頁，每天都被當成「有活動」而跳過重啟。問不到時 log 會寫出原因（#44）。
+- **`/providers` 改為列出 `opencode auth list` 的輸出，格式與以前不同。** V2 沒有 `providers list`；新的
+  輸出列出已設定的 provider、憑證類型與是否已存，不印密鑰。`/models`、Web 的模型清單與系統診斷照常，
+  這些命令都用一次性的私有 server，不會在容器或你的主機上留下 V2 的背景 service（#44）。
+- **共用 server 模式的閒置重啟問不到 session 列表時，log 會寫出原因。** 例如沒有密碼、密碼被拒、
+  回應格式不符；以前這些情況跟「有 session 剛更新」印成同一句。判斷閒置改查 V2 的 `/api/session` 並帶
+  密碼，重啟的條件不變（#44）。
 
 ### Added
 

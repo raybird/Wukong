@@ -263,6 +263,13 @@ test_docker() {
     : > "$LOG"
     FIXTURE_SERVER_ACTIVE=1 run_installer '' --mode docker --version v9.9.9 >/dev/null
     assert_not_contains "$LOG" ' stop opencode-server'
+
+    # A fresh deployment gets its .env from .env.example, readable by the owner only:
+    # it is where the server password lives (review-c4d47d8 N-C).
+    prepare
+    run_installer '' --mode docker --version v9.9.9 >/dev/null
+    assert_file "$DEPLOYMENT/.env"
+    [[ "$(stat -c %a "$DEPLOYMENT/.env")" == 600 ]] || fail "a new .env is not 0600"
 }
 
 test_docker_env_migration() {
