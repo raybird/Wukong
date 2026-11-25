@@ -375,8 +375,20 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 驗收編號：SCN-014
 - 完成判準：模擬啟用失敗時，release 檔案與 opencode.db 都回到升級前；不還原 opencode.db 的版本會讓測試失敗（反向自檢）
 - 驗證：installer 腳本測試
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成
+- 證據：2026-11-25
+  - 改動（`scripts/install.sh`）：
+    - 找 volume 的邏輯抽成 `state_volume`（依 compose 標籤，比對到多個時失敗），`backup_docker_state` 改用它
+    - 新增 `restore_docker_state`：輸入 Task 5.1 記下的 `{"<名稱>": "<tar>"}`，先以 `tar -tf` 確認備份可讀，再用新版映像 `docker run --rm -i --network none -v VOL:/state --entrypoint sh … -c 'find /state -mindepth 1 -delete && tar -C /state -xpf -' < tar` 清空後整包解回，新版寫入或新增的檔案都不留下
+    - 啟用失敗路徑：有 state 備份時先 `docker compose -p P --profile server stop` 停掉新版所有服務，再還原 volume，之後才還原 .env 與 release 檔案並啟動前一版。還原失敗時仍換回前一版的檔案，但不啟動任何版本（前一版可能讀不了已遷移的資料），中止訊息列出備份檔路徑供手動還原。metadata 兩種情況都不前進
+    - `docs/docker.md` 補上失敗時的還原行為
+  - 測試：fake docker 加上 `FIXTURE_MIGRATING_TAG`（啟動該版時改寫 opencode.db 並新增 `v2-only`，模擬 V2 第一次啟動的遷移）與 `FIXTURE_RESTORE_EXIT`（還原的 `docker run` 失敗）。新增 `docker-state-restore` case（併入 `all`）：
+    - 健康檢查失敗：opencode-state 與升級前 `diff -r` 相同（`v2-only` 消失、opencode.db 回到升級前的 64 KiB 隨機內容），`.wukong-release` 與 docker-compose.yml 與升級前相同；log 順序為新版 `up` → 停止所有服務 → 還原 `docker run -i` → 前一版 `up`
+    - 還原失敗：release 檔案與 metadata 仍回到升級前，`up -d --force-recreate` 只出現新版那一次，輸出含 `volumes/opencode-state.tar`
+    - 紅燈：實作前「opencode-state was not restored to the backup」（diff 顯示 opencode.db 不同、多出 v2-only）。反向自檢（完成判準要求）：拿掉還原 →「opencode-state was not restored to the backup」；還原前不停服務 → 順序斷言失敗；還原失敗仍啟動前一版 →「a release was started on an unrestored opencode-state」
+  - 真實 docker：測試 volume `wk44probe_opencode-state` 放入 uid 1000 的 WAL 模式 SQLite（5000 筆）與子目錄，呼叫 installer 的 `backup_docker_state`，再以 uid 1000 模擬 V2（新增資料表 v2、刪光 t、新增檔案 v2-only），之後 `restore_docker_state`。還原後 `find -printf "%p %u:%g %m %s"` 清單與 opencode.db 的 sha256 都與備份前相同，`integrity_check` ok、t 為 5000 筆、沒有 v2 資料表。測試 volume 已刪除
+  - 其他檢查：`test-installer-upgrade.sh all`、`test-release-workflow.sh`、`test-docker-runtime.sh` 通過
+  - 限制：「服務回到前一版」在 fixture 層以前一版的 `up -d` 確認；以真實映像走完整失敗回復留給 Task 6.1
 
 ### Task 5.3 — `--rollback` 還原映像與 opencode.db
 - 產出與範圍：`scripts/install.sh` 的 `rollback_docker`；installer 輸出說明備份之後的對話不保留

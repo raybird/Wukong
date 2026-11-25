@@ -670,15 +670,22 @@ if c["backupRequired"]:
 PY
 }
 
+# 這個 compose project 的 volume 名稱（依 compose 標籤）；沒有時輸出空字串。
+state_volume() {
+    local volume
+    volume="$(docker volume ls --filter "label=com.docker.compose.project=$DOCKER_PROJECT_NAME" \
+        --filter "label=com.docker.compose.volume=$1" --format '{{.Name}}')" || return
+    [[ "$volume" != *$'\n'* ]] || { info "more than one $1 volume matches project $DOCKER_PROJECT_NAME" >&2; return 1; }
+    printf '%s\n' "$volume"
+}
+
 backup_docker_state() {
     local backup="$1" image="$2" name volume archive saved="{}"
     shift 2
     mkdir -p "$backup/volumes"
     for name in "$@"; do
-        volume="$(docker volume ls --filter "label=com.docker.compose.project=$DOCKER_PROJECT_NAME" \
-            --filter "label=com.docker.compose.volume=$name" --format '{{.Name}}')" || return
+        volume="$(state_volume "$name")" || return
         if [[ -z "$volume" ]]; then info "no $name volume in this deployment; nothing to back up" >&2; continue; fi
-        [[ "$volume" != *$'\n'* ]] || { info "more than one $name volume matches project $DOCKER_PROJECT_NAME" >&2; return 1; }
         archive="$backup/volumes/$name.tar"
         docker run --rm --network none -v "$volume:/state:ro" --entrypoint tar "$image" -C /state -cf - . > "$archive" || return
         tar -tf "$archive" >/dev/null || { info "backup of $name is not a readable archive" >&2; return 1; }
@@ -686,6 +693,21 @@ backup_docker_state() {
         info "backed up $name to $archive" >&2
     done
     printf '%s\n' "$saved"
+}
+
+# backup_docker_state 的反向：$1 是它輸出的 {"<名稱>": "<tar>"}。服務必須已停止。
+# 先確認 tar 可讀才清空 volume，清空後整包解回，讓新版寫入或新增的檔案都不留下。
+restore_docker_state() {
+    local image="$2" name archive volume
+    while IFS=$'\t' read -r name archive; do
+        [[ -n "$name" ]] || continue
+        tar -tf "$archive" >/dev/null 2>&1 || { info "backup of $name is not readable: $archive" >&2; return 1; }
+        volume="$(state_volume "$name")" || return
+        [[ -n "$volume" ]] || { info "the $name volume is gone; its backup is $archive" >&2; return 1; }
+        docker run --rm -i --network none -v "$volume:/state" --entrypoint sh "$image" \
+            -c 'find /state -mindepth 1 -delete && tar -C /state -xpf -' < "$archive" || return
+        info "restored $name from $archive" >&2
+    done < <(python3 -c 'import json,sys; [print(k + "\t" + v) for k, v in sorted(json.loads(sys.argv[1]).items())]' "$1")
 }
 
 install_docker() {
@@ -737,13 +759,23 @@ install_docker() {
     [[ -z "$env_report" ]] || while IFS= read -r line; do info "$line"; done <<< "$env_report"
     if ! activate_docker_services || ! docker compose -p "$DOCKER_PROJECT_NAME" ps >/dev/null; then
         # A failed recreation must not leave release-owned files or metadata advanced.
+        # State the new release may already have migrated (opencode.db under OpenCode V2)
+        # goes back first, with every service stopped; when that fails the old release is
+        # not started on it, because it may not be able to read the migrated data.
+        local state_restored=true
+        if [[ "$state_backups" != "{}" ]]; then
+            docker compose -p "$DOCKER_PROJECT_NAME" --profile server stop || true
+            restore_docker_state "$state_backups" "ghcr.io/raybird/wukong:${VERSION}" || state_restored=false
+        fi
         [[ "$env_report" != *'.env: backup '* ]] || cp -p "$env_backup/.env" .env
         if [[ -n "$backup" ]]; then
             for file in "${DOCKER_RELEASE_OWNED[@]}"; do [[ ! -f "$backup/$file" ]] || cp -p "$backup/$file" "$file"; done
-            activate_docker_services || true
+            [[ "$state_restored" == false ]] || activate_docker_services || true
         else
             for file in "${DOCKER_RELEASE_OWNED[@]}"; do rm -f "$file"; done
         fi
+        [[ "$state_restored" == true ]] || abort "Docker activation or health check failed and the state backup could not be restored; services are stopped. Restore by hand from: $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).values()))' "$state_backups")"
+        [[ "$state_backups" == "{}" ]] || abort "Docker activation or health check failed; restored previous release files and the state backed up before the upgrade"
         abort "Docker activation or health check failed; restored previous release files"
     fi
     write_json_atomically .wukong-release "$(python3 - "$VERSION" "$expected" "$previous_version" "$previous_digest" "$backup" "$DOCKER_PROJECT_NAME" "$RELEASE_DIR/release-manifest.json" "$state_backups" <<'PY'

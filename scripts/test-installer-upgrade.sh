@@ -146,7 +146,15 @@ if [[ "$1" == run ]]; then
         args=("${args[@]//$dst/$WUKONG_TEST_VOLUMES/$src}")
     done
     [[ -z "${FIXTURE_DOCKER_RUN_EXIT:-}" ]] || exit "$FIXTURE_DOCKER_RUN_EXIT"
+    [[ -z "${FIXTURE_RESTORE_EXIT:-}" || " ${args[*]} " != *" -xpf "* ]] || exit "$FIXTURE_RESTORE_EXIT"
     exec "${args[@]}"
+fi
+# FIXTURE_MIGRATING_TAG=<tag>: starting that release rewrites opencode.db and adds a
+# file, the way OpenCode V2 migrates the database on its first start.
+if [[ "$1" == compose && "${*: -3}" == 'up -d --force-recreate' && -n "${FIXTURE_MIGRATING_TAG:-}" ]] &&
+    grep -Fq "wukong:$FIXTURE_MIGRATING_TAG" docker-compose.yml && [[ -d "$WUKONG_TEST_VOLUMES/wukong_opencode-state" ]]; then
+    printf 'migrated by %s\n' "$FIXTURE_MIGRATING_TAG" > "$WUKONG_TEST_VOLUMES/wukong_opencode-state/opencode.db"
+    printf 'new\n' > "$WUKONG_TEST_VOLUMES/wukong_opencode-state/v2-only"
 fi
 if [[ "$1" == image && "$2" == inspect ]]; then printf 'ghcr.io/raybird/wukong@sha256:%s\n' "${FIXTURE_IMAGE_DIGEST:-$(printf 'a%.0s' {1..64})}"; exit 0; fi
 if [[ "$1" == compose && "${*: -1}" == ps && -n "${FIXTURE_DOCKER_PS_EXIT:-}" ]]; then exit "$FIXTURE_DOCKER_PS_EXIT"; fi
@@ -615,6 +623,49 @@ PY
     [[ -d "$TMP/restored/snapshot" ]] || fail "backup lost a directory"
 }
 
+# issue-0044 SCN-014: when the new release fails to start, opencode.db goes back to
+# the pre-upgrade backup together with the release files, before the old release starts.
+state_backup_fixture() {
+    prepare
+    run_installer '' --mode docker --version v9.9.9 >/dev/null
+    mkdir -p "$VOLUMES/wukong_opencode-state/snapshot"
+    head -c 65536 /dev/urandom > "$VOLUMES/wukong_opencode-state/opencode.db"
+    printf 's\n' > "$VOLUMES/wukong_opencode-state/snapshot/f"
+    rm -rf "$TMP/state-before"; cp -a "$VOLUMES/wukong_opencode-state" "$TMP/state-before"
+    cp "$DEPLOYMENT/.wukong-release" "$TMP/metadata-before"; cp "$DEPLOYMENT/docker-compose.yml" "$TMP/compose-before"
+    FIXTURE_TAG=v9.9.7 FIXTURE_STATE_BACKUP=1 make_release
+    : > "$LOG"
+}
+
+test_docker_state_restore() {
+    state_backup_fixture
+    ! FIXTURE_MIGRATING_TAG=v9.9.7 FIXTURE_DOCKER_PS_EXIT=1 FIXTURE_STATE_BACKUP=1 \
+        run_installer '' --mode docker --upgrade --version v9.9.7 >"$TMP/out" 2>&1 || fail "unhealthy upgrade succeeded"
+    diff -r "$TMP/state-before" "$VOLUMES/wukong_opencode-state" || fail "opencode-state was not restored to the backup"
+    assert_same "$TMP/metadata-before" "$DEPLOYMENT/.wukong-release"
+    assert_same "$TMP/compose-before" "$DEPLOYMENT/docker-compose.yml"
+    # Order: new release starts → everything stops → volume restored → old release starts.
+    python3 - "$LOG" <<'PY'
+import sys
+lines = open(sys.argv[1]).read().splitlines()
+ups = [i for i, l in enumerate(lines) if l.endswith("up -d --force-recreate")]
+stops = [i for i, l in enumerate(lines) if l == "docker compose -p wukong --profile server stop"]
+restores = [i for i, l in enumerate(lines) if l.startswith("docker run ") and " -i " in f" {l} " and "wukong_opencode-state:/state " in f"{l} "]
+assert len(ups) == 2 and restores, "\n".join(lines)
+assert any(ups[0] < s < restores[0] for s in stops) and restores[0] < ups[1], "\n".join(lines)
+PY
+
+    # The restore itself fails: release files still go back, but nothing is started on
+    # a database the old release may not be able to read; the message names the backup.
+    state_backup_fixture
+    ! FIXTURE_MIGRATING_TAG=v9.9.7 FIXTURE_DOCKER_PS_EXIT=1 FIXTURE_RESTORE_EXIT=1 FIXTURE_STATE_BACKUP=1 \
+        run_installer '' --mode docker --upgrade --version v9.9.7 >"$TMP/out" 2>&1 || fail "unhealthy upgrade succeeded"
+    assert_same "$TMP/compose-before" "$DEPLOYMENT/docker-compose.yml"
+    assert_same "$TMP/metadata-before" "$DEPLOYMENT/.wukong-release"
+    [[ "$(grep -c 'up -d --force-recreate' "$LOG")" == 1 ]] || fail "a release was started on an unrestored opencode-state"
+    grep -Eq 'volumes/opencode-state\.tar' "$TMP/out" || fail "failure message does not point at the backup: $(cat "$TMP/out")"
+}
+
 test_docker_rollback() {
     prepare
     run_installer '' --mode docker --version v9.9.9 >/dev/null
@@ -762,13 +813,14 @@ case "$CASE" in
     legacy-rollback) test_legacy_rollback ;;
     compatibility) test_rollback_guard ;;
     docker-state-backup) test_docker_state_backup ;;
+    docker-state-restore) test_docker_state_restore ;;
     docker-rollback) test_docker_rollback ;;
     docker-recovery) test_docker_recovery ;;
     binary-recovery) test_binary_recovery ;;
     docker-project) test_docker_project_resolution ;;
     docker-project-conflicts) test_docker_project_conflicts ;;
     docker-project-persistence) test_docker_project_persistence ;;
-    all) test_parsing; test_verification; test_docker; test_docker_env_migration; test_docker_env_server_password; test_docker_forward_compatible_bundle; test_docker_bundle_missing_required_entry; test_docker_installer_replaces_itself_mid_run; test_stdin_installer; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_docker_compose_repair; test_docker_project_resolution; test_docker_project_conflicts; test_docker_project_persistence; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_state_backup; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
+    all) test_parsing; test_verification; test_docker; test_docker_env_migration; test_docker_env_server_password; test_docker_forward_compatible_bundle; test_docker_bundle_missing_required_entry; test_docker_installer_replaces_itself_mid_run; test_stdin_installer; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_docker_compose_repair; test_docker_project_resolution; test_docker_project_conflicts; test_docker_project_persistence; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_state_backup; test_docker_state_restore; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
     *) fail "unknown test case: $CASE" ;;
 esac
 

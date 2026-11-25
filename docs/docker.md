@@ -74,7 +74,7 @@ curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install
 
 `--upgrade` 會先比對目標 release、`.wukong-release` 與目前的 Compose image 設定；已是相同版本時會直接結束，不呼叫 Docker。需要重新部署相同版本時可加上 `--force`。
 
-目標 release 的 compatibility metadata（`data-compatibility.json` 的 `backupRequired`）要求備份時，installer 會在換上新版檔案之前先停止所有服務，把 `affectedState` 列出的 volume 打包到 `.wukong-backups/<前一版>-<時間>/volumes/<名稱>.tar`，位置記在 `.wukong-release` 的 `stateBackups`。2026-11-25 起換用 OpenCode V2 的版本會這樣備份 `opencode-state`（V2 第一次啟動時會就地遷移裡面的 `opencode.db`，issue-0044）。備份失敗時 installer 會重新啟動原本的服務並中止，部署維持原版。
+目標 release 的 compatibility metadata（`data-compatibility.json` 的 `backupRequired`）要求備份時，installer 會在換上新版檔案之前先停止所有服務，把 `affectedState` 列出的 volume 打包到 `.wukong-backups/<前一版>-<時間>/volumes/<名稱>.tar`，位置記在 `.wukong-release` 的 `stateBackups`。2026-11-25 起換用 OpenCode V2 的版本會這樣備份 `opencode-state`（V2 第一次啟動時會就地遷移裡面的 `opencode.db`，issue-0044）。備份失敗時 installer 會重新啟動原本的服務並中止，部署維持原版。新版啟用或健康檢查失敗時，installer 先停掉所有服務，把這些 volume 還原成備份（清空後整包解回，新版寫入的內容不保留），再換回前一版的檔案並啟動前一版；還原本身失敗時不啟動任何版本，服務維持停止，錯誤訊息會列出備份檔位置供手動還原。
 
 installer 會把 Docker Compose project 記錄在 `.wukong-release`。既有部署若尚未記錄，會從現有 Wukong container 的 `com.docker.compose.project` label 判斷並沿用，避免升級時切換到另一組 volumes。只有全新安裝可用 `COMPOSE_PROJECT_NAME=<name>` 選擇 project；既有 metadata、container labels 與手動指定值不一致，或現有 containers 的 ownership 不明確時，installer 會在覆寫檔案或重建服務前中止。這個選項不會遷移或複製 volumes。
 
