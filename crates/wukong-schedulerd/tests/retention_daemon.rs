@@ -133,7 +133,8 @@ impl Daemon {
             .env("WUKONG_SCHED_NOTIFY", "0")
             .env_remove("WUKONG_TG_TOKEN")
             .env_remove("WUKONG_AGENT_SERVER_USERNAME")
-            .env_remove("WUKONG_AGENT_SERVER_PASSWORD")
+            // server 模式一定要密碼（issue-0044 SCN-017）；這個假 server 不驗證。
+            .env("WUKONG_AGENT_SERVER_PASSWORD", "probe")
             .env_remove("WUKONG_EMBED")
             .env_remove("WUKONG_MD_DIR")
             .stdin(Stdio::null())

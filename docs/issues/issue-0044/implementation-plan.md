@@ -294,8 +294,28 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 驗收編號：SCN-003、SCN-017
 - 完成判準：入口與 opencode-server 用同一組密碼時就緒檢查通過、回合成功；server 停止或密碼錯誤時 healthcheck 判 unhealthy；沒有密碼時入口立即報錯並指出變數名稱；installer 測試確認 server 模式未設密碼時產生密碼、已設時不改、非 server 模式不加；每個服務都接到變數（地雷 W-3，`test-docker-runtime.sh`）
 - 驗證：容器層整合測試
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成
+- 證據：2026-11-25
+  - 改動：
+    - `build_backend_from_env` 改回傳 `Result`：設了 `WUKONG_AGENT_SERVER_URL` 卻沒有 `WUKONG_AGENT_SERVER_PASSWORD`（或為空）時回錯誤，訊息指出變數名稱。CLI、web、telegram、schedulerd 四個入口啟動時印出錯誤並結束；改簽章讓編譯器確保每個入口都處理（GitNexus impact：CRITICAL，6 個直接呼叫端，都是入口與測試）
+    - `docker-compose.yml`、`docker-compose.release.yml`：opencode-server 拿 `OPENCODE_SERVER_PASSWORD=${WUKONG_AGENT_SERVER_PASSWORD:-}`，`wukong`、`wukong-telegram`、`wukong-web`、`wukong-schedulerd` 拿 `WUKONG_AGENT_SERVER_PASSWORD=${WUKONG_AGENT_SERVER_PASSWORD:-}`。memoria overlay 不用改，疊上後每個服務都拿到同一組（`docker compose config` 確認）
+    - opencode-server healthcheck 改為帶 basic auth 查 `/api/info`。認證 header 以 base64 經 stdin 交給 curl（`-H @-`），密碼不出現在任何程序的參數裡（主機上的 `ps` 看得到容器內程序的參數），也不必處理特殊字元
+    - `scripts/install.sh` 的 `.env` 遷移：URL 指向內建 opencode-server 且 server profile 會啟用、密碼未設或為空時，先備份再產生 48 字元 hex 密碼（只寫進 `.env`，輸出只說明已產生，不印密碼）；已設時不動；本機模式不加；指向其他 server 時不產生（對不上那台 server），只印警告
+    - `.env.example` 說明這個變數
+  - 測試：
+    - 單元 `backend_from_env_uses_cli_when_server_url_missing` 加上沒有密碼時回錯誤並指出變數名稱。紅燈：簽章未改時編譯失敗；拿掉檢查的消融版本失敗於「server mode without a password must not build a backend」
+    - 整合 `crates/wukong-cli/tests/server_password.rs`：`wukong` binary 在 server 模式沒有密碼時 10 秒內失敗、stderr 含 `WUKONG_AGENT_SERVER_PASSWORD`。紅燈：改動前的程式改去連線，只報 `health_check failed … Connection refused`，看不出原因
+    - 既有的 `new_session_flag`、`opencode_prune`、`retention_daemon` 測試用不驗證的假 server，原本刻意不帶密碼，現在改帶一組
+    - `scripts/test-docker-runtime.sh` 新增解析 YAML 的檢查：兩個 compose 的 opencode-server 與四個入口都接到同一個變數、healthcheck 帶密碼查 `/api/info`、overlay 沒有改寫密碼變數。紅燈：改 compose 前 12 項失敗；原本比對 `/global/health` 字串的兩項移除
+    - `scripts/test-installer-upgrade.sh docker-env-server-password`：未設時產生（48 hex、一行、輸出不含密碼、備份等於原檔、只多一行）、再升級不變、空值就地補上、已設時不動且不備份、本機模式不加、其他 server 不改並提醒。紅燈：改 installer 前失敗於「no password was generated」。原 `docker-env-migration` 第一個案例改為已設密碼，維持「只補 profile」的期望
+  - 容器層實測：[scripts/server-password.sh](scripts/server-password.sh)（v0.25.1 映像加掛 V2 2.3.2，本 repo 的 entrypoint，server 容器 `--network none`，模型是容器內的假模型；本機建出的 `target/debug/wukong` 經 docker exec 轉接連進容器）。密碼、環境變數與 healthcheck 命令都從 release compose 的 `docker compose config` 取出。8 項全部通過，約 15 秒：
+    - compose 把同一組密碼交給 opencode-server 與三個入口
+    - 同一組密碼的 server，healthcheck 判 healthy；入口以同一組密碼就緒檢查通過、回合完成（rc=0，回覆 PONG）；入口換一組密碼時失敗並指出「認證被拒」
+    - 反向：healthcheck 帶錯的密碼時 curl 收到 401 而失敗
+    - `.env` 沒設密碼（server 拿到空字串、V2 自己產生隨機密碼）時判 unhealthy；同一個 server 上舊的 `/global/health` 檢查仍然成功，證明舊檢查抓不到
+    - 沒有 server 回應時同一個 healthcheck 失敗
+  - 綠燈：`cargo test --workspace` 786 passed、0 failed、14 ignored；clippy、fmt 通過；`bash scripts/test-docker-runtime.sh`、`bash scripts/test-installer-upgrade.sh all` 通過
+  - 限制：V2 正式映像要到 Task 4.1 才有，容器層實測同 Task 3.1 以加掛 V2 的方式執行；給使用者的升級說明（server 模式要設密碼、installer 會自動產生）留給 Task 6.3
 
 ## Phase 4 — 打包與 release
 

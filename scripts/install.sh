@@ -596,10 +596,11 @@ activate_docker_services() {
 
 # 2026-10-06：v0.22.0 起預設按需本機模式，但 .env 屬於使用者、升級時保留。
 # 只改寫舊範本的原始預設值；明確指向內建 server 者補 profile，維持原本選擇。
+# 2026-11-25（issue-0044）：內建 server 沒有密碼時產生一組，只寫進 .env、不印出。
 # 有改動時先備份到 $1，並印出備份路徑；沒改動則不輸出。
 migrate_docker_env() {
     python3 - .env "$1" <<'PY'
-import os, re, shutil, sys
+import os, re, secrets, shutil, sys
 path, backup_dir = sys.argv[1], sys.argv[2]
 text = open(path).read()
 lines = text.splitlines(keepends=True)
@@ -613,14 +614,35 @@ for i, line in enumerate(lines):
         lines[i] = 'WUKONG_AGENT_CMD=opencode run\n'
         changes.append('WUKONG_AGENT_CMD: old default -> opencode run (on-demand OpenCode)')
 url, profiles = assigned('WUKONG_AGENT_SERVER_URL'), assigned('COMPOSE_PROFILES')
+password = assigned('WUKONG_AGENT_SERVER_PASSWORD')
+builtin_server = False
 if url and re.fullmatch(r'https?://opencode-server(:\d+)?/?', url):
     if profiles is None:
         if lines and not lines[-1].endswith('\n'):
             lines[-1] += '\n'
         lines.append('COMPOSE_PROFILES=server\n')
         changes.append('added COMPOSE_PROFILES=server to keep the shared opencode-server')
+        builtin_server = True
     elif 'server' not in [p.strip() for p in profiles.split(',')]:
         print('warning: WUKONG_AGENT_SERVER_URL targets opencode-server but COMPOSE_PROFILES does not include server; edit .env')
+    else:
+        builtin_server = True
+# issue-0044 SCN-017: OpenCode V2 always requires a server password. For the built-in
+# opencode-server, compose hands the same .env value to the server and the entrances,
+# so one can be generated here. For anyone else's server it could never match.
+if url and not password:
+    if builtin_server:
+        generated = 'WUKONG_AGENT_SERVER_PASSWORD=' + secrets.token_hex(24) + '\n'
+        empty = [i for i, l in enumerate(lines) if re.match(r'\s*WUKONG_AGENT_SERVER_PASSWORD\s*=', l)]
+        if empty:
+            lines[empty[-1]] = generated
+        else:
+            if lines and not lines[-1].endswith('\n'):
+                lines[-1] += '\n'
+            lines.append(generated)
+        changes.append('generated WUKONG_AGENT_SERVER_PASSWORD for the shared opencode-server (OpenCode V2 requires one; it stays in .env)')
+    else:
+        print('warning: WUKONG_AGENT_SERVER_URL is set but WUKONG_AGENT_SERVER_PASSWORD is not; set it in .env to the password of that OpenCode V2 server')
 if changes:
     os.makedirs(backup_dir, exist_ok=True)
     shutil.copy2(path, os.path.join(backup_dir, '.env'))

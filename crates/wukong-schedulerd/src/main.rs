@@ -62,7 +62,8 @@ async fn run(cli: Cli) -> Result<(), String> {
     let agent_settings = wukong_settings::effective_agent_settings(&settings);
     cfg.apply_default_model(agent_settings.default_model.as_deref());
     let memory = wukong_runtime::bootstrap::open_memory_from_env(&cfg.db_url).await?;
-    let backend = build_backend_from_env(cfg.agent_command.clone(), workspace_dir());
+    let backend = build_backend_from_env(cfg.agent_command.clone(), workspace_dir())
+        .map_err(|e| e.to_string())?;
     let store = SchedulerStore::open(&cfg.db_url)
         .await
         .map_err(|e| e.to_string())?;

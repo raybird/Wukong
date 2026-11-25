@@ -221,13 +221,15 @@ test_docker_env_migration() {
     printf '%s\n' 'USER_SECRET=preserve' \
         'WUKONG_AGENT_CMD=opencode run --dangerously-skip-permissions' \
         '# WUKONG_AGENT_CMD=opencode run --dangerously-skip-permissions' \
-        'WUKONG_AGENT_SERVER_URL=http://opencode-server:4096' > "$DEPLOYMENT/.env"
+        'WUKONG_AGENT_SERVER_URL=http://opencode-server:4096' \
+        'WUKONG_AGENT_SERVER_PASSWORD=kept' > "$DEPLOYMENT/.env"
     cp "$DEPLOYMENT/.env" "$TMP/env-original"
     run_installer '' --mode docker --version v9.9.9 > "$TMP/env-out"
     printf '%s\n' 'USER_SECRET=preserve' \
         'WUKONG_AGENT_CMD=opencode run' \
         '# WUKONG_AGENT_CMD=opencode run --dangerously-skip-permissions' \
         'WUKONG_AGENT_SERVER_URL=http://opencode-server:4096' \
+        'WUKONG_AGENT_SERVER_PASSWORD=kept' \
         'COMPOSE_PROFILES=server' > "$TMP/env-expected"
     assert_same "$TMP/env-expected" "$DEPLOYMENT/.env"
     assert_contains "$TMP/env-out" 'WUKONG_AGENT_CMD'
@@ -260,6 +262,62 @@ test_docker_env_migration() {
     cp "$DEPLOYMENT/.env" "$TMP/env-original"
     ! FIXTURE_DOCKER_PS_EXIT=1 run_installer '' --mode docker --version v9.9.9 >/dev/null 2>&1 || fail "unhealthy Docker install succeeded"
     assert_same "$TMP/env-original" "$DEPLOYMENT/.env"
+}
+
+# issue-0044 Task 3.2（SCN-017）：OpenCode V2 server 一定要密碼。內建 opencode-server 會跑起來、
+# .env 卻沒有密碼時，先備份再產生一組；已設時不動；不是內建 server 時不加（產生的密碼對不上
+# 別人的 server），只提醒。
+test_docker_env_server_password() {
+    local line password
+    prepare
+    printf '%s\n' 'USER_SECRET=preserve' 'COMPOSE_PROFILES=server' \
+        'WUKONG_AGENT_SERVER_URL=http://opencode-server:4096' > "$DEPLOYMENT/.env"
+    cp "$DEPLOYMENT/.env" "$TMP/env-original"
+    run_installer '' --mode docker --version v9.9.9 > "$TMP/env-out"
+    line="$(grep '^WUKONG_AGENT_SERVER_PASSWORD=' "$DEPLOYMENT/.env")" || fail "no password was generated"
+    password="${line#*=}"
+    [[ "$password" =~ ^[0-9a-f]{48}$ ]] || fail "generated password is not 48 hex characters: $password"
+    assert_contains "$TMP/env-out" 'generated WUKONG_AGENT_SERVER_PASSWORD'
+    assert_not_contains "$TMP/env-out" "$password"
+    assert_same "$TMP/env-original" "$(find "$DEPLOYMENT/.wukong-backups" -name .env)"
+    [[ "$(grep -c . "$DEPLOYMENT/.env")" == 4 ]] || fail "migration changed more than the password"
+    cp "$DEPLOYMENT/.env" "$TMP/env-generated"
+    FIXTURE_TAG=v9.9.8 make_release
+    run_installer '' --mode docker --upgrade --version v9.9.8 >/dev/null
+    assert_same "$TMP/env-generated" "$DEPLOYMENT/.env"
+
+    # An empty assignment counts as unset and is filled in place.
+    prepare
+    printf '%s\n' 'WUKONG_AGENT_SERVER_URL=http://opencode-server:4096' 'WUKONG_AGENT_SERVER_PASSWORD=' \
+        'COMPOSE_PROFILES=server' > "$DEPLOYMENT/.env"
+    run_installer '' --mode docker --version v9.9.9 >/dev/null
+    [[ "$(grep -c '^WUKONG_AGENT_SERVER_PASSWORD=' "$DEPLOYMENT/.env")" == 1 ]] || fail "expected one password line"
+    grep -Eq '^WUKONG_AGENT_SERVER_PASSWORD=[0-9a-f]{48}$' "$DEPLOYMENT/.env" || fail "empty password was not filled"
+
+    # Already set: untouched, and nothing to back up.
+    prepare
+    printf '%s\n' 'WUKONG_AGENT_SERVER_URL=http://opencode-server:4096' 'WUKONG_AGENT_SERVER_PASSWORD=mine' \
+        'COMPOSE_PROFILES=server' > "$DEPLOYMENT/.env"
+    cp "$DEPLOYMENT/.env" "$TMP/env-original"
+    run_installer '' --mode docker --version v9.9.9 >/dev/null
+    assert_same "$TMP/env-original" "$DEPLOYMENT/.env"
+    [[ ! -d "$DEPLOYMENT/.wukong-backups" ]] || [[ -z "$(find "$DEPLOYMENT/.wukong-backups" -name .env)" ]] ||
+        fail "unchanged .env was backed up"
+
+    # Local mode: no server, no password.
+    prepare
+    printf '%s\n' 'WUKONG_AGENT_CMD=opencode run' > "$DEPLOYMENT/.env"
+    cp "$DEPLOYMENT/.env" "$TMP/env-original"
+    run_installer '' --mode docker --version v9.9.9 >/dev/null
+    assert_same "$TMP/env-original" "$DEPLOYMENT/.env"
+
+    # Someone else's server: a generated password could never match it.
+    prepare
+    printf '%s\n' 'WUKONG_AGENT_SERVER_URL=http://10.0.0.5:4096' > "$DEPLOYMENT/.env"
+    cp "$DEPLOYMENT/.env" "$TMP/env-original"
+    run_installer '' --mode docker --version v9.9.9 > "$TMP/env-out"
+    assert_same "$TMP/env-original" "$DEPLOYMENT/.env"
+    assert_contains "$TMP/env-out" 'WUKONG_AGENT_SERVER_PASSWORD'
 }
 
 test_metadata() {
@@ -582,6 +640,7 @@ case "$CASE" in
     verification) test_verification ;;
     docker) test_docker ;;
     docker-env-migration) test_docker_env_migration ;;
+    docker-env-server-password) test_docker_env_server_password ;;
     docker-forward-compat) test_docker_forward_compatible_bundle ;;
     docker-missing-entry) test_docker_bundle_missing_required_entry ;;
     docker-self-replace) test_docker_installer_replaces_itself_mid_run ;;
@@ -601,7 +660,7 @@ case "$CASE" in
     docker-project) test_docker_project_resolution ;;
     docker-project-conflicts) test_docker_project_conflicts ;;
     docker-project-persistence) test_docker_project_persistence ;;
-    all) test_parsing; test_verification; test_docker; test_docker_env_migration; test_docker_forward_compatible_bundle; test_docker_bundle_missing_required_entry; test_docker_installer_replaces_itself_mid_run; test_stdin_installer; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_docker_compose_repair; test_docker_project_resolution; test_docker_project_conflicts; test_docker_project_persistence; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
+    all) test_parsing; test_verification; test_docker; test_docker_env_migration; test_docker_env_server_password; test_docker_forward_compatible_bundle; test_docker_bundle_missing_required_entry; test_docker_installer_replaces_itself_mid_run; test_stdin_installer; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_docker_compose_repair; test_docker_project_resolution; test_docker_project_conflicts; test_docker_project_persistence; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
     *) fail "unknown test case: $CASE" ;;
 esac
 

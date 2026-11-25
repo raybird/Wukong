@@ -53,7 +53,13 @@ async fn main() {
     };
 
     let agent_command = wukong_runtime::util::agent_command_from_env();
-    let backend = build_backend_from_env(agent_command, workspace_dir());
+    let backend = match build_backend_from_env(agent_command, workspace_dir()) {
+        Ok(backend) => backend,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
 
     let state = AppState {
         memory: Arc::new(memory),

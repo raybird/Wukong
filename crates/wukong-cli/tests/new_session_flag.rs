@@ -68,7 +68,8 @@ async fn run_new_flag(delete_status: &'static str) -> (Vec<String>, Option<Strin
         .env("WUKONG_AGENT_SERVER_URL", &server_url)
         .env("WUKONG_SETTINGS_FILE", dir.path().join("settings.json"))
         .env_remove("WUKONG_AGENT_SERVER_USERNAME")
-        .env_remove("WUKONG_AGENT_SERVER_PASSWORD")
+        // server 模式一定要密碼（issue-0044 SCN-017）；這個假 server 不驗證。
+        .env("WUKONG_AGENT_SERVER_PASSWORD", "probe")
         .env_remove("WUKONG_EMBED")
         .env_remove("WUKONG_MD_DIR")
         .output()

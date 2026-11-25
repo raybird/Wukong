@@ -255,11 +255,28 @@ pub enum AgentBackend {
     Server(crate::opencode_server::OpencodeServerBackend),
 }
 
-pub fn build_backend_from_env(command: Vec<String>, workspace: Option<PathBuf>) -> AgentBackend {
-    match std::env::var("WUKONG_AGENT_SERVER_URL") {
-        Ok(url) if !url.trim().is_empty() => AgentBackend::Server(
-            crate::opencode_server::OpencodeServerBackend::from_env(url, workspace),
-        ),
+/// 依環境變數選 backend。設了 `WUKONG_AGENT_SERVER_URL` 卻沒有密碼時回錯誤：V2 server
+/// 一定有密碼（沒設時自己產生隨機的），沒有密碼的入口每個回合都會被拒，所以啟動就指出來
+/// （issue-0044 SCN-017）。
+pub fn build_backend_from_env(
+    command: Vec<String>,
+    workspace: Option<PathBuf>,
+) -> Result<AgentBackend, GatewayError> {
+    Ok(match std::env::var("WUKONG_AGENT_SERVER_URL") {
+        Ok(url) if !url.trim().is_empty() => {
+            if std::env::var("WUKONG_AGENT_SERVER_PASSWORD").map_or(true, |p| p.is_empty()) {
+                return Err(GatewayError::AgentFailed {
+                    code: None,
+                    stderr: "WUKONG_AGENT_SERVER_URL 已設定，但沒有設定 WUKONG_AGENT_SERVER_PASSWORD。\
+                        OpenCode V2 server 一定要密碼：請在 .env 設定 WUKONG_AGENT_SERVER_PASSWORD，\
+                        compose 會把同一組交給 opencode-server。"
+                        .to_string(),
+                });
+            }
+            AgentBackend::Server(crate::opencode_server::OpencodeServerBackend::from_env(
+                url, workspace,
+            ))
+        }
         _ if is_opencode(&command)
             && command.get(1).map(String::as_str) == Some("run")
             && strip_model_args(&command).len() == 2 =>
@@ -270,7 +287,7 @@ pub fn build_backend_from_env(command: Vec<String>, workspace: Option<PathBuf>) 
             ))
         }
         _ => AgentBackend::Cli(AgentCliBackend { command, workspace }),
-    }
+    })
 }
 
 /// 一則待回覆的 question 該送到哪個 opencode 端點。permission 詢問是以
@@ -1073,9 +1090,12 @@ mod tests {
         static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _lock = ENV_LOCK.lock().unwrap();
         let previous = std::env::var("WUKONG_AGENT_SERVER_URL").ok();
+        let previous_password = std::env::var("WUKONG_AGENT_SERVER_PASSWORD").ok();
         std::env::remove_var("WUKONG_AGENT_SERVER_URL");
+        std::env::remove_var("WUKONG_AGENT_SERVER_PASSWORD");
 
-        let backend = build_backend_from_env(vec!["opencode".to_string(), "run".to_string()], None);
+        let backend =
+            build_backend_from_env(vec!["opencode".to_string(), "run".to_string()], None).unwrap();
         let custom = build_backend_from_env(
             vec![
                 "opencode".into(),
@@ -1084,7 +1104,8 @@ mod tests {
                 "custom".into(),
             ],
             None,
-        );
+        )
+        .unwrap();
         let model = build_backend_from_env(
             vec![
                 "opencode".into(),
@@ -1093,15 +1114,32 @@ mod tests {
                 "probe/probe".into(),
             ],
             None,
-        );
-        let arbitrary = build_backend_from_env(vec!["printf".into(), "fixer".into()], None);
+        )
+        .unwrap();
+        let arbitrary =
+            build_backend_from_env(vec!["printf".into(), "fixer".into()], None).unwrap();
         std::env::set_var("WUKONG_AGENT_SERVER_URL", "http://127.0.0.1:1");
-        let remote = build_backend_from_env(vec!["command-that-must-not-run".into()], None);
+        // issue-0044 SCN-017：V2 server 一定要密碼，沒設時入口啟動就報錯，不等到回合。
+        let missing = build_backend_from_env(vec!["command-that-must-not-run".into()], None);
+        std::env::set_var("WUKONG_AGENT_SERVER_PASSWORD", "probe");
+        let remote =
+            build_backend_from_env(vec!["command-that-must-not-run".into()], None).unwrap();
 
-        match previous {
-            Some(value) => std::env::set_var("WUKONG_AGENT_SERVER_URL", value),
-            None => std::env::remove_var("WUKONG_AGENT_SERVER_URL"),
+        for (name, value) in [
+            ("WUKONG_AGENT_SERVER_URL", previous),
+            ("WUKONG_AGENT_SERVER_PASSWORD", previous_password),
+        ] {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
         }
+        let stderr = match missing {
+            Err(GatewayError::AgentFailed { stderr, .. }) => stderr,
+            Err(other) => panic!("unexpected error: {other}"),
+            Ok(_) => panic!("server mode without a password must not build a backend"),
+        };
+        assert!(stderr.contains("WUKONG_AGENT_SERVER_PASSWORD"), "{stderr}");
 
         assert!(matches!(backend, AgentBackend::Local(_)));
         assert!(matches!(custom, AgentBackend::Cli(_)));

@@ -63,7 +63,13 @@ async fn run_bot() {
     };
 
     let agent_command = wukong_runtime::util::agent_command_from_env();
-    let backend = Arc::new(build_backend_from_env(agent_command, workspace_dir()));
+    let backend = match build_backend_from_env(agent_command, workspace_dir()) {
+        Ok(backend) => Arc::new(backend),
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
 
     let base_cfg = GatewayConfig {
         scope: String::new(),

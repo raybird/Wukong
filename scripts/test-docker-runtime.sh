@@ -88,8 +88,6 @@ for service in wukong opencode-server wukong-telegram wukong-web wukong-schedule
 done
 require_in_file 'WUKONG_WEB_BIND:-127.0.0.1' "$release_compose" \
     "release Compose must retain the loopback web default"
-require_in_file 'curl -fsS http://localhost:4096/global/health || exit 1' "$release_compose" \
-    "release Compose must retain the OpenCode healthcheck"
 require_in_file 'IMAGE_SKILLS="/usr/local/share/wukong/skills/superpowers"' "$entrypoint" \
     "entrypoint must define image skill asset source"
 require_in_file 'WORKSPACE_SKILLS="$WUKONG_WORKSPACE/.wukong/skills/superpowers"' "$entrypoint" \
@@ -127,8 +125,42 @@ last_deny = max(i for i, r in enumerate(rules) if r[2] == "deny")
 assert rules.index(("shell", "*rm * /workspace/*", "allow")) > last_deny, \
     "the /workspace allow must come after the denies; the last matching rule wins"
 ' || { echo "FAIL: opencode.json baseline in $entrypoint" >&2; exit 1; }
-require_in_file "curl -fsS http://localhost:4096/global/health || exit 1" "$compose_file" \
-    "opencode server must expose a Compose healthcheck"
+# issue-0044 Task 3.2（SCN-003）：V2 server 一定要密碼。opencode-server 與每個入口要拿到
+# 同一個 .env 變數，少接一個服務，那個服務的每個回合都會被拒（地雷 W-3）；healthcheck 要帶
+# 認證問 /api/info，V2 對 /api 以外的路徑一律回網頁 200，不帶認證的檢查判不出 server 掛了。
+python3 - "$compose_file" "$release_compose" docker-compose.memoria.yml <<'PY_PASSWORD'
+import sys
+import yaml
+
+def env_of(service):
+    env = service.get("environment") or []
+    if isinstance(env, dict):
+        return env
+    return dict(str(i).split("=", 1) if "=" in str(i) else (str(i), None) for i in env)
+
+wanted = "${WUKONG_AGENT_SERVER_PASSWORD:-}"
+failed = []
+base, release, overlay = sys.argv[1:]
+for path in (base, release):
+    services = yaml.safe_load(open(path))["services"]
+    server = services["opencode-server"]
+    if env_of(server).get("OPENCODE_SERVER_PASSWORD") != wanted:
+        failed.append(f"{path} opencode-server must get OPENCODE_SERVER_PASSWORD={wanted}")
+    test = " ".join(server["healthcheck"]["test"])
+    if "/api/info" not in test or "OPENCODE_SERVER_PASSWORD" not in test:
+        failed.append(f"{path} opencode-server healthcheck must query /api/info with the password")
+    for name in ("wukong", "wukong-telegram", "wukong-web", "wukong-schedulerd"):
+        if env_of(services[name]).get("WUKONG_AGENT_SERVER_PASSWORD") != wanted:
+            failed.append(f"{path} {name} must get WUKONG_AGENT_SERVER_PASSWORD={wanted}")
+# The overlay replaces nothing it does not name; it must not drop or rename the variable.
+for name, service in yaml.safe_load(open(overlay))["services"].items():
+    env = env_of(service)
+    if any("SERVER_PASSWORD" in key for key in env):
+        failed.append(f"{overlay} {name} must leave the server password to the base compose files")
+for line in failed:
+    print("FAIL:", line, file=sys.stderr)
+sys.exit(1 if failed else 0)
+PY_PASSWORD
 # SCN-007／008（2026-10-03）：預設本機回合、獨立 server 顯式啟用。
 python3 - "$compose_file" "$release_compose" <<'PY_LOCAL'
 import sys
