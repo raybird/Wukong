@@ -470,6 +470,11 @@ impl AiBackend for AgentBackend {
     }
 }
 
+/// 已設定的 provider 與憑證狀態。V2 沒有 `providers` 子命令，`auth list` 只印名稱、類型與
+/// 是否已存，不印密鑰（`auth export` 才會）。
+pub const PROVIDERS_ARGS: &[&str] = &["auth", "list"];
+pub const MODELS_ARGS: &[&str] = &["models"];
+
 pub struct OpencodeUtility {
     pub binary: String,
     pub workspace: Option<PathBuf>,
@@ -487,6 +492,10 @@ impl OpencodeUtility {
         let mut cmd = Command::new(&self.binary);
         // 呼叫端逾時放棄時一併終止，不讓子行程留在背景。
         cmd.args(args).kill_on_drop(true).stdin(Stdio::null());
+        // 與 CLI backend 相同的理由：V2 不加 `--standalone` 會連背景 service，沒有就啟動一個常駐的。
+        if is_opencode(std::slice::from_ref(&self.binary)) {
+            cmd.arg("--standalone");
+        }
         if let Some(ws) = &self.workspace {
             cmd.current_dir(ws);
         }
@@ -1425,6 +1434,30 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
         assert!(!marker.exists(), "the abandoned child kept running");
+    }
+
+    // issue-0044 review-0405603 M1：V2 沒有 `providers` 子命令；不加 `--standalone` 時會連背景
+    // service，沒有就啟動一個常駐的，留在容器（或使用者的主機）裡。
+    #[tokio::test]
+    async fn utility_commands_use_v2_subcommands_with_a_private_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("opencode");
+        std::fs::write(&fake, "#!/bin/sh\necho \"$*\"\n").unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let util = OpencodeUtility::from_agent_command(
+            &[fake.display().to_string(), "run".to_string()],
+            None,
+        );
+
+        assert_eq!(
+            util.run_fixed(PROVIDERS_ARGS).await.unwrap(),
+            "auth list --standalone"
+        );
+        assert_eq!(
+            util.run_fixed(MODELS_ARGS).await.unwrap(),
+            "models --standalone"
+        );
     }
 
     #[test]

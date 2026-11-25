@@ -142,7 +142,7 @@ impl Drop for ForgetForms<'_> {
     fn drop(&mut self) {
         self.forms
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .retain(|_, (session_id, _)| session_id != self.session_id);
     }
 }
@@ -430,7 +430,7 @@ impl OpencodeServerBackend {
         let fields = self
             .forms
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(request_id)
             .map(|(_, fields)| fields.clone());
         let body = serde_json::json!({ "answer": form_answer(fields.as_deref(), answers) });
@@ -515,13 +515,10 @@ impl OpencodeServerBackend {
             .collect();
         self.forms
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(id.to_string(), (session_id.to_string(), fields));
     }
 
-    /// Best-effort：事件串流中斷後，server 端的 prompt 仍會繼續執行並佔住
-    /// session，讓後續回合永遠等不到 `session.idle`；這裡主動要求 opencode
-    /// 中止，失敗也不影響原本要回傳的錯誤。
     /// 回合的 future 在完成前被丟掉（入口取消、排程中止）時，V2 的執行仍會繼續佔住 session，
     /// 下一則 prompt 也會被併進這次執行；所以 drop 時在背景送 interrupt。
     fn interrupt_on_drop(&self, session_id: &str) -> InterruptOnDrop {
@@ -529,6 +526,8 @@ impl OpencodeServerBackend {
         InterruptOnDrop(Some(self.authorize(self.client.post(url))))
     }
 
+    /// Best-effort：事件串流中斷後，server 端的執行仍會繼續並佔住 session，後續回合要排在它
+    /// 後面；這裡主動要求 opencode 中止，失敗也不影響原本要回傳的錯誤。
     async fn abort_session(&self, session_id: &str) {
         let url = format!("{}/api/session/{}/interrupt", self.base_url, session_id);
         let _ = self
@@ -607,6 +606,25 @@ impl OpencodeServerBackend {
             Some(password) => request.basic_auth(SERVER_USERNAME, Some(password)),
             None => request,
         }
+    }
+
+    /// 等 server 上這次執行（回合或壓縮，兩者都是排進 session 佇列的項目）結束。future 被丟掉時
+    /// 在背景送 interrupt，失敗時直接送，不讓 V2 繼續執行、佔住 session。
+    async fn consume_or_interrupt(
+        &self,
+        response: reqwest::Response,
+        session_id: &str,
+        on_event: &mut dyn FnMut(StreamEvent),
+    ) -> Result<String, GatewayError> {
+        let mut interrupt = self.interrupt_on_drop(session_id);
+        let consumed = self
+            .consume_event_stream(response, session_id, on_event)
+            .await;
+        interrupt.disarm();
+        if consumed.is_err() {
+            self.abort_session(session_id).await;
+        }
+        consumed
     }
 
     /// 逾時或斷線時用來說明「卡在哪裡」。單看「before session became idle」
@@ -740,18 +758,15 @@ impl AiBackend for OpencodeServerBackend {
             }
         }
 
-        let mut interrupt = self.interrupt_on_drop(&session_id);
-        let consumed = self
-            .consume_event_stream(response, &session_id, on_event)
-            .await;
-        interrupt.disarm();
-        match consumed {
+        match self
+            .consume_or_interrupt(response, &session_id, on_event)
+            .await
+        {
             Ok(text) => Ok(AgentResponse {
                 text,
                 session_id: Some(session_id),
             }),
             Err(err) => {
-                self.abort_session(&session_id).await;
                 self.cleanup_session_if_owned(cleanup_on_error, &session_id)
                     .await;
                 Err(err)
@@ -775,7 +790,7 @@ impl AiBackend for OpencodeServerBackend {
             self.client.post(url).json(&serde_json::json!({})),
         )
         .await?;
-        self.consume_event_stream(response, session_id, &mut |_| {})
+        self.consume_or_interrupt(response, session_id, &mut |_| {})
             .await?;
         eprintln!("session_compacted session_id={session_id}");
         Ok(AgentResponse {
@@ -1715,6 +1730,32 @@ mod tests {
         );
     }
 
+    // issue-0044 SCN-007 第一列、review-0405603 S3：額度用完的真實樣本（2026-11-25）。V2 不重試
+    // free-limit，第一步就 step.failed、execution.failed，所以不會碰到 90 秒的重試中止。
+    #[tokio::test]
+    async fn a_real_free_limit_fails_at_once_as_rate_limited() {
+        let fake = fake_v2::FakeV2::start().await;
+        let events = fake_v2::fixture_events("server-free-limit", "ses_fake1");
+        assert!(!events.iter().any(|event| event.contains("session.retry")));
+        fake.script_events(events);
+        let started = tokio::time::Instant::now();
+
+        let error = v2_backend(&fake)
+            .run_streaming(plain_request("hi"), &mut |_| {})
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("Free usage limit reached"),
+            "{error}"
+        );
+        assert_eq!(
+            upstream_failure_kind(error),
+            crate::upstream_error::UpstreamFailure::RateLimited
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
     #[tokio::test]
     async fn an_interrupted_execution_reports_the_turn_as_aborted() {
         let fake = fake_v2::FakeV2::start().await;
@@ -1914,6 +1955,57 @@ mod tests {
         assert_eq!(
             fake.body_of("POST /api/session/ses_1/compact"),
             Some(json!({}))
+        );
+    }
+
+    // issue-0044 review-0405603 S1：壓縮與回合一樣在 server 上執行；失敗或被丟掉時不送 interrupt，
+    // V2 會繼續重試那次壓縮，下一個回合的 prompt 要排在它後面等。
+    #[tokio::test]
+    async fn a_compaction_retrying_too_long_is_interrupted() {
+        let fake = fake_v2::FakeV2::start().await;
+        fake.add_session("ses_1", 1, 1, None);
+        let mut events = events_until_retry("ses_1", 2);
+        events.push("hold".to_string());
+        fake.script_events(events);
+        let mut backend = v2_backend(&fake);
+        backend.retry_give_up_after = SHORT_RETRY_LIMIT;
+
+        let error = backend.compact_session("ses_1", None).await.unwrap_err();
+
+        assert_eq!(
+            upstream_failure_kind(error),
+            crate::upstream_error::UpstreamFailure::Unreachable
+        );
+        assert!(fake
+            .requests()
+            .contains(&"POST /api/session/ses_1/interrupt".to_string()));
+    }
+
+    #[tokio::test]
+    async fn dropping_a_compaction_interrupts_the_session() {
+        let fake = fake_v2::FakeV2::start().await;
+        fake.add_session("ses_1", 1, 1, None);
+        fake.script_events(vec!["hold".to_string()]);
+        let backend = v2_backend(&fake);
+
+        let compaction = backend.compact_session("ses_1", None);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(500), compaction)
+                .await
+                .is_err(),
+            "the held compaction should still be running"
+        );
+
+        let interrupt = "POST /api/session/ses_1/interrupt".to_string();
+        for _ in 0..50 {
+            if fake.requests().contains(&interrupt) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!(
+            "no interrupt after the compaction was dropped: {:?}",
+            fake.requests()
         );
     }
 

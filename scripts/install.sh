@@ -648,6 +648,7 @@ if changes:
     shutil.copy2(path, os.path.join(backup_dir, '.env'))
     with open(path, 'w') as f:
         f.write(''.join(lines))
+    os.chmod(path, 0o600)  # it may now hold the server password (review-0405603 S2)
     for change in changes:
         print('.env: ' + change)
     print('.env: backup ' + os.path.join(backup_dir, '.env'))
@@ -679,10 +680,19 @@ state_volume() {
     printf '%s\n' "$volume"
 }
 
-backup_docker_state() {
+# .wukong-backups 存有 .env（含 server 密碼）與 volume 備份（opencode-state 含 provider 憑證
+# auth.json 與完整對話），只給部署的擁有者讀（issue-0044 review-0405603 S2）；舊版建立的 0755
+# 目錄也一併收緊。$1 是要建立的備份目錄。
+make_backup_dir() {
+    (umask 077 && mkdir -p .wukong-backups "$1") && chmod 700 .wukong-backups
+}
+
+# 在 subshell 執行，umask 077 只套用在這裡建立的目錄與 tar。
+backup_docker_state() (
     local backup="$1" image="$2" name volume archive saved="{}"
     shift 2
-    mkdir -p "$backup/volumes"
+    umask 077
+    make_backup_dir "$backup/volumes" || return
     for name in "$@"; do
         volume="$(state_volume "$name")" || return
         if [[ -z "$volume" ]]; then info "no $name volume in this deployment; nothing to back up" >&2; continue; fi
@@ -693,6 +703,11 @@ backup_docker_state() {
         info "backed up $name to $archive" >&2
     done
     printf '%s\n' "$saved"
+)
+
+# $1 是 backup_docker_state 輸出的 {"<名稱>": "<tar>"}：依名稱排序，逐行印出「名稱<TAB>路徑」。
+state_backup_entries() {
+    python3 -c 'import json,sys; [print(k + "\t" + v) for k, v in sorted(json.loads(sys.argv[1]).items())]' "$1"
 }
 
 # backup_docker_state 的反向：$1 是它輸出的 {"<名稱>": "<tar>"}。服務必須已停止。
@@ -707,7 +722,7 @@ restore_docker_state() {
         docker run --rm -i --network none -v "$volume:/state" --entrypoint sh "$image" \
             -c 'find /state -mindepth 1 -delete && tar -C /state -xpf -' < "$archive" || return
         info "restored $name from $archive" >&2
-    done < <(python3 -c 'import json,sys; [print(k + "\t" + v) for k, v in sorted(json.loads(sys.argv[1]).items())]' "$1")
+    done < <(state_backup_entries "$1")
 }
 
 install_docker() {
@@ -724,7 +739,7 @@ install_docker() {
     local -a state_names=()
     if [[ -f .wukong-release ]]; then
         read -r previous_version previous_digest < <(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["productTag"], d["imageDigest"])' .wukong-release) || abort "invalid Docker release metadata"
-        backup=".wukong-backups/${previous_version}-$(date +%s)"; mkdir -p "$backup"
+        backup=".wukong-backups/${previous_version}-$(date +%s)"; make_backup_dir "$backup" || abort "could not create $backup"
         for file in "${DOCKER_RELEASE_OWNED[@]}"; do [[ ! -f "$file" ]] || { mkdir -p "$backup/$(dirname "$file")"; cp -p "$file" "$backup/$file"; }; done
     fi
     archive="$RELEASE_DIR/wukong-docker-${VERSION}.tar.gz"
@@ -753,9 +768,10 @@ install_docker() {
         }
     fi
     for file in "${DOCKER_RELEASE_OWNED[@]}"; do mkdir -p "$(dirname "$file")"; cp "$stage/wukong-docker/$file" "$file"; done
-    [[ -f .env ]] || cp .env.example .env
+    [[ -f .env ]] || (umask 077 && cp .env.example .env)
     env_backup="${backup:-.wukong-backups/env-$(date +%s)}"
-    env_report="$(migrate_docker_env "$env_backup")" || env_report="warning: could not migrate .env; check it against .env.example"
+    env_report="$(umask 077 && migrate_docker_env "$env_backup")" || env_report="warning: could not migrate .env; check it against .env.example"
+    [[ ! -d .wukong-backups ]] || chmod 700 .wukong-backups
     [[ -z "$env_report" ]] || while IFS= read -r line; do info "$line"; done <<< "$env_report"
     if ! activate_docker_services || ! docker compose -p "$DOCKER_PROJECT_NAME" ps >/dev/null; then
         # A failed recreation must not leave release-owned files or metadata advanced.
@@ -774,7 +790,7 @@ install_docker() {
         else
             for file in "${DOCKER_RELEASE_OWNED[@]}"; do rm -f "$file"; done
         fi
-        [[ "$state_restored" == true ]] || abort "Docker activation or health check failed and the state backup could not be restored; services are stopped. Restore by hand from: $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).values()))' "$state_backups")"
+        [[ "$state_restored" == true ]] || abort "Docker activation or health check failed and the state backup could not be restored; services are stopped. Restore by hand from: $(state_backup_entries "$state_backups" | cut -f2 | paste -sd' ')"
         [[ "$state_backups" == "{}" ]] || abort "Docker activation or health check failed; restored previous release files and the state backed up before the upgrade"
         abort "Docker activation or health check failed; restored previous release files"
     fi
@@ -820,24 +836,26 @@ PY
     while IFS=$'\t' read -r name archive; do
         [[ -n "$name" ]] || continue
         tar -tf "$archive" >/dev/null 2>&1 || abort "rollback refused: the $name backup taken before upgrading to $current_version is missing or unreadable ($archive); nothing was changed"
-    done < <(python3 -c 'import json,sys; [print(k + "\t" + v) for k, v in sorted(json.loads(sys.argv[1]).items())]' "$state_backups")
+    done < <(state_backup_entries "$state_backups")
     # The previous image is pulled and checked while the current release still runs.
     docker compose -p "$DOCKER_PROJECT_NAME" --project-directory "$PWD" -f "$backup/docker-compose.yml" pull || abort "could not pull the $version image; nothing was changed"
     [[ "$(docker image inspect "ghcr.io/raybird/wukong:${version}" --format '{{index .RepoDigests 0}}' | sed -n 's/.*@\(sha256:[0-9a-f]*\).*/\1/p')" == "$digest" ]] ||
         abort "the pulled $version image does not match the digest recorded before the upgrade; nothing was changed"
-    current_backup=".wukong-backups/${version}-rollback-$(date +%s)"; mkdir -p "$current_backup"
+    current_backup=".wukong-backups/${version}-rollback-$(date +%s)"; make_backup_dir "$current_backup" || abort "could not create $current_backup"
     if [[ "$state_backups" != "{}" ]]; then
-        while IFS= read -r line; do info "$line"; done < <(python3 -c 'import json,sys; [print(f"{k}: restoring the backup {v}; conversations after it was taken are not kept") for k, v in sorted(json.loads(sys.argv[1]).items())]' "$state_backups")
+        while IFS=$'\t' read -r name archive; do
+            info "$name: restoring the backup $archive; conversations after it was taken are not kept"
+        done < <(state_backup_entries "$state_backups")
         docker compose -p "$DOCKER_PROJECT_NAME" --profile server stop || abort "could not stop services for the rollback; nothing was changed"
         # What the current release holds is set aside, not destroyed.
-        mapfile -t missing < <(python3 -c 'import json,sys; [print(k) for k in sorted(json.loads(sys.argv[1]))]' "$state_backups")
+        mapfile -t missing < <(state_backup_entries "$state_backups" | cut -f1)
         backup_docker_state "$current_backup" "ghcr.io/raybird/wukong:${current_version}" "${missing[@]}" >/dev/null || {
             docker compose -p "$DOCKER_PROJECT_NAME" start || true
             abort "could not set aside the current state before the rollback; $current_version was started again"
         }
         info "the $current_version state is kept in $current_backup/volumes"
         restore_docker_state "$state_backups" "ghcr.io/raybird/wukong:${current_version}" ||
-            abort "rollback could not restore the state backup; services are stopped. Restore by hand from $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).values()))' "$state_backups") (the $current_version state is in $current_backup/volumes)"
+            abort "rollback could not restore the state backup; services are stopped. Restore by hand from $(state_backup_entries "$state_backups" | cut -f2 | paste -sd' ') (the $current_version state is in $current_backup/volumes)"
     fi
     for file in "${DOCKER_RELEASE_OWNED[@]}"; do [[ ! -f "$file" ]] || { mkdir -p "$current_backup/$(dirname "$file")"; cp -p "$file" "$current_backup/$file"; }; [[ ! -f "$backup/$file" ]] || cp -p "$backup/$file" "$file"; done
     activate_docker_services

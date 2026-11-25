@@ -12,6 +12,7 @@
 | server-compact.ndjson | `GET /api/event` | 回覆一次後 `POST /compact`，壓縮完成 |
 | server-attach-file.ndjson | `GET /api/event` | prompt 帶 `file://` 附件，回覆附件內的字 |
 | server-retry.ndjson | `GET /api/event`（`--network none`） | 上游連不到，retry.scheduled 兩次後 interrupt |
+| server-free-limit.ndjson | `GET /api/event`（2026-11-25，預設免費模型，`docs/issues/issue-0044/scripts/capture-free-limit.py`） | 額度用完：第一步就 step.failed、execution.failed（provider.free-limit，status 429），沒有 retry |
 | cli-text-reasoning.ndjson | `opencode run --format json --thinking` | 正常回覆，含思考 |
 | cli-no-route.ndjson | `opencode run --format json` | 模型不存在，error（provider.no-route） |
 | cli-model-eol.ndjson | `opencode run --standalone --format json`（2026-11-25，nvidia/deepseek-ai/deepseek-v4.1-flash） | 模型已下架，error（provider.invalid-request，status 410） |

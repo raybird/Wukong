@@ -295,7 +295,7 @@ wukong-orchestrator → wukong-gateway → wukong-memory
   - **V1 偵測**（`opencode_version.rs`）：第一次呼叫前檢查版本，1.x 時立即回明確錯誤，不等 agent timeout。
   - **上游錯誤**（`upstream_error.rs`）：依 V2 的錯誤類型與 HTTP 狀態碼分類，410、429 先依狀態碼判定。V2 的模型下架可能只回通用的 `provider.invalid-request`，要看 410。重試持續超過 `RETRY_GIVE_UP_AFTER`（90 秒）就中止回合，分類為「上游連不到」；server 送 `interrupt`，CLI 結束子程序。回合的 future 被丟掉時，server 也送 `interrupt`。
   - **遷移**：V2 第一次啟動時就地遷移 `opencode.db`，而且是單向的（刪掉 V1 的三張表）。所以 `release/data-compatibility.json` 宣告 `opencode-state` 要備份，installer 升級前備份、啟用失敗與 rollback 時還原。
-  - **`rollbackSafeTo` 只能寫一個版本**，installer 的 rollback 要求它等於升級前的版本。發版時要改成上一個發布的版本，否則所有 Docker `--rollback` 都會被拒絕（2026-07 到 2026-11-25 就停在 v0.17.1）。
+  - **`rollbackSafeTo` 只能寫一個版本**，installer 的 rollback 要求它等於升級前的版本。發版時要改成上一個發布的版本，否則所有 Docker `--rollback` 都會被拒絕（2026-07 到 2026-11-25 就停在 v0.17.1）。同一份檔案的 `backupRequired` 與 `affectedState` 也要逐版判斷：OpenCode V2 換版這一版需要備份 `opencode-state`；之後不再遷移 opencode.db 的版本，要把 `backupRequired` 改回 false、`affectedState` 清空，否則每次升級都會停掉服務、打包整個 volume。
   - **使用者設定**：binary 模式的 opencode 由使用者自己安裝，換版步驟見 `docs/installation.md`。
   - **驗證資料**：實測樣本在 `crates/wukong-gateway/tests/fixtures/opencode-v2/`，端到端演練見 `docs/issues/issue-0044/rehearsal.md`。
 - **容器內 opencode 權限**：Wukong 啟動 opencode 時 stdin 一律為 null，CLI backend 無法回應權限詢問，遇到 `ask` 直接拒絕；`--dangerously-skip-permissions` 只對 CLI backend 有效，仍遵守明確的 `deny`。按需本機模式與 server 模式都走 `opencode serve`，沒有對等旗標，因此對 Web／Telegram／Scheduler 而言 baseline 是唯一的權限控制。baseline 擋對絕對路徑的遞迴刪除、放行 `/workspace` 內刪除與 `/tmp` 存取（`/tmp` 詢問會讓無人值守排程卡到逾時）；屬防呆護欄，不是資安牆。

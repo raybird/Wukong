@@ -73,26 +73,53 @@ in_window() {
 }
 
 # 條件一：最近一次 session 更新已超過 QUIET_SECS。
-# /session 依 time.updated 由新到舊排序，time 為毫秒 epoch。解析不出來就回傳「忙」。
+# 問的是 OpenCode V2 的 `/api/session`（issue-0044）：回應是 `{"data": [...]}`，預設依 time.updated
+# 由新到舊排序（2026-11-25 實測：較早建立、較晚更新的 session 排在第一），time 為毫秒 epoch。
+# V2 的 server 一定有密碼，basic auth 的使用者名稱固定是 opencode；密碼經 stdin 交給 curl，不進參數。
+# V1 的 `/session` 在 V2 回 200 的網頁，所以看不懂的回應一律當成「忙」，並把原因放進
+# SESSIONS_BUSY_REASON，讓 log 跟真的有活動分得開。
+SESSIONS_BUSY_REASON=""
 sessions_idle() {
-    local body
-    body=$(curl -fsS --max-time 10 "http://127.0.0.1:${PORT}/session?limit=1" 2>/dev/null) || return 1
+    local out code body rc
+    if [[ -z "${OPENCODE_SERVER_PASSWORD:-}" ]]; then
+        SESSIONS_BUSY_REASON="OPENCODE_SERVER_PASSWORD is not set, so the session list cannot be read"
+        return 1
+    fi
+    out=$(printf 'Authorization: Basic %s\n' "$(printf 'opencode:%s' "$OPENCODE_SERVER_PASSWORD" | base64 -w0)" \
+        | curl -sS --max-time 10 -H @- -w '\n%{http_code}' "http://127.0.0.1:${PORT}/api/session?limit=1" 2>/dev/null) || {
+        SESSIONS_BUSY_REASON="the session list request failed"
+        return 1
+    }
+    code=${out##*$'\n'}
+    body=${out%$'\n'*}
+    if [[ "$code" == 401 ]]; then
+        SESSIONS_BUSY_REASON="the server rejected the password when listing sessions (401)"
+        return 1
+    elif [[ "$code" != 200 ]]; then
+        SESSIONS_BUSY_REASON="the session list returned HTTP ${code}"
+        return 1
+    fi
     python3 -c '
 import json, sys, time
 try:
     d = json.loads(sys.stdin.read())
+    data = d["data"]
+    if not isinstance(data, list):
+        raise ValueError
+    newest = max((s["time"]["updated"] for s in data), default=None)
 except Exception:
-    sys.exit(1)                      # 解析失敗 → 當成忙
-if not isinstance(d, list):
-    sys.exit(1)
-if not d:
+    sys.exit(2)                      # 看不懂 → 當成忙，另外說明原因
+if newest is None:
     sys.exit(0)                      # 完全沒有 session → 閒置
-try:
-    newest = max(s["time"]["updated"] for s in d) / 1000.0
-except Exception:
-    sys.exit(1)
-sys.exit(0 if (time.time() - newest) >= float(sys.argv[1]) else 1)
+sys.exit(0 if (time.time() - newest / 1000.0) >= float(sys.argv[1]) else 1)
 ' "$QUIET_SECS" <<<"$body"
+    rc=$?
+    case $rc in
+        0) return 0 ;;
+        1) SESSIONS_BUSY_REASON="a session was updated within ${QUIET_SECS}s" ;;
+        *) SESSIONS_BUSY_REASON="the response was not the V2 session list" ;;
+    esac
+    return 1
 }
 
 # 條件二：對外埠的 ESTABLISHED 連線數。
@@ -170,7 +197,7 @@ while true; do
             log "in window but opencode.db was written within ${QUIET_SECS}s; skipping"
             CONN_BLOCKED_SINCE=""
         elif ! sessions_idle; then
-            log "in window but a session was updated within ${QUIET_SECS}s; skipping"
+            log "in window but ${SESSIONS_BUSY_REASON}; skipping"
             CONN_BLOCKED_SINCE=""
         elif connections_still_block "$conns" "$now"; then
             log "in window and otherwise idle, but port ${PORT} has ${conns} established connection(s); waiting up to ${CONN_GRACE_SECS}s (blocked $(( now - CONN_BLOCKED_SINCE ))s so far)"

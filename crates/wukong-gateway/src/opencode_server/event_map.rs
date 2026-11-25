@@ -129,7 +129,12 @@ impl ServerEventMapper {
                 }
                 ServerEventAction::Ignore
             }
-            "session.execution.interrupted" if self.declined => ServerEventAction::Idle,
+            "session.execution.interrupted"
+                if self.declined
+                    && data.get("reason").and_then(Value::as_str) == Some("shutdown") =>
+            {
+                ServerEventAction::Idle
+            }
             "session.execution.interrupted" => ServerEventAction::Failed(UpstreamError {
                 name: "aborted".to_string(),
                 status_code: None,
@@ -528,6 +533,31 @@ mod tests {
                 &json!({"type":"session.execution.succeeded","data":{"sessionID":"ses_mine"}})
             ),
             ServerEventAction::Idle
+        );
+    }
+
+    // review-0405603 N2：取消提問之後 V2 以 reason `shutdown` 結束，算正常結束；使用者按停止
+    // （reason `user`）在任何時候都是中止。
+    #[test]
+    fn only_the_shutdown_after_a_decline_ends_the_turn_normally() {
+        let cancelled = json!({"type":"form.cancelled","data":{"id":"frm_1","sessionID":"ses_1"}});
+        let interrupted = |reason: &str| json!({"type":"session.execution.interrupted","data":{"sessionID":"ses_1","reason":reason}});
+
+        let mut mapper = ServerEventMapper::new("ses_1", RetryWatch::default());
+        mapper.map(&cancelled);
+        assert_eq!(
+            mapper.map(&interrupted("shutdown")),
+            ServerEventAction::Idle
+        );
+
+        let mut mapper = ServerEventMapper::new("ses_1", RetryWatch::default());
+        mapper.map(&cancelled);
+        assert!(
+            matches!(
+                mapper.map(&interrupted("user")),
+                ServerEventAction::Failed(_)
+            ),
+            "a user stop after a cancelled question must still abort"
         );
     }
 

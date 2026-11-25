@@ -108,14 +108,16 @@ pub async fn run_session_command(
                 &cfg.agent_command,
                 wukong_gateway::workspace_dir(),
             );
-            Ok(util.run_fixed(&["providers", "list"]).await?)
+            Ok(util
+                .run_fixed(wukong_gateway::backend::PROVIDERS_ARGS)
+                .await?)
         }
         SessionCommand::Models => {
             let util = OpencodeUtility::from_agent_command(
                 &cfg.agent_command,
                 wukong_gateway::workspace_dir(),
             );
-            Ok(util.run_fixed(&["models"]).await?)
+            Ok(util.run_fixed(wukong_gateway::backend::MODELS_ARGS).await?)
         }
         SessionCommand::SetModels(model) => {
             let model = model.trim();

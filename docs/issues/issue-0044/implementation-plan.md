@@ -508,6 +508,82 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
   - `rollbackSafeTo` 要寫上一個發布的版本 → Task 5.3 的發現
   - 保留期清理改走 cursor 分頁 → Task 2.1
 
+## 審查修正（review-0405603）
+
+2026-11-25 第一次完整審查（[review-0405603.md](review-0405603.md)）判定 RETURN TO execute-task。使用者同日決定：兩項 MUST FIX 與 S1～S3、N1～N5 全部在這一輪修正；`需決策` 的 SCN-005 規格不動，記入 README TBD-4。
+
+### R1 — opencode 工具命令改用 V2 寫法（M1）
+- 狀態：✅ 已完成
+- 改動：
+  - `backend.rs`：`PROVIDERS_ARGS` 改為 `auth list`（V2 沒有 `providers` 子命令），`MODELS_ARGS` 為 `models`。`OpencodeUtility::run_fixed` 在執行檔是 opencode 時補上 `--standalone`，理由與 CLI backend 相同。
+  - CLI 的 `/providers`、`/models` 與 Web 的 `/api/models`、系統診斷都改用這兩個常數。
+  - 更新 `docs/entrypoints.md`。
+- 證據：
+  - 先實測 V2 的命令（隔離容器，`--network none`，只放一筆假的 nvidia 憑證）：
+    - `auth list --standalone` 只印出 `Nvidia  API key  stored`，沒有印出假密鑰。
+    - `models --standalone` 的輸出仍是 `provider/model`，Web 的解析器不用改。
+  - 紅燈：`utility_commands_use_v2_subcommands_with_a_private_server`（假 opencode 記下 argv）在 V1 的參數下 `left: "providers list"`、`right: "auth list --standalone"`；改完綠燈。
+  - 容器端到端：在 rust 容器建出 musl 的 `wukong`、`wukong-web`，bind-mount 進 `wukong-issue44:v2-local`，同樣斷網、用假憑證。
+    - Web：`/api/models` 回傳 nvidia 的模型清單；系統診斷的 Providers、Models 都是 ok，沒有密鑰；之後容器裡沒有 opencode 程序。
+    - CLI REPL：`/providers` 印出 `Nvidia  API key  stored`，`/models` 印出模型清單，INFO log 0 行；之後沒有 opencode 程序。
+- 觀察（不在本 issue 範圍）：wukong 被訊號直接結束時（例如輸出接 `| head` 收到 SIGPIPE），本機模式的 `opencode serve` 子程序會留下來，因為 `kill_on_drop` 沒有機會執行。這是本機模式原本就有的行為，與 V2 無關。
+
+### R2 — server 模式的閒置重啟改查 V2（M2）
+- 狀態：✅ 已完成
+- 改動：
+  - `scripts/opencode-idle-restart.sh` 的 `sessions_idle` 改查 `/api/session?limit=1`，讀 `data[].time.updated`。
+  - basic auth 用容器的 `OPENCODE_SERVER_PASSWORD`，經 stdin（`-H @-`）交給 curl。
+  - 問不到列表時判「忙」，log 寫出原因：沒有密碼、401、非 200、不是 V2 格式。
+  - `scripts/test-idle-restart-decision.sh` 的假 server 改成 V2 的形狀：`/api/` 要認證，其他路徑回網頁。另加兩個反向案例：列表是網頁、密碼錯誤；兩者都不能重啟，而且 log 要說明原因、不印出密碼。
+- 證據：
+  - 先實測 V2 的排序（隔離容器）：先建 A、再建 B，然後對 A 送 prompt；`limit=1` 回的是 A。所以排序依據是 `time.updated`，`limit=1` 可用。不帶密碼或密碼錯誤都回 401。
+  - 紅燈：舊腳本在 V2 形狀的假 server 上，案例二一直印「a session was updated within 1s; skipping」，沒有重啟，跟審查描述的無聲失效相同。改完 5 個案例全部通過。
+  - 真實 V2 端到端：用 entrypoint 啟動 `opencode serve`（opencode 是 PID 1），bind-mount 新腳本，設 `TZ=Asia/Taipei` 與涵蓋現在的窗口。supervisor 判定閒置後送出 SIGINT，V2 結束（exit 130），容器在約 11 秒內退出，交給 compose 的 `restart: unless-stopped`。所以 V1 時「PID 1 只收得到有 handler 的 SIGINT」這個前提，在 V2 仍然成立。
+  - 第一次端到端沒設 TZ，容器是 UTC，窗口沒有命中，這正是腳本開頭警告的情況。compose 會設 TZ。
+
+### R3 — 壓縮失敗或被丟掉時中止 server 上的執行（S1）
+- 狀態：✅ 已完成
+- 改動：
+  - `opencode_server.rs` 新增 `consume_or_interrupt`：future 被丟掉時在背景送 interrupt，失敗時直接送。回合與壓縮共用它，`run_streaming` 原本內嵌的同一段邏輯改呼叫它。
+  - 同時處理 N1：`interrupt_on_drop` 與 `abort_session` 的說明歸位。
+- 證據：紅燈 `a_compaction_retrying_too_long_is_interrupted`、`dropping_a_compaction_interrupts_the_session` 兩支都失敗（沒有 `POST …/interrupt`）；改完綠燈，`opencode_server` 的 61 支測試全部通過。
+
+### R4 — 備份檔與 `.env` 的權限（S2）
+- 狀態：✅ 已完成
+- 改動：
+  - `install.sh` 新增 `make_backup_dir`：`.wukong-backups` 與其下的備份目錄都是 0700，舊版建立的 0755 根目錄也一併收緊。
+  - `backup_docker_state` 改在 subshell 執行並設 umask 077，所以 tar 是 0600，呼叫端的 umask 不受影響。
+  - installer 從 `.env.example` 建立 `.env`，或改寫 `.env` 時（例如產生 server 密碼），都設為 0600。
+  - 同時處理 N3：新增 `state_backup_entries`，取代四處重複的 inline python，以及兩處串接路徑的變體。
+- 證據：
+  - 紅燈：`docker-env-server-password`、`docker-state-backup`、`docker-state-rollback` 三個案例的權限斷言都失敗；改完 `test-installer-upgrade.sh all` 通過。
+  - 真實 docker：新增 `scripts/state-backup-real-docker.sh`，取代 Task 5.1、5.2 當時的臨時指令。它從 install.sh 取出函式，對帶 compose 標籤的測試 volume 操作（uid 1000、WAL 模式 SQLite 5000 筆、子目錄、`auth.json`）。
+    - 備份後 tar 是 600，`volumes/` 與 `.wukong-backups` 都是 700（測試前故意設成 755），呼叫端 shell 的 umask 仍是 0002。
+    - 模擬 V2 改寫後還原：`find -printf` 清單與 sha256 都與備份前相同，`integrity_check` ok，5000 筆，沒有 v2 資料表。
+    - 測試 volume 已刪除。
+
+### R5 — free-limit 429 的時間（S3）
+- 狀態：✅ 已完成
+- 證據：
+  - 新增 `scripts/capture-free-limit.py`：在 V2 容器裡先開 `/api/event`，再建 session，對預設免費模型送一則合成提示詞，記下每個事件與時間。
+  - 2026-11-25 擷取三次，依序是 429、成功、429：
+    - 兩次 429 都是 `step.started` → `step.failed`（provider.free-limit，status 429）→ `execution.failed`，在 1.1～1.8 秒內結束，中間沒有任何 retry 事件。
+    - 我把第一次的樣本直接寫進 fixture 路徑，第二次擷取的成功樣本把它覆蓋了，所以 fixture 是第三次的 429。
+  - fixture `server-free-limit.ndjson`；特徵化測試 `a_real_free_limit_fails_at_once_as_rate_limited` 以它重播，斷言沒有 retry、分類為上游限流、5 秒內結束。
+  - 結論寫在 README TBD-5。
+
+### R6 — 其餘建議（N2、N4、N5）
+- 狀態：✅ 已完成
+- N2：`event_map.rs` 只在之前取消提問或拒絕權限、而且 reason 是 `shutdown` 時，才把 `execution.interrupted` 當成正常結束。真實樣本中，取消與拒絕之後都是 `shutdown`，使用者按停止是 `user`。紅燈 `only_the_shutdown_after_a_decline_ends_the_turn_normally`：`user` 那個斷言失敗；改完綠燈。
+- N4：`forms` 的三處 `lock().unwrap()` 改成與同檔一致的 poison 處理。其中一處在 `ForgetForms` 的 Drop 裡，unwind 期間 panic 會讓程序 abort。
+- N5：`AGENTS.md` 的 `rollbackSafeTo` 發版提醒旁邊補上：之後不再遷移的版本，要把 `backupRequired` 改回 false、`affectedState` 清空。
+
+### 這一輪的整體檢查（2026-11-25）
+- `cargo fmt --all -- --check` 通過；`cargo clippy --all-targets --locked -- -D warnings` 通過。
+- `cargo test --workspace --locked`：792 passed、0 failed、14 ignored。
+- `test-idle-restart-decision.sh`、`test-installer-upgrade.sh all`、`test-docker-runtime.sh`、`test-resolve-opencode-version.sh` 都通過。
+- 沒有執行：shellcheck（主機沒有安裝，CI 也沒用）；需要真實模型的 `#[ignore]` 測試；完整重建 release 映像。容器驗證是把新的 binary 與腳本 bind-mount 進 Task 4.1 建的映像，Dockerfile 與打包流程這一輪沒有改動。
+
 ## 使用方式對照
 
 | 情境 | 變更前 | 變更後 |

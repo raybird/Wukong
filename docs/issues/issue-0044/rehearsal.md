@@ -224,7 +224,7 @@ V2 的 `session_message` 記錄的工具結果：
 ## 觀察（不在本 issue 範圍）
 
 - **`docker exec` 執行的 wukong 指令不套 `user.json`**：`OPENCODE_CONFIG` 只由 entrypoint export 給主程序，exec 進去的程序沒有。本機模式下，在 exec 裡 `schedule trigger` 的回合會用預設模型，不是使用者設定的模型。V1 的 entrypoint 也是這樣。
-- **V2 對 free-limit 429 的回報要等一段時間**：步驟 6 第一次 trigger 時，主回合那一棒從 V2 開始跑到回報 `Free usage limit reached`，經過約 161 秒（06:53:52～06:56:33 UTC）。中間 V2 有沒有在重試、為什麼沒有觸發 Wukong 的 90 秒重試中止，這次沒查清楚。
+- **V2 對 free-limit 429 的回報要等一段時間**：步驟 6 第一次 trigger 時，主回合那一棒從 V2 開始跑到回報 `Free usage limit reached`，經過約 161 秒（06:53:52～06:56:33 UTC）。中間 V2 有沒有在重試、為什麼沒有觸發 Wukong 的 90 秒重試中止，這次沒查清楚。2026-11-25 之後實測（README TBD-5）：V2 對 free-limit 不重試，第一步就失敗，1～2 秒結束；額度的限流是斷續的，161 秒最可能是那一棒前幾步成功、之後才碰到 429。
 - **NVIDIA 會卡住不回應**：上游 300 秒沒有回應 header 時，V1 以 `ProviderHeaderTimeoutError` 結束，分類為「上游錯誤」。
 - **`.env` 的權限是 644**：installer 從 `.env.example` 複製出來就是這個權限，產生的 server 密碼也寫在裡面。這不是本 issue 新增的，但 server 模式現在一定有密碼。
 - **`user.json` 被 V1 的 opencode 改寫**：加上了 `$schema`，修改時間在 V1 時期（06:45）。V2 沒有動過這個檔，rollback 不受影響。

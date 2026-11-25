@@ -13,7 +13,7 @@ GitHub #44。2026-11-24 使用者決定 OpenCode 升到 V2，Wukong 只專注在
 
 ## 現況
 
-2026-11-25 第一次完整審查判定 RETURN TO execute-task（兩項 MUST FIX），待修正後重新審查。
+2026-11-25 第一次完整審查判定 RETURN TO execute-task（兩項 MUST FIX）。使用者同日決定兩項 MUST FIX 與 S1～S3、N1～N5 全部在這一輪修正，SCN-005 記入待確認（TBD-4）；修正完成後送增量覆審。
 
 **現行 review**: [review-0405603.md](review-0405603.md)
 
@@ -41,13 +41,15 @@ GitHub #44。2026-11-24 使用者決定 OpenCode 升到 V2，Wukong 只專注在
 crates/
 ├── wukong-gateway/      # 可改：V2 adapter（opencode_server、event_map、local_process、backend、upstream_error、stream）
 ├── wukong-telegram/     # 可改：提問與權限回覆改走 form／新權限介面時的呼叫端
-├── wukong-web/          # 可改：同上
+├── wukong-web/          # 可改：同上；opencode 工具命令（模型清單、系統診斷）
+├── wukong-cli/          # 可改：/providers、/models 的 opencode 工具命令
 ├── wukong-runtime/      # 不可觸及：回合流程、planner、prompt 組裝屬 #45
 ├── wukong-orchestrator/ # 不可觸及：屬 #45
 └── wukong-skills/       # 不可觸及：屬 #45
 scripts/
 ├── docker-entrypoint.sh             # 可改：V2 格式的 opencode.json baseline、server 密碼
 ├── install.sh                       # 可改：opencode-state 備份、失敗還原、rollback
+├── opencode-idle-restart.sh         # 可改：server 模式閒置重啟查的 session 列表（V2 的 /api/session 與認證）
 ├── resolve-opencode-version.sh      # 可改：@opencode/cli 與固定釘選
 ├── test-release-image.sh            # 可改：V2 套件的釘選檢查
 └── test-installer-upgrade.sh 等      # 可改：對應回歸測試
@@ -238,6 +240,8 @@ Feature: Wukong 在 OpenCode V2 上維持 V1 時的行為
 | TBD-1 | 使用者自訂的 WUKONG_AGENT_CMD 若仍帶 V1 才有的旗標（例如 --dangerously-skip-permissions），V2 的 opencode run 會拒絕還是忽略；installer 現有的 .env 遷移只改寫原封未動的舊範本那一行 | 已解決（2026-11-24 Task 1.2，probe-cli.md）：V2 2.3.2 接受該旗標，效果與 --auto 相同，自訂命令不需改寫；另發現 V2 拒絕大寫的 --log-level ERROR，由 Task 2.6 改成小寫 | 未確認時，自訂命令的使用者升級後回合可能一律失敗；關聯 SCN-010、Phase 1 |
 | TBD-2 | 常駐 server 模式的密碼怎麼提供：V2 沒設密碼時會自己產生隨機密碼，入口無從得知；要沿用 WUKONG_AGENT_SERVER_PASSWORD 由使用者在 .env 設定，還是由 entrypoint 產生並存在共用 volume | 已解決（2026-11-24 使用者選「在 .env 設定」）：沿用 WUKONG_AGENT_SERVER_PASSWORD，compose 傳給 opencode-server 與三個入口，沒設時明確報錯，installer 升級時自動產生；見 SCN-003、SCN-017 | 決定前不實作 Phase 3 的 server 密碼接線；影響 server 模式使用者升級時要不要改 .env；關聯 SCN-003、SCN-004 |
 | TBD-3 | 上游連不到時 V2 不回錯誤：2026-11-24 Task 1.1（server 路徑）60 秒後 session 仍在執行；Task 1.2（CLI 路徑）一直送 retry 事件（error.type 為 provider.transport），120 秒內 7 次仍未結束。同條件下 V1 1.19.6 約 65 秒以 UnknownError 結束。Wukong 要自己收斂，收斂條件與回報方式待使用者決定 | 已解決（2026-11-24 使用者選「重試超過 90 秒就中止」）：任何 retry 持續超過 90 秒就中止回合，依錯誤類型回報；見 SCN-007、SCN-016 | 不處理時，上游連不到的回合要等到 agent timeout（預設 20 分鐘）才失敗；關聯 SCN-007、Task 1.3、Task 2.3 |
+| TBD-4 | SCN-005 寫的是「使用者從入口取消執行中的回合」，但 Web、Telegram、CLI 都沒有取消執行中回合的操作（V1 時也沒有）；review-0405603 的 `需決策` | 已解決（2026-11-25 使用者選「記入待確認」）：規格不動，以 gateway 層證據驗收：回合的 future 被丟掉時送 interrupt（`dropping_the_turn_interrupts_the_session`），V2 回報中止時分類為「回合被中止」；入口層的取消操作不在本 issue | 入口日後新增取消操作時，要另外驗證端到端；關聯 SCN-005 |
+| TBD-5 | 演練中 free-limit 429 約 161 秒才回報，與「重試超過 90 秒就中止」沒有對照清楚（review-0405603 S3） | 已解決（2026-11-25 實測，`docs/issues/issue-0044/scripts/capture-free-limit.py`）：V2 對 free-limit 不重試，第一步就 `step.failed`、`execution.failed`，1.1～1.8 秒結束，沒有 retry 事件；樣本存為 fixture `server-free-limit.ndjson`，以 `a_real_free_limit_fails_at_once_as_rate_limited` 釘住。三次擷取依序為 429、成功、429，間隔幾分鐘，額度的限流是斷續的；161 秒最可能是那一棒前幾步成功、之後某一步才碰到 429，但演練資料已清除，無法再對證。重試計時只在 `step.ended` 等有輸出的事件時重新起算，真實的 transport 重試樣本在兩次 retry 之間沒有這類事件 | 無：90 秒中止只針對 V2 實際會重試的錯誤；關聯 SCN-007 |
 
 ## Timeline
 

@@ -332,6 +332,9 @@ test_docker_env_server_password() {
     assert_not_contains "$TMP/env-out" "$password"
     assert_same "$TMP/env-original" "$(find "$DEPLOYMENT/.wukong-backups" -name .env)"
     [[ "$(grep -c . "$DEPLOYMENT/.env")" == 4 ]] || fail "migration changed more than the password"
+    # review-0405603 S2: the password and its backup are readable by the owner only.
+    [[ "$(stat -c %a "$DEPLOYMENT/.env")" == 600 ]] || fail ".env with the generated password is not 0600"
+    [[ "$(stat -c %a "$DEPLOYMENT/.wukong-backups")" == 700 ]] || fail ".wukong-backups is not 0700"
     cp "$DEPLOYMENT/.env" "$TMP/env-generated"
     FIXTURE_TAG=v9.9.8 make_release
     run_installer '' --mode docker --upgrade --version v9.9.8 >/dev/null
@@ -582,6 +585,8 @@ PY
     ! compgen -G "$DEPLOYMENT/.wukong-backups/*/volumes" >/dev/null || fail "volume archived without being required"
 
     FIXTURE_TAG=v9.9.7 FIXTURE_STATE_BACKUP=1 make_release
+    # A backup root an older installer left world-readable is tightened too (review-0405603 S2).
+    mkdir -p "$DEPLOYMENT/.wukong-backups"; chmod 755 "$DEPLOYMENT/.wukong-backups"
     # A backup that cannot be taken aborts before any release file changes, and starts
     # the stopped services again.
     cp "$DEPLOYMENT/.wukong-release" "$TMP/metadata-before"; cp "$DEPLOYMENT/docker-compose.yml" "$TMP/compose-before"
@@ -616,6 +621,9 @@ print(d["stateBackups"]["opencode-state"])
 PY
 )" || fail "metadata does not record the opencode-state backup"
     [[ "$path" == .wukong-backups/v9.9.8-*/volumes/opencode-state.tar ]] || fail "unexpected backup location: $path"
+    # The archive holds the provider credentials (auth.json) and every conversation.
+    [[ "$(stat -c %a "$DEPLOYMENT/$path")" == 600 ]] || fail "the opencode-state archive is not 0600"
+    [[ "$(stat -c %a "$DEPLOYMENT/.wukong-backups")" == 700 ]] || fail ".wukong-backups is not 0700"
     mkdir "$TMP/restored"
     tar -C "$TMP/restored" -xf "$DEPLOYMENT/$path"
     assert_same "$TMP/opencode.db.before" "$TMP/restored/opencode.db"
@@ -709,6 +717,7 @@ first(lambda l: l.endswith("up -d --force-recreate"), "start the previous releas
 PY
     # What the rolled-back release held is set aside, not destroyed.
     saved="$(ls "$DEPLOYMENT"/.wukong-backups/v9.9.9-rollback-*/volumes/opencode-state.tar)" || fail "the V2 state was not set aside"
+    [[ "$(stat -c %a "$saved")" == 600 ]] || fail "the set-aside opencode-state archive is not 0600"
     mkdir "$TMP/set-aside"; tar -C "$TMP/set-aside" -xf "$saved"
     diff -r "$TMP/state-v2" "$TMP/set-aside" || fail "the set-aside copy is not the state before rollback"
 

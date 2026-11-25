@@ -30,6 +30,13 @@
   連到背景 service；在主機上那可能是你自己的 opencode，回合會跑進你的資料裡。命令裡已經有
   `--standalone` 或 `--server` 時照你的設定（#44）。
 
+- **`/providers` 改用 `opencode auth list`，`/models` 與 Web 的模型清單、系統診斷不再留下背景程式。** V2 沒有
+  `providers list`，原本的命令會直接失敗；`opencode models` 不加 `--standalone` 時會啟動 V2 的背景 service
+  並一直留著（Docker 裡是 wukong-web 容器，binary 模式則是你的主機）。現在這些命令都用一次性的私有
+  server，`auth list` 只列出 provider 與憑證是否已存，不印密鑰（#44）。
+- **共用 server 模式的每日閒置重啟在 V2 上照常運作。** 判斷閒置時改查 V2 的 `/api/session` 並帶密碼；
+  原本查的 V1 路徑在 V2 回網頁，每天都被當成「有活動」而跳過重啟。問不到時 log 會寫出原因（#44）。
+
 ### Added
 
 - **Docker 升級前會備份 `opencode-state`，rollback 時一起還原。**
@@ -37,7 +44,9 @@
   - 新版啟用失敗：先還原再啟動前一版。
   - `--rollback`：把 `opencode-state` 還原成升級前的備份。V1 時期的對話可以接續，升級之後的對話不保留；
     installer 會印出這一點，並把還原前的內容另存一份。
-  - 登入資訊（`auth.json`）也在這個 volume，升級之後才登入的 provider，rollback 後要重新登入（#44）。
+  - 登入資訊（`auth.json`）也在這個 volume，升級之後才登入的 provider，rollback 後要重新登入。
+  - 備份含 provider 憑證與完整對話，所以 `.wukong-backups/` 是 0700、tar 是 0600；installer 建立或改寫
+    `.env` 時也設為 0600（#44）。
 - **binary 模式偵測到 V1 時明確報錯。** PATH 上的 `opencode` 是 1.x 時，第一個回合就回報要改裝 V2，不會等到
   agent timeout。換裝步驟與備份方式見 `docs/installation.md`「Binary 模式換用 OpenCode V2」（#44）。
 
