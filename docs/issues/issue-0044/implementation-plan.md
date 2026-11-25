@@ -418,8 +418,23 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 驗收編號：推導行為 (d)
 - 完成判準：文件寫出安裝命令、備份與還原路徑，並連到 SCN-011 的錯誤訊息
 - 驗證：等價證據（純文件）：照文件在隔離 HOME 實際執行一次
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成
+- 證據：2026-11-25
+  - 文件：`docs/installation.md` 新增「Binary 模式換用 OpenCode V2」一節。內容包括：
+    - binary 模式由使用者自行安裝 opencode、installer 不動它
+    - SCN-011 的錯誤訊息原文（`crates/wukong-gateway/src/opencode_version.rs`），以及新舊 Wukong 與 V1／V2 要一起換
+    - V2 單向遷移的路徑（`${XDG_DATA_HOME:-~/.local/share}/opencode`）與會被刪掉的三張表（#30 inventory.md 步驟 4 的實測），備份之後的對話不保留
+    - 升級四步：停 service、備份資料／設定／版本號、`npm uninstall -g opencode-ai` 後 `npm install -g @opencode/cli@2.3.2`、`install.sh --mode binary --upgrade`（installer 會重啟已啟用的 service，`install.sh` 第 487 行）
+    - 退回步驟：換回備份記下的 V1 版本、還原資料與設定、`--rollback`
+  - 等價證據（照文件在隔離 HOME 實際執行）：在 scratchpad 建立獨立的 HOME 與 npm prefix（`npm_config_prefix`），先裝 `opencode-ai@1.19.6` 模擬既有安裝。以 v0.25.1 映像在 `--network none` 容器、uid 1000 啟動 V1 serve，建出 V1 opencode.db（20 張表，含 data_migration、session_context_epoch、session_input）。之後把文件裡兩個 bash 區塊原樣抽出執行；`systemctl` 與 `curl` 換成只記錄參數的替身（不碰本機 user service，binary installer 本身由 `test-installer-upgrade.sh` 涵蓋），退回區塊只把佔位的 `<升級時的時間>` 換成實際目錄名
+    - 升級區塊 rc=0：備份目錄有 data、config、opencode-version（內容 `1.19.6`）；`opencode --version` 輸出 `opencode v2.3.2`，`bin/opencode` 指向 `@opencode/cli/bin/opencode.exe`；替身記錄到 `systemctl --user stop …` 與 `--mode binary --upgrade`
+    - 以 V2 在斷網容器啟動一次：`/api/experimental/migration/v1` 回 `{"status":"completed"}`，資料庫變成 29 張表、有 session_v2、V1 的三張表都不在（與文件所寫一致）
+    - 退回區塊 rc=0：`bin/opencode` 指回 `opencode-ai`；資料與設定目錄與備份 `diff -r` 相同；資料庫回到 20 張表、有 V1 的三張表、沒有 session_v2；替身記錄到 `--mode binary --rollback`
+    - 以 V1 在還原後的資料上啟動：報告 listening、`opencode --version` 為 1.19.6、`GET /session` 回 200
+  - 限制：
+    - 還原後的 V1 log 有 1 行含 error，目錄清掉前沒看內容。另以全新 V1 在同樣的斷網環境啟動，log 裡的 error 是「Failed to fetch models.dev」（沒網路所致），推測是同一類，但沒有逐字確認
+    - `systemctl` 與真實的 binary installer 沒在這次執行
+    - 沒有用帶對話的 V1 資料庫實測「還原後 V1 對話可接續」，只確認 V1 能在還原的資料上啟動並回應
 
 ## Phase 6 — 端到端演練、版本對照與文件
 

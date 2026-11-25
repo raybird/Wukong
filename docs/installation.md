@@ -93,6 +93,58 @@ Prerelease 適合驗證新功能或修補，例如 runtime skill assets、Docker
 
 Binary rollback 只使用 `~/.wukong/install.json` 指向的已驗證上一個 transaction，成功後會旋轉 current/previous metadata。第一次從 legacy 安裝升級時會建立 hash-checked backup；config、data 與 workspace 永遠不包含在 backup。缺少、損毀或宣告不可逆 migration 的 compatibility metadata 都會在 mutation 前拒絕 rollback；先備份受影響 state，再依 manifest 的 recovery instructions 處理。
 
+## Binary 模式換用 OpenCode V2
+
+2026-11-25 起（issue-0044），Wukong 只支援 OpenCode V2（npm 套件 `@opencode/cli`，驗證過的版本是 2.3.2）。Docker 映像已內建 V2，installer 會自動備份與還原；**binary 模式的 opencode 由你自己安裝，installer 不會動它**，所以升級 Wukong 時要自己換裝 V2 並備份資料。
+
+先知道兩件事：
+
+- **新版 Wukong 遇到 V1 會直接拒絕**。PATH 上的 `opencode` 回報 1.x 時，第一個回合就失敗並顯示：`需要 OpenCode V2（2.x），opencode 回報的版本是 1.19.6。請改裝 V2，例如 npm install -g @opencode/cli@2.3.2。`（不會等到 agent timeout）。反過來，舊版 Wukong 也不能接 V2，兩者要一起換。
+- **V2 的資料遷移是單向的**。V2 第一次啟動時就地改寫 `~/.local/share/opencode/opencode.db`（有設 `XDG_DATA_HOME` 時為 `$XDG_DATA_HOME/opencode/`）：新增 V2 的表、刪掉 V1 的 `data_migration`、`session_context_epoch`、`session_input` 三張表。原本的對話在 V2 裡可以接續；但要退回 V1，只能還原升級前的備份，**備份之後的對話不會保留**。登入資訊 `auth.json` 也在這個目錄。
+
+### 升級
+
+```bash
+# 1. 停掉會開 opencode.db 的程序：Wukong 的 user service（有裝的才需要；macOS 沒有），以及你自己開著的 opencode
+systemctl --user stop wukong-telegram wukong-web wukong-schedulerd
+
+# 2. 備份 opencode 的資料、設定與目前的版本
+backup="$HOME/opencode-v1-backup-$(date +%Y%m%d%H%M)"
+mkdir -p "$backup"
+opencode --version > "$backup/opencode-version"
+cp -a "${XDG_DATA_HOME:-$HOME/.local/share}/opencode" "$backup/data"
+[ ! -d "${XDG_CONFIG_HOME:-$HOME/.config}/opencode" ] || cp -a "${XDG_CONFIG_HOME:-$HOME/.config}/opencode" "$backup/config"
+
+# 3. 換裝 V2。套件改名了，兩個套件都提供 opencode 指令，所以先移除 V1
+npm uninstall -g opencode-ai
+npm install -g @opencode/cli@2.3.2
+opencode --version    # 應顯示 opencode v2.3.2
+
+# 4. 升級 Wukong；已啟用的 service 會由 installer 重新啟動
+curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash -s -- --mode binary --upgrade
+```
+
+V1 的設定檔不用改：V2 會自動轉換 `permission`、`bash`、`snapshot` 等舊鍵；轉換不了的（例如 `compaction.prune`、`tail_turns`）會被忽略。
+
+### 退回 V1
+
+```bash
+systemctl --user stop wukong-telegram wukong-web wukong-schedulerd
+backup="$HOME/opencode-v1-backup-<升級時的時間>"
+
+npm uninstall -g @opencode/cli
+npm install -g "opencode-ai@$(cat "$backup/opencode-version")"
+
+data="${XDG_DATA_HOME:-$HOME/.local/share}/opencode"
+rm -rf "$data" && cp -a "$backup/data" "$data"
+if [ -d "$backup/config" ]; then
+    config="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+    rm -rf "$config" && cp -a "$backup/config" "$config"
+fi
+
+curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install.sh | bash -s -- --mode binary --rollback
+```
+
 ## 從原始碼建置
 
 如果不想用預編譯 binary，也可以直接編譯：

@@ -214,7 +214,7 @@ Feature: Wukong 在 OpenCode V2 上維持 V1 時的行為
 2. 📝 **Phase 2** - gateway adapter 改寫與回歸測試
 3. ✅ **Phase 3** - 容器設定：baseline、server 密碼、healthcheck
 4. ✅ **Phase 4** - 打包與 release 釘選
-5. 📝 **Phase 5** - installer 備份、失敗還原與 rollback
+5. ✅ **Phase 5** - installer 備份、失敗還原與 rollback
 6. 📝 **Phase 6** - 隔離環境端到端演練、版本對照與常青文件
 
 ## 風險與首要驗證
