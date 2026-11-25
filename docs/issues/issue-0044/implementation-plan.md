@@ -261,8 +261,32 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 驗收編號：SCN-009
 - 完成判準：真實 V2 以 baseline 啟動成功；對絕對路徑的遞迴刪除被拒（拿掉規則時同一命令會通過的反向自檢）、/workspace 內刪除允許、/tmp 存取不詢問；user.json 的鍵覆蓋 baseline；`bash scripts/test-docker-runtime.sh` 通過
 - 驗證：容器層測試（真實 V2 映像）
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成
+- 證據：2026-11-25
+  - 實測 V2 2.3.2 怎麼讀 V1 寫法的 baseline（`opencode debug config`）：
+    - 仍可啟動，`permission` 轉成 `permissions` 有序清單（`bash` → `shell`），`snapshot` 轉成 `snapshots`
+    - `compaction.prune` 與 `tail_turns` 被默默丟掉，沒有任何錯誤或日誌（V2 原始碼標為 omitted unsupported legacy setting）
+    - V2 預設權限是 `* * allow`，加上讀 `.env` 時詢問；外部目錄預設不詢問（Task 1.2 第 8 段讀 `/etc/hostname` 直接完成，原因在此）
+  - 改動：
+    - `scripts/docker-entrypoint.sh` 的 baseline 改寫成 V2 原生格式：`snapshots`、`permissions` 清單（規則與順序同原本，`/workspace` 的 allow 在 deny 之後）、`tool_output` 與 `watcher` 不變
+    - `compaction` 改成 `{"auto": true, "background": false}`：V2 沒有 `prune`、`tail_turns` 的對應設定。`background` 預設是開，會在 session 接近上限時先在背景寫摘要，摘要沒用到也一樣花 token，V1 沒有這個行為，所以關掉
+    - 同檔註解改寫為 V2 的情況；`AGENTS.md` 的「容器內 opencode 權限」「opencode 設定分層」兩條同步更新
+    - `scripts/test-docker-runtime.sh` 原本 grep V1 的字串，改成解析 baseline：沒有 V1 的鍵、有 `/tmp` 放行與 rm deny、`/workspace` 的 allow 排在最後一條 deny 之後
+  - 測試：新增容器層測試 `scripts/test-opencode-baseline.sh IMAGE [V2_PREFIX]`（driver 為 `scripts/test-support/opencode-baseline-driver.py`）
+    - 容器以 `--network none` 執行本 repo 的 entrypoint，再以 wukong 使用者執行 driver。設定檔與 `OPENCODE_CONFIG` 都是 entrypoint 實際寫出的結果
+    - driver 內建只綁 127.0.0.1 的 OpenAI 相容假模型，第一次請求要求呼叫指定工具。真實 opencode 照常解析設定、比對權限、執行工具，不連外部模型，不受免費額度影響
+    - 11 項檢查：
+      - V2 讀入的 baseline 與檔案內容相同（沒有鍵被改或丟掉）；`user.json` 是設定來源之一
+      - `rm -rf /tmp/victim` 被拒，加 `--dangerously-skip-permissions` 也被拒，目錄仍在；反向自檢：拿掉 deny 規則後同一命令通過，目錄被刪
+      - `rm -rf /workspace/victim` 通過
+      - read 工具讀 `/tmp/probe.txt` 不詢問、取得內容；反向自檢：`/tmp` 規則改成 ask 時同一讀取被拒（「This non-interactive run cannot ask the user for permission…」），證明這項抓得到詢問
+      - `user.json` 用 V2 的 `permissions` 或沿用 V1 的 `permission.bash` 都能讓同一個 rm 通過；`user.json` 的 `tool_output.max_lines: 3` 讓 `seq 1 50` 的輸出從 50 行變成 3 行
+    - 紅燈：改動前的 baseline 有 3 項失敗。「讀入相同」報 `compaction` 被改成 `{"auto": true}`、`permission` 與 `snapshot` 被轉換；兩個反向自檢以 V2 格式改寫規則，對 V1 寫法無效。權限行為本身靠 V2 的自動轉換仍然正確
+    - 綠燈：`bash scripts/test-opencode-baseline.sh ghcr.io/raybird/wukong:v0.25.1 <V2 2.3.2 prefix>` 11 passed、0 failed，約 14 秒；`bash scripts/test-docker-runtime.sh` 通過。在 baseline 放回 V1 的 `snapshot` 鍵時，`test-docker-runtime.sh` 失敗並指出該鍵
+  - 限制：
+    - V2 正式映像要到 Task 4.1 才有，這次以 v0.25.1 映像加掛 V2 prefix 執行；Task 4.1 建好映像後以不帶 prefix 的方式再跑一次
+    - 權限以 `opencode run` 驗證，本機與 server 模式的 `serve` 用同一份設定與同一套規則比對；`serve` 遇到 ask 會轉給使用者回答，那條路徑屬 Task 2.5
+    - 給使用者的文件（`user.json` 可用 V2 的 `permissions`、V1 寫法仍有效、`tail_turns` 不再生效）留給 Task 6.3
 
 ### Task 3.2 — 常駐 server 模式的密碼與 healthcheck
 - 產出與範圍：compose 三個檔（含 release、memoria overlay）把 `WUKONG_AGENT_SERVER_PASSWORD` 交給 opencode-server（作為 `OPENCODE_SERVER_PASSWORD`）與三個入口，opencode-server healthcheck 帶認證打 `/api/info`；server 模式沒有密碼時入口啟動即報錯；`scripts/install.sh` 的 `.env` 遷移在 server 模式未設密碼時先備份再產生；`.env.example`

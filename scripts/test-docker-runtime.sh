@@ -112,10 +112,21 @@ require_in_file 'cp -a "$OPENCODE_CONFIG_FILE" "$OPENCODE_CONFIG_FILE.pre-baseli
     "entrypoint must back up a pre-baseline config before taking over opencode.json"
 require_in_file 'if [[ ! -f "$OPENCODE_USER_CONFIG_FILE" ]]; then' "$entrypoint" \
     "entrypoint must create the user config layer only when missing"
-require_in_file '"external_directory": {' "$entrypoint" \
-    "baseline must grant external_directory access explicitly"
-require_in_file '"*rm -rf /*": "deny"' "$entrypoint" \
-    "baseline must retain the destructive-rm denylist"
+# issue-0044 Task 3.1：baseline 用 OpenCode V2 的原生格式。V2 會轉換 V1 的鍵，但轉換不了的
+# 會被默默丟掉，所以不能留 V1 的鍵。實際行為由 scripts/test-opencode-baseline.sh 對真實
+# opencode 驗證；這裡只擋掉不必起容器就看得出來的退步。
+sed -n "/<<'OPENCODE_JSON'/,/^OPENCODE_JSON/p" "$entrypoint" | sed '1d;$d' | python3 -c '
+import json, sys
+config = json.load(sys.stdin)
+legacy = sorted({"permission", "snapshot"} & config.keys())
+assert not legacy, f"baseline must use V2 keys, found V1 {legacy}"
+rules = [(r["action"], r["resource"], r["effect"]) for r in config["permissions"]]
+assert ("external_directory", "/tmp", "allow") in rules, "baseline must allow /tmp explicitly"
+assert ("shell", "*rm -rf /*", "deny") in rules, "baseline must retain the destructive-rm denylist"
+last_deny = max(i for i, r in enumerate(rules) if r[2] == "deny")
+assert rules.index(("shell", "*rm * /workspace/*", "allow")) > last_deny, \
+    "the /workspace allow must come after the denies; the last matching rule wins"
+' || { echo "FAIL: opencode.json baseline in $entrypoint" >&2; exit 1; }
 require_in_file "curl -fsS http://localhost:4096/global/health || exit 1" "$compose_file" \
     "opencode server must expose a Compose healthcheck"
 # SCN-007／008（2026-10-03）：預設本機回合、獨立 server 顯式啟用。
