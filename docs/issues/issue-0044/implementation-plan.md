@@ -477,8 +477,15 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 驗收編號：GitHub #44 驗收（版本對照）
 - 完成判準：記錄耗時、CPU 與 opencode.db 增量，失敗樣本保留；V2 退步時寫出原因或未知
 - 驗證：基準測試
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成
+- 證據：2026-11-25 15:16～15:39（台北），[bench-v1-v2.md](bench-v1-v2.md)，原始資料 [bench/](bench/)，腳本 [scripts/bench-v1-v2.sh](scripts/bench-v1-v2.sh)
+  - 設定：兩個映像各跑兩輪，順序相反，short、tool 各 7 回合，全部成功；模型都是使用者的 NVIDIA 模型，RUN_DIR 是全新的合成狀態
+  - `bench-turn.sh` 補上 entrypoint 交給正式服務的 `OPENCODE_CONFIG`，否則 `user.json` 不生效；沒套用時的第一輪保留為失敗樣本，其中有真實的 free-limit 429，Wukong 在 6 秒內回報「上游限流」
+  - 耗時：兩輪的範圍互相重疊，看不出 V2 退步，主要取決於上游。V2 每一步本身有沒有額外成本，沒有固定回應的上游分不出來，列為未知
+  - CPU：V2 暖回合約少 15～30%，冷回合約少一半
+  - 記憶體峰值：V2 約 560～620 MiB，V1 約 625～1,030 MiB
+  - throttling：V2 每回合約 1.1 秒，V1 約 0.28 秒，原因未知（推測 CPU 用量集中在短時間內）
+  - opencode.db：V2 第一次多 14 MB（`kv` 表的 models.dev 目錄快取），之後每回合 4～12 KB，V1 是 20～342 KB
 
 ### Task 6.3 — 常青文件
 - 產出與範圍：`docs/docker.md`、根目錄 `AGENTS.md`（架構、關鍵設計細節、容器內 opencode 權限）、`.env.example`、`CHANGELOG.md` 的 `[Unreleased]`

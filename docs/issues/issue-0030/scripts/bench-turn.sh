@@ -4,6 +4,8 @@
 # 用法：bench-turn.sh IMAGE RUN_DIR TASK N
 #   RUN_DIR 要有 data/memory.db、opencode/opencode.db、config/（opencode-config 的複本）、workspace/
 #   TASK：short（只回 OK）或 tool（建立並讀回一個檔案）
+# OPENCODE_CONFIG 與 entrypoint 交給正式服務的相同（2026-11-25 issue-0044 補上）：回合在 entrypoint 之外執行，
+# 沒有它 user.json 不生效，回合會用預設的免費模型。
 # 每回合輸出一行 JSON（tool 任務的 bench_file 是該回合結束時 bench.txt 是否為 hello）；stderr 存在 RUN_DIR/logs/。prompt 是固定的合成內容，不帶任何對話資料。
 set -euo pipefail
 image=$1 run=$2 task=$3 n=$4
@@ -15,6 +17,7 @@ esac
 mkdir -p "$run/logs"
 docker run --rm --cpus 1.5 --memory 3g --pids-limit 256 \
   -e WUKONG_AGENT_SERVER_URL= -e WUKONG_OPENCODE_SESSION_RETENTION_DAYS=30 \
+  -e OPENCODE_CONFIG=/home/wukong/.config/opencode/user.json \
   -e BENCH_IMAGE="$image" -e BENCH_TASK="$task" -e BENCH_N="$n" -e BENCH_PROMPT="$prompt" \
   -v "$run/data":/data -v "$run/opencode":/home/wukong/.local/share/opencode \
   -v "$run/config":/home/wukong/.config/opencode -v "$run/workspace":/workspace -v "$run/logs":/logs \
