@@ -11,6 +11,7 @@
 - **預設 Web + Telegram + Scheduler**：`docker compose up -d` 會啟動 Web Console、Telegram Bot 與排程 daemon；CLI / REPL 透過被動 `run` 使用
 - **按需執行與互動（2026-10-04）**：預設每次執行在入口容器內啟動 OpenCode 控制程序，監聽 loopback 可用埠，完成、錯誤、逾時或取消後回收。CLI／REPL、Web、Telegram 都支援問答，排程依 Reject／AllowOnce 處理權限，一般問題一律拒絕。
 - **權限設定**：entrypoint 的 baseline 保留 destructive-rm denylist 與 `/tmp` 放行；自訂 allow／ask／deny 寫入 `user.json`。它是防呆護欄，隔離邊界仍是容器及 host 掛載目錄。
+- **OpenCode 版本**：2026-11-25 起映像內建 OpenCode V2（npm 套件 `@opencode/cli`，版本由 `release/runtime-inputs.env` 釘選，目前是 2.3.2，issue-0044）。V2 第一次啟動時會就地遷移 `opencode-state` 裡的 `opencode.db`，原本的對話照常接續；installer 升級前會先備份這個 volume（見「升級既有 installer Docker 部署」）。
 
 ### opencode 設定分層（baseline / user）
 
@@ -39,9 +40,19 @@
 ```dotenv
 COMPOSE_PROFILES=server
 WUKONG_AGENT_SERVER_URL=http://opencode-server:4096
+WUKONG_AGENT_SERVER_PASSWORD=<openssl rand -hex 24 的輸出>
 ```
 
-再執行 `docker compose up -d`。啟用 profile 與 URL 是兩個必要設定；連接自行管理的遠端 server 則只設定 URL。共用 `/workspace` 時附件用 `shared`，沒有共享檔案系統的遠端可改用 `inline`（單檔 10 MiB）。本機程序固定使用入口的工作目錄與共享檔案，不套用遠端路徑映射。
+再執行 `docker compose up -d`。啟用 profile 與 URL 是兩個必要設定；2026-11-25 起（OpenCode V2，issue-0044）密碼也是必要的：
+
+- V2 server 一定有密碼，沒設時會自己產生隨機的一組，入口無從得知。
+- compose 把同一組 `WUKONG_AGENT_SERVER_PASSWORD` 交給 opencode-server（`OPENCODE_SERVER_PASSWORD`）與三個入口。basic auth 的使用者名稱固定是 `opencode`，`WUKONG_AGENT_SERVER_USERNAME` 不再有作用。
+- 設了 URL 卻沒設密碼時，入口啟動就報錯並指出這個變數，不會等到 agent timeout。
+- installer 升級時若偵測到 server 模式沒有密碼，會先把 `.env` 備份到 `.wukong-backups/`，再產生一組 48 字元的密碼寫進 `.env`；輸出只說明有產生，不印出密碼。
+- 密碼錯誤時，入口的就緒檢查回報「認證被拒」。
+- opencode-server 的 healthcheck 帶 basic auth 查 `/api/info`，密碼不對或 server 沒有回應就判為 unhealthy。V2 的網頁不帶認證也回 200，所以不能拿它判斷健康。
+
+連接自行管理的遠端 server 則只設定 URL。共用 `/workspace` 時附件用 `shared`，沒有共享檔案系統的遠端可改用 `inline`（單檔 10 MiB）。本機程序固定使用入口的工作目錄與共享檔案，不套用遠端路徑映射。
 
 升級到按需模式時，移除 `.env` 的 `COMPOSE_PROFILES=server` 與非空 URL，將舊的 `WUKONG_AGENT_CMD=opencode run --dangerously-skip-permissions` 改為 `opencode run`。額外 run 旗標會保留純 CLI 路徑，沒有問答回覆通道。2026-10-06 起 installer 安裝或升級時會自動處理兩件事：把舊範本原封未動的這行改成 `opencode run`；`WUKONG_AGENT_SERVER_URL` 指向內建 `opencode-server` 而沒有 `COMPOSE_PROFILES` 時補上 `COMPOSE_PROFILES=server`。改動前先備份到 `.wukong-backups/`，其他自訂值不動；`COMPOSE_PROFILES` 已設定但不含 `server` 時只印警告。installer 會停止同一 project 已停用的 `opencode-server`；手動更新 Compose 時先執行以下命令，因為 profile 停用與 `--remove-orphans` 不會停止舊的 profile 容器：
 
@@ -181,7 +192,9 @@ services:
         畫面上會顯示驗證網址與驗證碼，請在主機瀏覽器中開啟並完成登入。
 
     > [!NOTE]
-    > 以上互動式設定都會自動保存至 `opencode-config` 持久化 Volume 中。之後背景啟動 `wukong-web` 或 `wukong-telegram` 時會自動共享此授權狀態，不需重複設定。
+    > 登入資訊存在 `opencode-state` volume 的 `auth.json`（`/home/wukong/.local/share/opencode/`）；模型等設定寫在 `opencode-config` volume 的 `user.json`。之後背景啟動 `wukong-web` 或 `wukong-telegram` 時會自動共享此授權狀態，不需重複設定。
+    >
+    > `opencode-state` 是升級時會備份、rollback 時會還原的 volume。升級之後才登入或換過的 provider，rollback 後會回到升級前的狀態，需要重新登入。
 
 *   **方法 B：直接透過環境變數注入（適用於 OpenAI / Anthropic / NVIDIA 等單一 API Key）**
     如果不希望手動在 UI 輸入，可以直接將 API Key 透過環境變數注入容器：
@@ -194,8 +207,9 @@ services:
 | :--- | :--- | :--- |
 | `USER_ID` / `GROUP_ID` | 與 host 對齊的 UID/GID，避免 volume 權限問題 | `1000` |
 | `WUKONG_HOST_WORKSPACE` | Host 工作目錄路徑（opencode workspace） | `./workspace` |
-| `WUKONG_AGENT_CMD` | 預設選按需本機控制程序；額外 run 旗標與任意命令走純 CLI | `opencode run` |
+| `WUKONG_AGENT_CMD` | 預設選按需本機控制程序；額外 run 旗標與任意命令走純 CLI。純 CLI 執行 opencode 時，Wukong 會補上 `--standalone --print-logs --log-level error`（命令裡已有 `--standalone` 或 `--server` 時不補 `--standalone`），以免回合跑進使用者自己的 V2 背景 service | `opencode run` |
 | `WUKONG_AGENT_SERVER_URL` | 非空時選既有共用 server adapter；空值使用本機執行 | 空值 |
+| `WUKONG_AGENT_SERVER_PASSWORD` | 共用 server 的密碼；設了 URL 就必填。compose 同時交給 opencode-server 與各入口；installer 升級時若缺少會自動產生 | 空值 |
 | `WUKONG_AGENT_SERVER_FILE_MODE` | server backend 附件模式：共享工作區 `shared`、Base64 `inline`、停用 `disabled` | `shared` |
 | `WUKONG_AGENT_SERVER_WORKSPACE` | `shared` 模式中 OpenCode server 看見的 workspace 絕對路徑 | `/workspace` |
 | `WUKONG_TG_TOKEN` | Telegram Bot Token（選用；可由 Web `/settings` 設定，env 優先） | — |
@@ -279,10 +293,19 @@ docker compose exec -u wukong wukong-schedulerd wukong opencode prune --dry-run
 
 ## 模型額度不足與上游錯誤診斷（2026-10-26）
 
-當排程或對話使用的模型達到用量上限（例如 `AI_APICallError: Free usage limit reached` 或 429 錯誤）時，OpenCode 1.19.3 本機執行會在日誌輸出 `message="stream error"`，但 SSE 串流可能靜默掛起而不發送錯誤事件。
+2026-10-26 起，Wukong 遇到上游錯誤時立即中止回合，不等 1200 秒逾時。當時針對的是 OpenCode 1.19.3：額度用完時只在日誌輸出 `message="stream error"`，串流卻靜默掛起。2026-11-25 換用 OpenCode V2（issue-0044）後，錯誤由 V2 的事件或 `--format json` 的 error 行回報，Wukong 依錯誤類型與 HTTP 狀態碼分類：
 
-Wukong Gateway 自 2026-10-26 起，在按需啟動本機 OpenCode 時加上 `--print-logs` 並監聽 stderr 串流錯誤：
-- **立即失敗**：收到上游串流錯誤後立即中止回合，保留原始錯誤原因，不再等待 1200 秒逾時。
+| 上游情況 | V2 的錯誤 | Wukong 回報 |
+|---|---|---|
+| 額度用完或限流 | `provider.free-limit`、`rate-limit`、`quota` 等，或狀態碼 429 | 上游模型錯誤（上游限流） |
+| 模型下架或不存在 | 狀態碼 410（例如 NVIDIA 回 `provider.invalid-request`「reached its end of life」），或 `provider.no-route` | 上游模型錯誤（模型已下架） |
+| 連不到上游 | V2 持續重試 `transport`、`connect` 等錯誤超過 90 秒 | 上游模型錯誤（上游連不到），訊息附重試次數 |
+
+- 重試在 90 秒內恢復時，回合照常完成。
+- 上游接受連線卻遲遲不回應時，由 opencode 自己的逾時處理。2026-11-25 演練時，V1 碰到 NVIDIA 300 秒沒有回應 header，回合以 `ProviderHeaderTimeoutError` 結束；V2 遇到同樣情況會怎麼結束，沒有實測。
+
+處理方式如下：
+- **立即失敗**：收到上游錯誤後立即中止回合，保留原始錯誤原因，不再等待 1200 秒逾時。
 - **排程診斷**：排程 run 結果標記為 failure，並標記 `[上游失敗: 達到請求頻率或額度上限]` 與詳細錯誤內容，可直接透過 `wukong schedule runs` 檢視。
 - **處置方式**：
   1. **調整 Wukong 明確模型設定**：若已在 Wukong 設定了預設模型（例如 `/data/settings.json` 的 `agent.default_model`），回合最後一棒會明確傳入該模型覆寫 OpenCode 預設值。可透過 Web Console 設定頁面（`/settings`）切換為其他可用模型，亦可進入 Wukong REPL 使用 `/set_models <model>` 指令設定。若欲完全移除覆寫、交由 OpenCode 預設決策，需手動自 `/data/settings.json` 中將 `agent.default_model` 設為 `null` 或刪除該欄位（現有 Web 與 REPL 介面不接受空值輸入）。

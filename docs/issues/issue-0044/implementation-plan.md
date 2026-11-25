@@ -493,8 +493,20 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 驗收編號：project.md 常青文件更新責任
 - 完成判準：文件描述的介面、變數與 6.1 演練時的實際行為一致
 - 驗證：等價證據（純文件）：逐項對照演練紀錄
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成
+- 證據：2026-11-25。改了 `docs/docker.md`、根目錄 `AGENTS.md`、`CHANGELOG.md` 的 `[Unreleased]`；`.env.example` 的密碼說明已在 Task 3.2 改好，這次不用動。逐項對照：
+  - server 模式必須有密碼、installer 備份 `.env` 並產生 48 字元密碼且不印出 → rehearsal.md 步驟 8
+  - healthcheck 帶 basic auth 查 `/api/info` → rehearsal.md 步驟 9、Task 3.2
+  - 密碼錯誤時回報「認證被拒」、V2 網頁不帶認證也回 200 → Task 3.2、Task 2.1
+  - basic auth 使用者名稱固定 `opencode`、`WUKONG_AGENT_SERVER_USERNAME` 不再讀取 → Task 2.1；程式裡只剩測試的 `env_remove`
+  - CLI 補 `--standalone --print-logs --log-level error` → Task 2.6 的 argv 紀錄
+  - V1 偵測 → Task 2.7
+  - 上游錯誤分類 → Task 2.3；410 下架的真實樣本 → Task 2.6
+  - 「V2 遇到 300 秒不回應 header 會怎樣」寫成沒有實測，因為演練碰到的是 V1
+  - 登入資訊在 `opencode-state` 的 `auth.json`，rollback 會一起還原 → rehearsal.md（auth.json 放在該 volume，rollback 還原整個 volume）。修正了 docker.md 原本「保存在 opencode-config」的錯誤說法
+  - V1 時期的對話接續、rollback 後升級之後的對話不保留 → rehearsal.md 步驟 3、7
+  - `rollbackSafeTo` 要寫上一個發布的版本 → Task 5.3 的發現
+  - 保留期清理改走 cursor 分頁 → Task 2.1
 
 ## 使用方式對照
 

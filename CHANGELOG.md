@@ -11,6 +11,41 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **換用 OpenCode V2。** 映像內建的 opencode 從 V1（`opencode-ai` 1.19.6）換成 V2（`@opencode/cli`，固定
+  2.3.2），Wukong 只支援 V2。Telegram、Web、排程與 CLI 的使用方式不變：
+  - V1 時期的對話換版後照常接續。V2 第一次啟動時會就地遷移 `opencode.db`。
+  - 上游錯誤照樣分類為上游限流、模型已下架、上游連不到。V2 持續重試超過 90 秒就中止回合，
+    回報「上游連不到」。
+  - 你的 `user.json` 不用改，V2 會轉換 V1 的設定鍵；轉換不了的鍵（例如 `compaction.prune`、
+    `tail_turns`）會被忽略（#44）。
+- **共用 server 模式必須設定密碼。** V2 的 server 一定有密碼，所以啟用 `opencode-server`（設了
+  `WUKONG_AGENT_SERVER_URL`）時要在 `.env` 設 `WUKONG_AGENT_SERVER_PASSWORD`：
+  - compose 會把同一組密碼交給 server 與三個入口。沒設時入口啟動就報錯。
+  - installer 升級時若發現沒設，會先備份 `.env` 再自動產生一組，輸出不會印出密碼。
+  - basic auth 的使用者名稱固定是 `opencode`，`WUKONG_AGENT_SERVER_USERNAME` 不再有作用。
+  - opencode-server 的 healthcheck 改為帶認證查詢 `/api/info`（#44）。
+- **自訂 `WUKONG_AGENT_CMD` 的 opencode 命令會自動加上 `--standalone`。** V2 的 `opencode run` 預設會
+  連到背景 service；在主機上那可能是你自己的 opencode，回合會跑進你的資料裡。命令裡已經有
+  `--standalone` 或 `--server` 時照你的設定（#44）。
+
+### Added
+
+- **Docker 升級前會備份 `opencode-state`，rollback 時一起還原。**
+  - 升級：installer 先停止服務，把 volume 打包到 `.wukong-backups/`。
+  - 新版啟用失敗：先還原再啟動前一版。
+  - `--rollback`：把 `opencode-state` 還原成升級前的備份。V1 時期的對話可以接續，升級之後的對話不保留；
+    installer 會印出這一點，並把還原前的內容另存一份。
+  - 登入資訊（`auth.json`）也在這個 volume，升級之後才登入的 provider，rollback 後要重新登入（#44）。
+- **binary 模式偵測到 V1 時明確報錯。** PATH 上的 `opencode` 是 1.x 時，第一個回合就回報要改裝 V2，不會等到
+  agent timeout。換裝步驟與備份方式見 `docs/installation.md`「Binary 模式換用 OpenCode V2」（#44）。
+
+### Fixed
+
+- **Docker `--rollback` 不再一律被拒絕。** `release/data-compatibility.json` 的 `rollbackSafeTo` 自 2026-07 起停在
+  v0.17.1，之後所有版本的 rollback 都因此被拒絕；現在改成 v0.25.1（#44）。
+
 ## [0.25.1] - 2026-11-20
 
 ### Fixed
