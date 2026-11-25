@@ -357,7 +357,7 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 狀態：✅ 已完成
 - 證據：2026-11-25
   - 改動：
-    - `release/data-compatibility.json`：`affectedState` 為 `["opencode-state"]`、`backupRequired` 為 true（`rollbackSafeTo` 留給 Task 5.3）
+    - `release/data-compatibility.json`：`affectedState` 為 `["opencode-state"]`、`backupRequired` 為 true（`rollbackSafeTo` 由 Task 5.3 處理）
     - `scripts/install.sh`：新增 `required_state_backups`（從 release manifest 的 dataCompatibility 取出要備份的名稱）與 `backup_docker_state`（以 compose 標籤 `com.docker.compose.project`／`com.docker.compose.volume` 找 volume，用剛拉下且比對過 digest 的新版映像 `docker run --rm --network none -v VOL:/state:ro --entrypoint tar … -C /state -cf - .` 打包到 `.wukong-backups/<前一版>-<時間>/volumes/<名稱>.tar`，再以 `tar -tf` 確認可讀）。`install_docker` 在比對 digest 之後、換上新版檔案之前，若有前一版且新版要求備份，先 `docker compose -p P --profile server stop` 停掉所有服務（含已停用 profile 的 opencode-server）再備份；備份失敗時以 `docker compose -p P start` 重新啟動原本的服務並中止，release 檔案與 metadata 不動。成功時 `.wukong-release` 多一個 `stateBackups`（名稱 → 相對路徑）
     - `docs/docker.md` 補上這個升級行為
   - 測試：`scripts/test-installer-upgrade.sh` 的 fake docker 加上 named volume 模擬（`$WUKONG_TEST_VOLUMES/<名稱>` 目錄；`volume ls` 依標籤回答，`run` 把 volume 掛載點換成該目錄後在主機上執行，tar 真的打包）；fixture 以 `FIXTURE_STATE_BACKUP=1` 產生要求備份的 release。新增 `docker-state-backup` case（併入 `all`）：
@@ -396,8 +396,21 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - 驗收編號：SCN-015
 - 完成判準：rollback 後映像、release 檔案與 opencode.db 都是升級前的備份；備份缺漏時拒絕並說明原因；不還原 opencode.db 的版本會讓測試失敗（反向自檢）
 - 驗證：installer 腳本測試
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成
+- 證據：2026-11-25
+  - 前提：`release/data-compatibility.json` 的 `rollbackSafeTo` 自 5b6c45f（2026-07）起停在 `v0.17.1`，`rollback_docker` 要求它等於前一版，所以從 v0.25.1 升到 V2 版後的 `--rollback` 會被拒絕。改為 `v0.25.1`（目前最新 release，也是 RunWuKong 的版本）。限制：這個欄位只能寫一個版本，從更早的版本直接升到 V2 版的部署，rollback 仍會被拒絕；V2 版發布前若又發了 V1 版，要改成那一版（Task 6.3 的發版說明要提）
+  - 改動（`scripts/install.sh` 的 `rollback_docker`）：
+    - 動部署之前先檢查：讀 `.wukong-release` 的 `stateBackups` 與 `dataCompatibility`；要求備份的名稱沒有備份、而這個部署有該 volume 時拒絕；每份備份要 `tar -tf` 可讀，否則拒絕並指出是哪一份。都說明「nothing was changed」
+    - 前一版映像改在目前版本仍在執行時，以備份裡的 docker-compose.yml 拉取（`-f "$backup/docker-compose.yml"`），並比對 `docker image inspect` 的 digest 與升級前記錄的 `previousImageDigest`，不符就拒絕（原本是換檔後才拉、不比對）
+    - 有 state 備份時：印出「<名稱>: restoring the backup <路徑>; conversations after it was taken are not kept」→ 停止所有服務 → 以 `backup_docker_state` 把目前內容另存到 `.wukong-backups/<前一版>-rollback-<時間>/volumes/`（失敗時重新啟動目前版本並中止）→ `restore_docker_state` 還原（失敗時服務維持停止，訊息列出兩邊的備份位置）→ 換回前一版的檔案並啟動
+    - `docs/docker.md`：rollback 不動 volumes 的說法改為「升級時備份過的 volume 例外」，並寫出升級後的對話不保留、目前內容另存的位置與拒絕條件
+  - 測試：新增 `docker-state-rollback` case（併入 `all`），fixture 從 v9.9.9 升到要求備份、啟動時會遷移 opencode.db 的 v9.9.7，再執行 `--rollback`：
+    - 成功：opencode-state 與升級前 `diff -r` 相同、docker-compose.yml 與升級前相同、metadata 為 v9.9.9（previousVersion v9.9.7）、有檢查 v9.9.9 映像；輸出含備份路徑與「conversations after it was taken are not kept」；log 順序為 pull → 停止所有服務 → 還原 → `up -d`；另存的 tar 解開後與 rollback 前的 V2 狀態相同
+    - 備份 tar 被刪：rollback 失敗、輸出指出 opencode-state，metadata、compose 與 volume 都不變，沒有停止或啟動服務
+    - 前一版映像 digest 不符：rollback 失敗、輸出提到 digest，部署與 volume 不變，沒有停止或啟動服務
+    - 紅燈：實作前「opencode-state is not the pre-upgrade backup」（diff 顯示 opencode.db 不同、多出 v2-only）。反向自檢：拿掉還原（完成判準要求）→「opencode-state is not the pre-upgrade backup」；拿掉備份可讀性檢查 →「a refused rollback stopped or started services」；拿掉停服務 →「never ran: stop every service」；拿掉 digest 比對 →「rollback went ahead with a different image」
+  - 其他檢查：`test-installer-upgrade.sh all`（含既有 `docker-rollback`、`compatibility`）、`test-release-manifest.sh`、`test-release-workflow.sh`、`test-release-image.sh all`、`test-docker-runtime.sh` 通過
+  - 限制：備份與還原函式已在 Task 5.1、5.2 以真實 docker 驗過；以真實映像從 V2 版 rollback 到 v0.25.1、並確認 V1 時期的對話可以接續，留給 Task 6.1 的演練
 
 ### Task 5.4 — binary 模式的升級說明
 - 產出與範圍：`docs/installation.md`：binary 模式要自行安裝 @opencode/cli 2.3.2、升級前備份 opencode 的資料目錄、V2 的單向遷移與回復方式

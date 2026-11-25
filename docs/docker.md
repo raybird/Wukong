@@ -80,7 +80,9 @@ installer 會把 Docker Compose project 記錄在 `.wukong-release`。既有部�
 
 installer 不會呼叫 `docker compose build`、`down` 或 `down -v`；升級時也請不要手動使用 `docker compose down -v`，避免刪除 `wukong-data`、`opencode-config`、`opencode-state` 等持久化 volume。若你是從舊版升級且容器還在，想盡量保留尚未持久化的 opencode session，可先備份：
 
-在同一部署目錄執行 `install.sh --mode docker --rollback` 可回復最近一個已驗證 release；`.env`、Compose override、workspace 和 volumes 保持使用者擁有。compatibility metadata 缺少或拒絕目標版本時，installer 不會變更部署。
+在同一部署目錄執行 `install.sh --mode docker --rollback` 可回復最近一個已驗證 release；`.env`、Compose override、workspace 保持使用者擁有，volumes 也不動，只有升級時依上述規則備份過的 volume 例外。compatibility metadata 缺少或拒絕目標版本時，installer 不會變更部署。
+
+升級時備份過 volume（`.wukong-release` 有 `stateBackups`）的 rollback 會把這些 volume 一起還原成升級前的備份：例如從 OpenCode V2 版回到 V1 版時，`opencode-state` 回到升級前的內容，V1 時期的對話可以接續，**升級之後產生的對話不保留**（installer 會印出這一點與所用的備份）。還原前，installer 把目前的內容另存到 `.wukong-backups/<前一版>-rollback-<時間>/volumes/`，需要時可以手動取回。開始前會先確認每份備份都在而且可讀、拉下的前一版映像與升級前記錄的 digest 相同；任一項不成立就拒絕並說明原因，部署不變。
 
 ```bash
 docker cp wukong-telegram:/home/wukong/.local/share/opencode ./opencode-session-backup

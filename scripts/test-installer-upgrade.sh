@@ -666,6 +666,72 @@ PY
     grep -Eq 'volumes/opencode-state\.tar' "$TMP/out" || fail "failure message does not point at the backup: $(cat "$TMP/out")"
 }
 
+# issue-0044 SCN-015: --rollback after an upgrade that backed up opencode-state brings
+# the image, the release files and opencode.db back to the pre-upgrade backup.
+upgraded_with_state_backup() {
+    state_backup_fixture
+    FIXTURE_SAFE_TO=v9.9.9 FIXTURE_TAG=v9.9.7 FIXTURE_STATE_BACKUP=1 make_release
+    FIXTURE_MIGRATING_TAG=v9.9.7 FIXTURE_SAFE_TO=v9.9.9 FIXTURE_STATE_BACKUP=1 \
+        run_installer '' --mode docker --upgrade --version v9.9.7 >/dev/null
+    rm -rf "$TMP/state-v2"; cp -a "$VOLUMES/wukong_opencode-state" "$TMP/state-v2"
+    cmp -s "$TMP/state-before/opencode.db" "$TMP/state-v2/opencode.db" && fail "fixture: the new release did not migrate opencode.db"
+    cp "$DEPLOYMENT/.wukong-release" "$TMP/metadata-v2"; cp "$DEPLOYMENT/docker-compose.yml" "$TMP/compose-v2"
+    : > "$LOG"
+}
+
+test_docker_state_rollback() {
+    upgraded_with_state_backup
+    run_installer '' --mode docker --rollback >"$TMP/out" 2>&1 || fail "rollback failed: $(cat "$TMP/out")"
+    diff -r "$TMP/state-before" "$VOLUMES/wukong_opencode-state" || fail "opencode-state is not the pre-upgrade backup"
+    assert_same "$TMP/compose-before" "$DEPLOYMENT/docker-compose.yml"
+    python3 - "$DEPLOYMENT/.wukong-release" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["productTag"] == "v9.9.9" and d["previousVersion"] == "v9.9.7", d
+PY
+    assert_contains "$LOG" 'docker image inspect ghcr.io/raybird/wukong:v9.9.9'
+    # Conversations held since the backup are dropped, and the installer says so.
+    grep -Eq 'v9\.9\.9-[0-9]+/volumes/opencode-state\.tar; conversations after it was taken are not kept' "$TMP/out" ||
+        fail "rollback does not say later conversations are dropped: $(cat "$TMP/out")"
+    # Order: the old image is pulled while the current release still runs, then
+    # everything stops, the volume is restored, and the old release starts.
+    python3 - "$LOG" <<'PY'
+import sys
+lines = open(sys.argv[1]).read().splitlines()
+def first(pred, what, after=-1):
+    for i, l in enumerate(lines):
+        if i > after and pred(l): return i
+    raise SystemExit(f"never ran: {what}\n" + "\n".join(lines))
+pull = first(lambda l: l.endswith(" pull"), "pull the previous image")
+stop = first(lambda l: l == "docker compose -p wukong --profile server stop", "stop every service", pull)
+restore = first(lambda l: l.startswith("docker run ") and " -i " in l and "wukong_opencode-state:/state " in l + " ", "restore opencode-state", stop)
+first(lambda l: l.endswith("up -d --force-recreate"), "start the previous release", restore)
+PY
+    # What the rolled-back release held is set aside, not destroyed.
+    saved="$(ls "$DEPLOYMENT"/.wukong-backups/v9.9.9-rollback-*/volumes/opencode-state.tar)" || fail "the V2 state was not set aside"
+    mkdir "$TMP/set-aside"; tar -C "$TMP/set-aside" -xf "$saved"
+    diff -r "$TMP/state-v2" "$TMP/set-aside" || fail "the set-aside copy is not the state before rollback"
+
+    # A missing backup refuses the rollback, says why, and changes nothing.
+    upgraded_with_state_backup
+    rm "$DEPLOYMENT"/.wukong-backups/v9.9.9-[0-9]*/volumes/opencode-state.tar
+    ! run_installer '' --mode docker --rollback >"$TMP/out" 2>&1 || fail "rollback went ahead without the opencode-state backup"
+    assert_contains "$TMP/out" 'opencode-state'
+    assert_same "$TMP/metadata-v2" "$DEPLOYMENT/.wukong-release"
+    assert_same "$TMP/compose-v2" "$DEPLOYMENT/docker-compose.yml"
+    diff -r "$TMP/state-v2" "$VOLUMES/wukong_opencode-state" || fail "a refused rollback touched opencode-state"
+    ! grep -Eq ' stop$| up -d' "$LOG" || fail "a refused rollback stopped or started services"
+
+    # The pulled previous image is not the one recorded before the upgrade: refused too.
+    upgraded_with_state_backup
+    ! FIXTURE_IMAGE_DIGEST="$(printf 'b%.0s' {1..64})" run_installer '' --mode docker --rollback >"$TMP/out" 2>&1 ||
+        fail "rollback went ahead with a different image"
+    assert_contains "$TMP/out" 'digest'
+    assert_same "$TMP/compose-v2" "$DEPLOYMENT/docker-compose.yml"
+    diff -r "$TMP/state-v2" "$VOLUMES/wukong_opencode-state" || fail "a refused rollback touched opencode-state"
+    ! grep -Eq ' stop$| up -d' "$LOG" || fail "a refused rollback stopped or started services"
+}
+
 test_docker_rollback() {
     prepare
     run_installer '' --mode docker --version v9.9.9 >/dev/null
@@ -814,13 +880,14 @@ case "$CASE" in
     compatibility) test_rollback_guard ;;
     docker-state-backup) test_docker_state_backup ;;
     docker-state-restore) test_docker_state_restore ;;
+    docker-state-rollback) test_docker_state_rollback ;;
     docker-rollback) test_docker_rollback ;;
     docker-recovery) test_docker_recovery ;;
     binary-recovery) test_binary_recovery ;;
     docker-project) test_docker_project_resolution ;;
     docker-project-conflicts) test_docker_project_conflicts ;;
     docker-project-persistence) test_docker_project_persistence ;;
-    all) test_parsing; test_verification; test_docker; test_docker_env_migration; test_docker_env_server_password; test_docker_forward_compatible_bundle; test_docker_bundle_missing_required_entry; test_docker_installer_replaces_itself_mid_run; test_stdin_installer; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_docker_compose_repair; test_docker_project_resolution; test_docker_project_conflicts; test_docker_project_persistence; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_state_backup; test_docker_state_restore; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
+    all) test_parsing; test_verification; test_docker; test_docker_env_migration; test_docker_env_server_password; test_docker_forward_compatible_bundle; test_docker_bundle_missing_required_entry; test_docker_installer_replaces_itself_mid_run; test_stdin_installer; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_docker_compose_repair; test_docker_project_resolution; test_docker_project_conflicts; test_docker_project_persistence; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_state_backup; test_docker_state_restore; test_docker_state_rollback; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
     *) fail "unknown test case: $CASE" ;;
 esac
 

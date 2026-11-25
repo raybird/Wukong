@@ -787,7 +787,7 @@ PY
 
 rollback_docker() {
     [[ -f .wukong-release ]] || abort "rollback requires Docker release metadata"
-    local version digest backup current_backup file
+    local version digest backup current_backup file current_version current_digest
     read -r version digest backup current_version current_digest < <(python3 - .wukong-release "$VERSION" <<'PY'
 import json,sys
 d=json.load(open(sys.argv[1])); requested=sys.argv[2]
@@ -799,9 +799,47 @@ print(d["previousVersion"], d["previousImageDigest"], d["previousBackupPath"], d
 PY
     ) || abort "rollback source is absent or metadata is invalid"
     [[ -d "$backup" ]] || abort "Docker rollback backup is unavailable"
+    # 2026-11-25（issue-0044）：升級時備份過的 state（V2 遷移過的 opencode.db）也要回到
+    # 備份。每份備份都在、可讀，且升級時沒漏備份，才開始動部署。
+    local state_backups name archive line
+    local -a missing=()
+    { read -r state_backups; mapfile -t missing; } < <(python3 - .wukong-release <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+c = d.get("dataCompatibility") or {}
+saved = d.get("stateBackups") or {}
+print(json.dumps(saved, sort_keys=True))
+if c.get("backupRequired"):
+    for name in c.get("affectedState", []):
+        if name not in saved: print(name)
+PY
+    ) || abort "invalid Docker release metadata"
+    for name in "${missing[@]}"; do
+        [[ -z "$(state_volume "$name")" ]] || abort "rollback refused: upgrading to $current_version took no backup of $name, so its data cannot go back to $version; nothing was changed"
+    done
+    while IFS=$'\t' read -r name archive; do
+        [[ -n "$name" ]] || continue
+        tar -tf "$archive" >/dev/null 2>&1 || abort "rollback refused: the $name backup taken before upgrading to $current_version is missing or unreadable ($archive); nothing was changed"
+    done < <(python3 -c 'import json,sys; [print(k + "\t" + v) for k, v in sorted(json.loads(sys.argv[1]).items())]' "$state_backups")
+    # The previous image is pulled and checked while the current release still runs.
+    docker compose -p "$DOCKER_PROJECT_NAME" --project-directory "$PWD" -f "$backup/docker-compose.yml" pull || abort "could not pull the $version image; nothing was changed"
+    [[ "$(docker image inspect "ghcr.io/raybird/wukong:${version}" --format '{{index .RepoDigests 0}}' | sed -n 's/.*@\(sha256:[0-9a-f]*\).*/\1/p')" == "$digest" ]] ||
+        abort "the pulled $version image does not match the digest recorded before the upgrade; nothing was changed"
     current_backup=".wukong-backups/${version}-rollback-$(date +%s)"; mkdir -p "$current_backup"
+    if [[ "$state_backups" != "{}" ]]; then
+        while IFS= read -r line; do info "$line"; done < <(python3 -c 'import json,sys; [print(f"{k}: restoring the backup {v}; conversations after it was taken are not kept") for k, v in sorted(json.loads(sys.argv[1]).items())]' "$state_backups")
+        docker compose -p "$DOCKER_PROJECT_NAME" --profile server stop || abort "could not stop services for the rollback; nothing was changed"
+        # What the current release holds is set aside, not destroyed.
+        mapfile -t missing < <(python3 -c 'import json,sys; [print(k) for k in sorted(json.loads(sys.argv[1]))]' "$state_backups")
+        backup_docker_state "$current_backup" "ghcr.io/raybird/wukong:${current_version}" "${missing[@]}" >/dev/null || {
+            docker compose -p "$DOCKER_PROJECT_NAME" start || true
+            abort "could not set aside the current state before the rollback; $current_version was started again"
+        }
+        info "the $current_version state is kept in $current_backup/volumes"
+        restore_docker_state "$state_backups" "ghcr.io/raybird/wukong:${current_version}" ||
+            abort "rollback could not restore the state backup; services are stopped. Restore by hand from $(python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).values()))' "$state_backups") (the $current_version state is in $current_backup/volumes)"
+    fi
     for file in "${DOCKER_RELEASE_OWNED[@]}"; do [[ ! -f "$file" ]] || { mkdir -p "$current_backup/$(dirname "$file")"; cp -p "$file" "$current_backup/$file"; }; [[ ! -f "$backup/$file" ]] || cp -p "$backup/$file" "$file"; done
-    docker compose -p "$DOCKER_PROJECT_NAME" pull
     activate_docker_services
     docker compose -p "$DOCKER_PROJECT_NAME" ps >/dev/null
     write_json_atomically .wukong-release "$(python3 - "$version" "$digest" "$current_backup" "$current_version" "$current_digest" "$DOCKER_PROJECT_NAME" <<'PY'
