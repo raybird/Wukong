@@ -80,8 +80,11 @@
 - 驗收編號：SCN-014、SCN-009 的前提
 - 完成判準：三種模式各有一個成立或不成立的結論，附命令與輸出，並寫出 Phase 2 採用的目錄。
 - 驗證：最小真實請求。不需要模型的部分讀 `/api/agent` 一類的端點；需要模型的部分各跑 1 回合，從事件確認用的是哪個 agent。
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成（2026-11-26）
+- 證據：[probe-agents.md](probe-agents.md)，`scripts/probe-agents.sh` 20 項全部 PASS，模型 opencode/big-pickle（TBD-6）。
+  - 三種模式都讀得到工作區 `.opencode/agents/`。Phase 2 採用這個目錄，不用全域設定目錄：binary 模式寫在那裡會改到使用者自己的 OpenCode。
+  - 不存在的 agent 會讓回合失敗（Agent not found），不會改用 build。執行中新增的定義不用重啟就生效。
+  - 內建的 explore、general 會和 Wukong 的 subagent 一起出現，可能影響 SCN-003，留給 Phase 2 與 Task 6.1。
 
 ### Task 1.2 — 技能的探索路徑與使用
 - 產出與範圍：`probe-skills.md`。內容：
