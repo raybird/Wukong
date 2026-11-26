@@ -66,7 +66,7 @@ pub fn agent_definitions(soul: &str, memoria_hint: bool) -> Vec<AgentDefinition>
     }
     let primary = format!(
         "{}{}\n\n[派工]\n依任務性質決定自己回答，或用 subagent 工具派工：\n{rules}\
-         簡單的問題直接回答，不要派工。\n\n{}\n\n{}\n",
+         簡單的問題直接回答，不要派工。\n\n{}\n\n{}\n\n{}\n",
         frontmatter(
             "孫悟空，主要助手，決定自己回答或派工給專門的 subagent",
             "primary"
@@ -74,6 +74,7 @@ pub fn agent_definitions(soul: &str, memoria_hint: bool) -> Vec<AgentDefinition>
         soul.trim(),
         crate::persona::final_answer_directive(),
         crate::persona::scheduling_capability_guide(&crate::persona::scheduling_bin()),
+        crate::persona::file_interaction_rules(),
     );
     let primary = if memoria_hint {
         format!("{primary}\n{}\n", crate::persona::memoria_capability_hint())
@@ -153,6 +154,14 @@ pub(crate) fn write_if_changed(dir: &Path, file_name: &str, content: &str) -> io
 
 #[cfg(test)]
 mod tests {
+    // #45 SCN-006：檔案互動規則在 primary agent 的定義裡，每回合只附產出目錄。
+    #[test]
+    fn the_primary_agent_carries_the_file_rules() {
+        let primary = &agent_definitions("soul", false)[0].content;
+        assert!(primary.contains("[檔案互動規則]"), "{primary}");
+        assert!(primary.contains("`[產出目錄] <路徑>`"), "{primary}");
+    }
+
     // #45 SCN-008：長期記憶能力只在 WUKONG_MEMORIA_HINT 開啟時寫進 primary agent 的定義。
     #[test]
     fn the_memoria_capability_follows_the_switch() {

@@ -242,6 +242,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | TBD-4 | V2 事件裡的 subagent 身分資訊（task 工具的參數、子 session 的事件） | 已解決（2026-11-26，probe-subagent.md）：subagent 工具的輸入帶 agent，子 session 的 session.created 帶 parentID、agent 與 model，產出以 synthetic 項目回到 primary 的 inbox；fixture 已存檔。另發現 subagent 一律在背景執行，回合要等背景工作清空才算結束，已補進 Task 3.1 | 拿不到時，角色顯示要另找來源；關聯 SCN-002 |
 | TBD-5 | 範圍第 7 項：用 V2 的 session inbox（delivery 設成 queue）簡化同一 scope 並行回合的 lease | 待確認 | 只做評估，結論記入實作計畫；要改變「立即拒絕」的行為時另外取得核准；關聯 SCN-012 |
 | TBD-6 | 預設免費模型的派工與技能遵循表現 | 已解決（2026-11-26）：NVIDIA 憑證被拒（403）後，使用者表示「使用免費模型驗證也可以」。驗收可以用 NVIDIA nemotron 或預設免費模型 opencode/big-pickle判定，每份紀錄寫明實際用的模型；對照組（例如 SCN-001 的 b65b487）用同一個模型。免費模型額度用完時照實記下，不繞過額度限制 | 正式部署若用預設免費模型，派工表現可能與驗收時不同；關聯 SCN-003 |
+| TBD-7 | SCN-006 的「檔案互動規則」：Telegram 的產出目錄每回合不同（`artifacts/<scope>/<turn_id>`），不能整段放進 agent 定義 | 已解決（2026-11-26，使用者選「規則進定義，只留路徑（建議）」）：規則文字寫進 agent `wukong` 的定義，user message 只留一行 `[產出目錄] <路徑>`，視為和召回記憶一樣的動態區塊；SCN-006 的「檔案互動規則」指規則文字。沒有採用的做法：每個 scope 固定一個產出目錄（要改檔案回傳流程）、路徑也放 entry（每回合在對話紀錄多一則通知） | Task 4.2 的外迴圈檢查 user message 時，產出目錄那一行屬於動態區塊；關聯 SCN-006 |
 
 ## Timeline
 
@@ -256,6 +257,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | 2026-11-26 | Task 3.3 完成：Wukong 不再依回合數壓縮；7 天輪替改在每回合開始時檢查，session 開始時間記在記憶庫（`agent_session_state.session_started_at`），每回合不問 backend |
 | 2026-11-26 | Task 3.4 內迴圈完成：自訂的 opencode 命令沒指定 agent 時以 `wukong` 執行，使用者指定的 agent 照舊，非 opencode 命令不加 `--agent`；3.2、3.4 的真實 V2 驗證等免費模型額度恢復 |
 | 2026-11-26 | Task 3.2 內迴圈完成，測試釘住每次送 prompt 前都選取指定模型；Task 4.1 內迴圈完成，V2 backend 的 scope 改放 session 指令層的 entry `wukong.scope`，排程能力的固定說明併入 agent 定義，CLI backend 照舊附在 prompt；重跑派工探測仍是免費額度 429 |
+| 2026-11-26 | Task 4.2 內迴圈完成：V2 backend 的輸出要求、長期記憶能力、檔案互動規則移進 agent 定義，Telegram 每回合只附產出目錄一行（TBD-7，使用者決定），CLI backend 照舊附在 prompt |
 
 ---
 **建立日期**: 2026-11-26  

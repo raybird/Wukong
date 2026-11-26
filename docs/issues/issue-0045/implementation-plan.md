@@ -443,7 +443,7 @@
   - 接真實 V2 的測試：查 opencode.db，Telegram 與 Web 路徑的 user message 不含上述區塊，動態區塊仍在；
   - `WUKONG_MEMORIA_HINT` 開啟時，模型能回報長期記憶能力的指令，關閉時不能。
 - 驗證：雙迴圈。外迴圈查 opencode.db 的整合測試；內迴圈是 persona 與 prompt 組裝的單元測試。
-- 狀態：🚧 進行中（2026-11-26）：輸出要求與長期記憶能力已移出；Telegram 檔案互動規則待決定做法
+- 狀態：🚧 內迴圈完成；外迴圈待免費模型額度恢復（2026-11-26）
 - 證據：
   - 角色卡：Task 2.1 起已不附在 prompt（subagent 的角色卡在各自的定義裡）。
   - 輸出要求、長期記憶能力：V2 backend 的回合不附在 prompt，改寫在 primary agent `wukong` 的定義裡；CLI backend 照舊附在 prompt。
@@ -455,8 +455,16 @@
     - `the_scope_goes_to_the_session_layer_not_the_prompt` 加上「不含 `[輸出要求]`」。
     - `run_turn_advertises_memoria_only_when_enabled` 加上「開啟時 V2 backend 的 prompt 也不含」。CLI 路徑的開關測試照舊。
     - 三項先以「簽名改了、行為沒改」的版本跑出紅燈，再實作到綠燈。
-  - 文件：AGENTS.md「末棒輸出保證」、README.md「輸出要求」、`.env.example` 的 `WUKONG_MEMORIA_HINT` 說明。
-  - 其他檢查：CI 三道全過（767 passed、14 ignored）。
+  - Telegram 檔案互動規則（TBD-7，2026-11-26 使用者決定）：規則文字（`persona::file_interaction_rules`）寫進 agent `wukong` 的定義；Telegram 每回合只附一行 `[產出目錄] <路徑>`（`persona::ARTIFACT_DIR_HEADER`），路徑每回合不同，算動態區塊。
+    - run_turn 照舊以這一行的標頭切出使用者原文，記憶與召回不含它（`remember` 剝除入口區塊的行為不變）。
+    - CLI backend：回合帶有產出目錄時，run_turn 在 prompt 補上規則文字。
+    - 舊標頭 `[Wukong 檔案互動規則]` 與常數 `FILE_RULES_HEADER` 移除，已存的記憶本來就不含規則，不受影響。
+  - 內迴圈（續）：
+    - `the_primary_agent_carries_the_file_rules`、Telegram 的 `the_artifact_instruction_is_only_the_directory_line`，先紅燈再綠燈。
+    - `file_rules_reach_the_prompt_but_not_memory_or_recall` 改為 CLI 與 V2 兩組：兩者 prompt 都有產出目錄、記憶只有原文；只有 CLI 的 prompt 有規則文字。先紅燈再綠燈。
+    - `without_other_running_turns_prompts_are_unchanged` 改用 V2 backend：它比對兩個回合的完整 prompt，CLI 路徑會被並行切換 `WUKONG_MEMORIA_HINT` 的測試影響（全套測試時失敗過一次，這個競態在改動前就存在）。
+  - 文件：AGENTS.md「末棒輸出保證」與 remember 的說明、README.md「輸出要求」、`.env.example` 的 `WUKONG_MEMORIA_HINT` 說明。
+  - 其他檢查：CI 三道全過（769 passed、14 ignored）。
   - 外迴圈（待做）：查 opencode.db 的 user message、`WUKONG_MEMORIA_HINT` 開關各一組。需要真實模型，2026-11-26 免費額度用完（429）。
 
 ## Phase 5 — 入口的角色顯示與規劃偏好移除

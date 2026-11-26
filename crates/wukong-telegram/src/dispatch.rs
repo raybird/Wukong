@@ -932,10 +932,11 @@ fn agent_visible_path(path: &Path) -> Result<PathBuf, String> {
 
 fn prompt_with_artifact_instruction(input: &str, artifact_dir: &Path) -> Result<String, String> {
     let visible_dir = agent_visible_path(artifact_dir)?;
-    // 標頭用 runtime 的常數：run_turn 靠它把規則切出記憶與召回。
+    // 標頭用 runtime 的常數：run_turn 靠它把這一行切出記憶與召回。規則本身在 agent 定義裡
+    // （#45 SCN-006），CLI backend 由 run_turn 補上。
     Ok(format!(
-        "{input}\n\n{}\n上傳附件已是可修改的工作副本，不要修改 .wukong/uploads 內的原始檔。若使用者要求建立、轉換、修改或回傳檔案，請將每個最終成品直接寫入此目錄：{}。只把要回傳給使用者的成品放入該目錄。",
-        wukong_runtime::persona::FILE_RULES_HEADER,
+        "{input}\n\n{} {}",
+        wukong_runtime::persona::ARTIFACT_DIR_HEADER,
         visible_dir.display()
     ))
 }
@@ -2266,6 +2267,22 @@ mod tests {
             .join(".wukong/uploads")
             .join(&attachments[0].relative_path);
         assert_eq!(std::fs::read(original_path).unwrap(), b"pdf");
+    }
+
+    // #45 SCN-006：檔案互動規則在 agent 定義裡，每回合只附產出目錄這一行。
+    #[test]
+    fn the_artifact_instruction_is_only_the_directory_line() {
+        let workspace = tempfile::tempdir().unwrap();
+        let dir = workspace.path().join("out");
+        std::fs::create_dir(&dir).unwrap();
+
+        let prompt = prompt_with_artifact_instruction("做一份報表", &dir).unwrap();
+
+        let visible = agent_visible_path(&dir).unwrap();
+        assert_eq!(
+            prompt,
+            format!("做一份報表\n\n[產出目錄] {}", visible.display())
+        );
     }
 
     #[tokio::test]

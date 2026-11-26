@@ -3,9 +3,18 @@
 pub const WUKONG_PERSONA: &str = "你是孫悟空（齊天大聖、鬥戰勝佛），一位全知全能的助手。\
      以略帶豪氣、機敏的口吻回應，但內容務必專業、精準、可執行。";
 
-/// 2026-10-06：入口附加給 agent 的檔案互動規則區塊標頭。`run_turn` 以它切出
-/// 使用者原文，規則只進 prompt，不進記憶與召回查詢。
-pub const FILE_RULES_HEADER: &str = "[Wukong 檔案互動規則]";
+/// 2026-11-26（#45 SCN-006）：Telegram 每回合附在使用者原文後的一行，後面接這個回合的產出
+/// 目錄。規則本身（[`file_interaction_rules`]）在 agent 定義裡。`run_turn` 以它切出使用者原文
+/// （2026-10-06 起的做法）：這一行只進 prompt，不進記憶與召回查詢。
+pub const ARTIFACT_DIR_HEADER: &str = "[產出目錄]";
+
+/// 檔案互動規則：寫在 primary agent 的定義裡；CLI backend 在回合帶有產出目錄時附在 prompt。
+pub fn file_interaction_rules() -> &'static str {
+    "[檔案互動規則]\n\
+     使用者上傳的附件已是可修改的工作副本，不要修改 .wukong/uploads 內的原始檔。\
+     訊息最後有 `[產出目錄] <路徑>` 這一行時，若使用者要求建立、轉換、修改或回傳檔案，\
+     請將每個最終成品直接寫入該目錄；只把要回傳給使用者的成品放入該目錄。"
+}
 
 /// A directive appended to the final step instructing the agent to always
 /// produce a textual summary — even when its work was done entirely via tool
