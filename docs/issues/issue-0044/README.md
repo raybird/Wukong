@@ -13,9 +13,9 @@ GitHub #44。2026-11-24 使用者決定 OpenCode 升到 V2，Wukong 只專注在
 
 ## 現況
 
-2026-11-25 第一次完整審查（review-0405603）判定 RETURN TO execute-task；同日修正後增量覆審（0405603..c4d47d8）判定 PASS；三項建議依使用者決定，N-A 記入 TBD-6，N-B、N-C 修正。2026-11-26 處理建議後的增量覆審（c4d47d8..7df8450）判定 PASS，兩項新建議依使用者決定：N-D 修正，N-E 等發版時改（TBD-8）。同日 PR #46 第一輪審查提出兩項 P2、一項 P3：P2 修正（TBD-9、TBD-10），P3 記入 TBD-11；修正後的增量覆審（7df8450..d632fe3）判定 PASS，附一項 SHOULD FIX（S-1）與兩項 NICE TO HAVE，使用者決定三項都修正（TBD-12），修正後待增量覆審。
+2026-11-25 第一次完整審查（review-0405603）判定 RETURN TO execute-task；同日修正後增量覆審（0405603..c4d47d8）判定 PASS；三項建議依使用者決定，N-A 記入 TBD-6，N-B、N-C 修正。2026-11-26 處理建議後的增量覆審（c4d47d8..7df8450）判定 PASS，兩項新建議依使用者決定：N-D 修正，N-E 等發版時改（TBD-8）。同日 PR #46 第一輪審查提出兩項 P2、一項 P3：P2 修正（TBD-9、TBD-10），P3 記入 TBD-11；修正後的增量覆審（7df8450..d632fe3）判定 PASS，附一項 SHOULD FIX（S-1）與兩項 NICE TO HAVE，使用者決定三項都修正（TBD-12）。修正後的增量覆審（d632fe3..2dd4369）判定 RETURN TO execute-task：三項都已修好，另查出既有缺陷 M-1（Docker `--rollback` 沒帶 `--version` 時拿最新 release 比對，TBD-13），使用者決定在這個 PR 修。
 
-**現行 review**: [review-d632fe3.md](review-d632fe3.md)
+**現行 review**: [review-2dd4369.md](review-2dd4369.md)
 
 ## 快速導覽
 
