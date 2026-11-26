@@ -187,7 +187,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 ```
 
 ## Gherkin 核准紀錄
-- **核准 commit**: `待提交`
+- **核准 commit**: 18377ce
 - **核准來源**: 範圍與「留在 Wukong」來自 GitHub #45 內文與使用者 2026-11-24 的決定（拆成兩個 issue，#44 合併後開始）；2026-11-26 使用者要求「好開始 /dev-cycle #45」。同日逐題確認：Q1「NVIDIA 為準（建議）」→ Background、SCN-003；Q2「移除（建議）」→ SCN-011；Q3「Wukong 管理、自動更新（建議）」→ SCN-009；Q4「session 指令層（建議）」→ SCN-007。同日總結確認推導行為（派工門檻、輪替後仍補上一回合、保留的動態區塊、舊壓縮變數忽略且 7 天輪替改每回合檢查、lease 在任何 LLM 呼叫前取得、subagent 沿用指定模型、自訂命令不加旗標、inbox 只評估）選「全部核准（建議）」→ SCN-001～SCN-014
 
 | Scenario | 核准日期 | 狀態 |
@@ -251,4 +251,4 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 **建立日期**: 2026-11-26  
 **分級**: Large（runtime、orchestrator、skills、gateway、三個入口與排程的顯示、部署設定）  
 **風險**: High\
-**狀態**: 待拆解
+**狀態**: 待實作
