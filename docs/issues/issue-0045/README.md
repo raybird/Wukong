@@ -255,6 +255,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | 2026-11-26 | Task 3.1 完成：回合只以 agent `wukong` 送出一次，planner 與接力鏈移除；回合等 subagent 回報才結束。真實 V2 有兩次背景工作清單漏掉執行中的 fixer，改為先看事件 |
 | 2026-11-26 | Task 3.3 完成：Wukong 不再依回合數壓縮；7 天輪替改在每回合開始時檢查，session 開始時間記在記憶庫（`agent_session_state.session_started_at`），每回合不問 backend |
 | 2026-11-26 | Task 3.4 內迴圈完成：自訂的 opencode 命令沒指定 agent 時以 `wukong` 執行，使用者指定的 agent 照舊，非 opencode 命令不加 `--agent`；3.2、3.4 的真實 V2 驗證等免費模型額度恢復 |
+| 2026-11-26 | Task 3.2 內迴圈完成，測試釘住每次送 prompt 前都選取指定模型；Task 4.1 內迴圈完成，V2 backend 的 scope 改放 session 指令層的 entry `wukong.scope`，排程能力的固定說明併入 agent 定義，CLI backend 照舊附在 prompt；重跑派工探測仍是免費額度 429 |
 
 ---
 **建立日期**: 2026-11-26  

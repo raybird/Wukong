@@ -25,6 +25,8 @@ struct State {
     events: Vec<String>,
     /// `GET /api/experimental/job` 依序回的背景工作清單；用完之後回空清單。
     jobs: Vec<Value>,
+    /// session 指令層：session → (key, value)，依寫入順序。
+    entries: Vec<(String, String, Value)>,
     created: usize,
 }
 
@@ -98,6 +100,28 @@ impl FakeV2 {
     /// 之後每次 `GET /api/experimental/job` 依序回的 `data`（背景工作清單）；用完回空清單。
     pub fn script_jobs(&self, jobs: Vec<Value>) {
         self.state.lock().unwrap().jobs = jobs;
+    }
+
+    /// 預先放一筆 session 指令層的 entry。
+    pub fn set_entry(&self, session: &str, key: &str, value: Value) {
+        let mut state = self.state.lock().unwrap();
+        state
+            .entries
+            .retain(|(s, k, _)| !(s == session && k == key));
+        state
+            .entries
+            .push((session.to_string(), key.to_string(), value));
+    }
+
+    /// session 指令層目前的 entry（key → value）。
+    pub fn entries_of(&self, session: &str) -> Vec<(String, Value)> {
+        let state = self.state.lock().unwrap();
+        state
+            .entries
+            .iter()
+            .filter(|(s, _, _)| s == session)
+            .map(|(_, k, v)| (k.clone(), v.clone()))
+            .collect()
     }
 
     /// 最後一次 `request`（`METHOD path`）的 JSON body。
@@ -310,6 +334,36 @@ fn handle(
                 JSON,
                 json!({"data": page, "cursor": {"previous": null, "next": next}}).to_string(),
             )
+        }
+        (method, route) if route.starts_with("/api/experimental/session/") => {
+            let rest = &route["/api/experimental/session/".len()..];
+            let (id, action) = rest.split_once('/').unwrap_or((rest, ""));
+            if !state.sessions.iter().any(|s| s["id"] == id) {
+                return not_found(id);
+            }
+            let id = id.to_string();
+            match (method, action.strip_prefix("instructions/entries")) {
+                ("GET", Some("")) => {
+                    let data: Vec<Value> = state
+                        .entries
+                        .iter()
+                        .filter(|(s, _, _)| *s == id)
+                        .map(|(_, k, v)| json!({"key": k, "value": v}))
+                        .collect();
+                    ("200 OK", JSON, json!({ "data": data }).to_string())
+                }
+                ("PUT", Some(key)) if key.starts_with('/') => {
+                    let key = key[1..].to_string();
+                    let value = serde_json::from_str::<Value>(body)
+                        .ok()
+                        .and_then(|b| b.get("value").cloned())
+                        .unwrap_or(Value::Null);
+                    state.entries.retain(|(s, k, _)| !(*s == id && *k == key));
+                    state.entries.push((id, key, value));
+                    ("204 No Content", JSON, String::new())
+                }
+                _ => not_found(&id),
+            }
         }
         (method, route) if route.starts_with("/api/session/") => {
             let rest = &route["/api/session/".len()..];

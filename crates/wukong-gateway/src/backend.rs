@@ -36,6 +36,10 @@ pub struct AgentRequest {
     /// Per-tool opencode server overrides. `false` disables a tool for this request.
     pub tool_overrides: BTreeMap<String, bool>,
     pub attachments: Vec<AgentAttachment>,
+    /// 2026-11-26（#45 SCN-007）：要放在 session 指令層的內容（key → 文字），例如
+    /// `wukong.scope`。支援的 backend（[`AiBackend::supports_session_instructions`]）在送
+    /// prompt 前確認 session 上有這些 entry，缺少或值不同才寫入；其他 backend 忽略。
+    pub session_instructions: BTreeMap<String, String>,
 }
 
 /// The backend's textual response.
@@ -68,6 +72,13 @@ pub struct SessionListing {
 #[allow(async_fn_in_trait)]
 pub trait AiBackend {
     async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError>;
+
+    /// 2026-11-26（#45 SCN-007）：會不會把 [`AgentRequest::session_instructions`] 放進
+    /// session 指令層。只有 OpenCode V2 server（常駐與本機按需）會；不會的 backend 由呼叫端
+    /// 改把內容寫進 prompt。
+    fn supports_session_instructions(&self) -> bool {
+        false
+    }
 
     /// Run, invoking `on_event` as events arrive, returning the full response.
     /// Default: call `run`, then emit the whole text as a single Text event.
@@ -119,6 +130,7 @@ pub trait AiBackend {
                 agent: None,
                 tool_overrides: BTreeMap::new(),
                 attachments: Vec::new(),
+                session_instructions: Default::default(),
             },
             &mut |_| {},
         )
@@ -398,6 +410,14 @@ impl AgentBackend {
 }
 
 impl AiBackend for AgentBackend {
+    fn supports_session_instructions(&self) -> bool {
+        match self {
+            AgentBackend::Cli(backend) => backend.supports_session_instructions(),
+            AgentBackend::Local(backend) => backend.supports_session_instructions(),
+            AgentBackend::Server(backend) => backend.supports_session_instructions(),
+        }
+    }
+
     async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
         match self {
             AgentBackend::Cli(backend) => backend.run(req).await,
@@ -1533,6 +1553,7 @@ mod tests {
                 agent: None,
                 tool_overrides: BTreeMap::new(),
                 attachments: Vec::new(),
+                session_instructions: Default::default(),
             })
             .await
             .unwrap();
@@ -1555,6 +1576,7 @@ mod tests {
                 agent: None,
                 tool_overrides: BTreeMap::new(),
                 attachments: Vec::new(),
+                session_instructions: Default::default(),
             })
             .await
             .unwrap_err();
@@ -1580,6 +1602,7 @@ mod tests {
                 agent: None,
                 tool_overrides: BTreeMap::new(),
                 attachments: Vec::new(),
+                session_instructions: Default::default(),
             }),
         )
         .await;
@@ -1625,6 +1648,7 @@ mod tests {
                     agent: None,
                     tool_overrides: BTreeMap::new(),
                     attachments: Vec::new(),
+                    session_instructions: Default::default(),
                 },
                 &mut |e| events.push(e),
             )
@@ -1669,6 +1693,7 @@ mod tests {
                 agent: None,
                 tool_overrides: BTreeMap::new(),
                 attachments: Vec::new(),
+                session_instructions: Default::default(),
             })
             .await
             .unwrap();
@@ -1716,6 +1741,7 @@ mod tests {
                     agent: None,
                     tool_overrides: BTreeMap::new(),
                     attachments: Vec::new(),
+                    session_instructions: Default::default(),
                 },
                 &mut |e| events.push(e),
             )
@@ -1757,6 +1783,7 @@ mod tests {
             agent: None,
             tool_overrides: BTreeMap::new(),
             attachments: Vec::new(),
+            session_instructions: Default::default(),
         }
     }
 
@@ -1999,6 +2026,7 @@ mod tests {
                     agent: None,
                     tool_overrides: BTreeMap::new(),
                     attachments: Vec::new(),
+                    session_instructions: Default::default(),
                 },
                 &mut |e| events.push(e),
             )
@@ -2037,6 +2065,7 @@ mod tests {
                     agent: None,
                     tool_overrides: BTreeMap::new(),
                     attachments: Vec::new(),
+                    session_instructions: Default::default(),
                 },
                 &mut |_| {},
             ),
@@ -2083,6 +2112,7 @@ mod tests {
                     agent: None,
                     tool_overrides: BTreeMap::new(),
                     attachments: Vec::new(),
+                    session_instructions: Default::default(),
                 };
                 if streaming {
                     backend.run_streaming(req, &mut |_| {}).await
@@ -2141,6 +2171,7 @@ mod tests {
                     agent: None,
                     tool_overrides: BTreeMap::new(),
                     attachments: Vec::new(),
+                    session_instructions: Default::default(),
                 },
                 &mut |e| events.push(e),
             ),

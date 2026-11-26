@@ -65,13 +65,14 @@ pub fn agent_definitions(soul: &str) -> Vec<AgentDefinition> {
     }
     let primary = format!(
         "{}{}\n\n[派工]\n依任務性質決定自己回答，或用 subagent 工具派工：\n{rules}\
-         簡單的問題直接回答，不要派工。\n\n{}\n",
+         簡單的問題直接回答，不要派工。\n\n{}\n\n{}\n",
         frontmatter(
             "孫悟空，主要助手，決定自己回答或派工給專門的 subagent",
             "primary"
         ),
         soul.trim(),
         crate::persona::final_answer_directive(),
+        crate::persona::scheduling_capability_guide(&crate::persona::scheduling_bin()),
     );
     let mut defs = vec![AgentDefinition {
         name: PRIMARY_AGENT,
@@ -140,6 +141,21 @@ pub(crate) fn write_if_changed(dir: &Path, file_name: &str, content: &str) -> io
 
 #[cfg(test)]
 mod tests {
+    // #45 SCN-007：排程能力的固定說明在 primary agent 的定義裡；scope 由 session 指令層提供，
+    // 定義裡只寫「目前的 scope」。
+    #[test]
+    fn the_primary_agent_explains_scheduling_without_a_scope() {
+        let defs = agent_definitions("soul");
+        let primary = &defs[0].content;
+        assert!(primary.contains("[排程能力]"), "{primary}");
+        assert!(primary.contains("schedule add-turn"), "{primary}");
+        assert!(primary.contains("--scope \"<目前的 scope>\""), "{primary}");
+        assert!(primary.contains("[目前的 scope]"), "{primary}");
+        for sub in &defs[1..] {
+            assert!(!sub.content.contains("[排程能力]"), "{}", sub.name);
+        }
+    }
+
     use super::*;
 
     fn read(dir: &Path, name: &str) -> String {

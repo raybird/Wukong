@@ -232,7 +232,7 @@ services:
 | `WUKONG_MEMORY_MAINTENANCE_INTERVAL_SECS` | schedulerd 自動 memory maintenance 間隔秒數 | `900` |
 | `WUKONG_MEMORY_CONSOLIDATE_THRESHOLD` | 單一 scope 觸發自動 consolidation 的候選數 | `40` |
 | `WUKONG_OPENCODE_SESSION_RETENTION_DAYS` | opencode session 保留天數。schedulerd 啟動 6 小時後第一次、之後每 6 小時，刪除超過此天數、且沒有任何 scope 指向的 session；設 `0` 停用；在 `.env` 留空或寫了無法解析的值也視為停用 | `30` |
-| `WUKONG_BIN` | 注入排程能力提示詞時使用的 `wukong` 指令路徑（agent 自行建排程時用） | `wukong` |
+| `WUKONG_BIN` | 排程能力說明裡使用的 `wukong` 指令路徑（agent 自行建排程時用） | `wukong` |
 | `WUKONG_SCHED_NOTIFY` | schedulerd 是否把排程結果回送 Telegram（`0` 關閉） | `1` |
 | `WUKONG_SCHED_PERMISSION` | 無人值守排程遇到 opencode 權限詢問時的處置；`allow` 才自動允許一次，其餘一律拒絕 | `reject` |
 | `TZ` | 容器時區。**`opencode-server` 的重啟窗口是本地時間**，由此決定實際落點；不在 +08:00 才需要改 | `Asia/Taipei` |

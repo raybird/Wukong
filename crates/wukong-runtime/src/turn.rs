@@ -201,11 +201,21 @@ pub async fn run_turn_traced_with_attachments(
         let mut prompt = wukong_gateway::prompt::compose_prompt(&hits, input);
         prompt.push_str("\n\n");
         prompt.push_str(persona::final_answer_directive());
-        prompt.push_str("\n\n");
-        prompt.push_str(&persona::scheduling_capability_hint(
-            &cfg.scope,
-            &persona::scheduling_bin(),
-        ));
+        // 2026-11-26（#45 SCN-007）：V2 backend 的排程說明在 agent 定義、scope 在 session 指令層，
+        // 都不進 user message；CLI backend 沒有指令層，照舊附在 prompt。
+        let session_instructions = if backend.supports_session_instructions() {
+            std::collections::BTreeMap::from([(
+                persona::SCOPE_INSTRUCTION_KEY.to_string(),
+                persona::current_scope_instruction(&cfg.scope),
+            )])
+        } else {
+            prompt.push_str("\n\n");
+            prompt.push_str(&persona::scheduling_capability_hint(
+                &cfg.scope,
+                &persona::scheduling_bin(),
+            ));
+            std::collections::BTreeMap::new()
+        };
         if persona::memoria_hint_enabled() {
             prompt.push_str("\n\n");
             prompt.push_str(persona::memoria_capability_hint());
@@ -222,6 +232,7 @@ pub async fn run_turn_traced_with_attachments(
             agent: Some(crate::agent_assets::PRIMARY_AGENT.to_string()),
             tool_overrides: std::collections::BTreeMap::new(),
             attachments: attachments.clone(),
+            session_instructions: session_instructions.clone(),
         };
 
         let resp = backend
@@ -424,6 +435,7 @@ pub async fn run_turn_session_passthrough(
                     agent: None,
                     tool_overrides: std::collections::BTreeMap::new(),
                     attachments: Vec::new(),
+                    session_instructions: Default::default(),
                 },
                 &mut |_| {},
             )
@@ -452,6 +464,8 @@ mod tests {
         deleted_sessions: Mutex<Vec<String>>,
         response_session_ids: Mutex<VecDeque<String>>,
         fail_on_call: Mutex<Option<usize>>,
+        session_layer: bool,
+        instructions: Mutex<Vec<std::collections::BTreeMap<String, String>>>,
     }
 
     impl MockBackend {
@@ -467,7 +481,15 @@ mod tests {
                 deleted_sessions: Mutex::new(Vec::new()),
                 response_session_ids: Mutex::new(VecDeque::new()),
                 fail_on_call: Mutex::new(None),
+                session_layer: false,
+                instructions: Mutex::new(Vec::new()),
             }
+        }
+
+        /// 模擬 OpenCode V2 server：支援 session 指令層。
+        fn with_session_layer(mut self) -> MockBackend {
+            self.session_layer = true;
+            self
         }
 
         /// 第 `call` 次（從 0 起算）呼叫 `run` 時失敗。
@@ -489,8 +511,16 @@ mod tests {
     }
 
     impl AiBackend for MockBackend {
+        fn supports_session_instructions(&self) -> bool {
+            self.session_layer
+        }
+
         async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
             let has_session = req.session_id.is_some();
+            self.instructions
+                .lock()
+                .unwrap()
+                .push(req.session_instructions.clone());
             let call = self.prompts.lock().unwrap().len();
             self.prompts.lock().unwrap().push(req.prompt);
             self.session_ids.lock().unwrap().push(req.session_id);
@@ -763,7 +793,44 @@ mod tests {
         assert_eq!(prompts.len(), 1);
         assert!(prompts[0].contains("[排程能力]"));
         assert!(prompts[0].contains("schedule add-turn"));
-        assert!(prompts[0].contains("--scope \"project:T\""));
+        assert!(prompts[0].contains("這個對話的 scope 是 `project:T`"));
+        // 不支援 session 指令層的 backend（CLI）不收 entry，scope 照舊在 prompt 裡。
+        assert!(backend.instructions.lock().unwrap()[0].is_empty());
+    }
+
+    // #45 SCN-007：V2 backend 的 scope 放在 session 指令層，排程能力的固定說明在 agent 定義，
+    // 兩者都不進 user message；修復提示帶同一份 entry。
+    #[tokio::test]
+    async fn the_scope_goes_to_the_session_layer_not_the_prompt() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["", "f2"])
+            .with_response_session_ids(&["ses_turn"])
+            .with_session_layer();
+        run_turn(
+            &mem,
+            &backend,
+            &test_cfg("user:tg-42"),
+            "schedule it",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        let prompts = backend.prompts.lock().unwrap().clone();
+        assert_eq!(prompts.len(), 2);
+        for prompt in &prompts {
+            assert!(!prompt.contains("[排程能力]"), "{prompt}");
+            assert!(!prompt.contains("user:tg-42"), "{prompt}");
+        }
+        let instructions = backend.instructions.lock().unwrap().clone();
+        assert_eq!(instructions.len(), 2);
+        for entries in &instructions {
+            assert_eq!(entries.len(), 1, "{entries:?}");
+            assert!(
+                entries["wukong.scope"].contains("`user:tg-42`"),
+                "{entries:?}"
+            );
+        }
     }
 
     /// Both the off and on cases live in one test on purpose: `WUKONG_MEMORIA_HINT`

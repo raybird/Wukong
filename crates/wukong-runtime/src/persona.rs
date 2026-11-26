@@ -97,25 +97,41 @@ pub fn scheduling_bin() -> String {
         .unwrap_or_else(|| "wukong".to_string())
 }
 
-/// An always-on capability block telling the agent it can create and manage
-/// scheduled (cron) jobs by shelling out to the `wukong schedule` CLI. `scope`
-/// is the current turn's memory scope; it becomes the job's owner, which
-/// receives the results. The scheduled turns themselves run in their own scope.
-pub fn scheduling_capability_hint(scope: &str, bin: &str) -> String {
+/// 2026-11-26（#45 SCN-007）：session 指令層放 scope 的 entry key。
+pub const SCOPE_INSTRUCTION_KEY: &str = "wukong.scope";
+
+/// 排程能力的固定說明：寫在 primary agent 的定義裡（[`crate::agent_assets`]），不隨回合改變。
+/// 排程的擁有者取自 [`current_scope_instruction`]：V2 backend 放在 session 指令層，CLI backend
+/// 跟這段說明一起附在 prompt（[`scheduling_capability_hint`]）。
+pub fn scheduling_capability_guide(bin: &str) -> String {
     format!(
         "[排程能力]\n\
          你具備為使用者建立與管理定時排程（cron）的真實能力。當使用者要求「定時、每天、每隔、提醒、排程、固定時間執行」之類任務時，\
          請直接在終端機執行下列指令完成設定——這是可用的內建功能，不要拒絕，也不要只用文字描述而不執行：\n\
-         - 新增定時對話：`{bin} schedule add-turn --name \"<名稱>\" --cron \"<分 時 日 月 週>\" --scope \"{scope}\" --prompt \"<到時要執行的提示詞>\"`\n\
+         - 新增定時對話：`{bin} schedule add-turn --name \"<名稱>\" --cron \"<分 時 日 月 週>\" --scope \"<目前的 scope>\" --prompt \"<到時要執行的提示詞>\"`\n\
          - 指定排程使用的模型：新增時加 `--model \"<provider/model>\"`；修改既有排程用 `{bin} schedule set-model --id <id> --model \"<provider/model>\"`，省略 `--model` 就改回使用預設模型\n\
          - 列出所有排程：`{bin} schedule list`\n\
          - 立即觸發一次：`{bin} schedule trigger --id <id>`\n\
          - 查看排程的執行結果：`{bin} schedule runs --id <id>`\n\
          - 停用／啟用／刪除：`{bin} schedule disable|enable|rm --id <id>`\n\
-         規則：cron 為標準 5 欄位（分 時 日 月 週）。除非使用者另外指定 scope，否則一律沿用上面的 `--scope`。\
+         規則：cron 為標準 5 欄位（分 時 日 月 週）。`<目前的 scope>` 是 [目前的 scope] 寫的值；除非使用者另外指定 scope，否則一律用它。\
          `--scope` 是排程的擁有者，執行結果會回送給它；排程回合本身在獨立的記憶 scope 執行，\
          所以使用者問起排程回報過什麼時，用上面的查看指令取得，不要憑記憶回答。\
          建立完成後，用一句話回報排程名稱、cron 設定與用途即可。"
+    )
+}
+
+/// 這個對話的 scope（記憶與排程的擁有者）。
+pub fn current_scope_instruction(scope: &str) -> String {
+    format!("[目前的 scope]\n這個對話的 scope 是 `{scope}`，建立排程時 `--scope` 填這個值。")
+}
+
+/// 不支援 session 指令層的 backend（CLI）每回合附在 prompt 的排程能力：固定說明加上 scope。
+pub fn scheduling_capability_hint(scope: &str, bin: &str) -> String {
+    format!(
+        "{}\n\n{}",
+        scheduling_capability_guide(bin),
+        current_scope_instruction(scope)
     )
 }
 
@@ -135,7 +151,8 @@ mod tests {
         let hint = scheduling_capability_hint("project:Wukong", "wukong");
         assert!(hint.contains("[排程能力]"));
         assert!(hint.contains("schedule add-turn"));
-        assert!(hint.contains("--scope \"project:Wukong\""));
+        assert!(hint.contains("--scope \"<目前的 scope>\""));
+        assert!(hint.contains("[目前的 scope]\n這個對話的 scope 是 `project:Wukong`"));
         assert!(hint.contains("`wukong schedule list`"));
     }
 

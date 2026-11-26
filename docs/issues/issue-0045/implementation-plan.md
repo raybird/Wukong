@@ -414,8 +414,23 @@
   - 輪替後再做一次，結果相同；
   - user message 不含 scope（退路時只多一行 scope）。
 - 驗證：雙迴圈。外迴圈是真實 V2 加真實模型；內迴圈是 gateway 寫入 entries 的 adapter 測試（假 V2 server）。
-- 狀態：📝 待實作
+- 狀態：🚧 內迴圈完成；外迴圈待免費模型額度恢復（2026-11-26）
 - 證據：
+  - 依 1.2、1.3 的結論選擇：排程能力的固定說明併入 primary agent 的定義，scope 用 entry，不做成技能，也不需要退路。
+    - 固定說明是 `persona::scheduling_capability_guide`，寫在 `wukong` 的定義裡（啟動時寫入，`WUKONG_BIN` 在這時讀取）。說明裡的 `--scope` 寫成 `<目前的 scope>`，指向 `[目前的 scope]`。
+    - scope 的文字是 `persona::current_scope_instruction`，key 為 `wukong.scope`。
+  - gateway：`AgentRequest` 新增 `session_instructions`，`AiBackend::supports_session_instructions` 標出支援的 backend（常駐 server 與本機按需）。
+    - adapter 的 `ensure_instructions` 在每次送 prompt 前列出 entries，缺少或值不同才 `PUT`，值相同不重寫（改值會在對話紀錄插通知，probe-instructions.md）。
+    - 每回合都確認，所以新 session、輪替出來的 session、升級前就在的 session 都會在第一個回合寫入。
+    - 同一個 session 上使用者自己的其他 entry 不動。
+  - runtime：支援指令層的 backend，prompt 不再附排程能力也不含 scope；CLI backend 照舊附在 prompt（固定說明加 `[目前的 scope]`，兩者共用同一份文字）。
+    - 限制：CLI backend 跑的若是 opencode（`--agent wukong`），agent 定義裡也有固定說明，會讀到兩份。
+  - 內迴圈：
+    - gateway（假 V2 server 補上 entries 的列出與寫入）：`a_new_session_gets_its_instructions_before_the_prompt`、`an_unchanged_entry_is_not_written_again`、`a_missing_or_stale_entry_is_written_on_the_next_turn`、`a_request_without_instructions_does_not_touch_the_entries`。反向自檢：暫時拿掉 `ensure_instructions` 的呼叫，前三項失敗。
+    - runtime：`the_scope_goes_to_the_session_layer_not_the_prompt`（主提示與修復提示都不含排程能力與 scope，兩次都帶 entry）、`the_primary_agent_explains_scheduling_without_a_scope`；兩項先紅燈再綠燈。`run_turn_carries_the_scheduling_capability` 改成確認 CLI 路徑照舊附在 prompt、沒有 entry。
+  - 文件：AGENTS.md「排程能力注入」、`docs/cli-reference.md`、`docs/docker.md` 的 `WUKONG_BIN`。
+  - 外迴圈（待做）：「每天早上提醒我」建立排程、輪替後再做一次、查 opencode.db 的 user message。需要真實模型；2026-11-26 免費額度用完（429），等恢復。
+  - 其他檢查：CI 三道全過（766 passed、14 ignored）。
 
 ### Task 4.2 — 其餘固定區塊移出 user message
 - 產出與範圍：

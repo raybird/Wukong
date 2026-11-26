@@ -15,7 +15,7 @@ use reqwest::{StatusCode, Url};
 use serde::Serialize;
 use serde_json::Value;
 use sse::SseParser;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -405,6 +405,8 @@ impl OpencodeServerBackend {
     /// prompt 本身只收文字與附件，回 200 就排進佇列，結果由事件串流取得。session 不存在
     /// 時三個請求都回 404，呼叫端據此重建 session。
     async fn send_prompt(&self, session_id: &str, req: &AgentRequest) -> Result<(), GatewayError> {
+        self.ensure_instructions(session_id, &req.session_instructions)
+            .await?;
         let session = format!("{}/api/session/{session_id}", self.base_url);
         if let Some(agent) = req.agent.as_deref() {
             self.send_empty(
@@ -433,6 +435,47 @@ impl OpencodeServerBackend {
             self.client.post(format!("{session}/prompt")).json(&body),
         )
         .await
+    }
+
+    /// 2026-11-26（#45 SCN-007）：確認 session 指令層有 `wanted` 的每一筆，缺少或值不同才寫入。
+    /// 寫入後不再改的 entry 不會進對話紀錄；改值時 V2 會在對話紀錄插一則通知
+    /// （docs/issues/issue-0045/probe-instructions.md），所以值相同時不重寫。每回合都確認，
+    /// 升級前就在的 session 也會在下一個回合補上。
+    async fn ensure_instructions(
+        &self,
+        session_id: &str,
+        wanted: &BTreeMap<String, String>,
+    ) -> Result<(), GatewayError> {
+        if wanted.is_empty() {
+            return Ok(());
+        }
+        let base = format!(
+            "{}/api/experimental/session/{session_id}/instructions/entries",
+            self.base_url
+        );
+        let listed = self
+            .send_json("instruction_entries", self.client.get(&base))
+            .await?;
+        let current = |key: &str| {
+            listed
+                .get("data")
+                .and_then(Value::as_array)
+                .and_then(|entries| entries.iter().find(|e| e["key"] == key))
+                .and_then(|entry| entry["value"].as_str().map(str::to_string))
+        };
+        for (key, value) in wanted {
+            if current(key).as_deref() == Some(value.as_str()) {
+                continue;
+            }
+            self.send_empty(
+                "instruction_entry",
+                self.client
+                    .put(format!("{base}/{key}"))
+                    .json(&serde_json::json!({ "value": value })),
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// 回答一則提問（V2 的 form）。`request_id` 為 form ID；`answers` 依題目順序，每題為
@@ -799,6 +842,10 @@ impl OpencodeServerBackend {
 }
 
 impl AiBackend for OpencodeServerBackend {
+    fn supports_session_instructions(&self) -> bool {
+        true
+    }
+
     /// V2 的 prompt 一律非同步，沒有等到回覆才回應的端點；非串流的回合也走事件串流。
     async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
         self.run_streaming(req, &mut |_| {}).await
@@ -1555,6 +1602,7 @@ mod tests {
             agent: None,
             tool_overrides: BTreeMap::new(),
             attachments: Vec::new(),
+            session_instructions: Default::default(),
         }
     }
 
@@ -1864,6 +1912,100 @@ mod tests {
             fake.body_of("POST /api/session/ses_fake1/model"),
             Some(json!({ "model": { "id": "big-pickle", "providerID": "opencode" } }))
         );
+    }
+
+    // #45 SCN-007：session 指令層的 entry。
+    fn scope_request(session: Option<&str>, scope: &str) -> AgentRequest {
+        let mut req = plain_request("hi");
+        req.session_id = session.map(str::to_string);
+        req.session_instructions =
+            BTreeMap::from([("wukong.scope".to_string(), format!("scope: {scope}"))]);
+        req
+    }
+
+    const ENTRIES: &str = "/api/experimental/session/ses_fake1/instructions/entries";
+
+    #[tokio::test]
+    async fn a_new_session_gets_its_instructions_before_the_prompt() {
+        let fake = fake_v2::FakeV2::start().await;
+        fake.script_events(fake_v2::fixture_events("server-text-tool", "ses_fake1"));
+
+        v2_backend(&fake)
+            .run_streaming(scope_request(None, "user:tg-42"), &mut |_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fake.entries_of("ses_fake1"),
+            vec![("wukong.scope".to_string(), json!("scope: user:tg-42"))]
+        );
+        let requests = fake.requests();
+        let put = format!("PUT {ENTRIES}/wukong.scope");
+        let written = requests.iter().position(|r| *r == put).unwrap();
+        let prompt = requests
+            .iter()
+            .position(|r| r == "POST /api/session/ses_fake1/prompt")
+            .unwrap();
+        assert!(written < prompt, "{requests:?}");
+    }
+
+    // 值沒變就不重寫：改值會在對話紀錄插一則通知（probe-instructions.md）。
+    #[tokio::test]
+    async fn an_unchanged_entry_is_not_written_again() {
+        let fake = fake_v2::FakeV2::start().await;
+        fake.add_session("ses_fake1", 1, 1, None);
+        fake.set_entry("ses_fake1", "wukong.scope", json!("scope: user:tg-42"));
+        fake.script_events(fake_v2::fixture_events("server-text-tool", "ses_fake1"));
+
+        v2_backend(&fake)
+            .run_streaming(scope_request(Some("ses_fake1"), "user:tg-42"), &mut |_| {})
+            .await
+            .unwrap();
+
+        let requests = fake.requests();
+        assert!(requests.contains(&format!("GET {ENTRIES}")), "{requests:?}");
+        assert!(
+            !requests.iter().any(|r| r.starts_with("PUT ")),
+            "{requests:?}"
+        );
+    }
+
+    // 升級前就在的 session（沒有 entry）或值不同的 entry，在下一個回合補寫。
+    #[tokio::test]
+    async fn a_missing_or_stale_entry_is_written_on_the_next_turn() {
+        let fake = fake_v2::FakeV2::start().await;
+        fake.add_session("ses_fake1", 1, 1, None);
+        fake.set_entry("ses_fake1", "wukong.scope", json!("scope: user:old"));
+        fake.set_entry("ses_fake1", "user.note", json!("kept"));
+        fake.script_events(fake_v2::fixture_events("server-text-tool", "ses_fake1"));
+
+        v2_backend(&fake)
+            .run_streaming(scope_request(Some("ses_fake1"), "user:tg-42"), &mut |_| {})
+            .await
+            .unwrap();
+
+        let mut entries = fake.entries_of("ses_fake1");
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            entries,
+            vec![
+                ("user.note".to_string(), json!("kept")),
+                ("wukong.scope".to_string(), json!("scope: user:tg-42")),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_without_instructions_does_not_touch_the_entries() {
+        let fake = fake_v2::FakeV2::start().await;
+        fake.script_events(fake_v2::fixture_events("server-text-tool", "ses_fake1"));
+
+        v2_backend(&fake)
+            .run_streaming(plain_request("hi"), &mut |_| {})
+            .await
+            .unwrap();
+
+        assert!(!fake.requests().iter().any(|r| r.contains("/instructions/")));
     }
 
     #[tokio::test]
@@ -2655,6 +2797,7 @@ mod tests {
                 original_name: name.to_string(),
                 mime_type: Some(mime.to_string()),
             }],
+            session_instructions: BTreeMap::new(),
         }
     }
 
@@ -2755,6 +2898,7 @@ mod tests {
             agent: None,
             tool_overrides: BTreeMap::new(),
             attachments: Vec::new(),
+            session_instructions: Default::default(),
         };
 
         let retry = backend.rehydrate_request("ses_old", &follow_up);

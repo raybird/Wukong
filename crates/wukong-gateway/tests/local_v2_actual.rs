@@ -23,6 +23,7 @@ fn request(prompt: &str, session_id: Option<String>) -> AgentRequest {
         agent: None,
         tool_overrides: BTreeMap::new(),
         attachments: vec![],
+        session_instructions: Default::default(),
     }
 }
 
