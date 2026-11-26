@@ -121,6 +121,7 @@ async fn main() {
         return;
     }
 
+    wukong_runtime::bootstrap::prepare_agent_definitions();
     let prompt = cli.prompt_text();
     let (stdin_tx, mut stdin_lines) = tokio::sync::mpsc::unbounded_channel();
     // 2026-10-03：REPL 與 question 共用一個 reader，避免互相預讀答案；

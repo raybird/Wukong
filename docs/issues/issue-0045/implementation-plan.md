@@ -151,8 +151,15 @@
   - 單元測試確認首次寫入、內容沒變時不重寫、新版內容會覆寫；
   - 1.1 的探測腳本改用寫出來的定義後，三種模式都列得到 `wukong` 與五個 subagent。
 - 驗證：雙迴圈。外迴圈是探測腳本對真實 V2 列出 agent；內迴圈是寫入邏輯的單元測試。
-- 狀態：📝 待實作
+- 狀態：✅ 已完成（2026-11-26）
 - 證據：
+  - 內迴圈：`crates/wukong-runtime/src/agent_assets.rs` 的 6 個單元測試，涵蓋首次寫入、內容沒變不重寫、舊版或改過的會覆寫、同目錄使用者自己的定義不動、人格取自工作區 SOUL.md（沒有時用範本）、description 是單行的 YAML。紅燈：寫入改成空操作時其中 4 個失敗（另 2 個是防呆，空操作下本來就過）。CI 三道全過（`cargo test --workspace --locked` 798 passed、14 ignored）。
+  - 外迴圈：`scripts/probe-managed-agents.sh` 用 ignored 測試 `write_definitions_for_probe` 寫出的定義，在 `--network none` 下 22 項全部 PASS：`opencode debug agents`、常駐 server 的 `/api/agent`（wukong 的 prompt 含人格、派工、輸出要求，frontmatter 的註解不進 prompt）、剛啟動 server 的第一個 prompt、CLI `--agent wukong`（對照組 nosuchagent 印出 Agent not found）。
+  - 做法上的選擇：
+    - 寫入目錄用 backend 執行 opencode 的 `wukong_gateway::workspace_dir()`。技能現在用的 `resolve_skill_workspace()` 在沒設 `WUKONG_WORKSPACE` 時退回目前目錄，與 backend 不一致，留給 Task 2.2。
+    - 人格讀工作區的 SOUL.md，使用者改了 SOUL.md 就跟著改；沒有或是空的時用內建範本。
+    - 寫入時機是四個入口啟動時（`bootstrap::prepare_agent_definitions`；CLI 只在要跑回合時）。Docker entrypoint 不另外寫：常駐入口一啟動就寫進共用的工作區，V2 不用重啟就會載入（1.1）。
+    - 派工規則的措辭沿用 1.4 抽樣時的版本。`[輸出要求]` 在 Phase 4 拿掉每回合附加之前，會同時出現在定義與 prompt。
 
 ### Task 2.2 — 技能改走 V2 的 skill
 - 產出與範圍：

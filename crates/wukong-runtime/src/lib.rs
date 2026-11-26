@@ -1,6 +1,7 @@
 //! Shared Wukong runtime: turn execution and maintenance operations reused by
 //! CLI, Web, Telegram, and scheduler surfaces.
 
+pub mod agent_assets;
 pub mod bootstrap;
 pub mod maintenance;
 pub mod persona;

@@ -33,6 +33,7 @@ async fn main() {
         return;
     }
 
+    wukong_runtime::bootstrap::prepare_agent_definitions();
     let db_url = wukong_runtime::util::db_url_from_env();
     let memory = match wukong_runtime::bootstrap::open_memory_from_env(&db_url).await {
         Ok(m) => m,
