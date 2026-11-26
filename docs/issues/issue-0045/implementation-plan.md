@@ -455,7 +455,7 @@
   - 接真實 V2 的測試：查 opencode.db，Telegram 與 Web 路徑的 user message 不含上述區塊，動態區塊仍在；
   - `WUKONG_MEMORIA_HINT` 開啟時，模型能回報長期記憶能力的指令，關閉時不能。
 - 驗證：雙迴圈。外迴圈查 opencode.db 的整合測試；內迴圈是 persona 與 prompt 組裝的單元測試。
-- 狀態：⏳ SCN-006 外迴圈通過；SCN-008 發現定義改寫的時序問題，待決定處理方式（2026-11-26）
+- 狀態：✅ 已完成（2026-11-26）
 - 證據：
   - 角色卡：Task 2.1 起已不附在 prompt（subagent 的角色卡在各自的定義裡）。
   - 輸出要求、長期記憶能力：V2 backend 的回合不附在 prompt，改寫在 primary agent `wukong` 的定義裡；CLI backend 照舊附在 prompt。
@@ -484,7 +484,15 @@
       - `scripts/probe-agent-reload.sh` 直接對 server 改寫定義，中間隔了 docker exec 啟動 python 的幾百毫秒，就地寫入與 rename 都在下一個 prompt 生效，`/api/agent` 的清單反而晚一點才更新。
       - 對照：回合 3、4 之前各加一個同樣開關的暖身回合，等 2 秒再問，開啟答「有」、關閉答「沒有」。
       - 影響範圍：只有常駐 server 模式，而且回合緊接在定義改寫之後（CLI 單次執行；入口重啟時 Telegram 立刻取到積壓的訊息、schedulerd 立刻有到期的排程）。按需本機模式每回合啟動新的 server，不受影響。定義只在 Wukong 升級、`WUKONG_MEMORIA_HINT`／`WUKONG_BIN`／SOUL.md 改變時才會變。
-      - repo 裡的探測沒有暖身回合，目前回合 3、4 的兩項會失敗，作為這個問題的紅燈。
+      - repo 裡的探測沒有暖身回合，修正前回合 3、4 的兩項失敗，作為這個問題的紅燈。
+    - 修正（使用者 2026-11-26 選「等 server 讀到再送」，README TBD-8）：
+      - runtime：`write_if_changed` 回傳有沒有寫入；`write_definitions` 改寫 primary agent 時回報內文（frontmatter 之後、去掉頭尾空白，與 `/api/agent` 的 `system` 相同）；`materialize_agent_definitions` 記成待確認。V2 路徑的回合送 prompt 前取出（只取一次）並等待。
+      - gateway：`AiBackend::wait_for_agent_system` 預設立刻回來；常駐 server backend 每 100 毫秒查一次 `GET /api/agent`，`wukong` 的 `system` 相同才回來，最多 5 秒，逾時由 runtime 印 `agent_definition_not_loaded` 警告後照送。按需本機模式每回合啟動新的 server、CLI backend 每次啟動新程序，都用預設。
+      - 內迴圈：
+        - gateway：`waits_until_the_server_lists_the_rewritten_definition`（清單依序是沒有自訂 agent、舊內文、新內文，查 3 次後回來）、`gives_up_when_the_server_keeps_the_old_definition`（300 毫秒逾時）。紅燈：空殼沒有發出任何 `/api/agent` 請求、也不會放棄。
+        - runtime：`rewriting_the_primary_definition_reports_its_system_text`（第一次寫回報內文、沒變不回報、開關改變再回報）、`a_pending_definition_is_waited_for_and_none_is_not`。紅燈：空殼沒回報、沒等待。`the_system_text_is_what_v2_lists_for_the_definition` 以實測的定義檔與 `/api/agent` 回應為樣本，空殼裡就已實作，一開始就通過，是釘住測試。
+      - 外迴圈：修正後 `probe-session-layer.sh` 連跑 3 次，19 項全過，開啟時答「有」、關閉時答「沒有」；回合 4 定義寫入到切換 agent 從 17 毫秒變成 132 毫秒，沒有逾時警告。派工探測（3.2）重跑 1 次照樣全過。
+      - 其他檢查：CI 三道全過（769 passed、12 ignored）。
 
 ## Phase 5 — 入口的角色顯示與規劃偏好移除
 

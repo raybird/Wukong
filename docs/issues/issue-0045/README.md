@@ -243,6 +243,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | TBD-5 | 範圍第 7 項：用 V2 的 session inbox（delivery 設成 queue）簡化同一 scope 並行回合的 lease | 待確認 | 只做評估，結論記入實作計畫；要改變「立即拒絕」的行為時另外取得核准；關聯 SCN-012 |
 | TBD-6 | 預設免費模型的派工與技能遵循表現 | 已解決（2026-11-26）：NVIDIA 憑證被拒（403）後，使用者表示「使用免費模型驗證也可以」。驗收可以用 NVIDIA nemotron 或預設免費模型 opencode/big-pickle判定，每份紀錄寫明實際用的模型；對照組（例如 SCN-001 的 b65b487）用同一個模型。免費模型額度用完時照實記下，不繞過額度限制 | 正式部署若用預設免費模型，派工表現可能與驗收時不同；關聯 SCN-003 |
 | TBD-7 | SCN-006 的「檔案互動規則」：Telegram 的產出目錄每回合不同（`artifacts/<scope>/<turn_id>`），不能整段放進 agent 定義 | 已解決（2026-11-26，使用者選「規則進定義，只留路徑（建議）」）：規則文字寫進 agent `wukong` 的定義，user message 只留一行 `[產出目錄] <路徑>`，視為和召回記憶一樣的動態區塊；SCN-006 的「檔案互動規則」指規則文字。沒有採用的做法：每個 scope 固定一個產出目錄（要改檔案回傳流程）、路徑也放 entry（每回合在對話紀錄多一則通知） | Task 4.2 的外迴圈檢查 user message 時，產出目錄那一行屬於動態區塊；關聯 SCN-006 |
+| TBD-8 | 常駐 V2 server 在 agent 定義改寫後幾十毫秒內送出的回合，仍用舊定義（Task 4.2 外迴圈：WUKONG_MEMORIA_HINT 開關的答案相反） | 已解決（2026-11-26）：使用者選「等 server 讀到再送」。入口改寫過 primary agent 的定義時，下一個回合送 prompt 前輪詢 /api/agent，等 wukong 的 system 與新內文相同才送，最多 5 秒，逾時警告後照送；按需本機模式與 CLI backend 不用等 | 只影響常駐 server 模式、緊接在定義改寫之後的回合（CLI 單次執行、入口重啟時積壓的訊息或到期的排程）；SCN-008 |
 
 ## Timeline
 
@@ -262,6 +263,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | 2026-11-26 | Task 5.2 完成：規劃偏好的設定、套用、Web 的技能偏好頁與 API（含技能目錄）移除，舊 API 回 404；舊設定檔的 `planner_preferences` 照常載入、存檔不再寫回；技能清單只留名稱與內容；AGENTS.md 的 settings 路徑更正 |
 | 2026-11-26 | Task 3.2 完成：免費模型額度用完，改用 NVIDIA nemotron（憑證已恢復可用）跑派工探測 6 次全部通過，primary 與 subagent 都跑在指定模型 |
 | 2026-11-26 | Task 3.4、4.1 完成：以 NVIDIA nemotron 跑真實 V2，CLI backend 以 agent wukong 執行且不蓋過使用者的 --agent；排程建在正確的 scope，輪替後的新 session 也拿得到 scope。Task 4.2 的 SCN-008 發現常駐 server 在定義改寫後立刻送出的回合仍用舊定義，待決定處理方式 |
+| 2026-11-26 | Task 4.2 完成：依使用者決定（TBD-8），入口改寫 agent 定義後，常駐 server 讀到新定義才送下一個回合；長期記憶能力的開關以真實模型驗證 |
 
 ---
 **建立日期**: 2026-11-26  

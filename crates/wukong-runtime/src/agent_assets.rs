@@ -14,6 +14,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use wukong_orchestrator::Role;
 
@@ -29,6 +30,10 @@ const MANAGED_NOTE: &str = "# 由 Wukong 管理：啟動時依版本內容覆寫
 
 static WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
+/// 這個行程改寫過 primary agent 的定義、還沒確認 backend 用上時，記著它的內文（[`system_of`]）。
+static PENDING_PRIMARY_SYSTEM: Mutex<Option<String>> = Mutex::new(None);
+/// 等 backend 用上改寫後的定義最多等多久；逾時照常送出（實測幾百毫秒內生效）。
+const PRIMARY_LOAD_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 一個 agent 定義檔：`{name}.md` 與它的完整內容。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,20 +114,61 @@ fn workspace_soul(workspace: &Path) -> String {
 /// 把定義寫到 `workspace/.opencode/agents/`，回傳該目錄。長期記憶能力依
 /// `WUKONG_MEMORIA_HINT`（[`crate::persona::memoria_hint_enabled`]）。
 pub fn materialize_agent_definitions(workspace: &Path) -> io::Result<PathBuf> {
-    write_definitions(workspace, crate::persona::memoria_hint_enabled())
+    let (dir, rewritten) = write_definitions(workspace, crate::persona::memoria_hint_enabled())?;
+    if let Some(system) = rewritten {
+        if let Ok(mut pending) = PENDING_PRIMARY_SYSTEM.lock() {
+            *pending = Some(system);
+        }
+    }
+    Ok(dir)
+}
+
+/// 取出還沒確認的 primary agent 內文；取出後清掉，只有下一個回合會等。
+pub(crate) fn take_pending_primary_system() -> Option<String> {
+    PENDING_PRIMARY_SYSTEM.lock().ok()?.take()
+}
+
+/// 2026-11-26（#45 SCN-008）：定義剛改寫過時，送 prompt 前等 backend 用上新內容。常駐 V2
+/// server 靠檔案監看重新載入，入口啟動時改寫、緊接著送出的回合（CLI 單次執行、重啟時積壓的
+/// Telegram 訊息或到期的排程）會用到舊定義。其他 backend 不用等，立刻回來。
+pub(crate) async fn wait_until_primary_loaded(
+    backend: &impl wukong_gateway::backend::AiBackend,
+    pending: Option<String>,
+) {
+    let Some(system) = pending else {
+        return;
+    };
+    if !backend
+        .wait_for_agent_system(PRIMARY_AGENT, &system, PRIMARY_LOAD_TIMEOUT)
+        .await
+    {
+        eprintln!(
+            "warning: agent_definition_not_loaded agent={PRIMARY_AGENT} waited={}s; sending anyway",
+            PRIMARY_LOAD_TIMEOUT.as_secs()
+        );
+    }
 }
 
 /// 測試直接傳入開關：`WUKONG_MEMORIA_HINT` 是整個行程共用的，turn.rs 的測試會切換它。
-fn write_definitions(workspace: &Path, memoria_hint: bool) -> io::Result<PathBuf> {
+/// 回傳目錄，以及 primary agent 的定義有改寫時它的內文。
+fn write_definitions(
+    workspace: &Path,
+    memoria_hint: bool,
+) -> io::Result<(PathBuf, Option<String>)> {
     let _guard = WRITE_LOCK
         .lock()
         .map_err(|_| io::Error::other("agent definition write lock poisoned"))?;
     let dir = workspace.join(AGENTS_DIR);
     fs::create_dir_all(&dir)?;
+    let mut rewritten = None;
     for def in agent_definitions(&workspace_soul(workspace), memoria_hint) {
-        write_if_changed(&dir, &format!("{}.md", def.name), &def.content)?;
+        if write_if_changed(&dir, &format!("{}.md", def.name), &def.content)?
+            && def.name == PRIMARY_AGENT
+        {
+            rewritten = Some(system_of(&def.content).to_string());
+        }
     }
-    Ok(dir)
+    Ok((dir, rewritten))
 }
 
 /// 寫到 backend 執行 opencode 的工作區（[`wukong_gateway::workspace_dir`]：
@@ -135,10 +181,11 @@ pub fn materialize_default_agent_definitions() -> io::Result<PathBuf> {
 
 /// 把 `content` 寫到 `dir/file_name`：內容相同時不寫；不同時先寫同目錄的暫存檔再改名，
 /// V2 的檔案監看不會讀到寫到一半的檔案。技能檔（[`crate::skill_assets`]）也用它。
-pub(crate) fn write_if_changed(dir: &Path, file_name: &str, content: &str) -> io::Result<()> {
+/// 回傳有沒有寫入。
+pub(crate) fn write_if_changed(dir: &Path, file_name: &str, content: &str) -> io::Result<bool> {
     let path = dir.join(file_name);
     if fs::read_to_string(&path).is_ok_and(|existing| existing == content) {
-        return Ok(());
+        return Ok(false);
     }
     // 暫存檔不以 .md 結尾，V2 不會把它當成定義或技能載入
     let tmp = dir.join(format!(
@@ -149,7 +196,16 @@ pub(crate) fn write_if_changed(dir: &Path, file_name: &str, content: &str) -> io
     fs::write(&tmp, content)?;
     fs::rename(&tmp, &path).inspect_err(|_| {
         let _ = fs::remove_file(&tmp);
-    })
+    })?;
+    Ok(true)
+}
+
+/// 定義檔 frontmatter 之後的內文，去掉頭尾空白：V2 的 `/api/agent` 以 `system` 回傳的就是這段。
+fn system_of(content: &str) -> &str {
+    content
+        .split_once("\n---\n")
+        .map_or(content, |(_, body)| body)
+        .trim()
 }
 
 #[cfg(test)]
@@ -160,6 +216,73 @@ mod tests {
         let primary = &agent_definitions("soul", false)[0].content;
         assert!(primary.contains("[檔案互動規則]"), "{primary}");
         assert!(primary.contains("`[產出目錄] <路徑>`"), "{primary}");
+    }
+
+    // #45 SCN-008：改寫 primary agent 的定義時回報內文，供下一個回合確認 backend 已用上。
+    #[test]
+    fn rewriting_the_primary_definition_reports_its_system_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_, first) = write_definitions(temp.path(), false).unwrap();
+        let first = first.expect("the first write rewrites the primary definition");
+        assert_eq!(
+            first,
+            system_of(&agent_definitions(DEFAULT_SOUL, false)[0].content)
+        );
+        assert!(!first.contains("mode: primary"), "{first}");
+
+        let (_, again) = write_definitions(temp.path(), false).unwrap();
+        assert_eq!(again, None);
+
+        let (_, switched) = write_definitions(temp.path(), true).unwrap();
+        assert!(switched.unwrap().contains("[長期記憶能力]"));
+    }
+
+    // 2026-11-26 實測：定義檔是下面這段時，V2 `/api/agent` 回的 system 是 "第一行。\n\n第二段 ALPHA。"
+    #[test]
+    fn the_system_text_is_what_v2_lists_for_the_definition() {
+        let file =
+            "---\ndescription: shape probe\nmode: primary\n---\n第一行。\n\n第二段 ALPHA。\n";
+        assert_eq!(system_of(file), "第一行。\n\n第二段 ALPHA。");
+    }
+
+    struct WaitRecorder(std::sync::Mutex<Vec<(String, String, Duration)>>);
+    impl wukong_gateway::backend::AiBackend for WaitRecorder {
+        async fn run(
+            &self,
+            _req: wukong_gateway::backend::AgentRequest,
+        ) -> Result<wukong_gateway::backend::AgentResponse, wukong_gateway::error::GatewayError>
+        {
+            unreachable!("waiting never sends a prompt")
+        }
+        async fn wait_for_agent_system(
+            &self,
+            agent: &str,
+            system: &str,
+            timeout: Duration,
+        ) -> bool {
+            self.0
+                .lock()
+                .unwrap()
+                .push((agent.to_string(), system.to_string(), timeout));
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pending_definition_is_waited_for_and_none_is_not() {
+        let backend = WaitRecorder(std::sync::Mutex::new(Vec::new()));
+        wait_until_primary_loaded(&backend, None).await;
+        assert!(backend.0.lock().unwrap().is_empty());
+
+        wait_until_primary_loaded(&backend, Some("新的內文".to_string())).await;
+        assert_eq!(
+            *backend.0.lock().unwrap(),
+            vec![(
+                "wukong".to_string(),
+                "新的內文".to_string(),
+                PRIMARY_LOAD_TIMEOUT
+            )]
+        );
     }
 
     // #45 SCN-008：長期記憶能力只在 WUKONG_MEMORIA_HINT 開啟時寫進 primary agent 的定義。
@@ -196,7 +319,7 @@ mod tests {
     fn first_write_creates_the_primary_agent_and_five_subagents() {
         let temp = tempfile::tempdir().unwrap();
 
-        let dir = write_definitions(temp.path(), false).unwrap();
+        let (dir, _) = write_definitions(temp.path(), false).unwrap();
 
         assert_eq!(dir, temp.path().join(".opencode/agents"));
         let primary = read(&dir, "wukong");
@@ -238,7 +361,7 @@ mod tests {
     #[test]
     fn unchanged_content_is_not_rewritten() {
         let temp = tempfile::tempdir().unwrap();
-        let dir = write_definitions(temp.path(), false).unwrap();
+        let (dir, _) = write_definitions(temp.path(), false).unwrap();
         let before = fs::metadata(dir.join("wukong.md"))
             .unwrap()
             .modified()
@@ -282,11 +405,11 @@ mod tests {
     fn the_persona_comes_from_the_workspace_soul_and_falls_back_to_the_template() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("SOUL.md"), "你是測試用的人格。\n").unwrap();
-        let dir = write_definitions(temp.path(), false).unwrap();
+        let (dir, _) = write_definitions(temp.path(), false).unwrap();
         assert!(read(&dir, "wukong").contains("你是測試用的人格。"));
 
         let bare = tempfile::tempdir().unwrap();
-        let dir = write_definitions(bare.path(), false).unwrap();
+        let (dir, _) = write_definitions(bare.path(), false).unwrap();
         assert!(read(&dir, "wukong").contains(DEFAULT_SOUL.trim()));
     }
 

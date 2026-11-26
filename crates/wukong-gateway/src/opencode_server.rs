@@ -27,6 +27,8 @@ const SERVER_USERNAME: &str = "opencode";
 const SESSION_PAGE_SIZE: usize = 1000;
 /// 走到這麼多頁還有下一頁就停下來，回報清單被截斷，不讓壞掉的 cursor 卡住呼叫端。
 const SESSION_LIST_MAX_PAGES: usize = 100;
+/// 等 agent 定義重新載入時，兩次查詢 `/api/agent` 的間隔。
+const AGENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 pub struct OpencodeServerBackend {
     pub base_url: String,
@@ -844,6 +846,36 @@ impl OpencodeServerBackend {
 impl AiBackend for OpencodeServerBackend {
     fn supports_session_instructions(&self) -> bool {
         true
+    }
+
+    /// 輪詢 `GET /api/agent`，直到 `agent` 的 `system` 與 `system` 相同（頭尾空白不算）。
+    /// 實測清單比 prompt 更晚更新（Task 4.2 的 probe-agent-reload.sh），清單有了，prompt
+    /// 一定也用得上。請求失敗時當作還沒載入，繼續等到逾時。
+    async fn wait_for_agent_system(
+        &self,
+        agent: &str,
+        system: &str,
+        timeout: std::time::Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let url = format!("{}/api/agent", self.base_url);
+        loop {
+            if let Ok(listed) = self.send_json("list_agents", self.client.get(&url)).await {
+                let loaded = listed
+                    .get("data")
+                    .and_then(Value::as_array)
+                    .and_then(|agents| agents.iter().find(|a| a["id"] == agent))
+                    .and_then(|a| a["system"].as_str())
+                    .is_some_and(|loaded| loaded.trim() == system.trim());
+                if loaded {
+                    return true;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(AGENT_POLL_INTERVAL).await;
+        }
     }
 
     /// V2 的 prompt 一律非同步，沒有等到回覆才回應的端點；非串流的回合也走事件串流。
@@ -1924,6 +1956,61 @@ mod tests {
     }
 
     const ENTRIES: &str = "/api/experimental/session/ses_fake1/instructions/entries";
+
+    // #45 SCN-008：常駐 server 改寫定義後要等它用上新內容（實測改寫後 17 毫秒送出的回合仍用舊定義）。
+    fn agent_listing(system: &str) -> serde_json::Value {
+        json!([
+            {"id": "build", "name": "Build", "mode": "primary"},
+            {"id": "wukong", "name": "wukong", "mode": "primary", "system": system},
+        ])
+    }
+
+    #[tokio::test]
+    async fn waits_until_the_server_lists_the_rewritten_definition() {
+        let fake = fake_v2::FakeV2::start().await;
+        // 清單一開始沒有自訂 agent（server 剛啟動），接著是舊內容，之後才是新內容
+        fake.script_agents(vec![
+            json!([{"id": "build", "name": "Build"}]),
+            agent_listing("舊的內文"),
+            agent_listing("新的內文\n\n第二段"),
+        ]);
+
+        let loaded = v2_backend(&fake)
+            .wait_for_agent_system(
+                "wukong",
+                "新的內文\n\n第二段\n",
+                std::time::Duration::from_secs(5),
+            )
+            .await;
+
+        assert!(loaded);
+        let listed = fake
+            .requests()
+            .iter()
+            .filter(|r| *r == "GET /api/agent")
+            .count();
+        assert_eq!(listed, 3, "{:?}", fake.requests());
+    }
+
+    #[tokio::test]
+    async fn gives_up_when_the_server_keeps_the_old_definition() {
+        let fake = fake_v2::FakeV2::start().await;
+        fake.script_agents(vec![agent_listing("舊的內文")]);
+        let started = std::time::Instant::now();
+
+        let loaded = v2_backend(&fake)
+            .wait_for_agent_system("wukong", "新的內文", std::time::Duration::from_millis(300))
+            .await;
+
+        assert!(!loaded);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        let listed = fake
+            .requests()
+            .iter()
+            .filter(|r| *r == "GET /api/agent")
+            .count();
+        assert!(listed >= 2, "{:?}", fake.requests());
+    }
 
     #[tokio::test]
     async fn a_new_session_gets_its_instructions_before_the_prompt() {

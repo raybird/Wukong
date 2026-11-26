@@ -80,6 +80,15 @@ pub trait AiBackend {
         false
     }
 
+    /// 2026-11-26（#45 SCN-008）：等 backend 用上剛改寫的 agent 定義，`system` 是定義
+    /// frontmatter 之後的內文。常駐 V2 server 靠檔案監看非同步重新載入，改寫後幾十毫秒內
+    /// 送出的 prompt 仍用舊定義（docs/issues/issue-0045/implementation-plan.md Task 4.2）。
+    /// 其他 backend 每次執行都重新讀定義（按需本機模式啟動新的 server，CLI 啟動新的程序），
+    /// 不用等。回傳 `timeout` 內有沒有看到新內容；沒看到時呼叫端照常送出。
+    async fn wait_for_agent_system(&self, _agent: &str, _system: &str, _timeout: Duration) -> bool {
+        true
+    }
+
     /// Run, invoking `on_event` as events arrive, returning the full response.
     /// Default: call `run`, then emit the whole text as a single Text event.
     async fn run_streaming(
@@ -415,6 +424,20 @@ impl AiBackend for AgentBackend {
             AgentBackend::Cli(backend) => backend.supports_session_instructions(),
             AgentBackend::Local(backend) => backend.supports_session_instructions(),
             AgentBackend::Server(backend) => backend.supports_session_instructions(),
+        }
+    }
+
+    async fn wait_for_agent_system(&self, agent: &str, system: &str, timeout: Duration) -> bool {
+        match self {
+            AgentBackend::Cli(backend) => {
+                backend.wait_for_agent_system(agent, system, timeout).await
+            }
+            AgentBackend::Local(backend) => {
+                backend.wait_for_agent_system(agent, system, timeout).await
+            }
+            AgentBackend::Server(backend) => {
+                backend.wait_for_agent_system(agent, system, timeout).await
+            }
         }
     }
 

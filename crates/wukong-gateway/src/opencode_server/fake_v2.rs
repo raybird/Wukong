@@ -27,6 +27,8 @@ struct State {
     jobs: Vec<Value>,
     /// session 指令層：session → (key, value)，依寫入順序。
     entries: Vec<(String, String, Value)>,
+    /// `GET /api/agent` 依序回的 agent 清單；剩最後一份時之後都回它。
+    agents: Vec<Value>,
     created: usize,
 }
 
@@ -100,6 +102,11 @@ impl FakeV2 {
     /// 之後每次 `GET /api/experimental/job` 依序回的 `data`（背景工作清單）；用完回空清單。
     pub fn script_jobs(&self, jobs: Vec<Value>) {
         self.state.lock().unwrap().jobs = jobs;
+    }
+
+    /// 之後每次 `GET /api/agent` 依序回的 `data`；剩最後一份時一直回它，沒有時回空清單。
+    pub fn script_agents(&self, agents: Vec<Value>) {
+        self.state.lock().unwrap().agents = agents;
     }
 
     /// 預先放一筆 session 指令層的 entry。
@@ -284,6 +291,14 @@ fn handle(
             r#"{"version":"2.3.2","pid":1,"urls":["http://127.0.0.1:4096"],"paths":{"tmp":"/tmp/opencode"}}"#
                 .to_string(),
         ),
+        ("GET", "/api/agent") => {
+            let agents = match state.agents.len() {
+                0 => json!([]),
+                1 => state.agents[0].clone(),
+                _ => state.agents.remove(0),
+            };
+            ("200 OK", JSON, json!({ "location": {"directory": "/workspace"}, "data": agents }).to_string())
+        }
         ("GET", "/api/experimental/job") => {
             let jobs = if state.jobs.is_empty() {
                 json!([])

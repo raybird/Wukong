@@ -225,6 +225,11 @@ pub async fn run_turn_traced_with_attachments(
         // 定義裡，scope 在 session 指令層，都不進 user message；CLI backend 沒有指令層，照舊附在
         // prompt。
         let session_instructions = if backend.supports_session_instructions() {
+            crate::agent_assets::wait_until_primary_loaded(
+                backend,
+                crate::agent_assets::take_pending_primary_system(),
+            )
+            .await;
             std::collections::BTreeMap::from([(
                 persona::SCOPE_INSTRUCTION_KEY.to_string(),
                 persona::current_scope_instruction(&cfg.scope),
