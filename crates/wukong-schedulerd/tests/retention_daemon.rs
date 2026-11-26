@@ -18,16 +18,47 @@ use wukong_memory::Memory;
 
 const DAY_MS: u128 = 24 * 60 * 60 * 1000;
 
-/// 一個 40 天前的無主 session 與一個 40 天前、名為 `ses_kept` 的 session。
+/// 假 OpenCode V2 server 每頁最多回這麼多筆，不管要求的 limit。
+const PAGE_CAP: usize = 50;
+
+/// 由新到舊：118 個剛用過的無主 session，最後是 40 天前的無主 `ses_orphan` 與 40 天前的
+/// `ses_kept`。超過 100 個、最舊的在最後一頁（地雷 W-6、issue-0044 SCN-008）。
 fn fake_server() -> (String, Arc<Mutex<Vec<String>>>) {
-    let old = std::time::SystemTime::now()
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_millis()
-        - 40 * DAY_MS;
-    let sessions = format!(
-        r#"[{{"id":"ses_orphan","time":{{"updated":{old}}}}},{{"id":"ses_kept","time":{{"updated":{old}}}}}]"#
-    );
+        .as_millis();
+    let old = now - 40 * DAY_MS;
+    let mut sessions: Vec<String> = (0..118)
+        .map(|i| format!(r#"{{"id":"ses_recent{i}","time":{{"updated":{now}}}}}"#))
+        .collect();
+    sessions.push(format!(
+        r#"{{"id":"ses_orphan","time":{{"updated":{old}}}}}"#
+    ));
+    sessions.push(format!(r#"{{"id":"ses_kept","time":{{"updated":{old}}}}}"#));
+    // V2 的列表：`cursor.next` 一直給到取出空頁為止（2026-11-24 對 2.3.2 實測）。
+    let page = move |path: &str| {
+        let offset: usize = path
+            .split(['?', '&'])
+            .find_map(|pair| pair.strip_prefix("cursor=o"))
+            .map(|n| n.parse().unwrap())
+            .unwrap_or(0);
+        let items: Vec<&str> = sessions
+            .iter()
+            .skip(offset)
+            .take(PAGE_CAP)
+            .map(String::as_str)
+            .collect();
+        let next = if items.is_empty() {
+            "null".to_string()
+        } else {
+            format!(r#""o{}""#, offset + items.len())
+        };
+        format!(
+            r#"{{"data":[{}],"cursor":{{"next":{next}}}}}"#,
+            items.join(",")
+        )
+    };
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let hits = Arc::new(Mutex::new(Vec::new()));
@@ -50,12 +81,12 @@ fn fake_server() -> (String, Arc<Mutex<Vec<String>>>) {
                 words.next().unwrap_or_default(),
                 words.next().unwrap_or_default()
             );
-            let (status, body) = if request.starts_with("GET /session?") {
-                ("200 OK", sessions.clone())
-            } else if request.starts_with("DELETE /session/") {
-                ("200 OK", "true".to_string())
-            } else if request == "GET /global/health" {
-                ("200 OK", r#"{"healthy":true}"#.to_string())
+            let (status, body) = if request.starts_with("GET /api/session?") {
+                ("200 OK", page(&request))
+            } else if request.starts_with("DELETE /api/session/") {
+                ("204 No Content", String::new())
+            } else if request == "GET /api/info" {
+                ("200 OK", r#"{"version":"2.3.2"}"#.to_string())
             } else {
                 ("404 Not Found", String::new())
             };
@@ -102,7 +133,8 @@ impl Daemon {
             .env("WUKONG_SCHED_NOTIFY", "0")
             .env_remove("WUKONG_TG_TOKEN")
             .env_remove("WUKONG_AGENT_SERVER_USERNAME")
-            .env_remove("WUKONG_AGENT_SERVER_PASSWORD")
+            // server 模式一定要密碼（issue-0044 SCN-017）；這個假 server 不驗證。
+            .env("WUKONG_AGENT_SERVER_PASSWORD", "probe")
             .env_remove("WUKONG_EMBED")
             .env_remove("WUKONG_MD_DIR")
             .stdin(Stdio::null())
@@ -172,14 +204,15 @@ async fn the_daemon_runs_the_cleanup_and_logs_what_it_did() {
 
     let log = daemon.log();
     assert!(log.contains("anchored=true"), "{log}");
+    assert!(log.contains("listed=120 truncated=false"), "{log}");
     assert!(log.contains("deleted=1"), "{log}");
     let deletes = daemon.deletes();
     assert!(
-        deletes.contains(&"DELETE /session/ses_orphan".to_string()),
+        deletes.contains(&"DELETE /api/session/ses_orphan".to_string()),
         "{deletes:?}"
     );
     assert!(
-        !deletes.contains(&"DELETE /session/ses_kept".to_string()),
+        !deletes.contains(&"DELETE /api/session/ses_kept".to_string()),
         "{deletes:?}"
     );
 }

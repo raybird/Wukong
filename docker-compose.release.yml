@@ -10,6 +10,7 @@ services:
       - GROUP_ID=${GROUP_ID:-1000}
       - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run}
       - WUKONG_AGENT_SERVER_URL=${WUKONG_AGENT_SERVER_URL:-}
+      - WUKONG_AGENT_SERVER_PASSWORD=${WUKONG_AGENT_SERVER_PASSWORD:-}
       - WUKONG_AGENT_SERVER_FILE_MODE=${WUKONG_AGENT_SERVER_FILE_MODE:-shared}
       - WUKONG_AGENT_SERVER_WORKSPACE=${WUKONG_AGENT_SERVER_WORKSPACE:-/workspace}
       - WUKONG_AGENT_TIMEOUT_SECS=${WUKONG_AGENT_TIMEOUT_SECS:-1200}
@@ -42,6 +43,10 @@ services:
       - USER_ID=${USER_ID:-1000}
       - GROUP_ID=${GROUP_ID:-1000}
       - WUKONG_WORKSPACE=/workspace
+      # OpenCode V2 always requires a password (it generates a random one when unset,
+      # which no entrance could know). The entrances get the same .env value as
+      # WUKONG_AGENT_SERVER_PASSWORD; set it in .env (issue-0044 SCN-003).
+      - OPENCODE_SERVER_PASSWORD=${WUKONG_AGENT_SERVER_PASSWORD:-}
       # The idle-restart window below is a LOCAL-time range, so TZ decides what it
       # actually means. Defaulting to UTC made 03:00 land at 11:00 in +08:00 and the
       # only symptom would be "the restart never happens when I expect" — so the
@@ -77,7 +82,15 @@ services:
     mem_reservation: "512m"
     pids_limit: ${WUKONG_OPENCODE_PIDS:-256}
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:4096/global/health || exit 1"]
+      # V2 answers every path outside /api with its web page (200), so only an
+      # authenticated /api/info proves the server is up. The header goes in on stdin
+      # so the password never shows in a process list.
+      test:
+        - CMD-SHELL
+        - >-
+          printf 'Authorization: Basic %s\n'
+          "$$(printf 'opencode:%s' "$$OPENCODE_SERVER_PASSWORD" | base64 -w0)"
+          | curl -fsS -H @- http://localhost:4096/api/info > /dev/null || exit 1
       # 2026-10-03: the optional server uses fast startup health probes.
       # Steady-state probing relaxes
       # to 30s: at 2s this forked a shell+curl inside this container's cgroup ~43k
@@ -98,6 +111,7 @@ services:
       - GROUP_ID=${GROUP_ID:-1000}
       - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run}
       - WUKONG_AGENT_SERVER_URL=${WUKONG_AGENT_SERVER_URL:-}
+      - WUKONG_AGENT_SERVER_PASSWORD=${WUKONG_AGENT_SERVER_PASSWORD:-}
       - WUKONG_OPENCODE_SESSION_RETENTION_DAYS=${WUKONG_OPENCODE_SESSION_RETENTION_DAYS-30}
       - WUKONG_AGENT_TIMEOUT_SECS=${WUKONG_AGENT_TIMEOUT_SECS:-1200}
       - WUKONG_WORKSPACE=/workspace
@@ -132,6 +146,7 @@ services:
       - GROUP_ID=${GROUP_ID:-1000}
       - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run}
       - WUKONG_AGENT_SERVER_URL=${WUKONG_AGENT_SERVER_URL:-}
+      - WUKONG_AGENT_SERVER_PASSWORD=${WUKONG_AGENT_SERVER_PASSWORD:-}
       - WUKONG_OPENCODE_SESSION_RETENTION_DAYS=${WUKONG_OPENCODE_SESSION_RETENTION_DAYS-30}
       - WUKONG_AGENT_TIMEOUT_SECS=${WUKONG_AGENT_TIMEOUT_SECS:-1200}
       - WUKONG_WORKSPACE=/workspace
@@ -171,6 +186,7 @@ services:
       - GROUP_ID=${GROUP_ID:-1000}
       - WUKONG_AGENT_CMD=${WUKONG_AGENT_CMD:-opencode run}
       - WUKONG_AGENT_SERVER_URL=${WUKONG_AGENT_SERVER_URL:-}
+      - WUKONG_AGENT_SERVER_PASSWORD=${WUKONG_AGENT_SERVER_PASSWORD:-}
       - WUKONG_AGENT_TIMEOUT_SECS=${WUKONG_AGENT_TIMEOUT_SECS:-1200}
       - WUKONG_WORKSPACE=/workspace
       - WUKONG_MEMORY_DB=sqlite:///data/memory.db

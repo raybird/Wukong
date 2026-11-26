@@ -53,9 +53,15 @@ impl UpstreamError {
 ///
 /// 兩者實測（2026-09-08，opencode 1.18.18）都是
 /// `{"error":{"name":"…","data":{"message":"…","statusCode":410}}}`。
+///
+/// OpenCode V2 的 CLI 同樣送 `{"type":"error","error":{…}}`，但 `error` 換成
+/// `{type, message, status?}`；沒有 `name` 而有 `type` 時改用 [`parse_v2_error`]。
 pub fn parse_error_field(container: &serde_json::Value) -> Option<UpstreamError> {
     use serde_json::Value;
     let error = container.get("error")?;
+    if error.get("name").is_none() && error.get("type").is_some() {
+        return parse_v2_error(error);
+    }
     let name = error
         .get("name")
         .and_then(Value::as_str)
@@ -78,6 +84,25 @@ pub fn parse_error_field(container: &serde_json::Value) -> Option<UpstreamError>
     })
 }
 
+/// OpenCode V2 的錯誤物件 `{type, message, status?, retryAfterMs?}`（openapi 的
+/// `Session.StructuredError`）。`status` 是整數的 HTTP 狀態碼，與 V1 的 `statusCode` 同義。
+pub fn parse_v2_error(error: &serde_json::Value) -> Option<UpstreamError> {
+    use serde_json::Value;
+    let name = error.get("type")?.as_str()?.to_string();
+    Some(UpstreamError {
+        name,
+        status_code: error
+            .get("status")
+            .and_then(Value::as_u64)
+            .and_then(|code| u16::try_from(code).ok()),
+        message: error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
 /// 上游錯誤的分類。決定告警怎麼說、以及是否值得重試。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpstreamFailure {
@@ -87,6 +112,8 @@ pub enum UpstreamFailure {
     RateLimited,
     /// 回合被中止。不是上游的錯，但也**不是成功**。
     Aborted,
+    /// 連不到上游（網路、DNS、逾時）。V2 會一直重試，由 [`RetryWatch`] 收斂。
+    Unreachable,
     /// 其他上游錯誤。
     Other,
 }
@@ -97,6 +124,7 @@ impl UpstreamFailure {
             Self::ModelEol => "模型已下架",
             Self::RateLimited => "上游限流",
             Self::Aborted => "回合被中止",
+            Self::Unreachable => "上游連不到",
             Self::Other => "上游錯誤",
         }
     }
@@ -119,9 +147,99 @@ pub fn classify(name: &str, status_code: Option<u16>) -> UpstreamFailure {
         _ => {}
     }
     match name {
-        "MessageAbortedError" => UpstreamFailure::Aborted,
+        // V1 的錯誤名與 V2 的錯誤類型（`step.failed` 的 `error.type`、execution 中止）。
+        "MessageAbortedError" | "aborted" => UpstreamFailure::Aborted,
         "ProviderModelNotFoundError" => UpstreamFailure::ModelEol,
+        // V2 2.3.2 的 provider 錯誤類型（取自 2.3.2 執行檔的錯誤對應；上游回 410、429 時
+        // `status` 照樣帶狀態碼，由上面先判）。額度、預算與各方案用量上限都歸為限流。
+        "provider.rate-limit"
+        | "provider.quota"
+        | "provider.free-limit"
+        | "provider.go-limit"
+        | "provider.budget-limit"
+        | "provider.model-budget-limit"
+        | "provider.chatgpt-limit" => UpstreamFailure::RateLimited,
+        // 找不到可用的模型路由（實測：不存在的模型），與 V1 的 ProviderModelNotFoundError 同類。
+        "provider.no-route" => UpstreamFailure::ModelEol,
+        "provider.transport" | "provider.connect" | "provider.timeout" => {
+            UpstreamFailure::Unreachable
+        }
         _ => UpstreamFailure::Other,
+    }
+}
+
+/// V2 遇到上游錯誤時會一直重試（實測：連不到上游時 120 秒內重試 7 次仍未結束，V1 約 65
+/// 秒就以錯誤結束），Wukong 在重試持續這麼久之後中止回合（issue-0044 TBD-3）。
+pub const RETRY_GIVE_UP_AFTER: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// 追蹤一次回合中持續的重試。第一次重試起算，模型有了實際輸出（思考、文字、工具、
+/// 步驟結束）就算恢復並重新起算；超過時限時以最後一次重試的錯誤回報。
+#[derive(Debug)]
+pub struct RetryWatch {
+    limit: std::time::Duration,
+    since: Option<tokio::time::Instant>,
+    attempts: u32,
+    last: Option<UpstreamError>,
+}
+
+impl Default for RetryWatch {
+    fn default() -> Self {
+        Self::new(RETRY_GIVE_UP_AFTER)
+    }
+}
+
+impl RetryWatch {
+    pub fn new(limit: std::time::Duration) -> Self {
+        Self {
+            limit,
+            since: None,
+            attempts: 0,
+            last: None,
+        }
+    }
+
+    pub fn retrying(&mut self, error: Option<UpstreamError>) {
+        self.since.get_or_insert_with(tokio::time::Instant::now);
+        self.attempts += 1;
+        if error.is_some() {
+            self.last = error;
+        }
+    }
+
+    pub fn recovered(&mut self) {
+        self.since = None;
+        self.attempts = 0;
+        self.last = None;
+    }
+
+    /// 重試中才有值：到這個時間仍未恢復就中止。
+    pub fn deadline(&self) -> Option<tokio::time::Instant> {
+        self.since.map(|since| since + self.limit)
+    }
+
+    /// 等到 [`Self::deadline`]；沒有在重試時永遠不會完成，可直接放進 `select!`。
+    pub async fn expired(&self) {
+        match self.deadline() {
+            Some(deadline) => tokio::time::sleep_until(deadline).await,
+            None => std::future::pending().await,
+        }
+    }
+
+    pub fn give_up(&self) -> crate::error::GatewayError {
+        let error = self.last.clone().unwrap_or(UpstreamError {
+            name: "UnknownError".to_string(),
+            status_code: None,
+            message: String::new(),
+        });
+        let mut gateway_error = error.to_gateway_error();
+        if let crate::error::GatewayError::UpstreamFailed { detail, .. } = &mut gateway_error {
+            detail.push_str(&format!(
+                "（重試 {} 次、超過 {} 秒仍未成功，已中止）",
+                self.attempts,
+                self.limit.as_secs()
+            ));
+        }
+        gateway_error
     }
 }
 
@@ -339,6 +457,7 @@ mod tests {
             UpstreamFailure::ModelEol,
             UpstreamFailure::RateLimited,
             UpstreamFailure::Aborted,
+            UpstreamFailure::Unreachable,
             UpstreamFailure::Other,
         ];
         for (i, a) in all.iter().enumerate() {
@@ -348,5 +467,132 @@ mod tests {
                 assert_ne!(a.label(), b.label());
             }
         }
+    }
+
+    // issue-0044 SCN-007：V2 的錯誤類型照原本的分類。
+    #[test]
+    fn v2_error_types_keep_their_categories() {
+        for limit in [
+            "provider.rate-limit",
+            "provider.quota",
+            "provider.free-limit",
+            "provider.go-limit",
+            "provider.budget-limit",
+        ] {
+            assert_eq!(
+                classify(limit, None),
+                UpstreamFailure::RateLimited,
+                "{limit}"
+            );
+        }
+        assert_eq!(
+            classify("provider.no-route", None),
+            UpstreamFailure::ModelEol
+        );
+        for unreachable in ["provider.transport", "provider.connect", "provider.timeout"] {
+            assert_eq!(
+                classify(unreachable, None),
+                UpstreamFailure::Unreachable,
+                "{unreachable}"
+            );
+        }
+        // 狀態碼仍然先判：上游回 410 時不論類型都是下架。
+        assert_eq!(
+            classify("provider.invalid-request", Some(410)),
+            UpstreamFailure::ModelEol
+        );
+        assert_eq!(classify("provider.auth", None), UpstreamFailure::Other);
+    }
+
+    fn fixture_line(name: &str, event_type: &str) -> serde_json::Value {
+        let path = format!(
+            "{}/tests/fixtures/opencode-v2/{name}.ndjson",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|value| value["type"] == event_type)
+            .unwrap()
+    }
+
+    #[test]
+    fn parses_the_v2_cli_error_line() {
+        let line = fixture_line("cli-no-route", "error");
+        let error = parse_error_field(&line).unwrap();
+        assert_eq!(error.name, "provider.no-route");
+        assert_eq!(error.message, "Model unavailable: missing/nope");
+        assert_eq!(
+            classify(&error.name, error.status_code),
+            UpstreamFailure::ModelEol
+        );
+    }
+
+    // issue-0044 SCN-007 第二列：模型下架的真實樣本（2026-11-25，NVIDIA 回 410 end of life）。
+    // V2 的錯誤類型是通用的 provider.invalid-request，靠 status 410 才判得出下架。
+    #[test]
+    fn a_real_end_of_life_410_is_model_eol() {
+        let line = fixture_line("cli-model-eol", "error");
+        let error = parse_error_field(&line).unwrap();
+        assert_eq!(error.name, "provider.invalid-request");
+        assert_eq!(error.status_code, Some(410));
+        assert!(error.message.contains("end of life"), "{}", error.message);
+        assert_eq!(
+            classify(&error.name, error.status_code),
+            UpstreamFailure::ModelEol
+        );
+    }
+
+    fn transport_error() -> Option<UpstreamError> {
+        parse_error_field(&fixture_line("cli-retry-transport", "retry"))
+    }
+
+    // issue-0044 SCN-007 第三列：重試持續超過時限就以重試的錯誤類型中止。
+    #[tokio::test(start_paused = true)]
+    async fn retries_that_last_too_long_give_up_as_unreachable() {
+        let mut watch = RetryWatch::default();
+        assert!(watch.deadline().is_none());
+        let started = tokio::time::Instant::now();
+        watch.retrying(transport_error());
+        tokio::time::sleep(std::time::Duration::from_secs(40)).await;
+        watch.retrying(transport_error());
+
+        watch.expired().await;
+
+        assert_eq!(started.elapsed(), RETRY_GIVE_UP_AFTER);
+        match watch.give_up() {
+            crate::error::GatewayError::UpstreamFailed { kind, detail, .. } => {
+                assert_eq!(kind, UpstreamFailure::Unreachable);
+                assert!(detail.contains("Can't reach opencode.ai"), "{detail}");
+                assert!(detail.contains("重試 2 次"), "{detail}");
+            }
+            other => panic!("expected UpstreamFailed, got {other:?}"),
+        }
+    }
+
+    // issue-0044 SCN-016：時限內恢復就重新起算，不會被中止。
+    #[tokio::test(start_paused = true)]
+    async fn a_recovery_restarts_the_clock() {
+        let mut watch = RetryWatch::default();
+        watch.retrying(transport_error());
+        tokio::time::sleep(std::time::Duration::from_secs(80)).await;
+        watch.recovered();
+        assert!(watch.deadline().is_none());
+
+        watch.retrying(transport_error());
+        let expires_at = watch.deadline().unwrap();
+        assert_eq!(
+            expires_at,
+            tokio::time::Instant::now() + RETRY_GIVE_UP_AFTER
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn not_retrying_never_expires() {
+        let watch = RetryWatch::default();
+        let waited =
+            tokio::time::timeout(std::time::Duration::from_secs(3600), watch.expired()).await;
+        assert!(waited.is_err());
     }
 }

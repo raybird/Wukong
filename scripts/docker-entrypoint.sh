@@ -124,37 +124,38 @@ mkdir -p "$OPENCODE_CONFIG_DIR"
 # and the external_directory rule below both failed to reach running hosts.
 #
 # ── The baseline: a destructive-command guard ──
+# It is written in OpenCode V2's native format (issue-0044). V2 still reads the V1
+# keys (`permission`, `snapshot`) by converting them, but drops what it cannot
+# convert without a word: V1's compaction.prune and compaction.tail_turns simply
+# vanished. Writing native keys means what is below is what V2 runs with;
+# scripts/test-opencode-baseline.sh checks that V2 reads it back unchanged.
+#
 # Two backends reach opencode, and only one of them takes a CLI flag:
 #   * CLI backend (`opencode run`) — Wukong always starts it with stdin=null, so
 #     it can never answer an interactive prompt. WUKONG_AGENT_CMD therefore
 #     carries `--dangerously-skip-permissions`.
-#   * Server backend (`opencode serve`) — the compose default, selected by
-#     WUKONG_AGENT_SERVER_URL. `serve` has no equivalent flag, so THIS FILE is
-#     the only permission control Web, Telegram and Scheduler have.
-# `--dangerously-skip-permissions` still honours an explicit `deny`, so the bash
-# denylist below blocks catastrophic recursive deletes of absolute paths while
-# still allowing deletes inside /workspace. To change any of it, put your own
-# keys in user.json — do not edit opencode.json, it is overwritten on restart.
-# Keep user rules specific and self-contained: opencode resolves permissions by
-# "last matching rule wins", and merging two rule objects gives no guarantee
-# about where a user key lands in that order.
+#   * Server and local backends (`opencode serve`) — no equivalent flag, so THIS
+#     FILE is the only permission control Web, Telegram and Scheduler have.
+# Both still honour an explicit `deny`, so the shell rules below block recursive
+# deletes of absolute paths while still allowing deletes inside /workspace.
+# `permissions` is an ordered list and the last matching rule wins: keep the
+# /workspace allow after the denies. To change any of it, put your own keys in
+# user.json — do not edit opencode.json, it is overwritten on restart. Rules in
+# user.json come after these, so they win; the V1 `permission` form still works
+# there too.
 #
-#   external_directory - defaults to `ask`, which is what stalls unattended work:
-#                 a scheduled job touching /tmp stops on a prompt nobody answers
-#                 until the stream deadline kills the turn (see
-#                 docs/2026-08-06-docker-runtime-handover.md). /tmp is allowed
-#                 explicitly in three key forms because opencode matches the
-#                 requested path against these globs and reports the request as
-#                 `/tmp/*`. Grant further paths one at a time — do NOT relax this
-#                 to a blanket "allow", it applies to every path-based tool.
+#   external_directory - /tmp is allowed explicitly so a scheduled job touching
+#                 it never stops on a prompt nobody answers until the stream
+#                 deadline kills the turn (see
+#                 docs/2026-08-06-docker-runtime-handover.md). V2 2.3.2 does not
+#                 ask by default, but these rules keep that true if a default or a
+#                 broader user rule changes. Grant further paths one at a time.
 #
-# The seed also carries CPU guardrails for long conversations. opencode 1.18
-# persists every streaming update as a FULL snapshot of the part into its
-# durable event log (`opencode.db`), so one long answer costs O(text x updates)
-# in JSON serialisation plus SQLite writes — measured at ~430x write
-# amplification on a single session (38 MB written for a 91 KB final part).
-# These keys cut the base cost of that amplification:
-#   snapshot    - opencode keeps a bare git repo per project and commits the
+# The baseline also carries CPU guardrails for long conversations. opencode 1.18
+# was measured at ~430x write amplification on a single session (every streaming
+# update persisted as a full snapshot of the part, 38 MB written for a 91 KB
+# final part). These keys cut the base cost:
+#   snapshots   - opencode keeps a bare git repo per project and commits the
 #                 whole workspace on every edit; on a bind-mounted /workspace
 #                 that is expensive per tool call, and the store grows without
 #                 bound (>1 GB for a single project is normal). Wukong's
@@ -165,6 +166,10 @@ mkdir -p "$OPENCODE_CONFIG_DIR"
 #   compaction  - lets opencode trim its own context. Complements (does not
 #                 replace) Wukong's WUKONG_SESSION_COMPACT_EVERY_TURNS, which
 #                 compacts on turn count rather than on context pressure.
+#                 `background` is off: V2 would otherwise pre-write a summary as a
+#                 session nears the limit, spending tokens on summaries that may
+#                 never be used, which V1 never did. V1's prune and tail_turns
+#                 have no V2 counterpart.
 #   watcher     - keeps the in-container file watcher off build output.
 OPENCODE_CONFIG_FILE="$OPENCODE_CONFIG_DIR/opencode.json"
 OPENCODE_USER_CONFIG_FILE="$OPENCODE_CONFIG_DIR/user.json"
@@ -187,11 +192,10 @@ echo "[wukong] Writing opencode.json baseline (destructive-rm guard + /tmp acces
 cat > "$OPENCODE_CONFIG_FILE" <<'OPENCODE_JSON'
 {
   "$schema": "https://opencode.ai/config.json",
-  "snapshot": false,
+  "snapshots": false,
   "compaction": {
     "auto": true,
-    "prune": true,
-    "tail_turns": 8
+    "background": false
   },
   "tool_output": {
     "max_lines": 500,
@@ -206,30 +210,26 @@ cat > "$OPENCODE_CONFIG_FILE" <<'OPENCODE_JSON'
       "**/build/**"
     ]
   },
-  "permission": {
-    "external_directory": {
-      "/tmp": "allow",
-      "/tmp/*": "allow",
-      "/tmp/**": "allow"
-    },
-    "bash": {
-      "*": "allow",
-      "*rm -rf /*": "deny",
-      "*rm -fr /*": "deny",
-      "*rm -Rf /*": "deny",
-      "*rm -rF /*": "deny",
-      "*rm -r -f /*": "deny",
-      "*rm -f -r /*": "deny",
-      "*rm -r /*": "deny",
-      "*rm -R /*": "deny",
-      "*rm --recursive*": "deny",
-      "*rm --force* /*": "deny",
-      "*rm -rf ~*": "deny",
-      "*rm -rf $HOME*": "deny",
-      "*sudo rm *": "deny",
-      "*rm * /workspace/*": "allow"
-    }
-  }
+  "permissions": [
+    { "action": "external_directory", "resource": "/tmp", "effect": "allow" },
+    { "action": "external_directory", "resource": "/tmp/*", "effect": "allow" },
+    { "action": "external_directory", "resource": "/tmp/**", "effect": "allow" },
+    { "action": "shell", "resource": "*", "effect": "allow" },
+    { "action": "shell", "resource": "*rm -rf /*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -fr /*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -Rf /*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -rF /*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -r -f /*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -f -r /*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -r /*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -R /*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm --recursive*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm --force* /*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -rf ~*", "effect": "deny" },
+    { "action": "shell", "resource": "*rm -rf $HOME*", "effect": "deny" },
+    { "action": "shell", "resource": "*sudo rm *", "effect": "deny" },
+    { "action": "shell", "resource": "*rm * /workspace/*", "effect": "allow" }
+  ]
 }
 OPENCODE_JSON
 printf 'wukong-managed baseline; edits belong in user.json\n' > "$OPENCODE_BASELINE_MARKER"

@@ -8,7 +8,8 @@ use wukong_gateway::StreamEvent;
 #[ignore = "requires isolated OpenCode and local model fixture"]
 async fn managed_actual_question_reply_and_session_resume() {
     let root = PathBuf::from(std::env::var("WUKONG_ISSUE7_MANAGED_ROOT").unwrap());
-    let backend = build_backend_from_env(vec!["opencode".into(), "run".into()], Some(root));
+    let backend =
+        build_backend_from_env(vec!["opencode".into(), "run".into()], Some(root)).unwrap();
     let mut session = None;
     for answer in [Some("A"), None, Some("自己的答案")] {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -90,7 +91,8 @@ async fn managed_actual_question_reply_and_session_resume() {
 #[ignore = "requires isolated OpenCode and local model fixture"]
 async fn managed_native_compact_delete_and_unattended_permission() {
     let root = PathBuf::from(std::env::var("WUKONG_ISSUE7_MANAGED_ROOT").unwrap());
-    let backend = build_backend_from_env(vec!["opencode".into(), "run".into()], Some(root.clone()));
+    let backend =
+        build_backend_from_env(vec!["opencode".into(), "run".into()], Some(root.clone())).unwrap();
     let marker = root.join("permission-marker");
     let _ = std::fs::remove_file(&marker);
     let response = tokio::time::timeout(
@@ -145,7 +147,8 @@ async fn managed_native_compact_delete_and_unattended_permission() {
 #[ignore = "requires isolated OpenCode and local model fixture"]
 async fn managed_pending_turn_drop_invalidates_reply() {
     let root = PathBuf::from(std::env::var("WUKONG_ISSUE7_MANAGED_ROOT").unwrap());
-    let backend = build_backend_from_env(vec!["opencode".into(), "run".into()], Some(root));
+    let backend =
+        build_backend_from_env(vec!["opencode".into(), "run".into()], Some(root)).unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let mut sink = |event| {
         if let StreamEvent::QuestionRequest(q) = event {
@@ -183,7 +186,8 @@ async fn managed_pending_turn_drop_invalidates_reply() {
 #[ignore = "requires isolated OpenCode and local model fixture"]
 async fn managed_ephemeral_returns_no_resumable_session() {
     let root = PathBuf::from(std::env::var("WUKONG_ISSUE7_MANAGED_ROOT").unwrap());
-    let backend = build_backend_from_env(vec!["opencode".into(), "run".into()], Some(root));
+    let backend =
+        build_backend_from_env(vec!["opencode".into(), "run".into()], Some(root)).unwrap();
     let request = AgentRequest {
         prompt: "SERVER_PROBE".into(),
         session_id: None,
@@ -212,7 +216,8 @@ async fn managed_ephemeral_returns_no_resumable_session() {
 #[ignore = "requires isolated OpenCode and local model fixture"]
 async fn managed_concurrent_questions_use_distinct_sessions_and_routes() {
     let root = PathBuf::from(std::env::var("WUKONG_ISSUE7_MANAGED_ROOT").unwrap());
-    let backend = build_backend_from_env(vec!["opencode".into(), "run".into()], Some(root));
+    let backend =
+        build_backend_from_env(vec!["opencode".into(), "run".into()], Some(root)).unwrap();
     let request = AgentRequest {
         prompt: "QUESTION_PROBE".into(),
         session_id: None,

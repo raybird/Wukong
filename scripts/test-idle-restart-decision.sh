@@ -41,20 +41,35 @@ while True:
     time.sleep(3600)
 PY
 
-# 產生一個 /session 端點。必須是 threading server：測試會另外掛一條閒置連線不放，
-# 單執行緒的 http.server 會被它卡死，連 curl 探測都進不來。
-# $1 = 產生 response body 的 python 運算式。
+# 產生一個 V2 形狀的 server（issue-0044）：`/api/session` 要 basic auth（使用者 opencode、密碼
+# FAKE_PASSWORD），回 `{"data": [...], "cursor": {...}}`；其他路徑跟 V2 一樣回 200 的網頁。
+# 必須是 threading server：測試會另外掛一條閒置連線不放，單執行緒的 http.server 會被它卡死，
+# 連 curl 探測都進不來。
+# $1 = 產生 `/api/session` response body 的 python 運算式。
+FAKE_PASSWORD=test-pass
 write_fake_server() {
     cat >"$TMP/fake_server.py" <<PY
+import base64
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+EXPECTED = "Basic " + base64.b64encode(b"opencode:$FAKE_PASSWORD").decode()
 
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        body = ($1).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
+        if self.path.startswith("/api/"):
+            if self.headers.get("Authorization") != EXPECTED:
+                self.reply(401, "application/json", '{"error":"unauthorized"}')
+                return
+            self.reply(200, "application/json", $1)
+        else:
+            self.reply(200, "text/html", "<!doctype html><html></html>")
+
+    def reply(self, code, content_type, text):
+        body = text.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -119,9 +134,10 @@ print(f"{start // 60:02d}:{start % 60:02d}-{end // 60:02d}:{end % 60:02d}")
 '
 }
 
-# $1 = CONN_GRACE_SECS, $2 = 觀察秒數, $3 = 日誌輸出路徑
+# $1 = CONN_GRACE_SECS, $2 = 觀察秒數, $3 = 日誌輸出路徑, $4 = 交給 supervisor 的密碼（預設正確的那組）
 run_supervisor() {
-    local grace="$1" seconds="$2" out="$3" sup
+    local grace="$1" seconds="$2" out="$3" password="${4-$FAKE_PASSWORD}" sup
+    OPENCODE_SERVER_PASSWORD="$password" \
     WUKONG_OPENCODE_PORT="$PORT" \
     WUKONG_OPENCODE_RESTART_WINDOW="$(current_window)" \
     WUKONG_OPENCODE_RESTART_MIN_UPTIME_SECS=0 \
@@ -139,7 +155,7 @@ run_supervisor() {
 
 # ── 案例一：寬限期未到，閒置的 keep-alive 仍應擋下重啟 ──
 # 這是舊行為唯一正確的部分，必須保住：真正進行中的回合握著連線時不能被拉掉。
-write_fake_server '"[]"'
+write_fake_server "'{\"data\":[],\"cursor\":{\"next\":null}}'"
 start_fixture
 run_supervisor 3600 6 "$TMP/wait.log"
 
@@ -169,7 +185,7 @@ echo "ok: an idle keep-alive no longer blocks the restart forever"
 
 # ── 案例三：session 有活動時，連線寬限期怎麼設都不能重啟 ──
 # 安全閘門不能因為放寬連線判斷而一起鬆掉。
-write_fake_server '"[{\"time\":{\"updated\":%d}}]" % int(time.time() * 1000)'
+write_fake_server "'{\"data\":[{\"id\":\"ses_1\",\"time\":{\"updated\":%d}}],\"cursor\":{}}' % int(time.time() * 1000)"
 start_fixture
 run_supervisor 0 6 "$TMP/busy.log"
 
@@ -181,5 +197,32 @@ grep -q "sending SIGINT" "$TMP/busy.log" \
 kill -0 "$TARGET_PID" 2>/dev/null \
     || fail "supervisor killed opencode while a session was active"
 echo "ok: an active session still blocks the restart regardless of the connection grace"
+
+# ── 案例四、五（issue-0044）：問不到 V2 的 session 列表時，不能當成閒置 ──
+# V1 的 `/session` 在 V2 回 200 的網頁；不帶或帶錯密碼回 401。兩者都判「忙」，而且 log 要說出原因，
+# 不能跟真的有活動一樣印「a session was updated」（V1 腳本在 V2 上就是這樣每天無聲跳過）。
+write_fake_server "'<!doctype html><html></html>'"
+start_fixture
+run_supervisor 0 6 "$TMP/html.log"
+grep -q "sending SIGINT" "$TMP/html.log" \
+    && fail "supervisor restarted opencode although the session list was not JSON"
+grep -q "not the V2 session list" "$TMP/html.log" \
+    || fail "supervisor should say the session list was unreadable; log:
+$(cat "$TMP/html.log")"
+kill -0 "$TARGET_PID" 2>/dev/null \
+    || fail "supervisor killed opencode although the session list was not JSON"
+echo "ok: an unreadable session list blocks the restart and says why"
+
+write_fake_server "'{\"data\":[],\"cursor\":{}}'"
+start_fixture
+run_supervisor 0 6 "$TMP/auth.log" wrong-pass
+grep -q "sending SIGINT" "$TMP/auth.log" \
+    && fail "supervisor restarted opencode although the server rejected the password"
+grep -q "rejected the password" "$TMP/auth.log" \
+    || fail "supervisor should say the password was rejected; log:
+$(cat "$TMP/auth.log")"
+grep -q "wrong-pass" "$TMP/auth.log" \
+    && fail "supervisor printed the password"
+echo "ok: a rejected password blocks the restart and says why"
 
 echo "idle-restart decision checks passed"

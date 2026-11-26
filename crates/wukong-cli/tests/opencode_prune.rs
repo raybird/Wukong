@@ -17,7 +17,8 @@ fn now_ms() -> u128 {
         .as_millis()
 }
 
-/// 列表回傳 `sessions`，刪除以 `delete_status` 回應，其餘 404。
+/// 列表以 OpenCode V2 的形狀回傳 `sessions`（一頁、沒有下一頁），刪除以 `delete_status`
+/// 回應，其餘 404。
 fn fake_server(sessions: String, delete_status: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -41,10 +42,13 @@ fn fake_server(sessions: String, delete_status: &'static str) -> (String, Arc<Mu
                 words.next().unwrap_or_default(),
                 words.next().unwrap_or_default()
             );
-            let (status, body) = if request.starts_with("GET /session?") {
-                ("200 OK", sessions.clone())
-            } else if request.starts_with("DELETE /session/") {
-                (delete_status, "true".to_string())
+            let (status, body) = if request.starts_with("GET /api/session?") {
+                (
+                    "200 OK",
+                    format!(r#"{{"data":{sessions},"cursor":{{"next":null}}}}"#),
+                )
+            } else if request.starts_with("DELETE /api/session/") {
+                (delete_status, String::new())
             } else {
                 ("404 Not Found", String::new())
             };
@@ -100,7 +104,8 @@ async fn prune(
         .env("WUKONG_SETTINGS_FILE", dir.path().join("settings.json"))
         .env("WUKONG_OPENCODE_SESSION_RETENTION_DAYS", "30")
         .env_remove("WUKONG_AGENT_SERVER_USERNAME")
-        .env_remove("WUKONG_AGENT_SERVER_PASSWORD")
+        // server 模式一定要密碼（issue-0044 SCN-017）；這個假 server 不驗證。
+        .env("WUKONG_AGENT_SERVER_PASSWORD", "probe")
         .env_remove("WUKONG_EMBED")
         .env_remove("WUKONG_MD_DIR")
         .output()
@@ -131,7 +136,7 @@ async fn a_clean_run_names_its_memory_database_and_exits_zero() {
         "{}",
         outcome.stdout
     );
-    assert_eq!(outcome.deletes, ["DELETE /session/ses_orphan"]);
+    assert_eq!(outcome.deletes, ["DELETE /api/session/ses_orphan"]);
     assert_eq!(outcome.code, 0, "{}", outcome.stdout);
 }
 
@@ -139,7 +144,7 @@ async fn a_clean_run_names_its_memory_database_and_exits_zero() {
 async fn a_failed_delete_exits_nonzero() {
     let outcome = prune(Some("ses_kept"), None, "500 Internal Server Error").await;
 
-    assert_eq!(outcome.deletes, ["DELETE /session/ses_orphan"]);
+    assert_eq!(outcome.deletes, ["DELETE /api/session/ses_orphan"]);
     assert!(
         outcome.stdout.contains("刪除失敗 1 個"),
         "{}",

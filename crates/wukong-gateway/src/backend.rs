@@ -1,5 +1,7 @@
 use crate::error::GatewayError;
-use crate::stream::{parse_event, parse_session_id, parse_upstream_error_line, StreamEvent};
+use crate::stream::{
+    parse_event, parse_retry_line, parse_session_id, parse_upstream_error_line, StreamEvent,
+};
 use crate::upstream_error::classify_text;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -166,16 +168,23 @@ pub fn assemble_argv(
     prompt: &str,
 ) -> Vec<String> {
     let mut argv: Vec<String> = strip_model_args(command);
-    // 沒有這兩個旗標，opencode 只把上游錯誤寫進 ~/.local/share/opencode/log/，stderr
-    // 一個字都沒有——想檢查也拿不到資料。`ERROR` 不可省：預設 INFO 會把每次 bus
-    // publish 都灌進 stderr（實測健康回合的 stderr 只有 32 bytes）。
-    //
     // 只在真的是 opencode 時才加：`--agent-cmd "printf fixer"` / `echo` 的假 agent
     // 測試法是既有的除錯手段（見 AGENTS.md），把 opencode 專屬旗標塞給它會弄壞它。
     if is_opencode(command) {
+        // V2 的 run 預設連背景 service；主機上那可能是使用者自己的 opencode，回合會跑進
+        // 他的資料裡。使用者在命令裡自己指定了 --standalone 或 --server 就照他的
+        // （issue-0044 Task 2.6）。
+        let chosen = command
+            .iter()
+            .any(|arg| arg == "--standalone" || arg == "--server" || arg.starts_with("--server="));
+        if !chosen {
+            argv.push("--standalone".to_string());
+        }
+        // 沒有 --print-logs，失敗時 stderr 沒有任何線索。V2 只收小寫的等級，而且等級傳不到
+        // 私有 serve，INFO 照樣會印，回報前由 `without_info_logs` 濾掉。
         argv.push("--print-logs".to_string());
         argv.push("--log-level".to_string());
-        argv.push("ERROR".to_string());
+        argv.push("error".to_string());
     }
     if let Some(id) = session_id {
         argv.push("-s".to_string());
@@ -246,11 +255,28 @@ pub enum AgentBackend {
     Server(crate::opencode_server::OpencodeServerBackend),
 }
 
-pub fn build_backend_from_env(command: Vec<String>, workspace: Option<PathBuf>) -> AgentBackend {
-    match std::env::var("WUKONG_AGENT_SERVER_URL") {
-        Ok(url) if !url.trim().is_empty() => AgentBackend::Server(
-            crate::opencode_server::OpencodeServerBackend::from_env(url, workspace),
-        ),
+/// 依環境變數選 backend。設了 `WUKONG_AGENT_SERVER_URL` 卻沒有密碼時回錯誤：V2 server
+/// 一定有密碼（沒設時自己產生隨機的），沒有密碼的入口每個回合都會被拒，所以啟動就指出來
+/// （issue-0044 SCN-017）。
+pub fn build_backend_from_env(
+    command: Vec<String>,
+    workspace: Option<PathBuf>,
+) -> Result<AgentBackend, GatewayError> {
+    Ok(match std::env::var("WUKONG_AGENT_SERVER_URL") {
+        Ok(url) if !url.trim().is_empty() => {
+            if std::env::var("WUKONG_AGENT_SERVER_PASSWORD").map_or(true, |p| p.is_empty()) {
+                return Err(GatewayError::AgentFailed {
+                    code: None,
+                    stderr: "WUKONG_AGENT_SERVER_URL 已設定，但沒有設定 WUKONG_AGENT_SERVER_PASSWORD。\
+                        OpenCode V2 server 一定要密碼：請在 .env 設定 WUKONG_AGENT_SERVER_PASSWORD，\
+                        compose 會把同一組交給 opencode-server。"
+                        .to_string(),
+                });
+            }
+            AgentBackend::Server(crate::opencode_server::OpencodeServerBackend::from_env(
+                url, workspace,
+            ))
+        }
         _ if is_opencode(&command)
             && command.get(1).map(String::as_str) == Some("run")
             && strip_model_args(&command).len() == 2 =>
@@ -261,7 +287,7 @@ pub fn build_backend_from_env(command: Vec<String>, workspace: Option<PathBuf>) 
             ))
         }
         _ => AgentBackend::Cli(AgentCliBackend { command, workspace }),
-    }
+    })
 }
 
 /// 一則待回覆的 question 該送到哪個 opencode 端點。permission 詢問是以
@@ -324,7 +350,7 @@ impl AgentBackend {
         let backend = self.question_backend("回答")?;
         match question_reply_route(request_id, &answers)? {
             QuestionReplyRoute::Permission { id, reply } => {
-                backend.reply_permission(id, reply).await
+                backend.reply_permission(session_id, id, reply).await
             }
             QuestionReplyRoute::Question => {
                 backend
@@ -346,7 +372,7 @@ impl AgentBackend {
         let backend = self.question_backend("取消")?;
         match question_reject_route(request_id) {
             QuestionReplyRoute::Permission { id, reply } => {
-                backend.reply_permission(id, reply).await
+                backend.reply_permission(session_id, id, reply).await
             }
             QuestionReplyRoute::Question => backend.reject_question(session_id, request_id).await,
         }
@@ -444,6 +470,11 @@ impl AiBackend for AgentBackend {
     }
 }
 
+/// 已設定的 provider 與憑證狀態。V2 沒有 `providers` 子命令，`auth list` 只印名稱、類型與
+/// 是否已存，不印密鑰（`auth export` 才會）。
+pub const PROVIDERS_ARGS: &[&str] = &["auth", "list"];
+pub const MODELS_ARGS: &[&str] = &["models"];
+
 pub struct OpencodeUtility {
     pub binary: String,
     pub workspace: Option<PathBuf>,
@@ -461,6 +492,10 @@ impl OpencodeUtility {
         let mut cmd = Command::new(&self.binary);
         // 呼叫端逾時放棄時一併終止，不讓子行程留在背景。
         cmd.args(args).kill_on_drop(true).stdin(Stdio::null());
+        // 與 CLI backend 相同的理由：V2 不加 `--standalone` 會連背景 service，沒有就啟動一個常駐的。
+        if is_opencode(std::slice::from_ref(&self.binary)) {
+            cmd.arg("--standalone");
+        }
         if let Some(ws) = &self.workspace {
             cmd.current_dir(ws);
         }
@@ -477,6 +512,46 @@ impl OpencodeUtility {
 
 impl AiBackend for AgentCliBackend {
     async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+        self.run_with_retry_limit(req, crate::upstream_error::RETRY_GIVE_UP_AFTER)
+            .await
+    }
+
+    async fn run_streaming(
+        &self,
+        req: AgentRequest,
+        on_event: &mut dyn FnMut(StreamEvent),
+    ) -> Result<AgentResponse, GatewayError> {
+        self.run_streaming_with_retry_limit(
+            req,
+            on_event,
+            crate::upstream_error::RETRY_GIVE_UP_AFTER,
+        )
+        .await
+    }
+}
+
+impl AgentCliBackend {
+    /// opencode 的非串流回合也讀 `--format json` 事件：V2 對上游錯誤會一直重試，純文字輸出
+    /// 沒有任何訊號，只能等到 agent timeout（issue-0044 TBD-3）。session ID 照舊不回傳，
+    /// 路由與規劃這類非串流呼叫的行為不變。其他指令（自訂的 agent）維持讀純文字輸出。
+    async fn run_with_retry_limit(
+        &self,
+        req: AgentRequest,
+        retry_limit: std::time::Duration,
+    ) -> Result<AgentResponse, GatewayError> {
+        if is_opencode(&self.command) {
+            let response = self
+                .run_streaming_with_retry_limit(req, &mut |_| {}, retry_limit)
+                .await?;
+            return Ok(AgentResponse {
+                session_id: None,
+                ..response
+            });
+        }
+        self.run_plain(req).await
+    }
+
+    async fn run_plain(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
         let argv = assemble_argv(
             &self.command,
             req.session_id.as_deref(),
@@ -535,11 +610,17 @@ impl AiBackend for AgentCliBackend {
         })
     }
 
-    async fn run_streaming(
+    /// `retry_limit`：重試持續多久就結束子程序（見 [`crate::upstream_error::RetryWatch`]）；
+    /// 只有測試會傳其他值。
+    async fn run_streaming_with_retry_limit(
         &self,
         req: AgentRequest,
         on_event: &mut dyn FnMut(StreamEvent),
+        retry_limit: std::time::Duration,
     ) -> Result<AgentResponse, GatewayError> {
+        if is_opencode(&self.command) {
+            crate::opencode_version::ensure_v2(opencode_binary(&self.command)).await?;
+        }
         // Build argv then insert `--format json` before the prompt (last arg).
         let mut argv = assemble_argv(
             &self.command,
@@ -576,6 +657,7 @@ impl AiBackend for AgentCliBackend {
         let mut full = String::new();
         let mut session_id: Option<String> = None;
         let mut text_filter = DsmlToolCallFilter::default();
+        let mut retry = crate::upstream_error::RetryWatch::new(retry_limit);
         let deadline = tokio::time::sleep(agent_timeout());
         tokio::pin!(deadline);
         loop {
@@ -586,6 +668,13 @@ impl AiBackend for AgentCliBackend {
                     let _ = child.wait().await;
                     stderr_task.abort();
                     return Err(agent_timeout_error(""));
+                }
+                // V2 對上游錯誤會一直重試、子程序不結束（issue-0044 TBD-3）。
+                () = retry.expired() => {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    stderr_task.abort();
+                    return Err(retry.give_up());
                 }
             };
             let Some(line) = line else {
@@ -602,7 +691,15 @@ impl AiBackend for AgentCliBackend {
                 stderr_task.abort();
                 return Err(error.to_gateway_error());
             }
+            if let Some(error) = parse_retry_line(&line) {
+                retry.retrying(error);
+                continue;
+            }
             if let Some(ev) = parse_event(&line) {
+                // 重試前後都會有 step_start；有了實際輸出才算恢復。
+                if !matches!(ev, StreamEvent::StepStart) {
+                    retry.recovered();
+                }
                 match ev {
                     StreamEvent::Text(t) => {
                         let clean = text_filter.feed(&t);
@@ -641,7 +738,7 @@ impl AiBackend for AgentCliBackend {
         if !status.success() {
             return Err(GatewayError::AgentFailed {
                 code: status.code(),
-                stderr: stderr_buf.trim().to_string(),
+                stderr: without_info_logs(&stderr_buf).trim().to_string(),
             });
         }
         Ok(AgentResponse {
@@ -649,6 +746,22 @@ impl AiBackend for AgentCliBackend {
             session_id,
         })
     }
+}
+
+/// 去掉 opencode `--print-logs` 的 INFO 以下日誌行（`timestamp=… level=INFO …`），其他行原樣保留。
+fn without_info_logs(stderr: &str) -> String {
+    stderr
+        .lines()
+        .filter(|line| {
+            let level = line
+                .strip_prefix("timestamp=")
+                .and_then(|rest| rest.split_once(' '))
+                .and_then(|(_, rest)| rest.strip_prefix("level="))
+                .and_then(|rest| rest.split(' ').next());
+            !matches!(level, Some("TRACE" | "DEBUG" | "INFO"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 async fn read_pipe(mut pipe: impl tokio::io::AsyncRead + Unpin) -> String {
@@ -861,7 +974,7 @@ mod tests {
 
         let request = rx.await.unwrap();
         assert!(
-            request.starts_with("POST /permission/per_1/reply "),
+            request.starts_with("POST /api/session/ses_1/permission/per_1/reply "),
             "{request}"
         );
     }
@@ -880,7 +993,7 @@ mod tests {
 
         let request = rx.await.unwrap();
         assert!(
-            request.starts_with("POST /api/session/ses_1/question/que_1/reply "),
+            request.starts_with("POST /api/session/ses_1/form/que_1/reply "),
             "{request}"
         );
     }
@@ -899,7 +1012,24 @@ mod tests {
 
         let request = rx.await.unwrap();
         assert!(
-            request.starts_with("POST /permission/per_1/reply "),
+            request.starts_with("POST /api/session/ses_1/permission/per_1/reply "),
+            "{request}"
+        );
+    }
+
+    // issue-0044 SCN-006：V2 沒有 question 的 reject，取消提問改為刪除 form。
+    #[tokio::test]
+    async fn plain_question_cancel_deletes_the_form() {
+        let (url, rx) = recording_server().await;
+        let backend = AgentBackend::Server(
+            crate::opencode_server::OpencodeServerBackend::from_env(url, None),
+        );
+
+        backend.cancel_question("ses_1", "frm_1").await.unwrap();
+
+        let request = rx.await.unwrap();
+        assert!(
+            request.starts_with("DELETE /api/session/ses_1/form/frm_1 "),
             "{request}"
         );
     }
@@ -969,9 +1099,12 @@ mod tests {
         static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _lock = ENV_LOCK.lock().unwrap();
         let previous = std::env::var("WUKONG_AGENT_SERVER_URL").ok();
+        let previous_password = std::env::var("WUKONG_AGENT_SERVER_PASSWORD").ok();
         std::env::remove_var("WUKONG_AGENT_SERVER_URL");
+        std::env::remove_var("WUKONG_AGENT_SERVER_PASSWORD");
 
-        let backend = build_backend_from_env(vec!["opencode".to_string(), "run".to_string()], None);
+        let backend =
+            build_backend_from_env(vec!["opencode".to_string(), "run".to_string()], None).unwrap();
         let custom = build_backend_from_env(
             vec![
                 "opencode".into(),
@@ -980,7 +1113,8 @@ mod tests {
                 "custom".into(),
             ],
             None,
-        );
+        )
+        .unwrap();
         let model = build_backend_from_env(
             vec![
                 "opencode".into(),
@@ -989,15 +1123,32 @@ mod tests {
                 "probe/probe".into(),
             ],
             None,
-        );
-        let arbitrary = build_backend_from_env(vec!["printf".into(), "fixer".into()], None);
+        )
+        .unwrap();
+        let arbitrary =
+            build_backend_from_env(vec!["printf".into(), "fixer".into()], None).unwrap();
         std::env::set_var("WUKONG_AGENT_SERVER_URL", "http://127.0.0.1:1");
-        let remote = build_backend_from_env(vec!["command-that-must-not-run".into()], None);
+        // issue-0044 SCN-017：V2 server 一定要密碼，沒設時入口啟動就報錯，不等到回合。
+        let missing = build_backend_from_env(vec!["command-that-must-not-run".into()], None);
+        std::env::set_var("WUKONG_AGENT_SERVER_PASSWORD", "probe");
+        let remote =
+            build_backend_from_env(vec!["command-that-must-not-run".into()], None).unwrap();
 
-        match previous {
-            Some(value) => std::env::set_var("WUKONG_AGENT_SERVER_URL", value),
-            None => std::env::remove_var("WUKONG_AGENT_SERVER_URL"),
+        for (name, value) in [
+            ("WUKONG_AGENT_SERVER_URL", previous),
+            ("WUKONG_AGENT_SERVER_PASSWORD", previous_password),
+        ] {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
         }
+        let stderr = match missing {
+            Err(GatewayError::AgentFailed { stderr, .. }) => stderr,
+            Err(other) => panic!("unexpected error: {other}"),
+            Ok(_) => panic!("server mode without a password must not build a backend"),
+        };
+        assert!(stderr.contains("WUKONG_AGENT_SERVER_PASSWORD"), "{stderr}");
 
         assert!(matches!(backend, AgentBackend::Local(_)));
         assert!(matches!(custom, AgentBackend::Cli(_)));
@@ -1022,12 +1173,30 @@ mod tests {
             vec![
                 "opencode",
                 "run",
+                "--standalone",
                 "--print-logs",
                 "--log-level",
-                "ERROR",
+                "error",
                 "hi"
             ]
         );
+    }
+
+    // issue-0044 SCN-010：V2 的 run 預設連背景 service（主機上可能是使用者自己的），
+    // 一律加 --standalone；使用者自己指定了 --standalone 或 --server 就照他的。
+    #[test]
+    fn assemble_argv_keeps_the_server_choice_of_a_custom_command() {
+        for command in [
+            vec!["opencode", "run", "--standalone"],
+            vec!["opencode", "run", "--server", "http://127.0.0.1:4096"],
+            vec!["opencode", "run", "--server=http://127.0.0.1:4096"],
+        ] {
+            let command: Vec<String> = command.into_iter().map(String::from).collect();
+            let argv = assemble_argv(&command, None, false, None, None, &[], "hi");
+            let standalone = argv.iter().filter(|arg| *arg == "--standalone").count();
+            let expected = usize::from(command.iter().any(|arg| arg == "--standalone"));
+            assert_eq!(standalone, expected, "{argv:?}");
+        }
     }
 
     #[test]
@@ -1058,8 +1227,9 @@ mod tests {
             &[],
             "hi",
         );
+        assert!(argv.contains(&"--standalone".to_string()));
         assert!(argv.contains(&"--print-logs".to_string()));
-        assert!(argv.contains(&"ERROR".to_string()));
+        assert!(argv.contains(&"error".to_string()));
     }
 
     #[test]
@@ -1078,9 +1248,10 @@ mod tests {
             vec![
                 "opencode",
                 "run",
+                "--standalone",
                 "--print-logs",
                 "--log-level",
-                "ERROR",
+                "error",
                 "-s",
                 "ses_x",
                 "--thinking",
@@ -1105,9 +1276,10 @@ mod tests {
             vec![
                 "opencode",
                 "run",
+                "--standalone",
                 "--print-logs",
                 "--log-level",
-                "ERROR",
+                "error",
                 "--model",
                 "opencode/deepseek-v4-flash-free",
                 "hi"
@@ -1136,9 +1308,10 @@ mod tests {
             vec![
                 "opencode",
                 "run",
+                "--standalone",
                 "--print-logs",
                 "--log-level",
-                "ERROR",
+                "error",
                 "-s",
                 "ses_x",
                 "--thinking",
@@ -1177,9 +1350,10 @@ mod tests {
             vec![
                 "opencode",
                 "run",
+                "--standalone",
                 "--print-logs",
                 "--log-level",
-                "ERROR",
+                "error",
                 "--file",
                 "/tmp/report.pdf",
                 "--file",
@@ -1205,9 +1379,10 @@ mod tests {
             vec![
                 "opencode",
                 "run",
+                "--standalone",
                 "--print-logs",
                 "--log-level",
-                "ERROR",
+                "error",
                 "--agent",
                 "plan",
                 "hi"
@@ -1259,6 +1434,30 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
         assert!(!marker.exists(), "the abandoned child kept running");
+    }
+
+    // issue-0044 review-0405603 M1：V2 沒有 `providers` 子命令；不加 `--standalone` 時會連背景
+    // service，沒有就啟動一個常駐的，留在容器（或使用者的主機）裡。
+    #[tokio::test]
+    async fn utility_commands_use_v2_subcommands_with_a_private_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("opencode");
+        std::fs::write(&fake, "#!/bin/sh\necho \"$*\"\n").unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let util = OpencodeUtility::from_agent_command(
+            &[fake.display().to_string(), "run".to_string()],
+            None,
+        );
+
+        assert_eq!(
+            util.run_fixed(PROVIDERS_ARGS).await.unwrap(),
+            "auth list --standalone"
+        );
+        assert_eq!(
+            util.run_fixed(MODELS_ARGS).await.unwrap(),
+            "models --standalone"
+        );
     }
 
     #[test]
@@ -1488,6 +1687,249 @@ mod tests {
                 StreamEvent::StepFinish,
             ]
         );
+    }
+
+    fn v2_cli_fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/opencode-v2")
+            .join(format!("{name}.ndjson"))
+    }
+
+    /// 以 `sh -c` 當假 agent；argv 後面附加的旗標與提示詞成為 `$1`… 被忽略。
+    fn shell_agent(script: String) -> AgentCliBackend {
+        AgentCliBackend {
+            command: vec!["sh".to_string(), "-c".to_string(), script, "sh".to_string()],
+            workspace: None,
+        }
+    }
+
+    fn plain_request() -> AgentRequest {
+        AgentRequest {
+            prompt: "ignored".into(),
+            session_id: None,
+            thinking: false,
+            model: None,
+            agent: None,
+            tool_overrides: BTreeMap::new(),
+            attachments: Vec::new(),
+        }
+    }
+
+    const SHORT_RETRY_LIMIT: std::time::Duration = std::time::Duration::from_millis(400);
+
+    // issue-0044 SCN-007 第三列（CLI）：V2 一直送 retry、子程序不結束，超過時限就結束它。
+    #[tokio::test]
+    async fn agent_cli_gives_up_on_retries_that_last_too_long() {
+        let retry = v2_cli_fixture("cli-retry-transport");
+        let backend = shell_agent(format!("head -n 3 '{}'; exec sleep 30", retry.display()));
+        let started = std::time::Instant::now();
+
+        let error = backend
+            .run_streaming_with_retry_limit(plain_request(), &mut |_| {}, SHORT_RETRY_LIMIT)
+            .await
+            .unwrap_err();
+
+        let waited = started.elapsed();
+        assert!(
+            waited >= SHORT_RETRY_LIMIT && waited < std::time::Duration::from_secs(5),
+            "{waited:?}"
+        );
+        match error {
+            GatewayError::UpstreamFailed { kind, detail, .. } => {
+                assert_eq!(kind, crate::upstream_error::UpstreamFailure::Unreachable);
+                assert!(detail.contains("重試 2 次"), "{detail}");
+            }
+            other => panic!("expected UpstreamFailed, got {other:?}"),
+        }
+    }
+
+    // issue-0044 SCN-016（CLI）：重試後恢復輸出就重新起算；從第一次重試到結束超過時限也照常完成。
+    #[tokio::test]
+    async fn agent_cli_finishes_a_turn_that_recovers_from_retries() {
+        let retry = v2_cli_fixture("cli-retry-transport");
+        let answer = v2_cli_fixture("cli-text-reasoning");
+        let expected = std::fs::read_to_string(&answer)
+            .unwrap()
+            .lines()
+            .find_map(|line| match parse_event(line) {
+                Some(StreamEvent::Text(text)) => Some(text),
+                _ => None,
+            })
+            .unwrap();
+        let backend = shell_agent(format!(
+            "head -n 2 '{retry}'; sleep 0.3; cat '{answer}'; sleep 0.3",
+            retry = retry.display(),
+            answer = answer.display()
+        ));
+
+        let response = backend
+            .run_streaming_with_retry_limit(plain_request(), &mut |_| {}, SHORT_RETRY_LIMIT)
+            .await
+            .unwrap();
+
+        assert_eq!(response.text, expected.trim());
+    }
+
+    /// 名為 `opencode` 的假 agent（`is_opencode` 看檔名）：指向 sh 的符號連結執行 `body`。
+    /// 不直接 exec 剛寫好的腳本，避開平行測試 fork 時的 ETXTBSY。
+    fn fake_opencode(dir: &std::path::Path, body: &str) -> AgentCliBackend {
+        let link = dir.join("opencode");
+        std::os::unix::fs::symlink("/bin/sh", &link).unwrap();
+        let script = dir.join("agent.sh");
+        std::fs::write(&script, body).unwrap();
+        AgentCliBackend {
+            command: vec![link.display().to_string(), script.display().to_string()],
+            workspace: None,
+        }
+    }
+
+    fn v2_cli_session(name: &str) -> String {
+        let text = std::fs::read_to_string(v2_cli_fixture(name)).unwrap();
+        let first: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        first["sessionID"].as_str().unwrap().to_string()
+    }
+
+    // issue-0044 SCN-010：V2 `run --format json` 的真實輸出照常轉成步驟、思考、工具與文字，
+    // 並取得 session。
+    #[tokio::test]
+    async fn v2_run_output_streams_steps_reasoning_tools_and_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let answer = v2_cli_fixture("cli-text-reasoning");
+        let backend = fake_opencode(dir.path(), &format!("cat '{}'", answer.display()));
+        let mut events = Vec::new();
+        let response = backend
+            .run_streaming(plain_request(), &mut |event| events.push(event))
+            .await
+            .unwrap();
+        assert_eq!(response.text, "OK");
+        assert_eq!(
+            response.session_id,
+            Some(v2_cli_session("cli-text-reasoning"))
+        );
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::StepStart,
+                StreamEvent::Reasoning("The user wants exactly the word OK.".to_string()),
+                StreamEvent::Text("OK".to_string()),
+                StreamEvent::StepFinish,
+            ]
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let tools = v2_cli_fixture("cli-tool-completed");
+        let backend = fake_opencode(dir.path(), &format!("cat '{}'", tools.display()));
+        let mut events = Vec::new();
+        let response = backend
+            .run_streaming(plain_request(), &mut |event| events.push(event))
+            .await
+            .unwrap();
+        assert_eq!(response.text, "DONE");
+        let used: Vec<_> = events
+            .iter()
+            .filter(|event| matches!(event, StreamEvent::ToolUse(_)))
+            .collect();
+        assert_eq!(
+            used,
+            vec![
+                &StreamEvent::ToolUse("read".to_string()),
+                &StreamEvent::ToolUse("read".to_string())
+            ]
+        );
+    }
+
+    // V2 的 --log-level 傳不到私有 serve，stderr 每次都有幾十行 INFO；失敗時回報的
+    // stderr 只留錯誤，與 V1 傳 ERROR 時相同。
+    #[tokio::test]
+    async fn a_failed_v2_run_reports_stderr_without_info_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let stderr = v2_cli_fixture("cli-stderr-offline").with_extension("txt");
+        let backend = fake_opencode(
+            dir.path(),
+            &format!(
+                "cat '{}' >&2; echo 'plain failure' >&2; exit 1",
+                stderr.display()
+            ),
+        );
+        let error = backend
+            .run_streaming(plain_request(), &mut |_| {})
+            .await
+            .unwrap_err();
+        let GatewayError::AgentFailed { code, stderr } = error else {
+            panic!("{error:?}");
+        };
+        assert_eq!(code, Some(1));
+        assert!(!stderr.contains("level=INFO"), "{stderr}");
+        assert!(stderr.contains("Failed to fetch models.dev"), "{stderr}");
+        assert!(stderr.ends_with("plain failure"), "{stderr}");
+    }
+
+    // 路由與規劃走非串流的 run；opencode 的 run 也要看得到重試，否則只能等 agent timeout。
+    #[tokio::test]
+    async fn opencode_plain_run_also_gives_up_on_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let retry = v2_cli_fixture("cli-retry-transport");
+        let backend = fake_opencode(
+            dir.path(),
+            &format!("head -n 3 '{}'; exec sleep 30", retry.display()),
+        );
+
+        let error = backend
+            .run_with_retry_limit(plain_request(), SHORT_RETRY_LIMIT)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                GatewayError::UpstreamFailed {
+                    kind: crate::upstream_error::UpstreamFailure::Unreachable,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn opencode_plain_run_reads_the_answer_from_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let answer = v2_cli_fixture("cli-text-reasoning");
+        let backend = fake_opencode(dir.path(), &format!("cat '{}'", answer.display()));
+
+        let response = backend.run(plain_request()).await.unwrap();
+
+        let expected = std::fs::read_to_string(&answer)
+            .unwrap()
+            .lines()
+            .find_map(|line| match parse_event(line) {
+                Some(StreamEvent::Text(text)) => Some(text),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(response.text, expected.trim());
+        assert_eq!(response.session_id, None);
+    }
+
+    #[tokio::test]
+    async fn agent_cli_reports_the_v2_error_type() {
+        let backend = shell_agent(format!(
+            "cat '{}'; exec sleep 30",
+            v2_cli_fixture("cli-no-route").display()
+        ));
+
+        let error = backend
+            .run_streaming(plain_request(), &mut |_| {})
+            .await
+            .unwrap_err();
+
+        match error {
+            GatewayError::UpstreamFailed { kind, detail, .. } => {
+                assert_eq!(kind, crate::upstream_error::UpstreamFailure::ModelEol);
+                assert!(detail.contains("provider.no-route"), "{detail}");
+            }
+            other => panic!("expected UpstreamFailed, got {other:?}"),
+        }
     }
 
     #[tokio::test]

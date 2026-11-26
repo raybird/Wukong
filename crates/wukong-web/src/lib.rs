@@ -419,7 +419,7 @@ static MODELS_CACHE: models_api::ModelCatalogCache = models_api::ModelCatalogCac
 async fn get_models() -> axum::response::Response {
     let result = MODELS_CACHE
         .get_or_fetch(models_api::MODELS_CACHE_TTL, || {
-            run_opencode_diagnostic(&["models"])
+            run_opencode_diagnostic(wukong_gateway::backend::MODELS_ARGS)
         })
         .await;
     models_api::models_response(result)
@@ -583,8 +583,8 @@ async fn run_github_auth_status() -> Result<String, String> {
 
 async fn system_extra_groups() -> Vec<system_api::DiagnosticGroup> {
     let (providers_result, models_result, github_result) = tokio::join!(
-        run_opencode_diagnostic(&["providers", "list"]),
-        run_opencode_diagnostic(&["models"]),
+        run_opencode_diagnostic(wukong_gateway::backend::PROVIDERS_ARGS),
+        run_opencode_diagnostic(wukong_gateway::backend::MODELS_ARGS),
         run_github_auth_status(),
     );
 

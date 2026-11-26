@@ -52,7 +52,13 @@ async fn main() {
         }
     };
 
-    let backend = build_backend_from_env(cfg.agent_command.clone(), workspace_dir());
+    let backend = match build_backend_from_env(cfg.agent_command.clone(), workspace_dir()) {
+        Ok(backend) => backend,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
 
     if cli.new_session {
         // 先刪 opencode 那邊的 session，否則它會永遠留在 opencode.db。刪不掉也照樣

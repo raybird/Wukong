@@ -1,105 +1,239 @@
+//! OpenCode V2 `/api/event` 事件到 [`StreamEvent`] 的對應。
+//!
+//! V2 的事件形狀為 `{"type": "...", "data": {"sessionID": ..., ...}}`，對照見
+//! `docs/issues/issue-0044/probe-events.md`，測試以 `tests/fixtures/opencode-v2/` 的真實樣本重播。
+
 use crate::stream::{
     QuestionInfo, QuestionOption, QuestionRequest, StreamEvent, PERMISSION_ALLOW_ALWAYS_LABEL,
     PERMISSION_ALLOW_ONCE_LABEL, PERMISSION_REJECT_LABEL, PERMISSION_REQUEST_PREFIX,
 };
-use crate::upstream_error::{parse_error_field, UpstreamError};
+use crate::upstream_error::{parse_v2_error, RetryWatch, UpstreamError};
 use serde_json::Value;
+use std::collections::HashMap;
 
-fn format_tool_use_name(part: &Value, name: &str) -> String {
-    if name == "question" {
-        return format_question_tool_use(part, name);
+#[derive(Debug, PartialEq)]
+pub(super) enum ServerEventAction {
+    Emit(StreamEvent),
+    /// 本 session 的執行成功結束。
+    Idle,
+    /// 執行失敗、被中止或壓縮失敗。**必須**中止這次回合並回 `Err`：失敗的回合不能以
+    /// 成功收場（實測：中止後仍有 step 事件，只看「結束了」會把它當成正常完成）。
+    Failed(UpstreamError),
+    Ignore,
+}
+
+pub(super) fn event_type_of(value: &Value) -> &str {
+    value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+}
+
+/// 一次回合的事件對應。V2 的工具名稱只出現在 `session.tool.input.started`，輸入在之後的
+/// `session.tool.called`；回覆文字在 `session.text.ended`，要記到回合結束才知道哪則是最後的。
+pub(super) struct ServerEventMapper {
+    session_id: String,
+    tool_names: HashMap<String, String>,
+    last_message: Option<String>,
+    texts: Vec<(String, String)>,
+    pub(super) retry: RetryWatch,
+    /// 使用者取消了提問或拒絕了權限。V2 之後會以 `execution.interrupted`（reason
+    /// `shutdown`）結束執行；V1 1.19.6 同樣情況是不帶錯誤的 `session.idle`，回合照常收尾
+    /// （2026-11-24 兩版實測，見 docs/issues/issue-0044/probe-reply.md）。
+    declined: bool,
+}
+
+impl ServerEventMapper {
+    pub(super) fn new(session_id: &str, retry: RetryWatch) -> Self {
+        Self {
+            session_id: session_id.to_string(),
+            tool_names: HashMap::new(),
+            last_message: None,
+            texts: Vec::new(),
+            retry,
+            declined: false,
+        }
     }
 
-    let Some(input) = part.get("state").and_then(|state| state.get("input")) else {
-        return name.to_string();
-    };
+    /// 最後一則 assistant 訊息的文字。與 V1 取「最新一則 assistant message 的 text part」
+    /// 相同：最後一步沒有文字時是空字串，交給 runtime 的收尾處理，不拿前面步驟的文字頂替。
+    pub(super) fn final_text(&self) -> String {
+        let Some(last) = self.last_message.as_deref() else {
+            return String::new();
+        };
+        self.texts
+            .iter()
+            .filter(|(message, text)| message == last && !text.trim().is_empty())
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string()
+    }
+
+    pub(super) fn map(&mut self, value: &Value) -> ServerEventAction {
+        let event_type = event_type_of(value);
+        let Some(data) = value.get("data") else {
+            return ServerEventAction::Ignore;
+        };
+        // form 的 session 在 `data.form` 底下，其他事件都在 `data`。
+        let session = data
+            .get("sessionID")
+            .or_else(|| data.get("form").and_then(|form| form.get("sessionID")))
+            .and_then(Value::as_str);
+        // 不是本 session 的事件（含子 agent 的 session）一律忽略：別人的錯誤不能中止本回合。
+        if session != Some(self.session_id.as_str()) {
+            return ServerEventAction::Ignore;
+        }
+        if let Some(message) = data.get("assistantMessageID").and_then(Value::as_str) {
+            if matches!(event_type, "session.step.started" | "session.text.ended") {
+                self.last_message = Some(message.to_string());
+            }
+        }
+
+        // 重試之後模型有了實際輸出才算恢復；重試前後都會有 step.started，不能拿來判斷。
+        if matches!(
+            event_type,
+            "session.step.ended"
+                | "session.reasoning.delta"
+                | "session.text.delta"
+                | "session.text.ended"
+                | "session.tool.called"
+        ) {
+            self.retry.recovered();
+        }
+
+        match event_type {
+            "session.retry.scheduled" => {
+                self.retry
+                    .retrying(data.get("error").and_then(parse_v2_error));
+                ServerEventAction::Ignore
+            }
+            "session.execution.succeeded" => ServerEventAction::Idle,
+            "session.execution.failed" | "session.compaction.failed" => {
+                ServerEventAction::Failed(data.get("error").and_then(parse_v2_error).unwrap_or(
+                    UpstreamError {
+                        name: "UnknownError".to_string(),
+                        status_code: None,
+                        message: format!("{event_type} without error"),
+                    },
+                ))
+            }
+            "form.cancelled" => {
+                self.declined = true;
+                ServerEventAction::Ignore
+            }
+            "permission.replied" => {
+                if data.get("reply").and_then(Value::as_str) == Some("reject") {
+                    self.declined = true;
+                }
+                ServerEventAction::Ignore
+            }
+            "session.execution.interrupted"
+                if self.declined
+                    && data.get("reason").and_then(Value::as_str) == Some("shutdown") =>
+            {
+                ServerEventAction::Idle
+            }
+            "session.execution.interrupted" => ServerEventAction::Failed(UpstreamError {
+                name: "aborted".to_string(),
+                status_code: None,
+                message: format!(
+                    "execution interrupted ({})",
+                    data.get("reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                ),
+            }),
+            "session.step.started" => ServerEventAction::Emit(StreamEvent::StepStart),
+            "session.step.ended" => ServerEventAction::Emit(StreamEvent::StepFinish),
+            "session.reasoning.delta" => match data.get("delta").and_then(Value::as_str) {
+                Some(delta) if !delta.trim().is_empty() => {
+                    ServerEventAction::Emit(StreamEvent::Reasoning(delta.to_string()))
+                }
+                _ => ServerEventAction::Ignore,
+            },
+            "session.text.ended" => {
+                if let (Some(message), Some(text)) = (
+                    data.get("assistantMessageID").and_then(Value::as_str),
+                    data.get("text").and_then(Value::as_str),
+                ) {
+                    self.texts.push((message.to_string(), text.to_string()));
+                }
+                // 文字不在串流中送出：與 V1 server 路徑相同，回覆在回合結束時一次取得，
+                // 一邊送一邊再整段回傳會讓入口顯示兩次（見 docs/entrypoints.md）。
+                ServerEventAction::Ignore
+            }
+            "session.tool.input.started" => {
+                if let (Some(id), Some(name)) = (
+                    data.get("id").and_then(Value::as_str),
+                    data.get("name").and_then(Value::as_str),
+                ) {
+                    self.tool_names.insert(id.to_string(), name.to_string());
+                }
+                ServerEventAction::Ignore
+            }
+            "session.tool.called" => {
+                let name = data
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .and_then(|id| self.tool_names.get(id))
+                    .map(String::as_str)
+                    .unwrap_or("tool");
+                // 提問由 form.created 顯示，工具本身不再當成進度送出。
+                if name == "question" {
+                    return ServerEventAction::Ignore;
+                }
+                ServerEventAction::Emit(StreamEvent::ToolUse(format_tool_use(
+                    name,
+                    data.get("input"),
+                )))
+            }
+            "form.created" => match data.get("form").and_then(parse_form_request) {
+                Some(request) => ServerEventAction::Emit(StreamEvent::QuestionRequest(request)),
+                None => ServerEventAction::Ignore,
+            },
+            "permission.asked" => match parse_permission_request(data) {
+                Some(request) => ServerEventAction::Emit(StreamEvent::QuestionRequest(request)),
+                None => ServerEventAction::Ignore,
+            },
+            _ => ServerEventAction::Ignore,
+        }
+    }
+}
+
+/// 工具名稱加上少數欄位的摘要。只列白名單欄位：其他工具的輸入可能很長或帶敏感內容。
+fn format_tool_use(name: &str, input: Option<&Value>) -> String {
     let fields: &[&str] = match name {
-        "bash" => &["command"],
-        "read" => &["filePath"],
+        "shell" | "bash" => &["command"],
+        "read" => &["path", "filePath"],
         "grep" => &["pattern", "path", "include"],
         "glob" => &["pattern", "path"],
         _ => return name.to_string(),
     };
-
     let mut lines = vec![name.to_string()];
-    for field in fields {
-        if let Some(value) = input.get(field).and_then(Value::as_str) {
-            if !value.is_empty() {
-                lines.push(format!("  {field}: {}", truncate_tool_value(value)));
-            }
-        }
-    }
-
-    if lines.len() == 1 {
-        name.to_string()
-    } else {
-        lines.join("\n")
-    }
-}
-
-fn format_question_tool_use(part: &Value, name: &str) -> String {
-    let Some(questions) = part
-        .get("state")
-        .and_then(|state| state.get("input"))
-        .and_then(|input| input.get("questions"))
-        .and_then(Value::as_array)
-    else {
-        return name.to_string();
-    };
-
-    let mut lines = vec![name.to_string()];
-    for question in questions {
-        let prompt = question.get("question").and_then(Value::as_str);
-        let header = question.get("header").and_then(Value::as_str);
-        match (header, prompt) {
-            (Some(header), Some(prompt)) if !header.is_empty() && !prompt.is_empty() => {
-                lines.push(format!("  {header}: {}", truncate_tool_value(prompt)));
-            }
-            (_, Some(prompt)) if !prompt.is_empty() => {
-                lines.push(format!("  {}", truncate_tool_value(prompt)));
-            }
-            _ => {}
-        }
-
-        if let Some(options) = question.get("options").and_then(Value::as_array) {
-            for (idx, option) in options.iter().enumerate() {
-                let label = option.get("label").and_then(Value::as_str).unwrap_or("");
-                if label.is_empty() {
-                    continue;
-                }
-                let description = option
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                if description.is_empty() {
-                    lines.push(format!("  {}. {}", idx + 1, truncate_tool_value(label)));
-                } else {
-                    lines.push(format!(
-                        "  {}. {} - {}",
-                        idx + 1,
-                        truncate_tool_value(label),
-                        truncate_tool_value(description)
-                    ));
+    if let Some(input) = input {
+        for field in fields {
+            if let Some(value) = input.get(field).and_then(Value::as_str) {
+                if !value.is_empty() {
+                    lines.push(format!("  {field}: {}", truncate_tool_value(value)));
                 }
             }
         }
     }
-
-    if lines.len() == 1 {
-        name.to_string()
-    } else {
-        lines.join("\n")
-    }
+    lines.join("\n")
 }
 
-fn parse_question_request(properties: &Value) -> Option<QuestionRequest> {
-    let request_id = properties.get("id")?.as_str()?.to_string();
-    let session_id = properties.get("sessionID")?.as_str()?.to_string();
-    let questions = properties
-        .get("questions")?
+/// question 工具在 V2 變成 form：每個 field 是一題，`description` 是題目、`title` 是標題。
+/// `request_id` 是 form id，回覆時由它找回 field 的 key。
+fn parse_form_request(form: &Value) -> Option<QuestionRequest> {
+    let request_id = form.get("id")?.as_str()?.to_string();
+    let session_id = form.get("sessionID")?.as_str()?.to_string();
+    let questions = form
+        .get("fields")?
         .as_array()?
         .iter()
-        .filter_map(parse_question_info)
+        .filter_map(parse_form_field)
         .collect::<Vec<_>>();
     if questions.is_empty() {
         return None;
@@ -111,27 +245,28 @@ fn parse_question_request(properties: &Value) -> Option<QuestionRequest> {
     })
 }
 
-fn parse_question_info(value: &Value) -> Option<QuestionInfo> {
-    let question = value.get("question")?.as_str()?.to_string();
-    let header = value
-        .get("header")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let multiple = value
-        .get("multiple")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let custom = value.get("custom").and_then(Value::as_bool).unwrap_or(true);
-    let options = value
+fn parse_form_field(field: &Value) -> Option<QuestionInfo> {
+    let text = |key: &str| {
+        field
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+    };
+    let header = text("title").unwrap_or("").to_string();
+    let question = text("description").or_else(|| text("title"))?.to_string();
+    let options = field
         .get("options")
         .and_then(Value::as_array)
         .map(|items| {
             items
                 .iter()
                 .filter_map(|option| {
+                    let label = option
+                        .get("label")
+                        .or_else(|| option.get("value"))?
+                        .as_str()?;
                     Some(QuestionOption {
-                        label: option.get("label")?.as_str()?.to_string(),
+                        label: label.to_string(),
                         description: option
                             .get("description")
                             .and_then(Value::as_str)
@@ -142,28 +277,21 @@ fn parse_question_info(value: &Value) -> Option<QuestionInfo> {
                 .collect()
         })
         .unwrap_or_default();
-
     Some(QuestionInfo {
         question,
         header,
         options,
-        multiple,
-        custom,
+        multiple: field.get("type").and_then(Value::as_str) == Some("multiselect"),
+        custom: field.get("custom").and_then(Value::as_bool).unwrap_or(true),
     })
 }
 
-fn parse_permission_request(properties: &Value) -> Option<QuestionRequest> {
-    let permission_id = properties
-        .get("id")
-        .or_else(|| properties.get("requestID"))?
-        .as_str()?;
-    let session_id = properties.get("sessionID")?.as_str()?.to_string();
-    let permission = properties
-        .get("permission")
-        .and_then(Value::as_str)
-        .unwrap_or("tool");
-    let patterns = properties
-        .get("patterns")
+fn parse_permission_request(data: &Value) -> Option<QuestionRequest> {
+    let permission_id = data.get("id")?.as_str()?;
+    let session_id = data.get("sessionID")?.as_str()?.to_string();
+    let action = data.get("action").and_then(Value::as_str).unwrap_or("tool");
+    let resources = data
+        .get("resources")
         .and_then(Value::as_array)
         .map(|items| {
             items
@@ -174,10 +302,10 @@ fn parse_permission_request(properties: &Value) -> Option<QuestionRequest> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let mut question = format!("OpenCode 要求執行權限：{permission}");
-    if !patterns.is_empty() {
+    let mut question = format!("OpenCode 要求執行權限：{action}");
+    if !resources.is_empty() {
         question.push_str("\n\n範圍：\n• ");
-        question.push_str(&patterns.join("\n• "));
+        question.push_str(&resources.join("\n• "));
     }
     Some(QuestionRequest {
         request_id: format!("{PERMISSION_REQUEST_PREFIX}{permission_id}"),
@@ -219,704 +347,246 @@ fn truncate_tool_value(value: &str) -> String {
     }
 }
 
-#[derive(Debug, PartialEq)]
-pub(super) enum ServerEventAction {
-    Emit(StreamEvent),
-    Idle,
-    /// 上游回報了具名錯誤。**必須**中止這次回合並回 `Err`——在此之前
-    /// `session.error` 落在 fall-through 裡被丟掉，隨後的 `session.idle` 讓一個
-    /// 失敗的回合以 `Ok` 收場（實測：被 abort 的回合會對呼叫端回報成功）。
-    Failed(UpstreamError),
-    Ignore,
-}
-
-/// 取出事件型別（opencode 有時把事件包在 `payload` 底下）。錯誤診斷也需要它，
-/// 共用同一份解析才不會與 `map_server_event` 走鐘。
-pub(super) fn event_type_of(value: &Value) -> &str {
-    value
-        .get("payload")
-        .unwrap_or(value)
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-}
-
-pub(super) fn map_server_event(
-    value: &Value,
-    session_id: &str,
-    seen_tools: &mut std::collections::HashSet<String>,
-) -> ServerEventAction {
-    let payload = match value.get("payload") {
-        Some(payload) => payload,
-        None => value,
-    };
-    let event_type = event_type_of(value);
-    let properties = payload.get("properties").unwrap_or(payload);
-
-    // 先於 session.idle 判定：錯誤事件與 idle 事件會前後腳送達，漏讀錯誤就會把
-    // 失敗的回合當成正常結束。
-    if event_type == "session.error" {
-        return match (event_session_id(properties), parse_error_field(properties)) {
-            (Some(id), Some(error)) if id == session_id => ServerEventAction::Failed(error),
-            // session 不符（或無從判斷）時一律忽略：不能讓別人的錯誤中止本回合。
-            _ => ServerEventAction::Ignore,
-        };
-    }
-    if event_type == "session.idle" {
-        return match event_session_id(properties).as_deref() {
-            Some(id) if id == session_id => ServerEventAction::Idle,
-            _ => ServerEventAction::Ignore,
-        };
-    }
-    if event_type == "session.status" {
-        let is_idle = properties
-            .get("status")
-            .and_then(|status| status.get("type"))
-            .and_then(Value::as_str)
-            .map(|kind| kind == "idle")
-            .unwrap_or(false);
-        return match (event_session_id(properties).as_deref(), is_idle) {
-            (Some(id), true) if id == session_id => ServerEventAction::Idle,
-            _ => ServerEventAction::Ignore,
-        };
-    }
-    if event_type == "question.asked" {
-        return match parse_question_request(properties) {
-            Some(request) if request.session_id == session_id => {
-                ServerEventAction::Emit(StreamEvent::QuestionRequest(request))
-            }
-            _ => ServerEventAction::Ignore,
-        };
-    }
-    if event_type == "permission.asked" {
-        return match parse_permission_request(properties) {
-            Some(request) if request.session_id == session_id => {
-                ServerEventAction::Emit(StreamEvent::QuestionRequest(request))
-            }
-            _ => ServerEventAction::Ignore,
-        };
-    }
-    if event_type != "message.part.updated" {
-        return ServerEventAction::Ignore;
-    }
-
-    let part = match properties.get("part") {
-        Some(part) => part,
-        None => return ServerEventAction::Ignore,
-    };
-    let matches_session = part.get("sessionID").and_then(Value::as_str) == Some(session_id)
-        || event_session_id(properties).as_deref() == Some(session_id);
-    if !matches_session {
-        return ServerEventAction::Ignore;
-    }
-
-    match part.get("type").and_then(Value::as_str).unwrap_or_default() {
-        "reasoning" => {
-            let text = properties
-                .get("delta")
-                .and_then(Value::as_str)
-                .or_else(|| part.get("text").and_then(Value::as_str))
-                .unwrap_or_default();
-            if text.trim().is_empty() {
-                ServerEventAction::Ignore
-            } else {
-                ServerEventAction::Emit(StreamEvent::Reasoning(text.to_string()))
-            }
-        }
-        "tool" => {
-            let dedupe_key = part
-                .get("callID")
-                .and_then(Value::as_str)
-                .or_else(|| part.get("id").and_then(Value::as_str))
-                .unwrap_or("tool")
-                .to_string();
-            if !seen_tools.insert(dedupe_key) {
-                return ServerEventAction::Ignore;
-            }
-            let name = part.get("tool").and_then(Value::as_str).unwrap_or("tool");
-            if name == "question" {
-                return ServerEventAction::Ignore;
-            }
-            ServerEventAction::Emit(StreamEvent::ToolUse(format_tool_use_name(part, name)))
-        }
-        "step-start" => ServerEventAction::Emit(StreamEvent::StepStart),
-        "step-finish" => ServerEventAction::Emit(StreamEvent::StepFinish),
-        // `text` parts are intentionally NOT streamed here. The server backend
-        // fetches the final assistant text once via `list_messages` at the end
-        // of `run` (see `extract_latest_assistant_text`); emitting text deltas
-        // too would double-render the answer. Only reasoning/tool/step activity
-        // is streamed live. The CLI backend does stream text — this deliberate
-        // difference is documented in docs/entrypoints.md.
-        _ => ServerEventAction::Ignore,
-    }
-}
-
-fn event_session_id(properties: &Value) -> Option<String> {
-    properties
-        .get("sessionID")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            properties
-                .get("session")
-                .and_then(|session| session.get("id"))
-                .and_then(Value::as_str)
-        })
-        .or_else(|| {
-            properties
-                .get("info")
-                .and_then(|info| info.get("id"))
-                .and_then(Value::as_str)
-        })
-        .map(str::to_string)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::upstream_error::UpstreamFailure;
     use serde_json::json;
 
-    #[test]
-    fn maps_reasoning_delta_for_matching_session() {
-        let value = json!({
-            "payload": {
-                "type": "message.part.updated",
-                "properties": {
-                    "delta": "thinking",
-                    "part": {
-                        "id": "part_1",
-                        "sessionID": "ses_1",
-                        "messageID": "msg_1",
-                        "type": "reasoning",
-                        "text": "thinking total"
-                    }
-                }
-            }
-        });
-        let mut seen_tools = std::collections::HashSet::new();
-
-        assert_eq!(
-            map_server_event(&value, "ses_1", &mut seen_tools),
-            ServerEventAction::Emit(StreamEvent::Reasoning("thinking".to_string()))
+    /// 重播一份真實樣本，回傳送出的事件、結尾動作與最後的回覆文字。session 取樣本裡
+    /// 第一個 `session.created`。
+    fn replay(fixture: &str) -> (Vec<StreamEvent>, Option<ServerEventAction>, String) {
+        let path = format!(
+            "{}/tests/fixtures/opencode-v2/{fixture}.ndjson",
+            env!("CARGO_MANIFEST_DIR")
         );
+        let events: Vec<Value> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let session = events
+            .iter()
+            .find(|event| event["type"] == "session.created")
+            .and_then(|event| event["data"]["sessionID"].as_str())
+            .unwrap()
+            .to_string();
+        let mut mapper = ServerEventMapper::new(&session, RetryWatch::default());
+        let mut emitted = Vec::new();
+        for event in &events {
+            match mapper.map(event) {
+                ServerEventAction::Emit(event) => emitted.push(event),
+                ServerEventAction::Ignore => {}
+                end => return (emitted, Some(end), mapper.final_text()),
+            }
+        }
+        (emitted, None, mapper.final_text())
     }
 
+    // 期望值取自樣本內容本身：一次 shell 呼叫（`echo probe`），之後一步思考加上回覆 DONE。
     #[test]
-    fn maps_reasoning_text_when_delta_missing() {
-        let value = json!({
-            "payload": {
-                "type": "message.part.updated",
-                "properties": {
-                    "part": {
-                        "id": "part_1",
-                        "sessionID": "ses_1",
-                        "messageID": "msg_1",
-                        "type": "reasoning",
-                        "text": "thinking total"
-                    }
-                }
-            }
-        });
-        let mut seen_tools = std::collections::HashSet::new();
-
-        assert_eq!(
-            map_server_event(&value, "ses_1", &mut seen_tools),
-            ServerEventAction::Emit(StreamEvent::Reasoning("thinking total".to_string()))
-        );
-    }
-
-    #[test]
-    fn maps_part_updates_when_session_id_is_on_properties() {
-        let reasoning = json!({
-            "payload": {
-                "type": "message.part.updated",
-                "properties": {
-                    "sessionID": "ses_1",
-                    "delta": "thinking",
-                    "part": {
-                        "id": "part_1",
-                        "messageID": "msg_1",
-                        "type": "reasoning",
-                        "text": "thinking total"
-                    }
-                }
-            }
-        });
-        let tool = json!({
-            "payload": {
-                "type": "message.part.updated",
-                "properties": {
-                    "sessionID": "ses_1",
-                    "part": {
-                        "id": "part_tool",
-                        "messageID": "msg_1",
-                        "type": "tool",
-                        "callID": "call_1",
-                        "tool": "bash"
-                    }
-                }
-            }
-        });
-        let mut seen_tools = std::collections::HashSet::new();
-
-        assert_eq!(
-            map_server_event(&reasoning, "ses_1", &mut seen_tools),
-            ServerEventAction::Emit(StreamEvent::Reasoning("thinking".to_string()))
-        );
-        assert_eq!(
-            map_server_event(&tool, "ses_1", &mut seen_tools),
-            ServerEventAction::Emit(StreamEvent::ToolUse("bash".to_string()))
-        );
-    }
-
-    #[test]
-    fn maps_tool_use_once_per_call_id() {
-        let value = json!({
-            "payload": {
-                "type": "message.part.updated",
-                "properties": {
-                    "part": {
-                        "id": "part_tool",
-                        "sessionID": "ses_1",
-                        "messageID": "msg_1",
-                        "type": "tool",
-                        "callID": "call_1",
-                        "tool": "bash"
-                    }
-                }
-            }
-        });
-        let mut seen_tools = std::collections::HashSet::new();
-
-        assert_eq!(
-            map_server_event(&value, "ses_1", &mut seen_tools),
-            ServerEventAction::Emit(StreamEvent::ToolUse("bash".to_string()))
-        );
-        assert_eq!(
-            map_server_event(&value, "ses_1", &mut seen_tools),
-            ServerEventAction::Ignore
-        );
-    }
-
-    #[test]
-    fn maps_question_asked_to_question_request() {
-        let value = json!({
-            "payload": {
-                "type": "question.asked",
-                "properties": {
-                    "id": "que_1",
-                    "sessionID": "ses_1",
-                    "questions": [{
-                        "question": "要怎麼處理 question 工具顯示？",
-                        "header": "顯示方式",
-                        "multiple": true,
-                        "custom": true,
-                        "options": [
-                            {
-                                "label": "輸出選項",
-                                "description": "遇到 question 時直接列出可選項目"
-                            },
-                            {
-                                "label": "查文件",
-                                "description": "先確認是否有官方格式可轉換"
-                            }
-                        ]
-                    }]
-                }
-            }
-        });
-        let mut seen_tools = std::collections::HashSet::new();
-
-        assert_eq!(
-            map_server_event(&value, "ses_1", &mut seen_tools),
-            ServerEventAction::Emit(StreamEvent::QuestionRequest(QuestionRequest {
-                request_id: "que_1".to_string(),
-                session_id: "ses_1".to_string(),
-                questions: vec![QuestionInfo {
-                    question: "要怎麼處理 question 工具顯示？".to_string(),
-                    header: "顯示方式".to_string(),
-                    multiple: true,
-                    custom: true,
-                    options: vec![
-                        QuestionOption {
-                            label: "輸出選項".to_string(),
-                            description: "遇到 question 時直接列出可選項目".to_string(),
-                        },
-                        QuestionOption {
-                            label: "查文件".to_string(),
-                            description: "先確認是否有官方格式可轉換".to_string(),
-                        },
-                    ],
-                }],
-            }))
-        );
-    }
-
-    #[test]
-    fn maps_permission_asked_to_interactive_question() {
-        let value = json!({
-            "payload": {
-                "type": "permission.asked",
-                "properties": {
-                    "id": "per_1",
-                    "sessionID": "ses_1",
-                    "permission": "bash",
-                    "patterns": ["python clean_report.py", "python clean_report.py *"]
-                }
-            }
-        });
-        let mut seen_tools = std::collections::HashSet::new();
-
-        assert_eq!(
-            map_server_event(&value, "ses_1", &mut seen_tools),
-            ServerEventAction::Emit(StreamEvent::QuestionRequest(QuestionRequest {
-                request_id: "permission-per_1".to_string(),
-                session_id: "ses_1".to_string(),
-                questions: vec![QuestionInfo {
-                    question: "OpenCode 要求執行權限：bash\n\n範圍：\n• python clean_report.py\n• python clean_report.py *".to_string(),
-                    header: "🔐 權限確認".to_string(),
-                    multiple: false,
-                    custom: false,
-                    options: vec![
-                        QuestionOption {
-                            label: "允許一次".to_string(),
-                            description: "只允許這次請求".to_string(),
-                        },
-                        QuestionOption {
-                            label: "本次工作階段總是允許".to_string(),
-                            description: "在目前 OpenCode session 記住相同規則".to_string(),
-                        },
-                        QuestionOption {
-                            label: "拒絕".to_string(),
-                            description: "拒絕執行".to_string(),
-                        },
-                    ],
-                }],
-            }))
-        );
-    }
-
-    #[test]
-    fn ignores_question_tool_part_update_as_progress() {
-        let value = json!({
-            "payload": {
-                "type": "message.part.updated",
-                "properties": {
-                    "part": {
-                        "id": "part_tool",
-                        "sessionID": "ses_1",
-                        "messageID": "msg_1",
-                        "type": "tool",
-                        "callID": "call_1",
-                        "tool": "question",
-                        "state": {
-                            "status": "running",
-                            "input": {
-                                "questions": [{
-                                    "question": "要怎麼處理 question 工具顯示？",
-                                    "header": "顯示方式",
-                                    "options": []
-                                }]
-                            }
-                        }
-                    }
-                }
-            }
-        });
-        let mut seen_tools = std::collections::HashSet::new();
-
-        assert_eq!(
-            map_server_event(&value, "ses_1", &mut seen_tools),
-            ServerEventAction::Ignore
-        );
-    }
-
-    #[test]
-    fn maps_whitelisted_tool_use_input_summaries() {
-        fn tool_part(tool: &str, input: serde_json::Value) -> serde_json::Value {
-            json!({
-                "payload": {
-                    "type": "message.part.updated",
-                    "properties": {
-                        "part": {
-                            "id": format!("part_{tool}"),
-                            "sessionID": "ses_1",
-                            "messageID": "msg_1",
-                            "type": "tool",
-                            "callID": format!("call_{tool}"),
-                            "tool": tool,
-                            "state": {
-                                "status": "running",
-                                "input": input
-                            }
-                        }
-                    }
-                }
+    fn replays_a_tool_call_and_the_final_answer() {
+        let (events, end, text) = replay("server-text-tool");
+        assert_eq!(end, Some(ServerEventAction::Idle));
+        assert_eq!(text, "DONE");
+        let shape: Vec<String> = events
+            .iter()
+            .map(|event| match event {
+                StreamEvent::StepStart => "step".to_string(),
+                StreamEvent::StepFinish => "/step".to_string(),
+                StreamEvent::Reasoning(_) => "think".to_string(),
+                StreamEvent::ToolUse(tool) => format!("tool:{tool}"),
+                other => format!("{other:?}"),
             })
-        }
-
-        let cases = [
-            (
-                tool_part(
-                    "bash",
-                    json!({
-                        "command": "cargo test -p wukong-gateway",
-                        "secret": "do not show"
-                    }),
-                ),
-                "bash\n  command: cargo test -p wukong-gateway",
-            ),
-            (
-                tool_part(
-                    "read",
-                    json!({
-                        "filePath": "/workspace/crates/wukong-gateway/src/opencode_server.rs"
-                    }),
-                ),
-                "read\n  filePath: /workspace/crates/wukong-gateway/src/opencode_server.rs",
-            ),
-            (
-                tool_part(
-                    "grep",
-                    json!({
-                        "pattern": "ToolUse",
-                        "path": "/workspace/crates",
-                        "include": "*.rs"
-                    }),
-                ),
-                "grep\n  pattern: ToolUse\n  path: /workspace/crates\n  include: *.rs",
-            ),
-            (
-                tool_part(
-                    "glob",
-                    json!({
-                        "pattern": "**/*.rs",
-                        "path": "/workspace/crates"
-                    }),
-                ),
-                "glob\n  pattern: **/*.rs\n  path: /workspace/crates",
-            ),
-            (
-                tool_part(
-                    "webfetch",
-                    json!({
-                        "url": "https://example.com",
-                        "format": "markdown"
-                    }),
-                ),
-                "webfetch",
-            ),
-        ];
-
-        let mut seen_tools = std::collections::HashSet::new();
-        for (value, expected) in cases {
-            assert_eq!(
-                map_server_event(&value, "ses_1", &mut seen_tools),
-                ServerEventAction::Emit(StreamEvent::ToolUse(expected.to_string()))
-            );
-        }
-
-        let long_command = "a".repeat(130);
-        let expected_long_command = format!("bash\n  command: {}...", "a".repeat(117));
-        let value = tool_part("bash", json!({ "command": long_command }));
-        let mut seen_tools = std::collections::HashSet::new();
+            .collect::<Vec<_>>();
+        let mut collapsed = shape.clone();
+        collapsed.dedup();
         assert_eq!(
-            map_server_event(&value, "ses_1", &mut seen_tools),
-            ServerEventAction::Emit(StreamEvent::ToolUse(expected_long_command))
+            collapsed,
+            [
+                "step",
+                "tool:shell\n  command: echo probe",
+                "/step",
+                "step",
+                "think",
+                "/step"
+            ],
+            "{shape:?}"
         );
     }
 
     #[test]
-    fn maps_step_boundaries_and_idle() {
-        let mut seen_tools = std::collections::HashSet::new();
-        let step_start = json!({
-            "payload": {
-                "type": "message.part.updated",
-                "properties": {
-                    "part": { "id": "s1", "sessionID": "ses_1", "type": "step-start" }
-                }
-            }
-        });
-        let step_finish = json!({
-            "payload": {
-                "type": "message.part.updated",
-                "properties": {
-                    "part": { "id": "s2", "sessionID": "ses_1", "type": "step-finish" }
-                }
-            }
-        });
-        let idle = json!({
-            "payload": {
-                "type": "session.idle",
-                "properties": { "sessionID": "ses_1" }
-            }
-        });
+    fn replays_a_permission_request() {
+        let (events, end, _) = replay("server-permission");
+        assert_eq!(end, Some(ServerEventAction::Idle));
+        let requests: Vec<&QuestionRequest> = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::QuestionRequest(request) => Some(request),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(requests.len(), 1);
+        let request = requests[0];
+        assert_eq!(
+            request.request_id,
+            format!("{PERMISSION_REQUEST_PREFIX}per_20c8cc493001tAuadPx45uP440")
+        );
+        assert_eq!(
+            request.questions[0].question,
+            "OpenCode 要求執行權限：shell\n\n範圍：\n• echo probe"
+        );
+        assert_eq!(
+            request.questions[0]
+                .options
+                .iter()
+                .map(|option| option.label.as_str())
+                .collect::<Vec<_>>(),
+            [
+                PERMISSION_ALLOW_ONCE_LABEL,
+                PERMISSION_ALLOW_ALWAYS_LABEL,
+                PERMISSION_REJECT_LABEL
+            ]
+        );
+    }
 
+    #[test]
+    fn replays_a_question_form() {
+        let (events, end, _) = replay("server-form");
+        assert_eq!(end, Some(ServerEventAction::Idle));
+        let requests: Vec<&QuestionRequest> = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::QuestionRequest(request) => Some(request),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
-            map_server_event(&step_start, "ses_1", &mut seen_tools),
-            ServerEventAction::Emit(StreamEvent::StepStart)
+            requests,
+            [&QuestionRequest {
+                request_id: "frm_20c8cdc8c001tihFwyDW9Qv4EM".to_string(),
+                session_id: "ses_df3732be1ffeE82SQhxZQCmaDm".to_string(),
+                questions: vec![QuestionInfo {
+                    question: "Choose between A and B.".to_string(),
+                    header: "Choice".to_string(),
+                    options: vec![
+                        QuestionOption {
+                            label: "A".to_string(),
+                            description: "Option A".to_string(),
+                        },
+                        QuestionOption {
+                            label: "B".to_string(),
+                            description: "Option B".to_string(),
+                        },
+                    ],
+                    multiple: false,
+                    custom: true,
+                }],
+            }]
         );
+        assert!(!events.iter().any(
+            |event| matches!(event, StreamEvent::ToolUse(tool) if tool.starts_with("question"))
+        ));
+    }
+
+    #[test]
+    fn an_interrupted_execution_is_not_success() {
+        // 樣本裡中止之後還有 step.failed：結尾要以 execution 事件為準。
+        let (_, end, _) = replay("server-interrupt");
+        match end {
+            Some(ServerEventAction::Failed(error)) => {
+                assert_eq!(
+                    crate::upstream_error::classify(&error.name, error.status_code),
+                    UpstreamFailure::Aborted
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failed_execution_carries_the_v2_error() {
+        let (_, end, _) = replay("server-no-route");
+        match end {
+            Some(ServerEventAction::Failed(error)) => {
+                assert_eq!(error.name, "provider.no-route");
+                assert_eq!(error.message, "Model unavailable: missing/nope");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn events_of_other_sessions_are_ignored() {
+        let mut mapper = ServerEventMapper::new("ses_mine", RetryWatch::default());
+        for event in [
+            json!({"type":"session.execution.failed","data":{"sessionID":"ses_child","error":{"type":"provider.transport","message":"x"}}}),
+            json!({"type":"session.execution.succeeded","data":{"sessionID":"ses_child"}}),
+            json!({"type":"form.created","data":{"form":{"id":"frm_1","sessionID":"ses_child","fields":[{"key":"q0","title":"T","type":"string"}]}}}),
+            json!({"type":"session.step.started","data":{"sessionID":"ses_child","assistantMessageID":"msg_1"}}),
+        ] {
+            assert_eq!(mapper.map(&event), ServerEventAction::Ignore, "{event}");
+        }
         assert_eq!(
-            map_server_event(&step_finish, "ses_1", &mut seen_tools),
-            ServerEventAction::Emit(StreamEvent::StepFinish)
-        );
-        assert_eq!(
-            map_server_event(&idle, "ses_1", &mut seen_tools),
+            mapper.map(
+                &json!({"type":"session.execution.succeeded","data":{"sessionID":"ses_mine"}})
+            ),
             ServerEventAction::Idle
         );
     }
 
+    // review-0405603 N2：取消提問之後 V2 以 reason `shutdown` 結束，算正常結束；使用者按停止
+    // （reason `user`）在任何時候都是中止。
     #[test]
-    fn ignores_events_for_other_sessions_and_text_parts() {
-        let mut seen_tools = std::collections::HashSet::new();
-        let other = json!({
-            "payload": {
-                "type": "message.part.updated",
-                "properties": {
-                    "delta": "hidden",
-                    "part": { "id": "p", "sessionID": "ses_2", "type": "reasoning" }
-                }
-            }
-        });
-        let text = json!({
-            "payload": {
-                "type": "message.part.updated",
-                "properties": {
-                    "delta": "answer",
-                    "part": { "id": "p", "sessionID": "ses_1", "type": "text", "text": "answer" }
-                }
-            }
-        });
+    fn only_the_shutdown_after_a_decline_ends_the_turn_normally() {
+        let cancelled = json!({"type":"form.cancelled","data":{"id":"frm_1","sessionID":"ses_1"}});
+        let interrupted = |reason: &str| json!({"type":"session.execution.interrupted","data":{"sessionID":"ses_1","reason":reason}});
 
+        let mut mapper = ServerEventMapper::new("ses_1", RetryWatch::default());
+        mapper.map(&cancelled);
         assert_eq!(
-            map_server_event(&other, "ses_1", &mut seen_tools),
-            ServerEventAction::Ignore
+            mapper.map(&interrupted("shutdown")),
+            ServerEventAction::Idle
         );
-        assert_eq!(
-            map_server_event(&text, "ses_1", &mut seen_tools),
-            ServerEventAction::Ignore
+
+        let mut mapper = ServerEventMapper::new("ses_1", RetryWatch::default());
+        mapper.map(&cancelled);
+        assert!(
+            matches!(
+                mapper.map(&interrupted("user")),
+                ServerEventAction::Failed(_)
+            ),
+            "a user stop after a cancelled question must still abort"
         );
     }
 
-    /// AC-1：session.error 不再被忽略，且結構化欄位原樣帶出。
     #[test]
-    fn session_error_becomes_failed_with_structured_status_code() {
-        let value = serde_json::json!({
-            "type": "session.error",
-            "properties": {
-                "sessionID": "ses_1",
-                "error": {
-                    "name": "APIError",
-                    "data": {"message": "model is gone", "statusCode": 410, "isRetryable": false}
-                }
-            }
-        });
-        let mut seen_tools = std::collections::HashSet::new();
-        match map_server_event(&value, "ses_1", &mut seen_tools) {
-            ServerEventAction::Failed(error) => {
-                assert_eq!(error.name, "APIError");
-                assert_eq!(error.status_code, Some(410));
-                assert_eq!(error.message, "model is gone");
-            }
-            other => panic!("expected Failed, got {other:?}"),
+    fn final_text_is_empty_when_the_last_step_said_nothing() {
+        let mut mapper = ServerEventMapper::new("ses_1", RetryWatch::default());
+        for event in [
+            json!({"type":"session.step.started","data":{"sessionID":"ses_1","assistantMessageID":"msg_1"}}),
+            json!({"type":"session.text.ended","data":{"sessionID":"ses_1","assistantMessageID":"msg_1","ordinal":0,"text":"Let me check."}}),
+            json!({"type":"session.step.started","data":{"sessionID":"ses_1","assistantMessageID":"msg_2"}}),
+        ] {
+            mapper.map(&event);
         }
-    }
+        assert_eq!(mapper.final_text(), "");
 
-    /// AC-1 失敗路徑：別人的 session 出錯不得中止本回合。
-    #[test]
-    fn session_error_for_another_session_is_ignored() {
-        let value = serde_json::json!({
-            "type": "session.error",
-            "properties": {
-                "sessionID": "ses_OTHER",
-                "error": {"name": "APIError", "data": {"statusCode": 410}}
-            }
-        });
-        let mut seen_tools = std::collections::HashSet::new();
-        assert!(matches!(
-            map_server_event(&value, "ses_1", &mut seen_tools),
-            ServerEventAction::Ignore
-        ));
-
-        // 無從判斷 session 時同樣保守處理。
-        let no_session = serde_json::json!({
-            "type": "session.error",
-            "properties": {"error": {"name": "APIError", "data": {"statusCode": 410}}}
-        });
-        assert!(matches!(
-            map_server_event(&no_session, "ses_1", &mut seen_tools),
-            ServerEventAction::Ignore
-        ));
-    }
-
-    /// AC-3：中止的回合要能與下架區分開，fixture 用 2026-09-08 實測抓到的原文。
-    #[test]
-    fn aborted_session_error_is_classified_as_aborted() {
-        let raw = r#"{"type":"session.error","properties":{"sessionID":"ses_1","error":{"name":"MessageAbortedError","data":{"message":"Aborted"}}}}"#;
-        let value: Value = serde_json::from_str(raw).unwrap();
-        let mut seen_tools = std::collections::HashSet::new();
-        match map_server_event(&value, "ses_1", &mut seen_tools) {
-            ServerEventAction::Failed(error) => {
-                let kind = crate::upstream_error::classify(&error.name, error.status_code);
-                assert_eq!(kind, crate::upstream_error::UpstreamFailure::Aborted);
-                assert_ne!(kind, crate::upstream_error::UpstreamFailure::ModelEol);
-            }
-            other => panic!("expected Failed, got {other:?}"),
-        }
+        mapper.map(&json!({"type":"session.text.ended","data":{"sessionID":"ses_1","assistantMessageID":"msg_2","ordinal":0,"text":"first"}}));
+        mapper.map(&json!({"type":"session.text.ended","data":{"sessionID":"ses_1","assistantMessageID":"msg_2","ordinal":1,"text":"second"}}));
+        assert_eq!(mapper.final_text(), "first\nsecond");
     }
 
     #[test]
-    fn maps_sse_payload_sequence_to_stream_events_until_idle() {
-        let payloads = vec![
-            json!({
-                "payload": {
-                    "type": "message.part.updated",
-                    "properties": {
-                        "delta": "think",
-                        "part": { "id": "r1", "sessionID": "ses_1", "type": "reasoning" }
-                    }
-                }
-            }),
-            json!({
-                "payload": {
-                    "type": "message.part.updated",
-                    "properties": {
-                        "part": { "id": "t1", "sessionID": "ses_1", "type": "tool", "tool": "bash" }
-                    }
-                }
-            }),
-            json!({
-                "payload": {
-                    "type": "session.idle",
-                    "properties": { "sessionID": "ses_1" }
-                }
-            }),
-        ];
-        let mut seen_tools = std::collections::HashSet::new();
-        let mut events = Vec::new();
-        let mut idle = false;
-
-        for payload in payloads {
-            match map_server_event(&payload, "ses_1", &mut seen_tools) {
-                ServerEventAction::Emit(event) => events.push(event),
-                ServerEventAction::Idle => {
-                    idle = true;
-                    break;
-                }
-                ServerEventAction::Ignore => {}
-                // 正常序列不該冒出上游錯誤；真的冒出來要當場紅，不要默默吞掉。
-                ServerEventAction::Failed(error) => {
-                    panic!("unexpected upstream failure in happy path: {error:?}")
-                }
-            }
-        }
-
-        assert!(idle);
+    fn long_tool_values_are_truncated() {
+        let long = "x".repeat(300);
+        let shown = format_tool_use("shell", Some(&json!({ "command": long })));
+        assert!(shown.starts_with("shell\n  command: "));
+        assert!(shown.ends_with("..."));
         assert_eq!(
-            events,
-            vec![
-                StreamEvent::Reasoning("think".to_string()),
-                StreamEvent::ToolUse("bash".to_string()),
-            ]
+            format_tool_use("webfetch", Some(&json!({"url":"u"}))),
+            "webfetch"
         );
     }
 }

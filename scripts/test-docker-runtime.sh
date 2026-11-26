@@ -88,8 +88,6 @@ for service in wukong opencode-server wukong-telegram wukong-web wukong-schedule
 done
 require_in_file 'WUKONG_WEB_BIND:-127.0.0.1' "$release_compose" \
     "release Compose must retain the loopback web default"
-require_in_file 'curl -fsS http://localhost:4096/global/health || exit 1' "$release_compose" \
-    "release Compose must retain the OpenCode healthcheck"
 require_in_file 'IMAGE_SKILLS="/usr/local/share/wukong/skills/superpowers"' "$entrypoint" \
     "entrypoint must define image skill asset source"
 require_in_file 'WORKSPACE_SKILLS="$WUKONG_WORKSPACE/.wukong/skills/superpowers"' "$entrypoint" \
@@ -112,12 +110,57 @@ require_in_file 'cp -a "$OPENCODE_CONFIG_FILE" "$OPENCODE_CONFIG_FILE.pre-baseli
     "entrypoint must back up a pre-baseline config before taking over opencode.json"
 require_in_file 'if [[ ! -f "$OPENCODE_USER_CONFIG_FILE" ]]; then' "$entrypoint" \
     "entrypoint must create the user config layer only when missing"
-require_in_file '"external_directory": {' "$entrypoint" \
-    "baseline must grant external_directory access explicitly"
-require_in_file '"*rm -rf /*": "deny"' "$entrypoint" \
-    "baseline must retain the destructive-rm denylist"
-require_in_file "curl -fsS http://localhost:4096/global/health || exit 1" "$compose_file" \
-    "opencode server must expose a Compose healthcheck"
+# issue-0044 Task 3.1：baseline 用 OpenCode V2 的原生格式。V2 會轉換 V1 的鍵，但轉換不了的
+# 會被默默丟掉，所以不能留 V1 的鍵。實際行為由 scripts/test-opencode-baseline.sh 對真實
+# opencode 驗證；這裡只擋掉不必起容器就看得出來的退步。
+sed -n "/<<'OPENCODE_JSON'/,/^OPENCODE_JSON/p" "$entrypoint" | sed '1d;$d' | python3 -c '
+import json, sys
+config = json.load(sys.stdin)
+legacy = sorted({"permission", "snapshot"} & config.keys())
+assert not legacy, f"baseline must use V2 keys, found V1 {legacy}"
+rules = [(r["action"], r["resource"], r["effect"]) for r in config["permissions"]]
+assert ("external_directory", "/tmp", "allow") in rules, "baseline must allow /tmp explicitly"
+assert ("shell", "*rm -rf /*", "deny") in rules, "baseline must retain the destructive-rm denylist"
+last_deny = max(i for i, r in enumerate(rules) if r[2] == "deny")
+assert rules.index(("shell", "*rm * /workspace/*", "allow")) > last_deny, \
+    "the /workspace allow must come after the denies; the last matching rule wins"
+' || { echo "FAIL: opencode.json baseline in $entrypoint" >&2; exit 1; }
+# issue-0044 Task 3.2（SCN-003）：V2 server 一定要密碼。opencode-server 與每個入口要拿到
+# 同一個 .env 變數，少接一個服務，那個服務的每個回合都會被拒（地雷 W-3）；healthcheck 要帶
+# 認證問 /api/info，V2 對 /api 以外的路徑一律回網頁 200，不帶認證的檢查判不出 server 掛了。
+python3 - "$compose_file" "$release_compose" docker-compose.memoria.yml <<'PY_PASSWORD'
+import sys
+import yaml
+
+def env_of(service):
+    env = service.get("environment") or []
+    if isinstance(env, dict):
+        return env
+    return dict(str(i).split("=", 1) if "=" in str(i) else (str(i), None) for i in env)
+
+wanted = "${WUKONG_AGENT_SERVER_PASSWORD:-}"
+failed = []
+base, release, overlay = sys.argv[1:]
+for path in (base, release):
+    services = yaml.safe_load(open(path))["services"]
+    server = services["opencode-server"]
+    if env_of(server).get("OPENCODE_SERVER_PASSWORD") != wanted:
+        failed.append(f"{path} opencode-server must get OPENCODE_SERVER_PASSWORD={wanted}")
+    test = " ".join(server["healthcheck"]["test"])
+    if "/api/info" not in test or "OPENCODE_SERVER_PASSWORD" not in test:
+        failed.append(f"{path} opencode-server healthcheck must query /api/info with the password")
+    for name in ("wukong", "wukong-telegram", "wukong-web", "wukong-schedulerd"):
+        if env_of(services[name]).get("WUKONG_AGENT_SERVER_PASSWORD") != wanted:
+            failed.append(f"{path} {name} must get WUKONG_AGENT_SERVER_PASSWORD={wanted}")
+# The overlay replaces nothing it does not name; it must not drop or rename the variable.
+for name, service in yaml.safe_load(open(overlay))["services"].items():
+    env = env_of(service)
+    if any("SERVER_PASSWORD" in key for key in env):
+        failed.append(f"{overlay} {name} must leave the server password to the base compose files")
+for line in failed:
+    print("FAIL:", line, file=sys.stderr)
+sys.exit(1 if failed else 0)
+PY_PASSWORD
 # SCN-007／008（2026-10-03）：預設本機回合、獨立 server 顯式啟用。
 python3 - "$compose_file" "$release_compose" <<'PY_LOCAL'
 import sys

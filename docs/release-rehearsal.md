@@ -10,17 +10,12 @@ Provide controlled Telegram, Scheduler, and credential checks through `WUKONG_RE
 
 ## OpenCode 版本
 
-發版映像檔的 opencode 版本**由 CI 在發版當下解析成 npm 上的最新版**，不是用 repo 裡 `release/runtime-inputs.env` 的值。`scripts/resolve-opencode-version.sh` 會同時改寫版本、npm integrity 與 `release/package-lock.json`（`Dockerfile.release` 走 `npm ci`，三者不一致會直接建置失敗），所以「取最新版」不等於拿掉釘版——最終映像檔仍是確切版本 + integrity，`release-manifest.json` 也記錄同一個版本。
+發版映像檔的 OpenCode 是 **repo 裡 `release/runtime-inputs.env` 釘選的 V2 版本**（`@opencode/cli`，2026-11-25 起為 2.3.2，issue-0044）。npm 上有更新版時不會跟著升：Wukong 對 V2 的協定有自己的 adapter，換版前要先驗過。`scripts/resolve-opencode-version.sh` 在 CI 重新向 npm 取該版的 integrity，連同 `release/package.json`、`release/package-lock.json` 一起寫回（`Dockerfile.release` 走 `npm ci`，三者不一致會直接建置失敗）；`release-manifest.json` 記錄同一個版本，`scripts/test-release-image.sh smoke` 在發布 tag 前直接問映像內的 `opencode --version`，與釘選不同就中止。
 
-因此：
-
-- **repo 裡的 `OPENCODE_VERSION` 只是本機建置與測試的預設值**，不代表下次發版會用的版本。要知道實際版本，看 release manifest 或該次 workflow 的 summary。
-- **RC 驗收要涵蓋 opencode 換版的風險**。版本在 CI 才決定，所以 RC 與 stable 之間若隔了一段時間，兩者的 opencode 可能不同版。要讓 stable 用與 RC 相同的版本，先設下面的 pin。
-- **卡版（escape hatch）**：在 GitHub repository variables 設 `OPENCODE_VERSION_PIN=X.Y.Z`，workflow 會改用該版本而不取最新。opencode 出回歸、或想讓 stable 沿用 RC 驗過的版本時使用；解除就是刪掉該變數。
-
-本機要手動同步 repo 的釘版（例如讓本機建置跟上），直接跑：
+- **換版**：改 `release/runtime-inputs.env` 的版本，跑下面的命令重產三個檔，再跑 issue-0044 的驗證（`scripts/test-opencode-baseline.sh` 等）後提交。
+- **臨時改用其他版本**：在 GitHub repository variables 設 `OPENCODE_VERSION_PIN=X.Y.Z`，只接受 2.x；V1（1.x）會被拒絕。解除就是刪掉該變數。
 
 ```bash
-bash scripts/resolve-opencode-version.sh          # 取最新版
-OPENCODE_VERSION_PIN=1.18.14 bash scripts/resolve-opencode-version.sh   # 指定版本
+bash scripts/resolve-opencode-version.sh                                # 依 runtime-inputs.env 的版本重產
+OPENCODE_VERSION_PIN=2.3.2 bash scripts/resolve-opencode-version.sh     # 指定版本（只收 2.x）
 ```

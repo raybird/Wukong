@@ -30,7 +30,8 @@ check_pins() {
   [[ "${AGENT_REACH_REF:-}" =~ ^[0-9a-f]{40}$ ]] || fail "AGENT_REACH_REF must be a full commit SHA"
   [[ "${AGENT_REACH_ARCHIVE_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] || fail "AGENT_REACH_ARCHIVE_SHA256 must be a sha256 digest"
   grep -Eqi '(^|=)(latest|main|<|>)' "$runtime_inputs" && fail "runtime inputs contain a floating value"
-  grep -Fq "\"opencode-ai\": \"$OPENCODE_VERSION\"" "$root/release/package.json" || fail "package.json does not pin OpenCode"
+  [[ "${OPENCODE_VERSION%%.*}" == 2 ]] || fail "OPENCODE_VERSION must be OpenCode V2 (2.x); Wukong no longer supports V1"
+  grep -Fq "\"@opencode/cli\": \"$OPENCODE_VERSION\"" "$root/release/package.json" || fail "package.json does not pin @opencode/cli"
   grep -Fq "\"integrity\": \"$OPENCODE_INTEGRITY\"" "$root/release/package-lock.json" || fail "package lock integrity does not match runtime inputs"
 }
 
@@ -147,15 +148,30 @@ done
 # The restart window is a local-time range; without tzdata TZ silently resolves to
 # UTC and the window quietly moves by the offset.
 [ -f /usr/share/zoneinfo/Asia/Taipei ] || { echo "missing tzdata"; exit 1; }
-# Printed, not asserted here — the expected value lives in the repo, not the image.
+# Printed, not asserted here — the expected values live in the repo, not the image.
+opencode --version 2>/dev/null || echo "opencode-version-unavailable"
 node --version 2>/dev/null || echo "v0.0.0-no-node"
 '
   output="$(docker run --rm --entrypoint sh "$image" -c "$probe" 2>&1)" ||
     fail "$image failed its runtime contents check: ${output:-no output}"
 
+  check_opencode_version "$(printf '%s\n' "$output" | tail -2 | head -1)"
   check_memoria_node_major "$(printf '%s\n' "$output" | tail -1)"
 
   [[ "$(docker image inspect --format '{{.Config.User}}' "$image")" != "" ]] || true
+}
+
+# issue-0044 SCN-012: ask the image which opencode it actually runs. The pin files
+# and the manifest only say what was asked for; `npm ci` resolving to something else,
+# or a stale layer, would otherwise ship unnoticed (V2 prints `opencode v2.3.2`, V1
+# printed a bare `1.19.6`).
+check_opencode_version() {
+  local reported="${1:-}" actual expected
+  expected="$(sed -n 's/^OPENCODE_VERSION=//p' "$runtime_inputs")"
+  actual="${reported##* }"
+  actual="${actual#v}"
+  [[ "$actual" == "$expected" ]] ||
+    fail "image runs opencode '${reported}', but release/runtime-inputs.env pins $expected"
 }
 
 # The optional Memoria overlay mounts a runtime whose native modules
