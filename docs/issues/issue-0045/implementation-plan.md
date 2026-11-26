@@ -112,8 +112,11 @@
 - 驗收編號：SCN-006、SCN-007、SCN-008 的前提（TBD-2）
 - 完成判準：每一項都有結論；不成立時記下採用 2026-11-26 Q4 的退路（每回合附一行 scope），並寫明哪些區塊仍可放進 agent 定義。
 - 驗證：最小真實請求加 opencode.db 唯讀查詢。
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成（2026-11-26）
+- 證據：[probe-instructions.md](probe-instructions.md)，`scripts/probe-instructions.sh` 20 項全部 PASS，模型 opencode/big-pickle（TBD-6）。
+  - entry 存在 opencode.db，server 重啟後仍在且模型讀得到，每個 session 各自一份；覆寫與刪除只影響那個 key。
+  - 寫入後不再改的 entry 不進對話紀錄。模型看過之後才改值，V2 會插一則 `system` 通知到對話紀錄。scope 每個 session 寫入一次不再改，不受影響，不需要 Q4 的退路。
+  - 角色卡、輸出要求、檔案互動規則與排程能力的固定說明放 agent 定義，scope 用 entry；長期記憶能力用 entry 或技能，Phase 4 決定。
 
 ### Task 1.4 — subagent 的模型、事件與派工抽樣
 - 產出與範圍：`probe-subagent.md`，以及 V2 真實事件樣本（存成 fixture，供 5.1 使用）。內容：
