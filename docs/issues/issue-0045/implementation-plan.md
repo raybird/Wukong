@@ -308,7 +308,7 @@
   - 用真實模型跑一題會派工的任務，事件裡 primary agent 與 subagent 的模型都是指定的那一個；
   - 有單元或 adapter 測試釘住送出的參數。
 - 驗證：雙迴圈。外迴圈是真實 V2；內迴圈是 gateway 送出內容的測試。
-- 狀態：✅ 完成（2026-11-26）
+- 狀態：✅ 已完成（2026-11-26）
 - 證據：
   - 做法沿用 1.4 的結論，沒有改程式：agent 定義不寫模型，adapter 的 `send_prompt` 每次送 prompt 前都選取回合指定的模型。
     - 新建與續接的 session 都走這條路；subagent 沿用 session 選取的模型（probe-subagent.md）。
@@ -385,7 +385,7 @@
   - argv 測試涵蓋預設命令與自訂命令；
   - CLI backend 接真實 V2 跑 1 回合，用的是 agent `wukong`。
 - 驗證：雙迴圈。外迴圈是 #44 的 `cli-v2-actual.sh` 做法；內迴圈是 backend.rs 的 argv 測試。
-- 狀態：🚧 內迴圈完成；外迴圈待免費模型額度恢復（2026-11-26）
+- 狀態：✅ 已完成（2026-11-26）
 - 證據：
   - 預設命令：`opencode run`（可帶 `--model`）走本機按需 backend（`build_backend_from_env`），不經過 CLI 的 argv。
     - 本機按需 backend 把請求交給 server adapter，在送 prompt 前選取 agent。run_turn 已指定 `wukong`（3.1）。
@@ -399,7 +399,10 @@
     - `a_non_opencode_command_gets_no_agent_flag`。
     - 紅燈：舊實作上後兩項失敗，argv 分別多出 `--agent wukong`。
   - 入口：CLI 入口的 `cli_backend` 測試改成確認使用者自訂、不是 opencode 的假 agent 沒有收到 `--agent`。
-  - 外迴圈（待做）：照 #44 的 `docs/issues/issue-0044/scripts/cli-v2-actual.sh` 做法，CLI backend 接真實 V2 跑 1 回合，確認用的是 agent `wukong`。
+  - 外迴圈：2026-11-26 `scripts/probe-cli-agent.sh`，照 #44 `cli-v2-actual.sh` 的做法讓 CLI backend 接容器裡的真實 V2 2.3.2，模型 NVIDIA `nvidia/nvidia/nemotron-3-ultra-550b-a55b`（免費模型同日 429），6 項全過：
+    - A. 自訂命令沒有指定 agent：argv 是 `run --dangerously-skip-permissions --standalone --print-logs --log-level error --agent wukong --format json`，opencode.db 記的 assistant 是 agent `wukong`、模型 nemotron，回覆 OK。
+    - B. 自訂命令自己寫了 `--agent build`：argv 沒有另加 `--agent wukong`，opencode.db 記的是 agent `build`。
+    - 環境：隔離 HOME、只放 NVIDIA 一筆憑證、只送合成提示；容器以 `--rm` 執行，結束時 `docker kill`。
     - 2026-11-26 免費模型額度用完（`provider.free-limit` 429），照 TBD-6 不繞過，等額度恢復。
   - 其他檢查：CI 三道全過（758 passed、14 ignored）。
 
@@ -419,7 +422,7 @@
   - 輪替後再做一次，結果相同；
   - user message 不含 scope（退路時只多一行 scope）。
 - 驗證：雙迴圈。外迴圈是真實 V2 加真實模型；內迴圈是 gateway 寫入 entries 的 adapter 測試（假 V2 server）。
-- 狀態：🚧 內迴圈完成；外迴圈待免費模型額度恢復（2026-11-26）
+- 狀態：✅ 已完成（2026-11-26）
 - 證據：
   - 依 1.2、1.3 的結論選擇：排程能力的固定說明併入 primary agent 的定義，scope 用 entry，不做成技能，也不需要退路。
     - 固定說明是 `persona::scheduling_capability_guide`，寫在 `wukong` 的定義裡（啟動時寫入，`WUKONG_BIN` 在這時讀取）。說明裡的 `--scope` 寫成 `<目前的 scope>`，指向 `[目前的 scope]`。
@@ -434,7 +437,11 @@
     - gateway（假 V2 server 補上 entries 的列出與寫入）：`a_new_session_gets_its_instructions_before_the_prompt`、`an_unchanged_entry_is_not_written_again`、`a_missing_or_stale_entry_is_written_on_the_next_turn`、`a_request_without_instructions_does_not_touch_the_entries`。反向自檢：暫時拿掉 `ensure_instructions` 的呼叫，前三項失敗。
     - runtime：`the_scope_goes_to_the_session_layer_not_the_prompt`（主提示與修復提示都不含排程能力與 scope，兩次都帶 entry）、`the_primary_agent_explains_scheduling_without_a_scope`；兩項先紅燈再綠燈。`run_turn_carries_the_scheduling_capability` 改成確認 CLI 路徑照舊附在 prompt、沒有 entry。
   - 文件：AGENTS.md「排程能力注入」、`docs/cli-reference.md`、`docs/docker.md` 的 `WUKONG_BIN`。
-  - 外迴圈（待做）：「每天早上提醒我」建立排程、輪替後再做一次、查 opencode.db 的 user message。需要真實模型；2026-11-26 免費額度用完（429），等恢復。
+  - 外迴圈：2026-11-26 `scripts/probe-session-layer.sh` 回合 1、2：真實的 wukong 入口（常駐 server 模式）接容器裡的 V2 2.3.2，模型 NVIDIA nemotron（免費模型同日 429）。
+    - 回合 1「每天早上 8 點提醒我喝水。」：模型在容器裡執行 `wukong schedule add-turn`，排程「喝水提醒」`0 8 * * *` 的擁有者是本回合的 scope；session 的指令層有 `wukong.scope`，值含這個 scope；opencode.db 的 user message 就是使用者原文。
+    - 回合 2：把 `session_started_at` 改成 8 天前（真實的輪替路徑），同一個 scope 要求「每週一早上 9 點提醒我開週會。」：stderr 有 `session_rotation_due`，換成新 session，新 session 也有 `wukong.scope`，第二個排程「週會提醒」`0 9 * * 1` 一樣建在這個 scope。user message 只多了召回的相關記憶（SCN-006 允許），沒有固定區塊。
+    - 排程指令用映像內建的 wukong（主機編出的 binary 需要 GLIBC 2.39，映像沒有），寫進同一個記憶庫；agent 的 bash 在容器裡執行，與正式部署相同。
+    - 判定的可信度：探測第一版有 `check "…$(…)" $?` 的寫法，`$?` 會被訊息裡的命令替換覆寫，排程數那兩項的判定因此不可信（顯示的數字是對的）。已改成先存結果再判定，之後重跑的結果才列為證據。
   - 其他檢查：CI 三道全過（766 passed、14 ignored）。
 
 ### Task 4.2 — 其餘固定區塊移出 user message
@@ -448,7 +455,7 @@
   - 接真實 V2 的測試：查 opencode.db，Telegram 與 Web 路徑的 user message 不含上述區塊，動態區塊仍在；
   - `WUKONG_MEMORIA_HINT` 開啟時，模型能回報長期記憶能力的指令，關閉時不能。
 - 驗證：雙迴圈。外迴圈查 opencode.db 的整合測試；內迴圈是 persona 與 prompt 組裝的單元測試。
-- 狀態：🚧 內迴圈完成；外迴圈待免費模型額度恢復（2026-11-26）
+- 狀態：⏳ SCN-006 外迴圈通過；SCN-008 發現定義改寫的時序問題，待決定處理方式（2026-11-26）
 - 證據：
   - 角色卡：Task 2.1 起已不附在 prompt（subagent 的角色卡在各自的定義裡）。
   - 輸出要求、長期記憶能力：V2 backend 的回合不附在 prompt，改寫在 primary agent `wukong` 的定義裡；CLI backend 照舊附在 prompt。
@@ -470,7 +477,14 @@
     - `without_other_running_turns_prompts_are_unchanged` 改用 V2 backend：它比對兩個回合的完整 prompt，CLI 路徑會被並行切換 `WUKONG_MEMORIA_HINT` 的測試影響（全套測試時失敗過一次，這個競態在改動前就存在）。
   - 文件：AGENTS.md「末棒輸出保證」與 remember 的說明、README.md「輸出要求」、`.env.example` 的 `WUKONG_MEMORIA_HINT` 說明。
   - 其他檢查：CI 三道全過（769 passed、14 ignored）。
-  - 外迴圈（待做）：查 opencode.db 的 user message、`WUKONG_MEMORIA_HINT` 開關各一組。需要真實模型，2026-11-26 免費額度用完（429）。
+  - 外迴圈：2026-11-26 `scripts/probe-session-layer.sh`，模型 NVIDIA nemotron（免費模型同日 429）。
+    - SCN-006：4 個回合的 user message 都沒有任何固定區塊的標頭（排程能力、目前的 scope、輸出要求、長期記憶能力、檔案互動規則），只有使用者原文，輪替後的回合另有召回的相關記憶。agent `wukong` 的定義含排程能力、輸出要求、檔案互動規則。派工探測（3.2）的 6 次回合也一樣。入口是 CLI 接常駐 server；Telegram 每回合附的產出目錄那一行由 Task 4.2 的單元測試釘住。
+    - SCN-008：回合 3 開啟 `WUKONG_MEMORIA_HINT`、回合 4 關閉，都問模型「系統提示裡有沒有提到 memoria CLI」。第一次跑的答案正好相反（開啟答「沒有」、關閉答「有」），從推理內容看得出模型用的是上一版定義。
+      - 原因：wukong 啟動時改寫定義，17 毫秒後就送 prompt（回合 4：`wukong.md` mtime 684.995，agent-switched 685.012）。常駐 V2 server 的檔案監看還沒處理到這次改寫，這個回合就用了快取裡的舊定義。
+      - `scripts/probe-agent-reload.sh` 直接對 server 改寫定義，中間隔了 docker exec 啟動 python 的幾百毫秒，就地寫入與 rename 都在下一個 prompt 生效，`/api/agent` 的清單反而晚一點才更新。
+      - 對照：回合 3、4 之前各加一個同樣開關的暖身回合，等 2 秒再問，開啟答「有」、關閉答「沒有」。
+      - 影響範圍：只有常駐 server 模式，而且回合緊接在定義改寫之後（CLI 單次執行；入口重啟時 Telegram 立刻取到積壓的訊息、schedulerd 立刻有到期的排程）。按需本機模式每回合啟動新的 server，不受影響。定義只在 Wukong 升級、`WUKONG_MEMORIA_HINT`／`WUKONG_BIN`／SOUL.md 改變時才會變。
+      - repo 裡的探測沒有暖身回合，目前回合 3、4 的兩項會失敗，作為這個問題的紅燈。
 
 ## Phase 5 — 入口的角色顯示與規劃偏好移除
 
@@ -523,7 +537,7 @@
   - Web 的偏好 API 回 404，前端不再呼叫它；
   - 四個入口的既有測試全過。
 - 驗證：雙迴圈。外迴圈是 Web API 與入口測試；內迴圈是 settings 的單元測試。
-- 狀態：✅ 完成（2026-11-26）
+- 狀態：✅ 已完成（2026-11-26）
 - 證據：
   - 移除：
     - settings：`Settings.planner_preferences`、`PlannerPreferences`、`effective_planner_preferences`。`Settings` 沒有 `deny_unknown_fields`，舊欄位由 serde 忽略，struct 上補註解說明不可加。
