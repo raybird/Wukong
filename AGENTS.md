@@ -238,7 +238,7 @@ wukong-orchestrator → wukong-gateway → wukong-memory
 | crate | 職責 |
 |-------|------|
 | `wukong-skills` | 以 `include_str!` 內嵌 Superpowers 技能（`assets/superpowers/`） |
-| `wukong-settings` | 讀寫 `.wukong/settings.toml` 專案設定 |
+| `wukong-settings` | 讀寫 JSON 設定檔（Telegram、預設模型）：路徑取 `WUKONG_SETTINGS_FILE`，沒設時固定是 `/data/settings.json`（Docker 的資料 volume；在主機上執行也是這個路徑，要換位置就設變數）；檔案不存在時用預設值。不加 `deny_unknown_fields`，舊檔留著的 `planner_preferences`（2026-11-26，#45 移除）照常載入 |
 | `wukong-scheduler` | 排程核心 lib；SQLite lease 防止重複執行 |
 | `wukong-schedulerd` | 排程 daemon binary |
 | `wukong-memoryd` | 記憶 HTTP 服務（`/v1/recall`、`/v1/remember` 等） |

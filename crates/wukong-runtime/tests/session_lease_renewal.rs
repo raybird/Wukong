@@ -34,7 +34,6 @@ async fn run_turn_keeps_the_session_lease_past_its_length() {
         db_url: String::new(),
         agent_command: vec![],
         default_model: None,
-        planner_preferences: None,
         thinking: true,
         recall_top_k: 5,
         stream: true,

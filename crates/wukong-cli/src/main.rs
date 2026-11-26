@@ -587,12 +587,6 @@ async fn answer_terminal_question(
 fn apply_settings_to_config(cfg: &mut GatewayConfig, settings: &wukong_settings::Settings) {
     let agent_settings = wukong_settings::effective_agent_settings(settings);
     cfg.apply_default_model(agent_settings.default_model.as_deref());
-    let planner_preferences = wukong_settings::effective_planner_preferences(settings);
-    cfg.apply_planner_preferences(
-        planner_preferences.enabled,
-        planner_preferences.roles,
-        planner_preferences.skills,
-    );
 }
 
 /// Dispatch a `wukong memory <op>` maintenance command.

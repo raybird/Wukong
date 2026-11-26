@@ -374,7 +374,6 @@ fn resolve_config(cli: &Cli) -> GatewayConfig {
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| vec!["opencode".to_string(), "run".to_string()]),
         default_model: None,
-        planner_preferences: None,
         thinking: std::env::var("WUKONG_THINKING").as_deref() != Ok("0"),
         recall_top_k: 5,
         stream: false,
@@ -633,7 +632,6 @@ mod tests {
             db_url: url.clone(),
             agent_command: vec![],
             default_model: None,
-            planner_preferences: None,
             thinking: false,
             recall_top_k: 5,
             stream: false,

@@ -83,7 +83,11 @@ mod tests {
         assert_eq!(fs::metadata(&tdd).unwrap().modified().unwrap(), before);
         assert_eq!(
             fs::read_to_string(&brainstorm).unwrap(),
-            wukong_skills::find("brainstorming").unwrap().content
+            wukong_skills::all()
+                .iter()
+                .find(|skill| skill.name == "brainstorming")
+                .unwrap()
+                .content
         );
     }
 

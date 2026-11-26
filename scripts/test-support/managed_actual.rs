@@ -12,7 +12,6 @@ pub fn fixture(scope: &str) -> (tempfile::TempDir, AgentBackend, GatewayConfig) 
         db_url: format!("sqlite://{}", dir.path().join("memory.db").display()),
         agent_command: command,
         default_model: None,
-        planner_preferences: None,
         thinking: false,
         recall_top_k: 5,
         stream: true,

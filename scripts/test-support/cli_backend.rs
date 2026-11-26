@@ -54,7 +54,6 @@ printf '{"type":"step_finish"}\n'
         db_url: format!("sqlite://{}", dir.path().join("memory.db").display()),
         agent_command: command.clone(),
         default_model: None,
-        planner_preferences: None,
         thinking: false,
         recall_top_k: 5,
         stream: true,

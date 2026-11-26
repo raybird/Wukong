@@ -6,7 +6,9 @@
 
 ## Purpose
 
-This SOP defines the stable Web Console v1 operating flow for Wukong. It covers daily chat usage, read-only memory inspection, recall explainability, skill preferences, schedules, system diagnostics, and global model settings.
+This SOP defines the stable Web Console v1 operating flow for Wukong. It covers daily chat usage, read-only memory inspection, recall explainability, schedules, system diagnostics, and global model settings.
+
+> 2026-11-26（#45）：技能偏好頁（`Skills` 分頁）與它的 API（`/api/skills/catalog`、`/api/skills/preferences`）已移除。planner 已拿掉，偏好不再影響回合；設定檔裡留著的 `planner_preferences` 欄位照常載入但不使用。
 
 Web Console v1 is a control center, not a memory maintenance console. Memory mutation workflows such as consolidate, prune, export, edit, or delete are intentionally deferred.
 
@@ -14,7 +16,6 @@ Web Console v1 is a control center, not a memory maintenance console. Memory mut
 
 - Chat: daily conversation entry point, shared history, scope-aware turns, intermediate baton cards, and skill metadata.
 - Memory: read-only records, summary, recall preview, and recall score explanations.
-- Skills: role and Superpowers catalog, global planner preferences, and preference enablement.
 - Schedules: existing schedule management entry point, plus a per-schedule model picker on turn jobs.
 - System: read-only runtime diagnostics for providers, models, GitHub CLI, environment, schedules, and token/memory status.
 - Settings: default model (provider → model picker) and persisted Web/Telegram-related settings.
@@ -44,14 +45,6 @@ Web Console v1 is a control center, not a memory maintenance console. Memory mut
 4. Use Recall query for read-only recall inspection.
 5. Review each recall hit's score explanation: lexical, semantic, decay, importance, recall bonus, age, recall count, and source signals.
 6. Do not use Web Console for memory mutation in v1.
-
-## Skill Preference Flow
-
-1. Open the `Skills` tab to inspect available roles and Superpowers.
-2. Mark preferred roles and preferred skills as global planner guidance.
-3. Keep preferences enabled only when you want the planner prompt to mention them.
-4. Treat preferences as guidance, not hard routing constraints.
-5. Confirm Chat baton labels when you need to see which role and skill were actually selected.
 
 ## Settings Flow
 
@@ -94,7 +87,6 @@ Use this checklist before calling Web Console v1 ready in a local environment:
 - Memory records can be filtered by scope or kind.
 - Recall preview returns hits for a meaningful query.
 - Recall explanations show score components and source signals.
-- Skills preferences can be saved, reloaded, and reflected in Chat context.
 - Settings can read and update the default model through the provider → model picker.
 - A turn job's model can be set and cleared from its schedule card.
 - Schedules tab loads existing schedule state.
@@ -111,7 +103,6 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 node --check crates/wukong-web/static/components/wukong-chat.js
 node --check crates/wukong-web/static/components/wukong-memory.js
-node --check crates/wukong-web/static/components/wukong-skills.js
 node --check crates/wukong-web/static/components/wukong-settings.js
 node --check crates/wukong-web/static/components/wukong-schedules.js
 node --check crates/wukong-web/static/components/wukong-system.js

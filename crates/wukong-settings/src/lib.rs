@@ -1,23 +1,13 @@
 use std::path::{Path, PathBuf};
 
+/// 不加 `deny_unknown_fields`：2026-11-26（#45）移除的 `planner_preferences` 可能還留在
+/// 舊設定檔裡，要能照常載入（下次存檔時就不會再寫回）。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub struct Settings {
     #[serde(default)]
     pub telegram: TelegramSettings,
     #[serde(default)]
     pub agent: AgentSettings,
-    #[serde(default)]
-    pub planner_preferences: PlannerPreferences,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
-pub struct PlannerPreferences {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub roles: Vec<String>,
-    #[serde(default)]
-    pub skills: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
@@ -83,26 +73,6 @@ pub fn effective_agent_settings(file: &Settings) -> AgentSettings {
     }
 }
 
-pub fn effective_planner_preferences(file: &Settings) -> PlannerPreferences {
-    PlannerPreferences {
-        enabled: file.planner_preferences.enabled,
-        roles: normalize_preference_ids(&file.planner_preferences.roles),
-        skills: normalize_preference_ids(&file.planner_preferences.skills),
-    }
-}
-
-fn normalize_preference_ids(values: &[String]) -> Vec<String> {
-    let mut normalized = Vec::new();
-    for value in values {
-        let value = value.trim();
-        if value.is_empty() || normalized.iter().any(|existing| existing == value) {
-            continue;
-        }
-        normalized.push(value.to_string());
-    }
-    normalized
-}
-
 pub fn redact_token(token: &str) -> String {
     if token.is_empty() {
         String::new()
@@ -137,7 +107,6 @@ mod tests {
                 allowed: "42 99".to_string(),
             },
             agent: AgentSettings::default(),
-            planner_preferences: PlannerPreferences::default(),
         };
 
         save_settings(&path, &settings).unwrap();
@@ -155,7 +124,6 @@ mod tests {
             agent: AgentSettings {
                 default_model: Some("opencode/deepseek-v4-flash-free".to_string()),
             },
-            planner_preferences: PlannerPreferences::default(),
         };
 
         save_settings(&path, &settings).unwrap();
@@ -168,66 +136,37 @@ mod tests {
     }
 
     #[test]
-    fn missing_planner_preferences_defaults_cleanly() {
+    // 2026-11-26（#45，SCN-011）：規劃偏好移除後，舊設定檔的 planner_preferences 欄位照樣
+    // 載得進來（serde 忽略），其他欄位照舊；再存檔時不會寫回這個欄位。
+    fn legacy_planner_preferences_field_is_ignored() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
-        std::fs::write(&path, r#"{"telegram":{"token":"123:abc","allowed":"42"}}"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{
+                "telegram": {"token": "123:abc", "allowed": "42 99"},
+                "agent": {"default_model": "opencode/deepseek-v4-flash-free"},
+                "planner_preferences": {
+                    "enabled": true,
+                    "roles": ["fixer"],
+                    "skills": ["systematic-debugging"]
+                }
+            }"#,
+        )
+        .unwrap();
 
         let loaded = load_settings(&path).unwrap();
 
-        assert_eq!(loaded.planner_preferences, PlannerPreferences::default());
-    }
-
-    #[test]
-    fn saves_and_loads_planner_preferences() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        let settings = Settings {
-            telegram: TelegramSettings::default(),
-            agent: AgentSettings::default(),
-            planner_preferences: PlannerPreferences {
-                enabled: true,
-                roles: vec!["fixer".to_string(), "oracle".to_string()],
-                skills: vec!["systematic-debugging".to_string()],
-            },
-        };
-
-        save_settings(&path, &settings).unwrap();
-        let loaded = load_settings(&path).unwrap();
-
-        assert_eq!(loaded.planner_preferences, settings.planner_preferences);
-    }
-
-    #[test]
-    fn effective_planner_preferences_trims_dedupes_and_drops_empty_values() {
-        let settings = Settings {
-            telegram: TelegramSettings::default(),
-            agent: AgentSettings::default(),
-            planner_preferences: PlannerPreferences {
-                enabled: true,
-                roles: vec![
-                    " fixer ".to_string(),
-                    "".to_string(),
-                    "oracle".to_string(),
-                    "fixer".to_string(),
-                ],
-                skills: vec![
-                    " systematic-debugging ".to_string(),
-                    "systematic-debugging".to_string(),
-                    " ".to_string(),
-                    "verification-before-completion".to_string(),
-                ],
-            },
-        };
-
-        let effective = effective_planner_preferences(&settings);
-
-        assert!(effective.enabled);
-        assert_eq!(effective.roles, vec!["fixer", "oracle"]);
+        assert_eq!(loaded.telegram.token, "123:abc");
+        assert_eq!(loaded.telegram.allowed, "42 99");
         assert_eq!(
-            effective.skills,
-            vec!["systematic-debugging", "verification-before-completion"]
+            effective_agent_settings(&loaded).default_model.as_deref(),
+            Some("opencode/deepseek-v4-flash-free")
         );
+        save_settings(&path, &loaded).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("planner_preferences"), "{saved}");
+        assert_eq!(load_settings(&path).unwrap(), loaded);
     }
 
     #[test]
@@ -249,7 +188,6 @@ mod tests {
             agent: AgentSettings {
                 default_model: Some("opencode/deepseek-v4-flash-free".to_string()),
             },
-            planner_preferences: PlannerPreferences::default(),
         };
 
         let effective = effective_agent_settings(&settings);
@@ -270,7 +208,6 @@ mod tests {
                 allowed: "42".to_string(),
             },
             agent: AgentSettings::default(),
-            planner_preferences: PlannerPreferences::default(),
         };
 
         let effective = effective_telegram_settings(&file);

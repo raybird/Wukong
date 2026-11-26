@@ -4,7 +4,6 @@
 pub mod memory_api;
 pub mod models_api;
 pub mod schedule_api;
-pub mod skills_api;
 pub mod system_api;
 
 mod chat_api;
@@ -726,70 +725,6 @@ where
     }))
 }
 
-async fn get_skills_catalog<B>(
-    State(state): State<AppState<B>>,
-    Query(params): Query<SettingsQuery>,
-) -> axum::response::Response
-where
-    B: AiBackend + Send + Sync + 'static,
-{
-    use axum::response::IntoResponse;
-
-    if !authorized(&state.token, params.token.as_deref()) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    Json(skills_api::catalog_response()).into_response()
-}
-
-async fn get_skills_preferences<B>(
-    State(state): State<AppState<B>>,
-    Query(params): Query<SettingsQuery>,
-) -> axum::response::Response
-where
-    B: AiBackend + Send + Sync + 'static,
-{
-    use axum::response::IntoResponse;
-
-    if !authorized(&state.token, params.token.as_deref()) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    match wukong_settings::load_settings(&state.settings_path) {
-        Ok(settings) => {
-            let prefs = wukong_settings::effective_planner_preferences(&settings);
-            Json(skills_api::preferences_response(&prefs)).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
-}
-
-async fn put_skills_preferences<B>(
-    State(state): State<AppState<B>>,
-    Query(params): Query<SettingsQuery>,
-    Json(req): Json<skills_api::SaveSkillPreferencesRequest>,
-) -> axum::response::Response
-where
-    B: AiBackend + Send + Sync + 'static,
-{
-    use axum::response::IntoResponse;
-
-    if !authorized(&state.token, params.token.as_deref()) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let prefs = match skills_api::validate_preferences(req) {
-        Ok(prefs) => prefs,
-        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
-    };
-    let mut settings = wukong_settings::load_settings(&state.settings_path).unwrap_or_default();
-    settings.planner_preferences = prefs;
-    match wukong_settings::save_settings(&state.settings_path, &settings) {
-        Ok(()) => {
-            let effective = wukong_settings::effective_planner_preferences(&settings);
-            Json(skills_api::preferences_response(&effective)).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
-}
-
 async fn post_question_reply<B>(
     State(state): State<AppState<B>>,
     Path(request_id): Path<String>,
@@ -888,10 +823,6 @@ where
             get(static_assets::memory_js),
         )
         .route(
-            "/components/wukong-skills.js",
-            get(static_assets::skills_js),
-        )
-        .route(
             "/components/wukong-settings.js",
             get(static_assets::settings_js),
         )
@@ -951,11 +882,6 @@ where
         .route(
             "/api/memory/recall-preview",
             post(post_memory_recall_preview::<B>),
-        )
-        .route("/api/skills/catalog", get(get_skills_catalog::<B>))
-        .route(
-            "/api/skills/preferences",
-            get(get_skills_preferences::<B>).put(put_skills_preferences::<B>),
         )
         .route("/api/schedules", get(list_schedules::<B>))
         .route(
@@ -1249,12 +1175,6 @@ mod tests {
         assert!(content_type(
             build_router(state(None, &[]).await),
             "/components/wukong-memory.js"
-        )
-        .await
-        .contains("javascript"));
-        assert!(content_type(
-            build_router(state(None, &[]).await),
-            "/components/wukong-skills.js"
         )
         .await
         .contains("javascript"));
@@ -1894,7 +1814,6 @@ mod tests {
                 agent: wukong_settings::AgentSettings {
                     default_model: Some("opencode/deepseek-v4-flash-free".to_string()),
                 },
-                planner_preferences: wukong_settings::PlannerPreferences::default(),
             },
         )
         .unwrap();
@@ -2179,152 +2098,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skills_catalog_returns_roles_and_skills() {
+    // 2026-11-26（#45，SCN-011）：規劃偏好移除後，技能偏好的 API（含只給偏好頁用的技能目錄）
+    // 回 404，前端也不再呼叫、不再有技能偏好頁。
+    async fn skills_preference_api_is_gone() {
+        for (method, uri) in [
+            ("GET", "/api/skills/preferences"),
+            ("PUT", "/api/skills/preferences"),
+            ("GET", "/api/skills/catalog"),
+        ] {
+            for token in [None, Some("sekret")] {
+                let app = build_router(state(token, &[]).await);
+                let uri = match token {
+                    Some(token) => format!("{uri}?token={token}"),
+                    None => uri.to_string(),
+                };
+                let resp = app
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(&uri)
+                            .header("content-type", "application/json")
+                            .body(Body::from(r#"{"enabled":true,"roles":[],"skills":[]}"#))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+            }
+        }
         let app = build_router(state(None, &[]).await);
-
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/skills/catalog")
+                    .uri("/components/wukong-skills.js")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-        assert!(body.contains("Explorer"));
-        assert!(body.contains("systematic-debugging"));
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        for (name, asset) in [
+            ("index.html", static_assets::INDEX_HTML),
+            ("app.js", static_assets::APP_JS),
+            ("wukong-chat.js", static_assets::CHAT_JS),
+            (
+                "chat-thread-header.js",
+                static_assets::CHAT_THREAD_HEADER_JS,
+            ),
+        ] {
+            assert!(!asset.contains("/api/skills"), "{name}");
+            assert!(!asset.contains("#/skills"), "{name}");
+            assert!(!asset.contains("技能偏好"), "{name}");
+        }
     }
 
     #[tokio::test]
-    async fn skills_preferences_requires_token_when_set() {
-        let app = build_router(state(Some("sekret"), &[]).await);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/skills/preferences")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn get_skills_preferences_returns_defaults() {
-        let app = build_router(state(None, &[]).await);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/skills/preferences")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-        assert!(body.contains(r#""enabled":false"#));
-        assert!(body.contains(r#""roles":[]"#));
-        assert!(body.contains(r#""skills":[]"#));
-        assert!(body.contains(r#""warnings":[]"#));
-    }
-
-    #[tokio::test]
-    async fn put_skills_preferences_persists_normalized_values() {
-        let state = state(None, &[]).await;
-        let settings_path = state.settings_path.clone();
-        let app = build_router(state);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/api/skills/preferences")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"enabled":true,"roles":["fixer","fixer","oracle"],"skills":["systematic-debugging"]}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-        assert!(body.contains(r#""enabled":true"#));
-        assert!(body.contains(r#""roles":["fixer","oracle"]"#));
-        assert!(body.contains(r#""skills":["systematic-debugging"]"#));
-        let saved = wukong_settings::load_settings(&settings_path).unwrap();
-        assert!(saved.planner_preferences.enabled);
-        assert_eq!(saved.planner_preferences.roles, vec!["fixer", "oracle"]);
-        assert_eq!(
-            saved.planner_preferences.skills,
-            vec!["systematic-debugging"]
-        );
-    }
-
-    #[tokio::test]
-    async fn put_skills_preferences_rejects_unknown_role() {
-        let app = build_router(state(None, &[]).await);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/api/skills/preferences")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"enabled":true,"roles":["not-a-role"],"skills":[]}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        assert!(body_string(resp).await.contains("unknown role"));
-    }
-
-    #[tokio::test]
-    async fn put_skills_preferences_rejects_unknown_skill() {
-        let app = build_router(state(None, &[]).await);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/api/skills/preferences")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"enabled":true,"roles":[],"skills":["not-a-skill"]}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        assert!(body_string(resp).await.contains("unknown skill"));
-    }
-
-    #[tokio::test]
-    // 2026-11-26（#45）：planner 移除後，保存的規劃偏好不再影響回合（設定與 API 由 Task 5.2 移除）。
-    async fn chat_ignores_saved_planner_preferences() {
+    // 2026-11-26（#45，SCN-011）：規劃偏好已移除；設定檔還留著舊的 planner_preferences 欄位時，
+    // 回合照常執行，偏好也不會進 prompt。
+    async fn chat_ignores_legacy_planner_preferences() {
         let state = state(None, &["answer"]).await;
         let backend = state.backend.clone();
-        let settings = wukong_settings::Settings {
-            telegram: wukong_settings::TelegramSettings::default(),
-            agent: wukong_settings::AgentSettings::default(),
-            planner_preferences: wukong_settings::PlannerPreferences {
-                enabled: true,
-                roles: vec!["fixer".to_string()],
-                skills: vec!["systematic-debugging".to_string()],
-            },
-        };
-        wukong_settings::save_settings(&state.settings_path, &settings).unwrap();
+        std::fs::write(
+            &state.settings_path,
+            r#"{"telegram":{"token":"","allowed":""},"planner_preferences":{"enabled":true,"roles":["fixer"],"skills":["systematic-debugging"]}}"#,
+        )
+        .unwrap();
         let app = build_router(state);
 
         let resp = app

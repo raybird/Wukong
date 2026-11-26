@@ -83,12 +83,6 @@ where
                 let settings = wukong_settings::load_settings(&settings_path).unwrap_or_default();
                 let agent_settings = wukong_settings::effective_agent_settings(&settings);
                 cfg.apply_default_model(agent_settings.default_model.as_deref());
-                let planner_preferences = wukong_settings::effective_planner_preferences(&settings);
-                cfg.apply_planner_preferences(
-                    planner_preferences.enabled,
-                    planner_preferences.roles,
-                    planner_preferences.skills,
-                );
                 // Forward the routed role (as name) to the loop's on_role sink.
                 run_turn(memory, backend, &cfg, &input, on_event, &mut |r| {
                     on_role(r.name())
@@ -150,7 +144,6 @@ mod tests {
             db_url: String::new(),
             agent_command: vec![],
             default_model: None,
-            planner_preferences: None,
             thinking: true,
             recall_top_k: 5,
             stream: true,

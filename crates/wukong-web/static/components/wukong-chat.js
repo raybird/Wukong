@@ -49,7 +49,6 @@ export class WukongChat extends HTMLElement {
     this.input = textarea;
     this.scopeSelect = this.querySelector('#chat-scope');
     this.modelStatus = this.querySelector('#chat-model-status');
-    this.skillStatus = this.querySelector('#chat-skill-status');
     
     // Auto-resizing logic
     textarea.addEventListener('input', function () {
@@ -97,7 +96,6 @@ export class WukongChat extends HTMLElement {
   setupSlashMenu(textarea) {
     const commands = [
       { cmd: '/model', desc: '變更或查看悟空所使用的 AI 模型' },
-      { cmd: '/skills', desc: '配置或查看您的角色與技能偏好' },
       { cmd: '/schedules', desc: '查看當前正在運行的排程任務' },
       { cmd: '/learn', desc: '讓悟空學習新的工作習慣與自訂規則' },
       { cmd: '/goal', desc: '啟動深思熟慮模式，直到徹底達成目標' },
@@ -242,7 +240,7 @@ export class WukongChat extends HTMLElement {
   }
 
   async initialize() {
-    await Promise.all([this.loadModelStatus(), this.loadSkillStatus()]);
+    await this.loadModelStatus();
     await this.loadScopes();
     await this.loadLatest();
     this.startLiveStream();
@@ -315,25 +313,6 @@ export class WukongChat extends HTMLElement {
     }
     const data = await resp.json();
     this.modelStatus.textContent = data.model ? '模型：' + data.model : '模型：agent 預設';
-  }
-
-  async loadSkillStatus() {
-    if (!this.skillStatus) return;
-    const token = window.WUKONG_TOKEN ? '?token=' + encodeURIComponent(window.WUKONG_TOKEN) : '';
-    const resp = await fetch('/api/skills/preferences' + token);
-    if (!resp.ok) {
-      this.skillStatus.textContent = '技能偏好：未知';
-      return;
-    }
-    const data = await resp.json();
-    if (!data.enabled) {
-      this.skillStatus.textContent = '技能偏好：未啟用';
-      return;
-    }
-    const picks = [...(data.roles || []), ...(data.skills || [])];
-    this.skillStatus.textContent = picks.length
-      ? '技能偏好：' + picks.join(' + ')
-      : '技能偏好：已啟用';
   }
 
   resetMessages() {

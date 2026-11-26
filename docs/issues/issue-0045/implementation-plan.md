@@ -504,6 +504,7 @@
   - 文件：`docs/cli-reference.md` 的排程進度與失敗訊息範例。README.md 的時序圖、AGENTS.md「一回合資料流」等接力鏈的描述由 Task 6.5 一起更新。
   - 其他檢查：CI 三道全過（777 passed、12 ignored）。
   - 外迴圈（待做）：真實模型跑一題實作任務，Web 與 Telegram（mock transport）看得到「悟空·fixer」與產出。2026-11-26 免費額度用完（429）。
+  - 程序：gitnexus detect_changes 在提交 c7072c1 之後才跑（應在提交前），結果只有預期的符號（run_turn、事件對應、排程階段、各入口的 match 分支與測試）。
 
 ### Task 5.2 — 移除規劃偏好
 - 產出與範圍：
@@ -517,8 +518,21 @@
   - Web 的偏好 API 回 404，前端不再呼叫它；
   - 四個入口的既有測試全過。
 - 驗證：雙迴圈。外迴圈是 Web API 與入口測試；內迴圈是 settings 的單元測試。
-- 狀態：📝 待實作
+- 狀態：✅ 完成（2026-11-26）
 - 證據：
+  - 移除：
+    - settings：`Settings.planner_preferences`、`PlannerPreferences`、`effective_planner_preferences`。`Settings` 沒有 `deny_unknown_fields`，舊欄位由 serde 忽略，struct 上補註解說明不可加。
+    - gateway：`GatewayConfig.planner_preferences`、`PlannerPreferenceConfig`、`apply_planner_preferences`；CLI（main.rs、repl.rs、command.rs）、Telegram（dispatch.rs 兩處、main.rs）、Web（chat_api.rs）、schedulerd、排程 executor、runtime 與 scripts/test-support 的建構與套用一併拿掉。
+    - Web：`/api/skills/preferences`（GET、PUT）與 `/api/skills/catalog`（只給偏好頁用，回的是角色對應）、`skills_api.rs`、技能偏好頁 `wukong-skills.js` 與它的路由、導覽列「技能」、對話頁的「技能偏好」狀態標籤與 `loadSkillStatus`、slash 選單的 `/skills`（說明是「配置或查看您的角色與技能偏好」）、只給偏好頁用的 `.skill-card`／`.skill-grid` 樣式。
+    - 技能清單：`SkillSpec` 只留 `name` 與 `content`；`SkillId`、角色對應（`primary_role`、`collaborator_role`）、`description`、`route_options`、`find` 刪掉，`source_content` 保留。orchestrator 的 `router.rs`（`SkillRouteOption`）一併刪掉；wukong-skills 不再依賴 orchestrator，wukong-web 不再依賴 skills 與 orchestrator（Cargo.lock 跟著少 5 行）。`skill_assets.rs` 的測試改從 `all()` 找技能。刪除前以 grep 確認沒有其他使用者。
+  - 測試：
+    - 內迴圈：settings `legacy_planner_preferences_field_is_ignored`（含舊欄位的設定檔載入後 telegram、預設模型照舊，再存檔不寫回舊欄位）。紅燈：載入的部分移除前就會過（欄位還在），失敗在再存檔時仍寫出 `planner_preferences`；移除後通過。載入不報錯本身是釘住測試，serde 原本就忽略未知欄位。
+    - 外迴圈：Web `skills_preference_api_is_gone`（偏好 API 的 GET、PUT 與技能目錄，有無 token 都回 404；`/components/wukong-skills.js` 回 404；index.html、app.js、wukong-chat.js、chat-thread-header.js 不含 `/api/skills`、`#/skills`、「技能偏好」）。紅燈：`GET /api/skills/preferences` 回 200；移除後通過。`chat_ignores_saved_planner_preferences` 改成 `chat_ignores_legacy_planner_preferences`，直接寫含舊欄位的 JSON，回合照常完成、prompt 不含偏好。
+    - 隨功能刪掉的測試 15 個：settings 3、gateway 2、Web 偏好與目錄 API 6、技能清單 4（`SkillId` 兩個、`route_options`、`find`），新增 2 個。四個入口的既有測試全過。
+    - 前端：`node --check` 全部元件通過，`node --test` 17 項通過。
+  - 文件：根目錄 AGENTS.md 的 `wukong-settings` 一行改成實際的路徑解析（`WUKONG_SETTINGS_FILE`，沒設時固定 `/data/settings.json`，主機上執行也一樣；檔案不存在用預設值；舊欄位照常載入）。`docs/web-console-sop-v1.md` 拿掉技能偏好的段落、smoke 項目與 `node --check wukong-skills.js`，加註 2026-11-26 移除。README.md、docs/*.md 其他提到「偏好」的地方與規劃偏好無關。CHANGELOG 留給 Task 6.5。
+  - 程序：提交前跑 gitnexus detect_changes，風險 low、受影響流程 0，變更符號只有預期的 Settings、技能清單、Web 測試、`WukongChat.initialize` 與文件段落（索引是舊的，行號對應略有偏差）。
+  - 其他檢查：CI 三道全過（764 passed、0 failed、12 ignored；基線 777 − 刪掉的 15 + 新增的 2 = 764）。
 
 ## Phase 6 — 真實模型驗收、效能對照與常青文件
 
