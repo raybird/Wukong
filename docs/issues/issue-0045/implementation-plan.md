@@ -8,7 +8,8 @@
 
 所有探測與真實模型驗證都在隔離環境執行：
 
-- 獨立 HOME，只放 NVIDIA 一筆憑證；
+- 獨立 HOME，憑證只放 NVIDIA 一筆，用預設免費模型時不放憑證；
+- 真實模型用 NVIDIA nemotron 或預設免費模型 opencode/big-pickle（README TBD-6），每份紀錄寫明實際用的模型，回合用的不是指定模型時中止；
 - 只送合成提示；
 - 不用正式部署的副本，正式部署 RunWuKong 也不碰（project.md gate；不把正式對話送給外部模型）。
 
@@ -66,7 +67,7 @@
 里程碑：Phase 2 之後依賴的六項 V2 能力，都有成立或不成立的實測紀錄。
 
 探測的共同條件：
-- 隔離環境：獨立 HOME 與 XDG 目錄，只放 NVIDIA 一筆憑證，只送合成提示。
+- 隔離環境：獨立 HOME 與 XDG 目錄，憑證只放 NVIDIA 一筆或不放，只送合成提示。
 - 不需要模型的項目加 `--network none`。
 - 腳本放 `docs/issues/issue-0045/scripts/`，紀錄寫成 `probe-*.md`。
 
@@ -90,7 +91,7 @@
 - 相依：無
 - 驗收編號：SCN-005 的前提（TBD-1）
 - 完成判準：
-  - 找到可用的路徑與格式，至少一個 Superpowers 技能出現在 `/api/skill`，模型用 NVIDIA 跑 1 回合時事件看得到技能被使用；
+  - 找到可用的路徑與格式，至少一個 Superpowers 技能出現在 `/api/skill`，用真實模型跑 1 回合時事件看得到技能被使用；
   - 或者證實不成立，記錄嘗試過的路徑，回 README 修訂 SCN-005。
 - 驗證：契約探測加最小真實請求；必要時讀 V2 的原始碼或 `/openapi.json` 找出探索規則。
 - 狀態：📝 待實作
@@ -113,7 +114,7 @@
 - 產出與範圍：`probe-subagent.md`，以及 V2 真實事件樣本（存成 fixture，供 5.1 使用）。內容：
   - prompt 指定模型時，subagent 用的模型；subagent 定義沒寫模型時，沿用的是 primary agent 的模型、prompt 指定的模型，還是預設模型；
   - 事件裡辨識 subagent 的欄位（task 工具的參數、子 session 的事件、agent 名稱），以及 subagent 輸出所在的位置；
-  - 用 NVIDIA 抽樣：一題實作任務跑 3 次，看是否派給 fixer。
+  - 用真實模型抽樣：一題實作任務跑 3 次，看是否派給 fixer。
 - 相依：1.1
 - 驗收編號：SCN-013、SCN-002 的前提（TBD-3、TBD-4），SCN-003 的初步訊號
 - 完成判準：
@@ -151,7 +152,7 @@
 - 驗收編號：SCN-005
 - 完成判準：
   - 真實 V2 的 `/api/skill` 列得到八個技能；
-  - 用 NVIDIA 跑一題符合技能的任務，事件看得到技能被使用；
+  - 用真實模型跑一題符合技能的任務，事件看得到技能被使用；
   - prompt 不含技能規範指引。
 - 驗證：雙迴圈。外迴圈是接真實 V2 的 `#[ignore]` 整合測試；內迴圈是寫出路徑與內容的單元測試。
 - 狀態：📝 待實作
@@ -166,7 +167,7 @@
 - 驗收編號：SCN-009
 - 完成判準：
   - entrypoint 與 installer 的測試涵蓋三種工作區：全新部署、與舊範本相同（以 ac60ebe 版為例）、改過的；
-  - 用 NVIDIA 問「你是誰」，三種工作區都以孫悟空回答。
+  - 用真實模型問「你是誰」，三種工作區都以孫悟空回答。
 - 驗證：雙迴圈。外迴圈是 `scripts/test-docker-runtime.sh` 或新的腳本測試，加上真實回合；內迴圈是遷移判定的測試。
 - 狀態：📝 待實作
 - 證據：
@@ -202,7 +203,7 @@
 - 相依：1.4、3.1
 - 驗收編號：SCN-013
 - 完成判準：
-  - 用 NVIDIA 跑一題會派工的任務，事件裡 primary agent 與 subagent 的模型都是指定的那一個；
+  - 用真實模型跑一題會派工的任務，事件裡 primary agent 與 subagent 的模型都是指定的那一個；
   - 有單元或 adapter 測試釘住送出的參數。
 - 驗證：雙迴圈。外迴圈是真實 V2；內迴圈是 gateway 送出內容的測試。
 - 狀態：📝 待實作
@@ -252,7 +253,7 @@
   - 接真實 V2 的測試：要求「每天早上提醒我」，`wukong schedule list` 出現擁有者為該 scope 的排程；
   - 輪替後再做一次，結果相同；
   - user message 不含 scope（退路時只多一行 scope）。
-- 驗證：雙迴圈。外迴圈是真實 V2 加 NVIDIA；內迴圈是 gateway 寫入 entries 的 adapter 測試（假 V2 server）。
+- 驗證：雙迴圈。外迴圈是真實 V2 加真實模型；內迴圈是 gateway 寫入 entries 的 adapter 測試（假 V2 server）。
 - 狀態：📝 待實作
 - 證據：
 
@@ -283,7 +284,7 @@
 - 完成判準：
   - 用 1.4 的真實事件 fixture 測 gateway 的對應；
   - 四個入口各有顯示測試；
-  - 用 NVIDIA 跑一題實作任務，Web 與 Telegram（mock transport）看得到「悟空·fixer」與產出。
+  - 用真實模型跑一題實作任務，Web 與 Telegram（mock transport）看得到「悟空·fixer」與產出。
 - 驗證：雙迴圈。外迴圈是入口測試加真實回合；內迴圈是事件對應的單元測試。
 - 狀態：📝 待實作
 - 證據：
@@ -309,8 +310,7 @@
 ### Task 6.1 — 派工門檻（固定任務組）
 - 產出與範圍：
   - 固定任務組：實作、程式碼探索、資料查找、架構建議、介面設計各一題，加一題直接回答。
-  - 執行腳本與結果紀錄 `dispatch-eval.md`，NVIDIA nemotron 每題 3 次，記錄每次實際派給誰。
-  - 預設免費模型額度允許時另跑一組，只記錄（TBD-6）。
+  - 執行腳本與結果紀錄 `dispatch-eval.md`，真實模型每題 3 次，記錄每次實際派給誰與用的模型（TBD-6）。
 - 相依：4.2、5.1
 - 驗收編號：SCN-003
 - 完成判準：
@@ -323,7 +323,7 @@
 ### Task 6.2 — 效能對照
 - 產出與範圍：
   - bench-turn.sh 補上每回合 LLM step 數與 opencode 啟動次數（從 opencode.db 與程序紀錄取得）。
-  - 在相同條件下（1.5 CPU、3 GiB、NVIDIA nemotron、全新合成狀態）比較 b65b487 的映像與本分支的映像，short 與 tool 各至少 7 回合。
+  - 在相同條件下（1.5 CPU、3 GiB、同一個真實模型、全新合成狀態）比較 b65b487 的映像與本分支的映像，short 與 tool 各至少 7 回合。
   - 結果寫進 `bench-v2-slim.md`。
 - 相依：4.2
 - 驗收編號：SCN-001
@@ -371,7 +371,7 @@
 
 ## 測試策略
 
-- **真實模型**：派工、技能遵循、追問、人格，unit test 證明不了，以接真實 V2 加 NVIDIA nemotron 的整合測試或演練腳本驗證（`#[ignore]`，與 #44 的 `managed_actual` 相同的做法）。同一題重複執行，記錄每次的結果。
+- **真實模型**：派工、技能遵循、追問、人格，unit test 證明不了，以接真實 V2 加真實模型（TBD-6）的整合測試或演練腳本驗證（`#[ignore]`，與 #44 的 `managed_actual` 相同的做法）。同一題重複執行，記錄每次的結果。
 - **事件與 adapter**：
   - 用 Phase 1 擷取的 V2 真實事件存成 fixture，測 subagent 資訊的對應與顯示。
   - 假 agent 改輸出單一 primary agent 的回覆，不再輸出 planner 的格式。
@@ -383,5 +383,5 @@
 
 - [ ] Phase 1 的六項探測都有紀錄，TBD-1～TBD-4 已更新
 - [x] 每個 Scenario 都有責任 Task（2026-11-26 decompose，見責任對照）
-- [ ] 真實模型的驗證只用合成提示與 NVIDIA 憑證，正式部署沒有被碰
+- [ ] 真實模型的驗證只用合成提示，憑證只有 NVIDIA 一筆或沒有，正式部署沒有被碰
 - [ ] 常青文件依 project.md 全部更新
