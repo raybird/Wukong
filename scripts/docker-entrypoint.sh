@@ -106,9 +106,9 @@ mkdir -p "$OPENCODE_CONFIG_DIR"
 #                 Disabling it also disables opencode's own revert/undo.
 #   tool_output - tool results are the bulk of part payloads; capping them caps
 #                 what gets re-serialised on every subsequent update.
-#   compaction  - lets opencode trim its own context. Complements (does not
-#                 replace) Wukong's WUKONG_SESSION_COMPACT_EVERY_TURNS, which
-#                 compacts on turn count rather than on context pressure.
+#   compaction  - lets opencode trim its own context. Since 2026-11-26 (#45)
+#                 this is the only compaction: Wukong no longer compacts on
+#                 turn count (WUKONG_SESSION_COMPACT_EVERY_TURNS is ignored).
 #                 `background` is off: V2 would otherwise pre-write a summary as a
 #                 session nears the limit, spending tokens on summaries that may
 #                 never be used, which V1 never did. V1's prune and tail_turns

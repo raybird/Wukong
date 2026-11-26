@@ -326,8 +326,43 @@
     - 建立超過 7 天的 session 在下一個回合輪替，舊 session 被刪除。
   - `bash scripts/test-docker-runtime.sh` 通過。
 - 驗證：單迴圈。session.rs 與 turn.rs 的測試涵蓋同一個可觀察層級（是否呼叫 compact、是否輪替），沒有另一層整合責任。
-- 狀態：📝 待實作
+- 狀態：✅ 已完成（2026-11-26）
 - 證據：
+  - `crates/wukong-runtime/src/session.rs`：
+    - 移除依回合數壓縮的整條路徑（壓縮、失敗時的退避、404／405 改輪替），`SessionPolicy` 只剩 `lease_secs`。`WUKONG_SESSION_COMPACT_EVERY_TURNS` 不再讀取。
+    - 每個回合拿到 lease 之後看 session 開始了多久，超過 7 天就輪替。
+    - 使用者手動的 `/compact` passthrough 不變。
+  - 做法調整：session 的開始時間記在 Wukong 的記憶庫，每回合不問 backend。
+    - 理由：本機按需模式每問一次 backend 就要多啟動一個 opencode serve（約 0.7 秒），每回合都問等於每回合多 0.7 秒。
+    - 做法：`agent_session_state` 加 `session_started_at` 欄（Unix 秒），開檔時補上（`crates/wukong-memory/src/store/mod.rs`）。`finish_agent_session_turn` 與 `set_agent_session` 第一次看到這個 `session_id` 時記下，同一個 session 不變。
+    - 升級前就在的 session 沒有這一欄，由第一個回合以 `session_created_ms` 查一次 opencode 的 `time.created` 補記。查不到時從那時起算，之後不再查。
+    - 副作用：純 CLI backend 原本永遠不輪替，現在 7 天後也輪替。CLI backend 的 `delete_session` 是預設的空操作，舊 session 不會被刪，留在 `opencode.db`，與原本一樣。
+    - 沒有呼叫端的 `Memory::defer_agent_session_compaction` 一併移除。`mark_agent_session_compacted` 還用在 CLI 的手動 `/compact`，保留。
+  - 測試：
+    - session.rs：
+      - `a_scope_past_twenty_turns_is_not_compacted`：21 回合後不壓縮（backend 的壓縮一律 panic），也不問 backend；
+      - `the_old_compaction_variable_has_no_effect`：設了 `WUKONG_SESSION_COMPACT_EVERY_TURNS=1` 照常運作；
+      - `an_old_session_rotates_at_the_start_of_the_next_turn`：開始 8 天的 session 在第 2 回合就輪替；
+      - `a_young_session_continues`；
+      - `a_session_from_before_the_upgrade_is_aged_by_the_backend_once`、`an_unknown_age_counts_from_now_and_is_not_queried_again`；
+      - `lease_stays_held_during_a_slow_age_lookup`、`deciding_to_rotate_leaves_the_pointer_for_the_next_turn`。
+      - 紅燈：這組測試寫成舊實作也能編譯的形式，放在舊實作上 7 項失敗：壓縮了、第 2 回合不輪替、升級前的 session 沒有補記。
+    - turn.rs：
+      - `an_old_session_rotates_and_the_turn_sees_the_previous_turn`：輪替後舊 session 被刪除、回合帶上一回合；
+      - `a_young_session_past_twenty_turns_continues_without_compaction`：只呼叫一次、沒有 `/compact`；
+      - `a_rotation_turn_that_fails_keeps_the_old_session`。
+    - 記憶庫：
+      - `session_started_at_is_set_when_a_session_is_first_seen_and_kept_for_it`；
+      - `set_agent_session_started_only_touches_the_current_session`；
+      - `migrate_adds_session_started_at_to_an_old_session_table`：升級前的資料表開檔時加上這一欄，既有的列是 NULL，其餘不變。
+  - 設定與文件（W-3）：
+    - `.env.example` 與兩份 compose 拿掉這個變數。`.env.example` 留一段說明，指出它不再讀取。
+    - `docs/docker.md` 的變數表與「長期 session 的輪替」、`docs/entrypoints.md`、根目錄 AGENTS.md 的兩條設計細節、entrypoint 的 `compaction` 註解都已更新。
+    - 保留期清理不變。
+  - 其他檢查：
+    - `bash scripts/test-docker-runtime.sh` 通過，37 個 `.env.example` 變數都進得了容器；
+    - 兩份 compose 的 YAML 解析正常；
+    - CI 三道全過（755 passed、14 ignored）。
 
 ### Task 3.4 — CLI backend 與自訂命令
 - 產出與範圍：預設的 `opencode run` 帶上 agent `wukong`；使用者自訂的 `WUKONG_AGENT_CMD` 不被加上會改變行為的旗標（沿用 #44 對 `--standalone` 的判定方式）。

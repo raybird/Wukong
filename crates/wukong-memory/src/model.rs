@@ -187,6 +187,9 @@ pub struct AgentSessionState {
     pub lease_owner: Option<String>,
     pub lease_until: Option<i64>,
     pub last_compacted_at: Option<i64>,
+    /// 2026-11-26（#45）：Wukong 第一次記下這個 `session_id` 的時間（Unix 秒）；升級前就在的
+    /// session 是 `None`，由第一個回合向 backend 查建立時間補上。
+    pub session_started_at: Option<i64>,
     pub updated_at: i64,
 }
 

@@ -448,11 +448,9 @@ mod tests {
         models: Mutex<Vec<Option<String>>>,
         agents: Mutex<Vec<Option<String>>>,
         attachments: Mutex<Vec<Vec<AgentAttachment>>>,
-        compact_error: Mutex<Option<i32>>,
         persistent_error: Mutex<bool>,
         deleted_sessions: Mutex<Vec<String>>,
         response_session_ids: Mutex<VecDeque<String>>,
-        session_created_ms: Mutex<Option<i64>>,
         fail_on_call: Mutex<Option<usize>>,
     }
 
@@ -465,30 +463,17 @@ mod tests {
                 models: Mutex::new(Vec::new()),
                 agents: Mutex::new(Vec::new()),
                 attachments: Mutex::new(Vec::new()),
-                compact_error: Mutex::new(None),
                 persistent_error: Mutex::new(false),
                 deleted_sessions: Mutex::new(Vec::new()),
                 response_session_ids: Mutex::new(VecDeque::new()),
-                session_created_ms: Mutex::new(None),
                 fail_on_call: Mutex::new(None),
             }
-        }
-
-        fn with_session_created_ms(self, created_ms: i64) -> MockBackend {
-            *self.session_created_ms.lock().unwrap() = Some(created_ms);
-            self
         }
 
         /// 第 `call` 次（從 0 起算）呼叫 `run` 時失敗。
         fn failing_on_call(self, call: usize) -> MockBackend {
             *self.fail_on_call.lock().unwrap() = Some(call);
             self
-        }
-
-        fn with_compact_error(replies: &[&str], code: i32) -> MockBackend {
-            let backend = Self::new(replies);
-            *backend.compact_error.lock().unwrap() = Some(code);
-            backend
         }
 
         fn with_response_session_ids(self, ids: &[&str]) -> MockBackend {
@@ -505,7 +490,6 @@ mod tests {
 
     impl AiBackend for MockBackend {
         async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
-            let is_compact = req.prompt == "/compact";
             let has_session = req.session_id.is_some();
             let call = self.prompts.lock().unwrap().len();
             self.prompts.lock().unwrap().push(req.prompt);
@@ -524,14 +508,6 @@ mod tests {
                     code: Some(500),
                     stderr: "persistent session failed".to_string(),
                 });
-            }
-            if is_compact {
-                if let Some(code) = self.compact_error.lock().unwrap().take() {
-                    return Err(GatewayError::AgentFailed {
-                        code: Some(code),
-                        stderr: "compact failed".to_string(),
-                    });
-                }
             }
             let text = self.replies.lock().unwrap().pop_front().unwrap_or_default();
             let session_id = self
@@ -552,16 +528,6 @@ mod tests {
                 .unwrap()
                 .push(session_id.to_string());
             Ok(())
-        }
-
-        async fn session_created_ms(&self, _session_id: &str) -> Result<i64, GatewayError> {
-            self.session_created_ms
-                .lock()
-                .unwrap()
-                .ok_or_else(|| GatewayError::AgentFailed {
-                    code: None,
-                    stderr: "no time.created".to_string(),
-                })
         }
     }
 
@@ -621,98 +587,6 @@ mod tests {
             .unwrap();
         assert_eq!(text, "native compact");
         assert!(*backend.called.lock().unwrap());
-    }
-
-    #[tokio::test]
-    async fn pre_final_compaction_resets_turn_count_before_reuse() {
-        let mem = open_memory().await;
-        let backend = MockBackend::new(&["compacted"]);
-        let cfg = test_cfg("project:T");
-        mem.set_agent_session("project:T", "ses_1").await.unwrap();
-        mem.acquire_agent_session_lease("project:T", "seed", 300)
-            .await
-            .unwrap();
-        mem.finish_agent_session_turn("project:T", "seed", Some("ses_1"))
-            .await
-            .unwrap();
-
-        let prepared = crate::session::prepare_final_session_with_policy(
-            &mem,
-            &backend,
-            &cfg,
-            crate::session::SessionPolicy {
-                compact_every_turns: 1,
-                lease_secs: 300,
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(prepared.session_id.as_deref(), Some("ses_1"));
-        assert!(prepared.rotated_from.is_none());
-        assert_eq!(
-            mem.agent_session_state("project:T")
-                .await
-                .unwrap()
-                .unwrap()
-                .turn_count,
-            0
-        );
-        assert!(backend
-            .prompts
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|prompt| prompt == "/compact"));
-    }
-
-    #[tokio::test]
-    async fn failed_compaction_consumes_budget_instead_of_retrying_every_turn() {
-        let mem = open_memory().await;
-        // 500 is not in the "unsupported" set (404/405), so this takes the
-        // generic failure branch.
-        let backend = MockBackend::with_compact_error(&["answer"], 500);
-        let cfg = test_cfg("project:T");
-        mem.set_agent_session("project:T", "ses_1").await.unwrap();
-        mem.acquire_agent_session_lease("project:T", "seed", 300)
-            .await
-            .unwrap();
-        mem.finish_agent_session_turn("project:T", "seed", Some("ses_1"))
-            .await
-            .unwrap();
-        assert_eq!(
-            mem.agent_session_state("project:T")
-                .await
-                .unwrap()
-                .unwrap()
-                .turn_count,
-            1
-        );
-
-        let prepared = crate::session::prepare_final_session_with_policy(
-            &mem,
-            &backend,
-            &cfg,
-            crate::session::SessionPolicy {
-                compact_every_turns: 1,
-                lease_secs: 300,
-            },
-        )
-        .await
-        .unwrap();
-
-        // Session survives a transient compaction failure...
-        assert_eq!(prepared.session_id.as_deref(), Some("ses_1"));
-        assert!(prepared.rotated_from.is_none());
-        // ...but the budget is spent, so the next attempt is a full threshold
-        // away rather than on the very next turn.
-        assert_eq!(
-            mem.agent_session_state("project:T")
-                .await
-                .unwrap()
-                .unwrap()
-                .turn_count,
-            0
-        );
     }
 
     // issue-0012 審查 M-1：查詢失敗不能讓回合失敗；查不到就不告知。
@@ -1028,57 +902,20 @@ mod tests {
             .all(|record| record.session_id.as_deref() == Some("ses_new")));
     }
 
-    #[tokio::test]
-    async fn unsupported_compaction_rotates_after_new_session_succeeds() {
+    const DAY_SECS: i64 = 24 * 60 * 60;
+
+    /// scope 指向 `ses_old`、累積 20 個回合（原本的壓縮門檻），session 在 `days_ago` 天前
+    /// 開始，上一回合是晚餐的問答。
+    async fn memory_after_twenty_turns(days_ago: i64) -> Memory {
         let mem = open_memory().await;
         mem.set_agent_session("project:T", "ses_old").await.unwrap();
-        for _ in 0..20 {
-            mem.acquire_agent_session_lease("project:T", "seed", 300)
-                .await
-                .unwrap();
-            mem.finish_agent_session_turn("project:T", "seed", Some("ses_old"))
-                .await
-                .unwrap();
-        }
-        let backend = MockBackend::with_compact_error(&["answer"], 404)
-            .with_response_session_ids(&["ses_new"]);
-
-        run_turn(
-            &mem,
-            &backend,
-            &test_cfg("project:T"),
-            "rotate",
-            &mut |_| {},
-            &mut |_| {},
+        mem.set_agent_session_started(
+            "project:T",
+            "ses_old",
+            crate::util::now_unix() - days_ago * DAY_SECS,
         )
         .await
         .unwrap();
-
-        assert_eq!(
-            mem.agent_session("project:T").await.unwrap(),
-            Some("ses_new".to_string())
-        );
-        assert!(backend
-            .deleted_sessions
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|id| id == "ses_old"));
-    }
-
-    const DAY_MS: i64 = 24 * 60 * 60 * 1000;
-
-    fn now_ms() -> i64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64
-    }
-
-    /// scope 指向 `ses_old`、累積 20 個回合（預設的壓縮門檻），上一回合是晚餐的問答。
-    async fn memory_at_the_compaction_point() -> Memory {
-        let mem = open_memory().await;
-        mem.set_agent_session("project:T", "ses_old").await.unwrap();
         for _ in 0..20 {
             mem.acquire_agent_session_lease("project:T", "seed", 300)
                 .await
@@ -1091,14 +928,13 @@ mod tests {
         mem
     }
 
-    // issue-0028 SCN-004：舊 session 在壓縮時點改為輪替；回合在新 session 執行、帶上一回合
-    // （#45 SCN-004 保留這條），取得新 session 後刪掉舊的，而且不做壓縮。
+    // issue-0028 SCN-004：開始超過 7 天的 session 在回合開始時輪替（#45 SCN-010 起每個回合都
+    // 檢查）；回合在新 session 執行、帶上一回合（#45 SCN-004 保留這條），取得新 session 後刪掉
+    // 舊的，而且不做壓縮。
     #[tokio::test]
     async fn an_old_session_rotates_and_the_turn_sees_the_previous_turn() {
-        let mem = memory_at_the_compaction_point().await;
-        let backend = MockBackend::new(&["answer"])
-            .with_session_created_ms(now_ms() - 8 * DAY_MS)
-            .with_response_session_ids(&["ses_new"]);
+        let mem = memory_after_twenty_turns(8).await;
+        let backend = MockBackend::new(&["answer"]).with_response_session_ids(&["ses_new"]);
 
         run_turn(
             &mem,
@@ -1128,13 +964,12 @@ mod tests {
             .contains(&"ses_old".to_string()));
     }
 
-    // issue-0028 SCN-005：未滿 7 天照原本壓縮、續接，回合不額外帶上一回合。
+    // #45 SCN-010：超過 20 回合、未滿 7 天的 session 不壓縮，續接同一個 session，回合不額外帶
+    // 上一回合；回合只呼叫 backend 一次。
     #[tokio::test]
-    async fn a_young_session_is_compacted_and_the_turn_gets_no_previous_turn() {
-        let mem = memory_at_the_compaction_point().await;
-        let backend = MockBackend::new(&["compacted", "answer"])
-            .with_session_created_ms(now_ms() - 6 * DAY_MS)
-            .with_response_session_ids(&["ses_old", "ses_old"]);
+    async fn a_young_session_past_twenty_turns_continues_without_compaction() {
+        let mem = memory_after_twenty_turns(6).await;
+        let backend = MockBackend::new(&["answer"]).with_response_session_ids(&["ses_old"]);
 
         run_turn(
             &mem,
@@ -1148,7 +983,8 @@ mod tests {
         .unwrap();
 
         let prompts = backend.prompts.lock().unwrap();
-        assert!(prompts.iter().any(|prompt| prompt == "/compact"));
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        assert!(!prompts.iter().any(|prompt| prompt == "/compact"));
         let final_prompt = prompts.last().unwrap();
         assert!(!final_prompt.contains("晚餐吃什麼"), "{final_prompt}");
         assert_eq!(
@@ -1172,10 +1008,8 @@ mod tests {
     // scope 仍指向它。
     #[tokio::test]
     async fn a_rotation_turn_that_fails_keeps_the_old_session() {
-        let mem = memory_at_the_compaction_point().await;
-        let backend = MockBackend::new(&[])
-            .with_session_created_ms(now_ms() - 8 * DAY_MS)
-            .failing_on_call(0);
+        let mem = memory_after_twenty_turns(8).await;
+        let backend = MockBackend::new(&[]).failing_on_call(0);
 
         let result = run_turn(
             &mem,
@@ -1188,7 +1022,7 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        // 走的是輪替：回合沒有帶舊 session，前面也沒有做 compaction。
+        // 走的是輪替：回合沒有帶舊 session，也沒有做 compaction。
         {
             let prompts = backend.prompts.lock().unwrap();
             assert!(!prompts.iter().any(|p| p == "/compact"));
@@ -1202,56 +1036,6 @@ mod tests {
         assert_eq!(
             mem.agent_session("project:T").await.unwrap().as_deref(),
             Some("ses_old")
-        );
-    }
-
-    #[tokio::test]
-    async fn transient_compaction_failure_keeps_existing_session() {
-        let mem = open_memory().await;
-        mem.set_agent_session("project:T", "ses_old").await.unwrap();
-        for _ in 0..20 {
-            mem.acquire_agent_session_lease("project:T", "seed", 300)
-                .await
-                .unwrap();
-            mem.finish_agent_session_turn("project:T", "seed", Some("ses_old"))
-                .await
-                .unwrap();
-        }
-        let backend = MockBackend::with_compact_error(&["answer"], 500)
-            .with_response_session_ids(&["ses_old"]);
-
-        run_turn(
-            &mem,
-            &backend,
-            &test_cfg("project:T"),
-            "retain",
-            &mut |_| {},
-            &mut |_| {},
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            mem.agent_session("project:T").await.unwrap(),
-            Some("ses_old".to_string())
-        );
-        assert!(!backend
-            .deleted_sessions
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|id| id == "ses_old"));
-        // The failed attempt spends the compaction budget (20 -> 0), then this
-        // turn's own increment lands on 1. Leaving it at 21 would re-fire
-        // summarize on every following turn — see
-        // `failed_compaction_consumes_budget_instead_of_retrying_every_turn`.
-        assert_eq!(
-            mem.agent_session_state("project:T")
-                .await
-                .unwrap()
-                .unwrap()
-                .turn_count,
-            1
         );
     }
 

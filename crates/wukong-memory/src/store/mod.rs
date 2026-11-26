@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS agent_session_state (
     lease_owner        TEXT,
     lease_until        INTEGER,
     last_compacted_at  INTEGER,
+    session_started_at INTEGER,
     updated_at         INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS recall_telemetry (
@@ -489,7 +490,7 @@ impl Store {
     pub async fn agent_session_state(&self, scope: &str) -> Result<Option<AgentSessionState>> {
         let row = sqlx::query(
             "SELECT scope, session_id, turn_count, lease_owner, lease_until,
-                    last_compacted_at, updated_at
+                    last_compacted_at, session_started_at, updated_at
              FROM agent_session_state WHERE scope = ?1",
         )
         .bind(scope)
@@ -536,10 +537,14 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         sqlx::query(
-            "INSERT INTO agent_session_state(scope, session_id, updated_at)
-             VALUES (?1, ?2, ?3)
+            "INSERT INTO agent_session_state(scope, session_id, session_started_at, updated_at)
+             VALUES (?1, ?2, ?3, ?3)
              ON CONFLICT(scope) DO UPDATE SET
                  session_id = excluded.session_id,
+                 session_started_at = CASE
+                     WHEN agent_session_state.session_id = excluded.session_id
+                     THEN agent_session_state.session_started_at
+                     ELSE excluded.session_started_at END,
                  turn_count = CASE
                      WHEN agent_session_state.session_id = excluded.session_id
                      THEN agent_session_state.turn_count ELSE 0 END,
@@ -590,7 +595,7 @@ impl Store {
              WHERE scope = ?1
                AND (lease_until IS NULL OR lease_until <= ?4 OR lease_owner = ?2)
              RETURNING scope, session_id, turn_count, lease_owner, lease_until,
-                       last_compacted_at, updated_at",
+                       last_compacted_at, session_started_at, updated_at",
         )
         .bind(scope)
         .bind(owner)
@@ -635,13 +640,16 @@ impl Store {
         let row = sqlx::query(
             "UPDATE agent_session_state
              SET session_id = COALESCE(?3, session_id),
+                 session_started_at = CASE
+                     WHEN ?3 IS NOT NULL AND (session_id IS NULL OR session_id <> ?3) THEN ?4
+                     ELSE session_started_at END,
                  turn_count = turn_count + 1,
                  lease_owner = NULL,
                  lease_until = NULL,
                  updated_at = ?4
              WHERE scope = ?1 AND lease_owner = ?2 AND lease_until > ?4
              RETURNING scope, session_id, turn_count, lease_owner, lease_until,
-                       last_compacted_at, updated_at",
+                       last_compacted_at, session_started_at, updated_at",
         )
         .bind(scope)
         .bind(owner)
@@ -667,6 +675,26 @@ impl Store {
         }
         tx.commit().await?;
         Ok(Some(state))
+    }
+
+    /// 2026-11-26（#45）：補記或改寫 `session_id` 的開始時間（秒）。只在 scope 仍指向這個
+    /// session 時寫入；回傳有沒有寫入。
+    pub async fn set_agent_session_started(
+        &self,
+        scope: &str,
+        session_id: &str,
+        started_at: i64,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE agent_session_state SET session_started_at = ?3
+             WHERE scope = ?1 AND session_id = ?2",
+        )
+        .bind(scope)
+        .bind(session_id)
+        .bind(started_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// Release an active session lease owned by `owner`.
@@ -706,32 +734,6 @@ impl Store {
         .bind(scope)
         .bind(owner)
         .bind(session_id)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
-        Ok(result.rows_affected() == 1)
-    }
-
-    /// Consume the compaction budget after a *failed* compaction attempt.
-    ///
-    /// Resets the turn count so the next attempt is a full `compact_every_turns`
-    /// away instead of firing on every subsequent turn. Unlike
-    /// `mark_agent_session_compacted` this leaves `last_compacted_at` untouched
-    /// (no compaction actually happened) and keeps the caller's lease held,
-    /// because the turn continues under the same owner.
-    pub async fn defer_agent_session_compaction(
-        &self,
-        scope: &str,
-        owner: &str,
-        now: i64,
-    ) -> Result<bool> {
-        let result = sqlx::query(
-            "UPDATE agent_session_state
-             SET turn_count = 0, updated_at = ?3
-             WHERE scope = ?1 AND lease_owner = ?2 AND lease_until > ?3",
-        )
-        .bind(scope)
-        .bind(owner)
         .bind(now)
         .execute(&self.pool)
         .await?;
@@ -1077,16 +1079,24 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         .fetch_all(pool)
         .await?;
     let names: Vec<String> = cols.iter().map(|r| r.get::<String, _>("name")).collect();
-    add_column_if_missing(pool, &names, "embedding", "embedding BLOB").await?;
-    add_column_if_missing(pool, &names, "embedding_model", "embedding_model TEXT").await?;
+    add_column_if_missing(pool, "memories", &names, "embedding", "embedding BLOB").await?;
     add_column_if_missing(
         pool,
+        "memories",
+        &names,
+        "embedding_model",
+        "embedding_model TEXT",
+    )
+    .await?;
+    add_column_if_missing(
+        pool,
+        "memories",
         &names,
         "consolidated_into",
         "consolidated_into INTEGER",
     )
     .await?;
-    add_column_if_missing(pool, &names, "dedupe_key", "dedupe_key TEXT").await?;
+    add_column_if_missing(pool, "memories", &names, "dedupe_key", "dedupe_key TEXT").await?;
     sqlx::query(
         "CREATE UNIQUE INDEX IF NOT EXISTS memories_dedupe_key_idx
          ON memories(dedupe_key)
@@ -1100,13 +1110,28 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
-    add_column_if_missing(pool, &names, "search_text", "search_text TEXT").await?;
+    add_column_if_missing(pool, "memories", &names, "search_text", "search_text TEXT").await?;
+    // 2026-11-26（#45）：session 的開始時間，回合開始時判斷要不要輪替
+    let session_cols: Vec<String> = sqlx::query("PRAGMA table_info(agent_session_state)")
+        .fetch_all(pool)
+        .await?
+        .iter()
+        .map(|r| r.get::<String, _>("name"))
+        .collect();
+    add_column_if_missing(
+        pool,
+        "agent_session_state",
+        &session_cols,
+        "session_started_at",
+        "session_started_at INTEGER",
+    )
+    .await?;
     migrate_fts_to_search_text(pool).await?;
     create_indexes(pool).await?;
     Ok(())
 }
 
-/// `ALTER TABLE memories ADD COLUMN`，容忍另一個行程剛好搶先加好同一欄。
+/// `ALTER TABLE {table} ADD COLUMN`，容忍另一個行程剛好搶先加好同一欄。
 ///
 /// SQLite 沒有 `ADD COLUMN IF NOT EXISTS`，而容器部署裡 `wukong-web`、
 /// `wukong-telegram`、`wukong-schedulerd` 會**同時**開同一個 `/data/memory.db`：三者
@@ -1118,6 +1143,7 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
 /// 已經把我們要的欄位加好了，結果狀態正是我們要的。
 async fn add_column_if_missing(
     pool: &SqlitePool,
+    table: &str,
     existing: &[String],
     column: &str,
     definition: &str,
@@ -1125,7 +1151,7 @@ async fn add_column_if_missing(
     if existing.iter().any(|n| n == column) {
         return Ok(());
     }
-    match sqlx::query(&format!("ALTER TABLE memories ADD COLUMN {definition}"))
+    match sqlx::query(&format!("ALTER TABLE {table} ADD COLUMN {definition}"))
         .execute(pool)
         .await
     {
@@ -1273,6 +1299,7 @@ fn row_to_agent_session_state(r: sqlx::sqlite::SqliteRow) -> AgentSessionState {
         lease_owner: r.get::<Option<String>, _>("lease_owner"),
         lease_until: r.get::<Option<i64>, _>("lease_until"),
         last_compacted_at: r.get::<Option<i64>, _>("last_compacted_at"),
+        session_started_at: r.get::<Option<i64>, _>("session_started_at"),
         updated_at: r.get::<i64, _>("updated_at"),
     }
 }
@@ -1675,6 +1702,88 @@ mod tests {
         let names: Vec<String> = cols.iter().map(|r| r.get::<String, _>("name")).collect();
         assert!(names.iter().any(|n| n == "embedding"));
         assert!(names.iter().any(|n| n == "embedding_model"));
+    }
+
+    // #45 SCN-010：session 第一次出現或換了時記下開始時間，同一個 session 不變。
+    #[tokio::test]
+    async fn session_started_at_is_set_when_a_session_is_first_seen_and_kept_for_it() {
+        let store = test_store().await;
+        let turn = |owner: &'static str, session: Option<&'static str>, now: i64| {
+            let store = &store;
+            async move {
+                store
+                    .acquire_agent_session_lease("s", owner, now, 300)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                store
+                    .finish_agent_session_turn("s", owner, session, now)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .session_started_at
+            }
+        };
+        assert_eq!(turn("o1", Some("ses_1"), 100).await, Some(100));
+        assert_eq!(turn("o2", Some("ses_1"), 200).await, Some(100));
+        assert_eq!(turn("o3", None, 250).await, Some(100));
+        assert_eq!(turn("o4", Some("ses_2"), 300).await, Some(300));
+
+        store.set_agent_session("s", "ses_3", 500).await.unwrap();
+        store.set_agent_session("s", "ses_3", 600).await.unwrap();
+        let state = store.agent_session_state("s").await.unwrap().unwrap();
+        assert_eq!(state.session_started_at, Some(500));
+    }
+
+    #[tokio::test]
+    async fn set_agent_session_started_only_touches_the_current_session() {
+        let store = test_store().await;
+        store.set_agent_session("s", "ses_1", 100).await.unwrap();
+
+        assert!(store
+            .set_agent_session_started("s", "ses_1", 50)
+            .await
+            .unwrap());
+        assert!(!store
+            .set_agent_session_started("s", "ses_other", 10)
+            .await
+            .unwrap());
+
+        let state = store.agent_session_state("s").await.unwrap().unwrap();
+        assert_eq!(state.session_started_at, Some(50));
+    }
+
+    // 升級前的資料庫沒有這一欄：開檔時加上，既有的列是 NULL，其餘不變。
+    #[tokio::test]
+    async fn migrate_adds_session_started_at_to_an_old_session_table() {
+        let file = NamedTempFile::new().unwrap();
+        let url = format!("sqlite://{}", file.path().display());
+        std::mem::forget(file);
+        let old = SqlitePool::connect(&url).await.unwrap();
+        sqlx::query(
+            "CREATE TABLE agent_session_state (
+                scope TEXT PRIMARY KEY, session_id TEXT,
+                turn_count INTEGER NOT NULL DEFAULT 0, lease_owner TEXT, lease_until INTEGER,
+                last_compacted_at INTEGER, updated_at INTEGER NOT NULL)",
+        )
+        .execute(&old)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_session_state(scope, session_id, turn_count, updated_at)
+             VALUES ('s', 'ses_old', 7, 1)",
+        )
+        .execute(&old)
+        .await
+        .unwrap();
+        old.close().await;
+
+        let store = Store::open(&url).await.unwrap();
+
+        let state = store.agent_session_state("s").await.unwrap().unwrap();
+        assert_eq!(state.session_id.as_deref(), Some("ses_old"));
+        assert_eq!(state.turn_count, 7);
+        assert_eq!(state.session_started_at, None);
     }
 
     #[tokio::test]
