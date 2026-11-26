@@ -249,6 +249,7 @@ Feature: Wukong 在 OpenCode V2 上維持 V1 時的行為
 | TBD-10 | `up --wait` 涵蓋不到的兩種情況：按需模式下 V2 要到第一個回合才遷移 `opencode.db`，啟用時的健康等待驗不到遷移；沒有 healthcheck 的 wukong-telegram、wukong-schedulerd 啟動就退出、由重啟政策拉起時，實測 7 次有 2 次被判成功（R8） | 不影響本次交付（2026-11-26 使用者選 P2-1「修正」時一併決定記入）：追蹤：無，按需模式的遷移失敗會在第一個回合報錯，升級前的備份仍在，`--rollback` 會連同 `opencode.db` 還原（SCN-015）；那兩個服務不遷移 `opencode.db`，以前的 `ps` 檢查同樣看不出它們退出 | 按需模式升級後，遷移問題要到第一個回合才看得到；關聯 SCN-014 |
 | TBD-11 | PR #46 第一輪審查 P3：`opencode_version.rs` 以執行檔路徑字串快取「已確認是 V2」，長期執行中把同一路徑換回 V1 時會略過版本檢查 | 不影響本次交付（2026-11-26 使用者選「記入待確認」）：追蹤：無，只快取成功結果是刻意的設計（換版後不必重啟）；換回 V1 時第一個回合仍會失敗，只是錯誤訊息不會指出版本，不影響資料；Docker 映像內的執行檔不會在執行中被換掉 | binary 模式在服務執行中換回 V1 時，錯誤訊息看不出原因；關聯 SCN-011 |
 | TBD-12 | review-d632fe3 的建議：S-1 rollback 已換回前一版的檔案與 `opencode-state`、健康檢查才失敗時，`.wukong-release` 仍記著新版，再跑一次 `--rollback` 會把前一版的 state 當成新版另存；N-F CHANGELOG 備份清單那條寫成分支上的中間狀態；N-G 降級模式的條件寫成「對外開放卻沒設 token」不精確 | 已解決（2026-11-26 使用者三項都選修正）：rollback 先寫 metadata 再等健康，失敗時說明用 `docker compose up -d` 啟動；備份清單併入 Added 的備份條目；條件改寫成沒設 token、又把 `WUKONG_WEB_ALLOW_INSECURE` 改成 1 以外的值（見 implementation-plan.md R10） | 無 |
+| TBD-13 | review-2dd4369 M-1（既有缺陷，v0.18.0 起）：Docker `--rollback` 沒帶 `--version` 時，installer 先把版本填成 GitHub 最新的 release，再要求它等於前一版；升級到最新版後照文件執行 `--rollback` 一定被拒絕，訊息是「metadata is invalid」；另有 N-H：`docs/docker.md` 健康等待那段對 rollback 失敗的說法前後不一致 | 已解決（2026-11-26 使用者選「在這個 PR 修」與「修正」）：比照 binary 模式，只有明確指定 `--version` 時才比對；補上最新版不等於 rollback 目標、與指定錯誤版本的案例；`docs/docker.md` 分開寫升級失敗與 rollback 失敗的處理（見 implementation-plan.md R11） | 無 |
 
 ## Timeline
 

@@ -803,7 +803,14 @@ test_docker_rollback() {
     run_installer '' --mode docker --version v9.9.9 >/dev/null
     FIXTURE_TAG=v9.9.8 FIXTURE_SAFE_TO=v9.9.9 make_release
     FIXTURE_SAFE_TO=v9.9.9 run_installer '' --mode docker --upgrade --version v9.9.8 >/dev/null
-    run_installer '' --mode docker --rollback >/dev/null
+    # An explicit --version that is not the previous release is refused.
+    cp "$DEPLOYMENT/.wukong-release" "$TMP/metadata-before"
+    ! run_installer '' --mode docker --rollback --version v9.9.7 >/dev/null 2>&1 || fail "rollback to a version that is not the previous one ran"
+    assert_same "$TMP/metadata-before" "$DEPLOYMENT/.wukong-release"
+    # Without --version the target is the previous release, whatever the latest release
+    # is; here the latest is the release that was upgraded to, as after a normal upgrade
+    # (review-2dd4369 M-1).
+    FIXTURE_TAG=v9.9.8 run_installer '' --mode docker --rollback >"$TMP/out" 2>&1 || fail "rollback without --version was refused: $(cat "$TMP/out")"
     python3 - "$DEPLOYMENT/.wukong-release" <<'PY'
 import json,sys
 assert json.load(open(sys.argv[1]))["productTag"] == "v9.9.9"

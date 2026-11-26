@@ -815,9 +815,12 @@ PY
 rollback_docker() {
     [[ -f .wukong-release ]] || abort "rollback requires Docker release metadata"
     local version digest backup current_backup file current_version current_digest
-    read -r version digest backup current_version current_digest < <(python3 - .wukong-release "$VERSION" <<'PY'
+    # Only an explicit --version is compared: without one, VERSION holds the latest release,
+    # which after a normal upgrade is the release being rolled back from (2026-11-26,
+    # review-2dd4369 M-1; the binary rollback already did this).
+    read -r version digest backup current_version current_digest < <(python3 - .wukong-release "$VERSION" "$VERSION_EXPLICIT" <<'PY'
 import json,sys
-d=json.load(open(sys.argv[1])); requested=sys.argv[2]
+d=json.load(open(sys.argv[1])); requested=sys.argv[2] if sys.argv[3] == "true" else ""
 assert d["schemaVersion"] == 1 and d.get("previousVersion") and d.get("previousImageDigest") and d.get("previousBackupPath")
 assert not requested or requested == d["previousVersion"]
 compatibility=d.get("dataCompatibility", {})

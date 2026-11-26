@@ -641,6 +641,19 @@ PR #46 第一輪審查（raybird，2026-11-26，Reviewed HEAD 238df43）提出�
 - N-F：`CHANGELOG.md` 的備份清單那條併入 Added 的備份條目。v0.25.1 沒有備份 volume，「以前會截斷」是分支上的中間狀態。
 - N-G：降級模式的條件改寫成「沒設 `WUKONG_WEB_TOKEN`、又把 `WUKONG_WEB_ALLOW_INSECURE` 改成 1 以外的值」，涉及 `CHANGELOG.md`、`docs/docker.md` 健康等待那段、`install.sh` 註解。`crates/wukong-web/src/main.rs` 的判斷是沒有 token、綁非 loopback、ALLOW_INSECURE 不是 1；Docker 容器內一律綁非 loopback，而 compose 預設 ALLOW_INSECURE=1。`docs/docker.md` 其他段落原有的同類寫法不在這次範圍。CHANGELOG 的「或退出時」也拿掉了，因為沒有 healthcheck 的服務不一定抓得到（TBD-10）。
 
+### R11 — Docker rollback 不帶版本時回到前一版（review-2dd4369 M-1、N-H）
+- 狀態：✅ 已完成
+- 使用者 2026-11-26 決定：M-1 在這個 PR 修，N-H 修正。
+- 問題：installer 主流程在沒有 `--version` 時先把 `VERSION` 填成 GitHub 最新的 release。`rollback_docker` 接著要求它等於 `.wukong-release` 的 `previousVersion`。升級到最新版之後，最新版就是要退出的版本，所以 `--rollback` 一定被拒絕（「rollback source is absent or metadata is invalid」）。5b6c45f 起就是這樣（`git tag --contains` 最早 v0.18.0）。現有測試抓不到，因為假 curl 回的最新版預設是 v9.9.9，剛好等於 rollback 目標；Task 6.1 的演練是在 V2 版發布之前跑的。
+- 修正：比照 binary 模式的 rollback，把 `VERSION_EXPLICIT` 傳進比對，只有明確指定 `--version` 時才要求等於前一版。
+- 測試（`docker-rollback`）：
+  - 最新版是剛升級到的 v9.9.8 時，不帶 `--version` 的 rollback 成功回到 v9.9.9。
+  - `--rollback --version v9.9.7`（不是前一版）被拒絕，metadata 不變。
+- 紅燈：a267749 的 `install.sh` 在第一個新斷言失敗（「rollback source is absent or metadata is invalid」）。消融：完全不比對版本時，指定錯誤版本的斷言失敗（「rollback to a version that is not the previous one ran」）。
+- R10 的「再跑一次 `--rollback` 會被拒絕」：修正後擋下它的是 `dataCompatibility` 檢查（rollback 寫出的 metadata 沒有這個欄位），測試照樣通過。
+- N-H：`docs/docker.md` 健康等待那段分開寫：升級失敗時部署已還原，修好設定後重跑升級；rollback 失敗時部署已是前一版，修好後用 `docker compose up -d` 啟動。
+- `CHANGELOG.md` 的 Fixed 新增一條。
+
 ### 這一輪的整體檢查（2026-11-26）
 - `bash scripts/test-installer-upgrade.sh all`：通過。
 - `test-idle-restart-decision.sh`、`test-docker-runtime.sh`、`test-resolve-opencode-version.sh`：通過。

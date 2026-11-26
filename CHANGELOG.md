@@ -64,6 +64,9 @@
 
 - **Docker `--rollback` 不再一律被拒絕。** `release/data-compatibility.json` 的 `rollbackSafeTo` 自 2026-07 起停在
   v0.17.1，之後所有版本的 rollback 都因此被拒絕；現在改成 v0.25.1（#44）。
+- **Docker `--rollback` 不帶 `--version` 時回到前一版。** v0.18.0 起，沒指定版本時 installer 會拿 GitHub 上
+  最新的 release 去比對前一版，升級到最新版之後執行 `--rollback` 會被拒絕（「metadata is invalid」）。現在
+  只有明確指定 `--version` 時才比對，與 binary 模式的 rollback 相同（PR #46）。
 
 ## [0.25.1] - 2026-11-20
 
