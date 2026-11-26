@@ -8,12 +8,16 @@
 
 use wukong_memory::Memory;
 
-/// 2026-11-26（#45）：入口啟動時寫入 Wukong 管理的 agent 定義
-/// （[`crate::agent_assets`]）。寫入失敗只警告、不讓入口起不來：指定的 agent
-/// 不存在時，V2 會讓回合以「Agent not found」失敗，錯誤會照常回報給使用者。
-pub fn prepare_agent_definitions() {
+/// 2026-11-26（#45）：入口啟動時把 Wukong 管理的 agent 定義
+/// （[`crate::agent_assets`]）與技能（[`crate::skill_assets`]）寫進工作區。
+/// 寫入失敗只警告、不讓入口起不來：指定的 agent 不存在時，V2 會讓回合以
+/// 「Agent not found」失敗，錯誤會照常回報給使用者；少了技能只是模型用不到它。
+pub fn prepare_workspace_assets() {
     if let Err(e) = crate::agent_assets::materialize_default_agent_definitions() {
         eprintln!("warning: failed to write agent definitions: {e}");
+    }
+    if let Err(e) = crate::skill_assets::materialize_default_skills() {
+        eprintln!("warning: failed to write skills: {e}");
     }
 }
 

@@ -106,7 +106,7 @@ pub fn materialize_agent_definitions(workspace: &Path) -> io::Result<PathBuf> {
     let dir = workspace.join(AGENTS_DIR);
     fs::create_dir_all(&dir)?;
     for def in agent_definitions(&workspace_soul(workspace)) {
-        write_if_changed(&dir, def.name, &def.content)?;
+        write_if_changed(&dir, &format!("{}.md", def.name), &def.content)?;
     }
     Ok(dir)
 }
@@ -119,14 +119,16 @@ pub fn materialize_default_agent_definitions() -> io::Result<PathBuf> {
     materialize_agent_definitions(&workspace)
 }
 
-fn write_if_changed(dir: &Path, name: &str, content: &str) -> io::Result<()> {
-    let path = dir.join(format!("{name}.md"));
+/// 把 `content` 寫到 `dir/file_name`：內容相同時不寫；不同時先寫同目錄的暫存檔再改名，
+/// V2 的檔案監看不會讀到寫到一半的檔案。技能檔（[`crate::skill_assets`]）也用它。
+pub(crate) fn write_if_changed(dir: &Path, file_name: &str, content: &str) -> io::Result<()> {
+    let path = dir.join(file_name);
     if fs::read_to_string(&path).is_ok_and(|existing| existing == content) {
         return Ok(());
     }
-    // 暫存檔不以 .md 結尾，V2 不會把它當成定義載入
+    // 暫存檔不以 .md 結尾，V2 不會把它當成定義或技能載入
     let tmp = dir.join(format!(
-        ".{name}.tmp.{}.{}",
+        ".{file_name}.tmp.{}.{}",
         std::process::id(),
         WRITE_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
@@ -242,13 +244,15 @@ mod tests {
         assert!(read(&dir, "wukong").contains(DEFAULT_SOUL.trim()));
     }
 
-    /// 外迴圈用：把定義寫到 `WUKONG_AGENT_PROBE_DIR`，再交給
-    /// docs/issues/issue-0045/scripts/probe-managed-agents.sh 對真實 V2 檢查。
+    /// 外迴圈用：把 agent 定義與技能寫到 `WUKONG_AGENT_PROBE_DIR`，再交給
+    /// docs/issues/issue-0045/scripts/ 的 probe-managed-agents.sh、probe-managed-skills.sh
+    /// 對真實 V2 檢查。
     #[test]
     #[ignore = "writes into WUKONG_AGENT_PROBE_DIR for the V2 probe"]
     fn write_definitions_for_probe() {
         let dir = std::env::var("WUKONG_AGENT_PROBE_DIR").expect("WUKONG_AGENT_PROBE_DIR");
         materialize_agent_definitions(Path::new(&dir)).unwrap();
+        crate::skill_assets::materialize_skills(Path::new(&dir)).unwrap();
     }
 
     #[test]

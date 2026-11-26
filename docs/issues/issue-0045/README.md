@@ -63,14 +63,17 @@ crates/
 ├── wukong-web/          # 可改：角色與步驟顯示、移除偏好介面與 API
 ├── wukong-telegram/     # 可改：狀態泡泡的角色、檔案互動規則改走 session 指令層
 ├── wukong-scheduler/    # 可改：執行訊息的階段文字
-├── wukong-cli/          # 可改：角色顯示
+├── wukong-cli/          # 可改：角色顯示、啟動時寫入 agent 定義與技能
+├── wukong-schedulerd/   # 可改：啟動時寫入 agent 定義與技能
 ├── wukong-memory/       # 不可觸及：記憶與 lease 的 schema 不變
 └── wukong-memoryd/      # 不可觸及
 scripts/
 ├── docker-entrypoint.sh  # 可改：agent 定義、技能路徑、AGENTS.md 範本遷移
 ├── install.sh            # 可改：binary 模式的範本遷移（與 entrypoint 同一套規則）
+├── test-docker-runtime.sh # 可改：映像不再帶技能的檢查
 └── test-support/         # 可改：假 agent 不再輸出 planner 的格式
 workspace/AGENTS.md、workspace/SOUL.md  # 可改：範本內容
+Dockerfile、Dockerfile.release、.github/workflows/release.yml  # 可改：映像不再複製技能
 docs/                     # 可改：根目錄 AGENTS.md、docker.md、entrypoints.md、CHANGELOG.md
 ```
 

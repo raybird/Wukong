@@ -75,10 +75,11 @@ require_in_file 'mkdir -p "$AGENT_REACH_STATE"' "$entrypoint" \
     "entrypoint must create Agent Reach state directory before gosu"
 require_in_file 'chown -R wukong:wukong "$AGENT_REACH_STATE"' "$entrypoint" \
     "entrypoint must chown Docker-created Agent Reach state volume"
-require_in_file "COPY crates/wukong-skills/assets/superpowers /usr/local/share/wukong/skills/superpowers" "$dockerfile" \
-    "Docker image must package Superpowers skill assets"
-require_in_file "/usr/local/share/wukong/skills/superpowers" "$dockerfile" \
-    "Dockerfile must use the canonical image skill asset path"
+# 2026-11-26（#45）：技能由 wukong 的入口寫到工作區的 .opencode/skills，映像不再帶一份。
+for file in "$dockerfile" Dockerfile.release "$entrypoint" "$release_workflow"; do
+    require_count_in_file "superpowers" 0 "$file" \
+        "$file must not package or sync the old .wukong/skills/superpowers copy"
+done
 require_in_file "# Development-only Compose" "$compose_file" \
     "development Compose must identify its local-build role"
 require_in_file "# Release deployment template" "$release_compose" \
@@ -88,18 +89,6 @@ for service in wukong opencode-server wukong-telegram wukong-web wukong-schedule
 done
 require_in_file 'WUKONG_WEB_BIND:-127.0.0.1' "$release_compose" \
     "release Compose must retain the loopback web default"
-require_in_file 'IMAGE_SKILLS="/usr/local/share/wukong/skills/superpowers"' "$entrypoint" \
-    "entrypoint must define image skill asset source"
-require_in_file 'WORKSPACE_SKILLS="$WUKONG_WORKSPACE/.wukong/skills/superpowers"' "$entrypoint" \
-    "entrypoint must define workspace skill asset destination"
-require_in_file 'sync_wukong_skills()' "$entrypoint" \
-    "entrypoint must provide a skill asset sync function"
-require_in_file 'cmp -s "$IMAGE_SKILLS/SOURCE.md" "$WORKSPACE_SKILLS/SOURCE.md"' "$entrypoint" \
-    "entrypoint must skip skill sync when SOURCE.md matches"
-require_in_file 'cp -a "$IMAGE_SKILLS/." "$tmp_dir/"' "$entrypoint" \
-    "entrypoint must copy image skill assets into a temporary directory"
-require_in_file 'mv "$tmp_dir" "$WORKSPACE_SKILLS"' "$entrypoint" \
-    "entrypoint must atomically install workspace skill assets"
 require_in_file 'OPENCODE_CONFIG_DIR="/home/wukong/.config/opencode"' "$entrypoint" \
     "entrypoint must keep the config directory out of the OPENCODE_CONFIG variable name"
 require_in_file 'export OPENCODE_CONFIG="$OPENCODE_USER_CONFIG_FILE"' "$entrypoint" \

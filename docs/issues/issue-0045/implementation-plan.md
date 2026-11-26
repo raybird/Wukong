@@ -174,8 +174,21 @@
   - 用真實模型跑一題符合技能的任務，事件看得到技能被使用；
   - prompt 不含技能規範指引。
 - 驗證：雙迴圈。外迴圈是接真實 V2 的 `#[ignore]` 整合測試；內迴圈是寫出路徑與內容的單元測試。
-- 狀態：📝 待實作
+- 狀態：✅ 已完成（2026-11-26）
 - 證據：
+  - 內迴圈：
+    - `skill_assets.rs` 的 4 個單元測試：八個技能寫到 `.opencode/skills/{名稱}/SKILL.md`，內容與內嵌相同；根目錄沒有其他檔案；內容沒變不重寫，改過的會還原；同目錄使用者自己的技能不動；並行寫入不留暫存檔。
+    - `turn.rs` 的 `run_turn_leaves_skills_to_v2`：planner 選了技能，prompt 也不含 `[技能規範指引]` 與 SKILL.md 路徑，回合不再建立 `.wukong`。紅燈：改動前因 prompt 含技能區塊而失敗。
+    - `scripts/test-docker-runtime.sh` 改成檢查 Dockerfile、Dockerfile.release、entrypoint、release workflow 都不再含 `superpowers`。改動前的 Dockerfile 有 1 行符合，這項檢查會失敗。
+    - CI 三道全過（796 passed、15 ignored）。
+  - 外迴圈：`scripts/probe-managed-skills.sh`（opencode/big-pickle，TBD-6）12 項全部 PASS。
+    - `/api/skill` 列得到 Rust 寫出的八個技能，工作區沒有其他技能。
+    - 「請用測試先行的方式寫 add(a, b) 與 pytest 測試」這一題，wukong 用 `skill` 工具載入了 test-driven-development。
+  - 發現：V2 會把 `.opencode/skills/` 根目錄的 .md 檔也當成技能（第一次執行時 `SUPERPOWERS-SOURCE.md` 被列成一個技能）。上游出處因此只留在 repo 的 `crates/wukong-skills/assets/superpowers/SOURCE.md`，不寫進工作區。
+  - 範圍調整：
+    - 技能清單的精簡移到 5.2。現在 planner 與 Web 偏好 API 還在用它。
+    - 技能與 agent 定義一起在入口啟動時寫入（`bootstrap::prepare_workspace_assets`），位置是 backend 的工作區（`workspace_dir()`）。原本每回合在 `resolve_skill_workspace()`（會退回目前目錄）寫一次的做法已移除。
+    - 映像與 entrypoint 不再帶、不再同步技能，release workflow 也不再複製。既有工作區的 `.wukong/skills/superpowers` 留著不刪：V2 讀不到它，舊範本 AGENTS.md 的引用由 2.3 處理。
 
 ### Task 2.3 — workspace/AGENTS.md 範本更新與遷移
 - 產出與範圍：
@@ -319,6 +332,7 @@
 ### Task 5.2 — 移除規劃偏好
 - 產出與範圍：
   - 移除 `planner_preferences` 的讀寫、Web 的偏好介面與 API，以及 CLI、Telegram 的套用；serde 忽略舊欄位。
+  - 技能清單（`crates/wukong-skills/src/catalog.rs`）只留內嵌內容與寫出所需的部分：planner（3.1 移除）與偏好 API 移除後，角色對應、`route_options`、`find` 都不再有人用。從 2.2 移過來，那時兩者都還在用。
   - 更正根目錄 AGENTS.md 裡 settings 的路徑（實際是 `/data/settings.json` 或 `WUKONG_SETTINGS_FILE`）。
 - 相依：3.1
 - 驗收編號：SCN-011

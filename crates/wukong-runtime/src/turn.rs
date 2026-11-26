@@ -208,17 +208,9 @@ pub async fn run_turn_traced_with_attachments(
         let mut prior: Vec<wukong_orchestrator::Outcome> = Vec::new();
         let mut captured_session: Option<String> = None;
         let mut final_repair: Option<(Role, Option<String>, String)> = None;
-        let skill_root =
-            crate::skill_assets::materialize_default_runtime_skills().map_err(|err| {
-                WukongError::Backend(wukong_gateway::GatewayError::AgentFailed {
-                    code: None,
-                    stderr: format!("failed to prepare runtime skill assets: {err}"),
-                })
-            })?;
         for (i, step) in steps.into_iter().enumerate() {
             let role = step.role;
             on_role(role);
-            let skill = step.skill_name.as_deref().and_then(find_skill);
             let augmented = format!("{input}{}", wukong_orchestrator::chain_context(&prior));
             let is_final = i + 1 == n_steps;
             // 2026-11-03（issue-0028）：輪替的回合沒有舊 session 可接續，最後一棒也帶上一回合。
@@ -227,8 +219,8 @@ pub async fn run_turn_traced_with_attachments(
             } else {
                 &helper_hits
             };
-            let mut prompt =
-                persona::build_prompt_with_skill(role, skill, &skill_root, hits, &augmented);
+            // 2026-11-26（#45）：技能交給 V2 的 skill 機制，planner 選的技能不再寫進 prompt。
+            let mut prompt = persona::build_prompt(role, hits, &augmented);
             // Advertise the scheduling capability only on the user-facing final step,
             // so stateless helper steps never take a side-effecting schedule action.
             if is_final {
@@ -1015,8 +1007,11 @@ mod tests {
         }
     }
 
+    /// 2026-11-26（#45 SCN-005）：技能改由 V2 的 skill 機制提供（工作區的
+    /// `.opencode/skills/`，模型依描述自己載入），planner 選到的技能不再寫進 prompt，
+    /// 回合也不再寫出 `.wukong/skills/superpowers`。
     #[tokio::test]
-    async fn run_turn_injects_planned_skill_into_execute_prompt() {
+    async fn run_turn_leaves_skills_to_v2() {
         let workspace = tempfile::tempdir().unwrap();
         std::env::set_var("WUKONG_WORKSPACE", workspace.path());
         let mem = open_memory().await;
@@ -1035,13 +1030,10 @@ mod tests {
         assert_eq!(out.text, "done");
         let prompts = backend.prompts.lock().unwrap();
         assert_eq!(prompts.len(), 2);
-        assert!(prompts[0].contains("test-driven-development"));
-        assert!(prompts[1].contains("[技能規範指引]"));
-        assert!(prompts[1].contains("test-driven-development"));
-        assert!(prompts[1].contains(".wukong/skills/superpowers/test-driven-development/SKILL.md"));
-        assert!(!prompts[1].contains("Docker runtime"));
-        assert!(!prompts[1].contains("crates/wukong-skills/assets/superpowers"));
+        assert!(!prompts[1].contains("[技能規範指引]"), "{}", prompts[1]);
+        assert!(!prompts[1].contains("SKILL.md"), "{}", prompts[1]);
         assert!(prompts[1].contains("你是 Fixer"));
+        assert!(!workspace.path().join(".wukong").exists());
         std::env::remove_var("WUKONG_WORKSPACE");
     }
 

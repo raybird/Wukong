@@ -1,7 +1,5 @@
-use std::path::Path;
 use wukong_memory::RecallHit;
 use wukong_orchestrator::Role;
-use wukong_skills::SkillSpec;
 
 /// The Sun Wukong persona is managed globally at the system level via `SOUL.md`.
 /// This constant is kept for documentation and fallback reference.
@@ -13,28 +11,6 @@ pub const WUKONG_PERSONA: &str = "你是孫悟空（齊天大聖、鬥戰勝佛�
 pub fn build_prompt(role: Role, hits: &[RecallHit], input: &str) -> String {
     let body = wukong_gateway::prompt::compose_prompt(hits, input);
     format!("{}\n\n{body}", role.card())
-}
-
-pub fn build_prompt_with_skill(
-    role: Role,
-    skill: Option<&SkillSpec>,
-    skill_root: &Path,
-    hits: &[RecallHit],
-    input: &str,
-) -> String {
-    let body = wukong_gateway::prompt::compose_prompt(hits, input);
-    let mut prompt = role.card().to_string();
-    if let Some(skill) = skill {
-        let skill_path = skill_root.join(skill.name).join("SKILL.md");
-        prompt.push_str(&format!(
-            "\n\n[技能規範指引]\n你必須遵循 `{}` 的流程。請先閱讀並遵循 runtime 已準備好的技能規範文件：\n路徑：{}",
-            skill.name,
-            skill_path.display()
-        ));
-    }
-    prompt.push_str("\n\n");
-    prompt.push_str(&body);
-    prompt
 }
 
 /// 2026-10-06：入口附加給 agent 的檔案互動規則區塊標頭。`run_turn` 以它切出
@@ -194,42 +170,6 @@ mod tests {
         assert!(p.contains("[相關記憶]"));
         assert!(p.contains("earlier decision"));
         assert!(p.contains("你是 Oracle"));
-    }
-
-    #[test]
-    fn build_prompt_with_skill_includes_skill_block() {
-        let skill = wukong_skills::find("test-driven-development").unwrap();
-        let p = build_prompt_with_skill(
-            Role::Fixer,
-            Some(skill),
-            "/tmp/project/.wukong/skills/superpowers".as_ref(),
-            &[],
-            "fix the bug",
-        );
-        assert!(p.contains("[技能規範指引]"));
-        assert!(p.contains("test-driven-development"));
-        assert!(
-            p.contains("/tmp/project/.wukong/skills/superpowers/test-driven-development/SKILL.md")
-        );
-        assert!(!p.contains("/workspace/.wukong/skills/superpowers"));
-        assert!(!p.contains("Docker runtime"));
-        assert!(!p.contains("crates/wukong-skills/assets/superpowers"));
-        assert!(p.contains("你是 Fixer"));
-        assert!(p.contains("fix the bug"));
-    }
-
-    #[test]
-    fn build_prompt_with_skill_omits_skill_block_when_absent() {
-        let p = build_prompt_with_skill(
-            Role::Oracle,
-            None,
-            "/tmp/project/.wukong/skills/superpowers".as_ref(),
-            &[],
-            "think about it",
-        );
-        assert!(!p.contains("[技能規範指引]"));
-        assert!(p.contains("你是 Oracle"));
-        assert!(p.contains("think about it"));
     }
 
     #[test]
