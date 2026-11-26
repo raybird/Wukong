@@ -3995,12 +3995,6 @@ dependencies = [
 [[package]]
 name = "wukong-orchestrator"
 version = "0.1.0"
-dependencies = [
- "clap",
- "thiserror 1.0.69",
- "tokio",
- "wukong-gateway",
-]
 
 [[package]]
 name = "wukong-render"

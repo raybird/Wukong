@@ -260,14 +260,15 @@ pub async fn run_claimed_job<B: AiBackend + QuestionResponder + Sync>(
 /// 排程 run 目前的階段（issue-0013），寫進執行中的 run 訊息，以及失敗訊息的開頭。
 enum Phase {
     Maintenance,
-    Planning,
+    /// 2026-11-26（#45）：primary agent（悟空）在處理；planner 已移除，回合一開始就是這個階段。
+    Primary,
     Step(usize, Role),
 }
 
 impl Phase {
     fn initial(job: &Job) -> Self {
         match job.kind {
-            JobKind::Turn { .. } => Phase::Planning,
+            JobKind::Turn { .. } => Phase::Primary,
             JobKind::Maintenance { .. } => Phase::Maintenance,
         }
     }
@@ -283,7 +284,7 @@ impl Phase {
     fn label(&self) -> String {
         match self {
             Phase::Maintenance => "維護作業".to_string(),
-            Phase::Planning => "規劃中".to_string(),
+            Phase::Primary => "悟空".to_string(),
             Phase::Step(k, role) => format!("第 {k} 棒 {}", role.name()),
         }
     }
@@ -905,7 +906,8 @@ mod tests {
     async fn turn_longer_than_job_lease_keeps_the_job_claimed() {
         let memory = open_memory().await;
         let store = open_store().await;
-        let backend = SlowBackend::new(1600, vec![Ok("oracle"), Ok("完成")]);
+        // 一次呼叫 3.2 秒，比 2 秒的 job lease 久，也比 2.6 秒才來的 worker-b 晚結束。
+        let backend = SlowBackend::new(3200, vec![Ok("完成")]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory: &memory,
@@ -1027,7 +1029,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(claimed, vec![job.clone()]);
-        let backend = SlowBackend::new(1000, vec![Ok("oracle"), Ok("不該完成")]);
+        let backend = SlowBackend::new(1000, vec![Ok("不該完成")]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory: &memory,
@@ -1151,7 +1153,7 @@ mod tests {
             .claim_due_jobs(chrono::Utc::now().timestamp(), "worker-a", 300, 10)
             .await
             .unwrap();
-        let backend = MockBackend::new(vec![Ok("oracle"), Ok("年度提醒完成")]);
+        let backend = MockBackend::new(vec![Ok("年度提醒完成")]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory: &memory,
@@ -1178,7 +1180,7 @@ mod tests {
         let memory = open_memory().await;
         let store = open_store().await;
         let job = claimed_turn(&store, 5).await;
-        let backend = SlowBackend::new(1000, vec![Ok("oracle"), Ok("不該完成")]);
+        let backend = SlowBackend::new(1000, vec![Ok("不該完成")]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory: &memory,
@@ -1334,7 +1336,7 @@ mod tests {
     async fn deleting_a_running_job_cleans_up_after_the_turn() {
         let memory = open_memory().await;
         let store = open_store().await;
-        let backend = SlowBackend::new(1000, vec![Ok("oracle"), Ok("提醒完成")]);
+        let backend = SlowBackend::new(1000, vec![Ok("提醒完成")]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory: &memory,
@@ -1369,7 +1371,7 @@ mod tests {
     async fn deleting_a_queued_job_skips_it_and_clears_its_scope() {
         let memory = open_memory().await;
         let store = open_store().await;
-        let backend = MockBackend::new(vec![Ok("oracle"), Ok("不該執行")]);
+        let backend = MockBackend::new(vec![Ok("不該執行")]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory: &memory,
@@ -1405,7 +1407,7 @@ mod tests {
     async fn queued_job_whose_lease_was_taken_is_skipped() {
         let memory = open_memory().await;
         let store = open_store().await;
-        let backend = MockBackend::new(vec![Ok("oracle"), Ok("不該執行")]);
+        let backend = MockBackend::new(vec![Ok("不該執行")]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory: &memory,
@@ -1450,13 +1452,14 @@ mod tests {
     }
 
     // SCN-001：執行中的 run 訊息顯示目前階段與已執行秒數，同一階段內也會更新。
+    // 2026-11-26（#45）：回合只呼叫一次 primary agent，階段是「悟空」。
     #[tokio::test]
     async fn running_run_shows_phase_and_elapsed_seconds() {
         let memory = open_memory().await;
         let store = open_store().await;
-        // planner 與唯一一棒各 2.5 秒；lease 3 秒時每 1 秒更新一次進度。每個讀取點與它要讀到的
-        // 那次寫入、以及下一次換階段，都至少隔 0.7 秒，CI 上資料庫寫入變慢也不會讀到舊訊息。
-        let backend = SlowBackend::new(2500, vec![Ok("oracle"), Ok("完成")]);
+        // 唯一的一次呼叫 4 秒；lease 3 秒時每 1 秒更新一次進度。每個讀取點與它要讀到的那次寫入
+        // 至少隔 0.7 秒，CI 上資料庫寫入變慢也不會讀到舊訊息。
+        let backend = SlowBackend::new(4000, vec![Ok("完成")]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory: &memory,
@@ -1469,7 +1472,7 @@ mod tests {
         let probe = async {
             let start = tokio::time::Instant::now();
             let mut messages = Vec::new();
-            for at in [800u64, 1800, 3600] {
+            for at in [800u64, 1800, 2800] {
                 tokio::time::sleep_until(start + std::time::Duration::from_millis(at)).await;
                 let run = only_run(&store, &job).await;
                 assert_eq!(run.status, RunStatus::Running);
@@ -1481,27 +1484,18 @@ mod tests {
             tokio::join!(run_claimed_job(&store, &ctx, &job, "worker-a", 3), probe);
         outcome.unwrap();
 
+        for message in &messages {
+            assert!(message.starts_with("進行中：悟空，已執行 "), "{messages:?}");
+        }
         assert!(
-            messages[0].starts_with("進行中：規劃中，已執行 "),
-            "{messages:?}"
-        );
-        assert!(
-            messages[1].starts_with("進行中：規劃中，已執行 "),
-            "{messages:?}"
-        );
-        assert!(
-            elapsed_secs(&messages[1]) >= 1,
+            elapsed_secs(&messages[2]) >= 2,
             "同一階段內沒有更新：{messages:?}"
-        );
-        assert!(
-            messages[2].starts_with("進行中：第 1 棒 oracle，已執行 "),
-            "{messages:?}"
         );
     }
 
     // SCN-002：失敗時訊息開頭標出失敗的階段與已執行秒數，後面保留原錯誤。
     #[tokio::test]
-    async fn failure_message_names_the_planning_phase() {
+    async fn failure_message_names_the_phase() {
         let memory = open_memory().await;
         let store = open_store().await;
         let backend = SlowBackend::new(0, vec![Err(timed_out())]);
@@ -1521,42 +1515,7 @@ mod tests {
         let run = only_run(&store, &job).await;
         assert_eq!(run.status, RunStatus::Failure);
         assert!(
-            run.message.starts_with("規劃中失敗，已執行 "),
-            "{}",
-            run.message
-        );
-        assert!(
-            run.message.contains("本機 OpenCode 回合逾時，已中止程序。"),
-            "{}",
-            run.message
-        );
-    }
-
-    #[tokio::test]
-    async fn failure_message_names_the_failing_step() {
-        let memory = open_memory().await;
-        let store = open_store().await;
-        let backend = SlowBackend::new(
-            0,
-            vec![Ok("explorer, fixer"), Ok("看過了"), Err(timed_out())],
-        );
-        let cfg = cfg("project:Base");
-        let ctx = ExecutionContext {
-            memory: &memory,
-            backend: &backend,
-            base_config: &cfg,
-            permission_policy: PermissionPolicy::Reject,
-        };
-        let job = claimed_turn(&store, 300).await;
-
-        run_claimed_job(&store, &ctx, &job, "worker-a", 300)
-            .await
-            .unwrap();
-
-        let run = only_run(&store, &job).await;
-        assert_eq!(run.status, RunStatus::Failure);
-        assert!(
-            run.message.starts_with("第 2 棒 fixer 失敗，已執行 "),
+            run.message.starts_with("悟空失敗，已執行 "),
             "{}",
             run.message
         );
@@ -1572,7 +1531,7 @@ mod tests {
     async fn short_turn_result_and_leases_are_unchanged() {
         let memory = open_memory().await;
         let store = open_store().await;
-        let backend = SlowBackend::new(0, vec![Ok("oracle"), Ok("完成")]);
+        let backend = SlowBackend::new(0, vec![Ok("完成")]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory: &memory,
@@ -1775,9 +1734,9 @@ mod tests {
             .collect()
     }
 
-    /// 跑一次 Turn job（planner 一棒 + 執行一棒），回傳 backend 收到的所有 prompt。
+    /// 跑一次 Turn job（呼叫一次 primary agent），回傳 backend 收到的所有 prompt。
     async fn run_turn_job(memory: &Memory, job: &Job, reply: &str) -> Vec<String> {
-        let backend = MockBackend::new(vec![Ok("oracle"), Ok(reply)]);
+        let backend = MockBackend::new(vec![Ok(reply)]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory,
@@ -1868,10 +1827,26 @@ mod tests {
             .join("\n");
         let beta_second = run_turn_job(&memory, &beta, "beta-second").await.join("\n");
 
-        assert!(alpha_second.contains("Assistant: alpha-first"));
+        // 2026-11-26（#45 SCN-004）：接續 session 的回合不再補上一回合，所以 prompt 裡兩邊都看不到；
+        // 各自只接續自己的 scope，由兩個 scope 的回合記憶確認。
         assert!(!alpha_second.contains("beta-first"));
-        assert!(beta_second.contains("Assistant: beta-first"));
         assert!(!beta_second.contains("alpha-first"));
+        let alpha_events = event_texts(&memory, "agent:schedule-job-1").await;
+        let beta_events = event_texts(&memory, "agent:schedule-job-2").await;
+        for (events, own, other) in [
+            (&alpha_events, "alpha", "beta"),
+            (&beta_events, "beta", "alpha"),
+        ] {
+            assert!(
+                events.contains(&format!("Assistant: {own}-first")),
+                "{events:?}"
+            );
+            assert!(
+                events.contains(&format!("Assistant: {own}-second")),
+                "{events:?}"
+            );
+            assert!(!events.iter().any(|e| e.contains(other)), "{events:?}");
+        }
     }
 
     #[tokio::test]
@@ -2009,7 +1984,7 @@ mod tests {
     #[tokio::test]
     async fn turn_job_instructs_agent_to_auto_choose_recommended_options() {
         let memory = open_memory().await;
-        let backend = MockBackend::new(vec![Ok("oracle"), Ok("done")]);
+        let backend = MockBackend::new(vec![Ok("done")]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory: &memory,
@@ -2033,7 +2008,7 @@ mod tests {
 
     async fn models_sent_for_turn(job_model: Option<&str>) -> Vec<Option<String>> {
         let memory = open_memory().await;
-        let backend = MockBackend::new(vec![Ok("oracle"), Ok("done")]);
+        let backend = MockBackend::new(vec![Ok("done")]);
         let mut cfg = cfg("project:Base");
         cfg.default_model = Some("opencode/default".to_string());
         let ctx = ExecutionContext {

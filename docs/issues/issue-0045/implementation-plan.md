@@ -250,14 +250,58 @@
     - 上游錯誤照舊往外傳。
   - CI 三道全過。
 - 驗證：雙迴圈。外迴圈是入口層的既有測試（CLI、Web、Telegram、排程），改成單次回覆後的行為；內迴圈是 turn.rs 的測試。行為不變的部分（錯誤分類、補救）沿用同一組斷言。
-- 狀態：📝 待實作
+- 狀態：✅ 已完成（2026-11-26）
 - 證據：
+  - run_turn（`crates/wukong-runtime/src/turn.rs`）：
+    - 流程改成：拿 lease（`prepare_final_session`，在任何 LLM 呼叫之前），recall，輪替時補上一回合，以 agent `wukong` 送出一次，空輸出補一次修復提示（同一個 session、同一個 agent），remember。
+    - 移除 planner（`plan_skill_chain_with_preferences`、`parse_preferred_role`、`planner_preference_hint`、`planner_previous_turn`）、`[前序協作]`、輔助棒及它的上一回合補償。`persona::build_prompt` 一併移除。
+    - `TurnOutput` 拿掉 `role`，`WukongError::Orchestrator` 移除。
+  - 回合等背景工作（`crates/wukong-gateway/src/opencode_server.rs` 的 `consume_event_stream`）：
+    - primary 的執行結束時，有以下任一情況就繼續讀事件：
+      - 事件裡看得到還在執行的子 session（`session.execution.started` 之後還沒結束）；
+      - primary 的 inbox 有還沒送進執行的項目（`session.inbox.enqueued` 之後還沒 `delivered`）；
+      - `GET /api/experimental/job?sessionID={id}&descendants=true` 不是空的。
+    - 前兩項是外迴圈發現後補的，見下方外迴圈第 2 點。
+    - 子 session 從 `session.created` 的 `parentID` 認出（含子 session 再派出去的）。回合失敗或被取消時，primary 與這些子 session 都送 interrupt（`InterruptOnDrop`）。
+    - 等待沿用回合的逾時。本機按需模式在 `run_streaming` 回來之後才關 server，所以已涵蓋背景工作的時間，不必另改。
+  - 做法調整：
+    - 角色卡（`[角色]`）隨 planner 一起拿掉。人格與派工規則在 agent 定義裡（2.1），固定提示的其餘區塊留給 Phase 4。
+    - orchestrator 只留角色定義與 `SkillRouteOption`。demo binary `wukong-orchestrate` 與它的依賴一併移除，根目錄 README 與 AGENTS.md 的指令改成以假 agent 跑入口測試。
+    - 接力鏈拿掉後 `on_role`、`on_step` 不再被呼叫：入口暫時不顯示角色，排程的階段固定是「悟空」。改由 subagent 事件產生是 Task 5.1 的範圍；Web 兩個輔助棒卡片的測試標成 ignored，註明 5.1 改寫。
+    - 保存的規劃偏好在 5.2 移除之前不影響回合，Web 測試改成確認 prompt 不含偏好。
+    - 假 agent（`scripts/test-support/cli_backend.rs`）收到非串流呼叫（原本給 planner 的）時失敗，入口測試因此能抓到殘留的 planner 呼叫。
+  - 內迴圈：
+    - turn.rs：
+      - `a_turn_rejected_by_the_lease_makes_no_backend_call`：第二個回合被拒，backend 沒有收到呼叫；
+      - `a_turn_is_one_call_to_the_wukong_agent_and_is_remembered`：一次呼叫，agent `wukong`；
+      - `a_continuing_session_gets_no_previous_turn`：prompt 不含上一回合；
+      - `an_old_session_rotates_and_the_turn_sees_the_previous_turn`：輪替後的第一回合含上一回合；
+      - `run_turn_all_empty_repairs_with_text`、`run_turn_all_empty_repair_empty_returns_sentinel`：修復提示；
+      - `failed_turn_releases_session_lease`：上游錯誤照舊往外傳。
+      - 紅燈：前三項放在 HEAD 828fe85 的實作上（臨時 worktree）全部失敗。
+    - gateway，以 1.4 的真實派工 fixture `server-dispatch-subagent.ndjson` 重播：
+      - `a_turn_waits_for_a_running_subagent_even_when_the_job_list_is_empty`；
+      - `the_job_list_keeps_the_turn_open_when_the_events_show_no_running_subagent`；
+      - `a_report_waiting_in_the_inbox_keeps_the_turn_open`；
+      - `a_turn_without_background_work_ends_at_the_first_execution`；
+      - `a_failed_turn_interrupts_the_subagent_sessions_too`、`a_cancelled_turn_interrupts_the_subagent_sessions_too`。
+      - 紅燈：只看清單的實作上，第 1、3 項失敗，回覆都是「已派給 fixer……等它完成後我會回報結果」。
+  - 外迴圈：
+    - 入口層的既有測試（CLI、Web、Telegram、排程）改成單次回覆後全過。CLI 入口的 `cli_backend` 測試另外確認每回合只串流呼叫一次，參數帶 `--agent wukong`。
+    - 真實 V2：`scripts/probe-turn-dispatch.sh`（opencode/big-pickle，TBD-6）。
+      - 做法：真實的 `wukong` 入口接常駐 server，請它派給 fixer 建立 hello.txt。檢查回合等到 fixer 回報與 primary 的最終回覆、只送一次 prompt、primary 是 agent `wukong`。
+      - 只看清單的實作跑了 8 次：6 次 9 項全部 PASS，2 次回合在 primary 第一次執行結束時就結束，回覆是派工通知。
+      - 那 2 次 fixer 的 session 都還在執行（有 busy、沒有 idle），清單卻是空的。第一次失敗時沒有存事件串流，V2 清單漏掉執行中工作的原因沒有查出來。
+      - 依通過那幾次的事件順序（fixer 的 `execution.succeeded` 之後 2 ms 內 primary 的 inbox 收到回報，再開始下一次執行），補上前兩項事件判斷。
+      - 補上之後免費模型額度用完（`provider.free-limit` 429），沒有重跑；照 TBD-6 不繞過。殘留：補上的判斷只有 fixture 重播的證據，真實 V2 的重跑等額度恢復後在 3.2 的真實派工一併確認。
+  - 其他檢查：CI 三道全過（756 passed、14 ignored）。比 2.3 少的是 planner、接力鏈、`build_prompt` 被刪掉的測試，以及 `planner_probe.rs`。
 
 ### Task 3.2 — 指定模型時 subagent 用同一個模型
 - 產出與範圍：依 1.4 的結論，讓 primary agent 與 subagent 都用回合指定的模型（Web、排程、`default_model`）。
   - 1.4 的結論：subagent 沿用 session 選取的模型。
   - 做法：定義裡不寫模型，沿用 adapter 現有的逐 session 選取，並確認沒有指定模型的回合（`default_model`）也走選取。
   - 設定檔指定的模型在 server 上沒有套用，不能依賴它。
+  - 真實派工時一併以 `scripts/probe-turn-dispatch.sh` 重跑 3.1 補上的事件判斷（3.1 補上之後免費額度用完，沒有重跑）。
 - 相依：1.4、3.1
 - 驗收編號：SCN-013
 - 完成判準：
@@ -418,6 +462,7 @@
 ### Task 6.5 — 常青文件
 - 產出與範圍：
   - 根目錄 AGENTS.md：架構、一回合資料流、orchestrator 的職責、關鍵設計細節。
+  - 根目錄 README.md：一回合的流程圖、接力與空輸出回退等功能說明（3.1 只先改了不能執行的 `wukong-orchestrate` 指令與 crate 說明）。
   - `docs/docker.md`：agent 定義、技能路徑、AGENTS.md 遷移、移除的變數。
   - `docs/entrypoints.md`：角色顯示、偏好移除。
   - `CHANGELOG.md` 的 `[Unreleased]`。

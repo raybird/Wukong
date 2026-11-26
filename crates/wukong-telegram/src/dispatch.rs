@@ -2088,7 +2088,7 @@ mod tests {
     async fn ignores_messages_outside_allowlist() {
         let client = MockTgClient::default();
         let mem = open_memory().await;
-        let backend = MockBackend::new(&["oracle", "answer"]);
+        let backend = MockBackend::new(&["answer"]);
         let msg = TgMessage {
             update_id: 1,
             chat_id: 999,
@@ -2104,8 +2104,8 @@ mod tests {
     async fn turn_renders_answer_and_consolidates_messages() {
         let client = MockTgClient::default();
         let mem = open_memory().await;
-        // planner -> single role; then execute answer with markdown.
-        let backend = MockBackend::new(&["oracle", "**重點** 答案"]);
+        // 2026-11-26（#45）：回合只呼叫一次 primary agent，回覆含 markdown。
+        let backend = MockBackend::new(&["**重點** 答案"]);
         let msg = TgMessage {
             update_id: 1,
             chat_id: 12,
@@ -2114,8 +2114,8 @@ mod tests {
         };
         handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
 
-        // Status bubble edited per role, then deleted.
-        assert!(!client.edits.lock().unwrap().is_empty());
+        // Status bubble deleted once the answer is ready. 2026-11-26（#45）：接力鏈移除後
+        // 不再有逐棒的角色更新；Task 5.1 改由 subagent 資訊更新泡泡。
         assert!(!client.deletes.lock().unwrap().is_empty());
 
         // Final answer sent as rendered HTML.
@@ -2149,7 +2149,7 @@ mod tests {
         let mem = open_memory().await;
         // 三段各約 3000 bytes，切成三則；第二則被拒。
         let answer = ["甲", "乙", "丙"].map(|c| c.repeat(1000)).join("\n\n");
-        let backend = MockBackend::new(&["oracle", &answer]);
+        let backend = MockBackend::new(&[&answer]);
         let msg = TgMessage {
             update_id: 1,
             chat_id: 12,
@@ -2181,7 +2181,7 @@ mod tests {
         let history = wukong_chat_history::ChatHistoryStore::open(&db_url)
             .await
             .unwrap();
-        let backend = MockBackend::new(&["oracle", "telegram answer"]);
+        let backend = MockBackend::new(&["telegram answer"]);
         let msg = TgMessage {
             update_id: 1,
             chat_id: 12,
@@ -2215,7 +2215,7 @@ mod tests {
         let upload_dir = tempfile::tempdir().unwrap();
         std::env::set_var("WUKONG_WORKSPACE", upload_dir.path());
         let mem = open_memory().await;
-        let backend = RecordingBackend::new(&["oracle", "attachment answer"]);
+        let backend = RecordingBackend::new(&["attachment answer"]);
         let client =
             MockTgClient::default().with_file("doc_file", "documents/report.pdf", b"pdf".to_vec());
         let (_, db_url) = open_memory_with_url().await;
@@ -2637,7 +2637,7 @@ mod tests {
             .await
             .unwrap();
         assert!(events.iter().any(|e| e.kind == "user" && e.content == "hi"));
-        assert!(events.iter().any(|e| e.kind == "role"));
+        // 2026-11-26（#45）：「role」事件原本來自逐棒的 on_role，Task 5.1 改由 subagent 資訊產生。
         assert!(events
             .iter()
             .any(|e| e.kind == "tool" && e.label.as_deref() == Some("read")));
@@ -2663,7 +2663,7 @@ mod tests {
     async fn turn_sends_status_bubble_and_typing() {
         let client = MockTgClient::default();
         let mem = open_memory().await;
-        let backend = MockBackend::new(&["oracle", "答案"]);
+        let backend = MockBackend::new(&["答案"]);
         let msg = TgMessage {
             update_id: 1,
             chat_id: 12,

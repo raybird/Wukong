@@ -58,28 +58,44 @@ struct CreateSessionBody {
     permissions: Vec<PermissionRule>,
 }
 
-/// 見 [`OpencodeServerBackend::interrupt_on_drop`]。
-struct InterruptOnDrop(Option<reqwest::RequestBuilder>);
+/// 見 [`OpencodeServerBackend::interrupt_on_drop`]。回合本身的 session，加上串流中看到的
+/// subagent 子 session（#45：subagent 在背景執行，中斷回合時要一併中斷）。
+struct InterruptOnDrop(Vec<reqwest::RequestBuilder>);
 
 impl InterruptOnDrop {
+    fn add(&mut self, request: reqwest::RequestBuilder) {
+        self.0.push(request);
+    }
+
     fn disarm(&mut self) {
-        self.0 = None;
+        self.0.clear();
+    }
+
+    /// 回合失敗時立即送出。Best-effort：server 端的執行仍會繼續並佔住 session，後續回合
+    /// 要排在它後面；失敗也不影響原本要回傳的錯誤。
+    async fn send_now(&mut self) {
+        for request in self.0.drain(..) {
+            let _ = request.send().await;
+        }
     }
 }
 
 impl Drop for InterruptOnDrop {
     fn drop(&mut self) {
-        let Some(request) = self.0.take() else {
+        let requests = std::mem::take(&mut self.0);
+        if requests.is_empty() {
             return;
-        };
+        }
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                match request.send().await {
-                    Ok(response) => eprintln!(
-                        "turn_cancelled_interrupt status={}",
-                        response.status().as_u16()
-                    ),
-                    Err(err) => eprintln!("turn_cancelled_interrupt_failed: {err}"),
+                for request in requests {
+                    match request.send().await {
+                        Ok(response) => eprintln!(
+                            "turn_cancelled_interrupt status={}",
+                            response.status().as_u16()
+                        ),
+                        Err(err) => eprintln!("turn_cancelled_interrupt_failed: {err}"),
+                    }
                 }
             });
         }
@@ -522,17 +538,36 @@ impl OpencodeServerBackend {
     /// 回合的 future 在完成前被丟掉（入口取消、排程中止）時，V2 的執行仍會繼續佔住 session，
     /// 下一則 prompt 也會被併進這次執行；所以 drop 時在背景送 interrupt。
     fn interrupt_on_drop(&self, session_id: &str) -> InterruptOnDrop {
-        let url = format!("{}/api/session/{}/interrupt", self.base_url, session_id);
-        InterruptOnDrop(Some(self.authorize(self.client.post(url))))
+        InterruptOnDrop(vec![self.interrupt_request(session_id)])
     }
 
-    /// Best-effort：事件串流中斷後，server 端的執行仍會繼續並佔住 session，後續回合要排在它
-    /// 後面；這裡主動要求 opencode 中止，失敗也不影響原本要回傳的錯誤。
-    async fn abort_session(&self, session_id: &str) {
+    fn interrupt_request(&self, session_id: &str) -> reqwest::RequestBuilder {
         let url = format!("{}/api/session/{}/interrupt", self.base_url, session_id);
-        let _ = self
-            .send_empty("abort_session", self.client.post(url))
-            .await;
+        self.authorize(self.client.post(url))
+    }
+
+    /// 2026-11-26（#45）：這個 session 與它的子 session 還有沒有背景工作（執行中，或回報還沒被
+    /// 讀取）。subagent 一律在背景執行：primary 派工後先結束一次執行，收到回報再執行一次，
+    /// 清單空了回合才真的結束（docs/issues/issue-0045/probe-subagent.md）。查詢失敗時當作沒有，
+    /// 回合以目前的回覆收尾，與派工之前的行為相同。
+    async fn has_background_jobs(&self, session_id: &str) -> bool {
+        let url = format!(
+            "{}/api/experimental/job?sessionID={session_id}&descendants=true",
+            self.base_url
+        );
+        match self
+            .send_json("background_jobs", self.client.get(url))
+            .await
+        {
+            Ok(value) => value
+                .get("data")
+                .and_then(Value::as_array)
+                .is_some_and(|jobs| !jobs.is_empty()),
+            Err(err) => {
+                eprintln!("background_jobs_lookup_failed session_id={session_id}: {err}");
+                false
+            }
+        }
     }
 
     async fn open_event_stream(&self) -> Result<reqwest::Response, GatewayError> {
@@ -618,12 +653,12 @@ impl OpencodeServerBackend {
     ) -> Result<String, GatewayError> {
         let mut interrupt = self.interrupt_on_drop(session_id);
         let consumed = self
-            .consume_event_stream(response, session_id, on_event)
+            .consume_event_stream(response, session_id, on_event, &mut interrupt)
             .await;
-        interrupt.disarm();
         if consumed.is_err() {
-            self.abort_session(session_id).await;
+            interrupt.send_now().await;
         }
+        interrupt.disarm();
         consumed
     }
 
@@ -635,8 +670,16 @@ impl OpencodeServerBackend {
         mut response: reqwest::Response,
         session_id: &str,
         on_event: &mut dyn FnMut(StreamEvent),
+        interrupt: &mut InterruptOnDrop,
     ) -> Result<String, GatewayError> {
         let mut parser = SseParser::default();
+        // 本回合（含子 session 再派出去的）subagent 的 session。
+        let mut children: Vec<String> = Vec::new();
+        // 回合是否還有後續（#45）：還在執行的子 session，以及 primary 的 inbox 有沒有還沒送進
+        // 執行的項目（fixer 的回報）。真實 V2 有時在 primary 第一次執行結束時查背景工作拿到空清單，
+        // fixer 卻還在跑（2026-11-26 兩次），所以先看事件，事件看不出來才查清單。
+        let mut running_children: Vec<String> = Vec::new();
+        let mut inbox_pending = false;
         // 以 bytes 緩衝、只在整行（不會切在多位元組字元中間）時才解碼，
         // 避免 chunk 邊界落在 UTF-8 字元中間時產生 U+FFFD 亂碼。
         let mut buffer: Vec<u8> = Vec::new();
@@ -691,12 +734,59 @@ impl OpencodeServerBackend {
                     if event_type == "form.created" {
                         self.remember_form(session_id, &value);
                     }
+                    if event_type == "session.created" {
+                        let data = value.get("data");
+                        let parent = data.and_then(|d| d.get("parentID")).and_then(Value::as_str);
+                        let child = data
+                            .and_then(|d| d.get("sessionID"))
+                            .and_then(Value::as_str);
+                        if let (Some(parent), Some(child)) = (parent, child) {
+                            if parent == session_id || children.iter().any(|c| c == parent) {
+                                interrupt.add(self.interrupt_request(child));
+                                children.push(child.to_string());
+                            }
+                        }
+                    }
+                    let event_session = value
+                        .get("data")
+                        .and_then(|d| d.get("sessionID"))
+                        .and_then(Value::as_str);
+                    match (event_type.as_str(), event_session) {
+                        ("session.execution.started", Some(s))
+                            if children.iter().any(|c| c == s) =>
+                        {
+                            if !running_children.iter().any(|c| c == s) {
+                                running_children.push(s.to_string());
+                            }
+                        }
+                        (
+                            "session.execution.succeeded"
+                            | "session.execution.failed"
+                            | "session.execution.interrupted",
+                            Some(s),
+                        ) => running_children.retain(|c| c != s),
+                        ("session.inbox.enqueued", Some(s)) if s == session_id => {
+                            inbox_pending = true;
+                        }
+                        ("session.inbox.delivered", Some(s)) if s == session_id => {
+                            inbox_pending = false;
+                        }
+                        _ => {}
+                    }
                     match mapper.map(&value) {
                         ServerEventAction::Emit(event) => {
                             progress.record(&event_type, &event);
                             on_event(event);
                         }
-                        ServerEventAction::Idle => return Ok(mapper.final_text()),
+                        ServerEventAction::Idle => {
+                            if !running_children.is_empty()
+                                || inbox_pending
+                                || self.has_background_jobs(session_id).await
+                            {
+                                continue;
+                            }
+                            return Ok(mapper.final_text());
+                        }
                         ServerEventAction::Failed(error) => {
                             return Err(error.to_gateway_error());
                         }
@@ -1271,7 +1361,12 @@ mod tests {
 
         let response = backend.open_event_stream().await.unwrap();
         let result = backend
-            .consume_event_stream(response, "ses_1", &mut |_| {})
+            .consume_event_stream(
+                response,
+                "ses_1",
+                &mut |_| {},
+                &mut InterruptOnDrop(Vec::new()),
+            )
             .await;
         std::env::remove_var("WUKONG_AGENT_TIMEOUT_SECS");
 
@@ -1319,7 +1414,12 @@ mod tests {
 
         let response = backend.open_event_stream().await.unwrap();
         let result = backend
-            .consume_event_stream(response, "ses_1", &mut |_| {})
+            .consume_event_stream(
+                response,
+                "ses_1",
+                &mut |_| {},
+                &mut InterruptOnDrop(Vec::new()),
+            )
             .await;
         std::env::remove_var("WUKONG_AGENT_TIMEOUT_SECS");
 
@@ -1337,7 +1437,12 @@ mod tests {
 
         let response = backend.open_event_stream().await.unwrap();
         let result = backend
-            .consume_event_stream(response, "ses_1", &mut |_| {})
+            .consume_event_stream(
+                response,
+                "ses_1",
+                &mut |_| {},
+                &mut InterruptOnDrop(Vec::new()),
+            )
             .await;
         std::env::remove_var("WUKONG_AGENT_TIMEOUT_SECS");
 
@@ -1357,7 +1462,12 @@ mod tests {
         let response = backend.open_event_stream().await.unwrap();
 
         let result = backend
-            .consume_event_stream(response, "ses_1", &mut |_| {})
+            .consume_event_stream(
+                response,
+                "ses_1",
+                &mut |_| {},
+                &mut InterruptOnDrop(Vec::new()),
+            )
             .await;
 
         let error = result.expect_err("410 必須讓回合失敗，不能因為隨後的 idle 就當成功");
@@ -1378,7 +1488,12 @@ mod tests {
         let response = backend.open_event_stream().await.unwrap();
 
         let result = backend
-            .consume_event_stream(response, "ses_1", &mut |_| {})
+            .consume_event_stream(
+                response,
+                "ses_1",
+                &mut |_| {},
+                &mut InterruptOnDrop(Vec::new()),
+            )
             .await;
 
         let kind = upstream_failure_kind(result.expect_err("中止的回合不是成功"));
@@ -1397,7 +1512,12 @@ mod tests {
         let response = backend.open_event_stream().await.unwrap();
 
         backend
-            .consume_event_stream(response, "ses_1", &mut |_| {})
+            .consume_event_stream(
+                response,
+                "ses_1",
+                &mut |_| {},
+                &mut InterruptOnDrop(Vec::new()),
+            )
             .await
             .expect("沒有錯誤事件時必須正常收尾");
     }
@@ -1409,11 +1529,16 @@ mod tests {
 
         let mut reasoning = String::new();
         backend
-            .consume_event_stream(response, "ses_1", &mut |event| {
-                if let StreamEvent::Reasoning(text) = event {
-                    reasoning.push_str(&text);
-                }
-            })
+            .consume_event_stream(
+                response,
+                "ses_1",
+                &mut |event| {
+                    if let StreamEvent::Reasoning(text) = event {
+                        reasoning.push_str(&text);
+                    }
+                },
+                &mut InterruptOnDrop(Vec::new()),
+            )
             .await
             .unwrap();
 
@@ -1460,6 +1585,8 @@ mod tests {
                 "POST /api/session",
                 "GET /api/event",
                 "POST /api/session/ses_fake1/prompt",
+                // #45：執行結束時確認沒有背景工作（subagent）才收尾
+                JOBS_QUERY,
             ]
         );
         assert_eq!(
@@ -1474,6 +1601,199 @@ mod tests {
         fake.script_events(fake_v2::fixture_events("server-text-tool", "ses_fake1"));
         let response = v2_backend(&fake).run(plain_request("hi")).await.unwrap();
         assert_eq!(response.text, "DONE");
+    }
+
+    /// 真實派工樣本裡 fixer 的子 session。
+    const DISPATCH_CHILD: &str = "ses_de972586effeSd8dv5TyYgP2bk";
+    const JOBS_QUERY: &str = "GET /api/experimental/job?sessionID=ses_fake1&descendants=true";
+
+    /// 派工樣本裡 primary 與 fixer 的生命週期事件位置，用來重排或拿掉事件。
+    fn dispatch_event_index(
+        events: &[String],
+        session: &str,
+        event_type: &str,
+        nth: usize,
+    ) -> usize {
+        events
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                let e: Value = serde_json::from_str(e).unwrap();
+                e["type"] == event_type && e["data"]["sessionID"] == session
+            })
+            .nth(nth)
+            .unwrap()
+            .0
+    }
+
+    // #45 Task 3.1：subagent 在背景執行（docs/issues/issue-0045/probe-subagent.md）。primary 第一次
+    // 執行結束時 fixer 還在跑，回覆只是「已派工」；要等 fixer 回報、primary 再執行一次才是最終回覆。
+    // 2026-11-26 真實 V2 有兩次在這個時點查背景工作拿到空清單（fixer 仍在執行），所以事件裡看得到
+    // 仍在執行的子 session 時就繼續等，不靠清單。
+    #[tokio::test]
+    async fn a_turn_waits_for_a_running_subagent_even_when_the_job_list_is_empty() {
+        let fake = fake_v2::FakeV2::start().await;
+        fake.script_events(fake_v2::fixture_events(
+            "server-dispatch-subagent",
+            "ses_fake1",
+        ));
+
+        let response = v2_backend(&fake)
+            .run_streaming(plain_request("派給 fixer"), &mut |_| {})
+            .await
+            .unwrap();
+
+        assert!(
+            response.text.starts_with("fixer 已完成，我也驗證過了"),
+            "{}",
+            response.text
+        );
+        assert!(!response.text.contains("已派給 fixer"), "{}", response.text);
+        let requests = fake.requests();
+        // 第一次結束時事件已說明 fixer 還在跑，不必查；只在最後一次結束時查一次
+        assert_eq!(
+            requests.iter().filter(|r| *r == JOBS_QUERY).count(),
+            1,
+            "{requests:?}"
+        );
+        assert!(
+            !requests.iter().any(|r| r.ends_with("/interrupt")),
+            "{requests:?}"
+        );
+    }
+
+    // 事件串流沒有子 session 開始執行的事件時（例如串流晚接上），仍以背景工作清單判斷。
+    #[tokio::test]
+    async fn the_job_list_keeps_the_turn_open_when_the_events_show_no_running_subagent() {
+        let fake = fake_v2::FakeV2::start().await;
+        let mut events = fake_v2::fixture_events("server-dispatch-subagent", "ses_fake1");
+        events.remove(dispatch_event_index(
+            &events,
+            DISPATCH_CHILD,
+            "session.execution.started",
+            0,
+        ));
+        fake.script_events(events);
+        fake.script_jobs(vec![
+            json!([{"kind": "subagent", "agent": "fixer", "status": "running"}]),
+        ]);
+
+        let response = v2_backend(&fake)
+            .run_streaming(plain_request("派給 fixer"), &mut |_| {})
+            .await
+            .unwrap();
+
+        assert!(
+            response.text.starts_with("fixer 已完成，我也驗證過了"),
+            "{}",
+            response.text
+        );
+        assert_eq!(
+            fake.requests().iter().filter(|r| *r == JOBS_QUERY).count(),
+            2
+        );
+    }
+
+    // fixer 的回報已放進 primary 的 inbox、還沒送進下一次執行時，primary 那次執行結束也不算回合結束。
+    #[tokio::test]
+    async fn a_report_waiting_in_the_inbox_keeps_the_turn_open() {
+        let fake = fake_v2::FakeV2::start().await;
+        let mut events = fake_v2::fixture_events("server-dispatch-subagent", "ses_fake1");
+        // primary 第一次執行結束移到 fixer 結束、回報進 inbox 之後
+        let first_end =
+            dispatch_event_index(&events, "ses_fake1", "session.execution.succeeded", 0);
+        let ended = events.remove(first_end);
+        let enqueued = dispatch_event_index(&events, "ses_fake1", "session.inbox.enqueued", 1);
+        events.insert(enqueued + 1, ended);
+        fake.script_events(events);
+
+        let response = v2_backend(&fake)
+            .run_streaming(plain_request("派給 fixer"), &mut |_| {})
+            .await
+            .unwrap();
+
+        assert!(
+            response.text.starts_with("fixer 已完成，我也驗證過了"),
+            "{}",
+            response.text
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_without_background_work_ends_at_the_first_execution() {
+        let fake = fake_v2::FakeV2::start().await;
+        fake.script_events(fake_v2::fixture_events("server-text-tool", "ses_fake1"));
+
+        let response = v2_backend(&fake)
+            .run_streaming(plain_request("hi"), &mut |_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(response.text, "DONE");
+        assert_eq!(
+            fake.requests().iter().filter(|r| *r == JOBS_QUERY).count(),
+            1
+        );
+    }
+
+    /// 派工樣本到 fixer 的子 session 建立之後（含）的前 `extra` 則事件。
+    fn dispatch_events_until_child(extra: usize) -> Vec<String> {
+        let events = fake_v2::fixture_events("server-dispatch-subagent", "ses_fake1");
+        let created = events
+            .iter()
+            .position(|e| e.contains("\"session.created\""))
+            .unwrap();
+        events[..=created + extra].to_vec()
+    }
+
+    #[tokio::test]
+    async fn a_failed_turn_interrupts_the_subagent_sessions_too() {
+        let fake = fake_v2::FakeV2::start().await;
+        fake.script_events(dispatch_events_until_child(3));
+
+        v2_backend(&fake)
+            .run_streaming(plain_request("派給 fixer"), &mut |_| {})
+            .await
+            .unwrap_err();
+
+        let requests = fake.requests();
+        for session in ["ses_fake1", DISPATCH_CHILD] {
+            let interrupt = format!("POST /api/session/{session}/interrupt");
+            assert!(
+                requests.contains(&interrupt),
+                "{interrupt} not in {requests:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_turn_interrupts_the_subagent_sessions_too() {
+        let fake = fake_v2::FakeV2::start().await;
+        let mut events = dispatch_events_until_child(3);
+        events.push("hold".to_string());
+        fake.script_events(events);
+        let backend = v2_backend(&fake);
+
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            backend.run_streaming(plain_request("派給 fixer"), &mut |_| {}),
+        )
+        .await;
+
+        assert!(cancelled.is_err(), "the turn should still be running");
+        let child = format!("POST /api/session/{DISPATCH_CHILD}/interrupt");
+        for _ in 0..50 {
+            if fake.requests().contains(&child) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let requests = fake.requests();
+        assert!(
+            requests.contains(&"POST /api/session/ses_fake1/interrupt".to_string()),
+            "{requests:?}"
+        );
+        assert!(requests.contains(&child), "{requests:?}");
     }
 
     #[tokio::test]
@@ -2424,7 +2744,12 @@ mod tests {
         let response = backend.open_event_stream().await.unwrap();
 
         let err = backend
-            .consume_event_stream(response, "ses_1", &mut |_| {})
+            .consume_event_stream(
+                response,
+                "ses_1",
+                &mut |_| {},
+                &mut InterruptOnDrop(Vec::new()),
+            )
             .await
             .unwrap_err();
         let stderr = agent_failed_stderr(err);

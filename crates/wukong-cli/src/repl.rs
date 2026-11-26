@@ -112,16 +112,23 @@ mod tests {
 
     struct MockBackend {
         replies: Mutex<VecDeque<String>>,
+        calls: Mutex<usize>,
     }
     impl MockBackend {
         fn new(replies: &[&str]) -> Self {
             Self {
                 replies: Mutex::new(replies.iter().map(|s| s.to_string()).collect()),
+                calls: Mutex::new(0),
             }
+        }
+
+        fn prompt_count(&self) -> usize {
+            *self.calls.lock().unwrap()
         }
     }
     impl AiBackend for MockBackend {
         async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+            *self.calls.lock().unwrap() += 1;
             let text = self.replies.lock().unwrap().pop_front().unwrap_or_default();
             Ok(AgentResponse {
                 text,
@@ -169,8 +176,8 @@ mod tests {
     #[tokio::test]
     async fn loop_runs_turns_until_exit_and_continues_session() {
         let mem = open_memory().await;
-        // route+execute per turn => 2 replies per turn; 2 turns then /exit.
-        let backend = MockBackend::new(&["fixer", "ans1", "oracle", "ans2"]);
+        // 2026-11-26（#45）：每回合只呼叫一次 primary agent；2 turns then /exit.
+        let backend = MockBackend::new(&["ans1", "ans2"]);
         let lines = vec![
             "first question".to_string(),
             "".to_string(), // skipped
@@ -185,8 +192,9 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(turns, 2);
-        // route reply "fixer" => Role::Fixer (name "fixer"); "oracle" => "oracle".
-        assert_eq!(roles, vec!["fixer".to_string(), "oracle".to_string()]);
+        assert_eq!(backend.prompt_count(), 2);
+        // 接力鏈移除後回合不再回報角色；Task 5.1 改由 subagent 資訊顯示。
+        assert!(roles.is_empty(), "{roles:?}");
     }
 
     #[test]

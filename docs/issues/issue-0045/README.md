@@ -252,6 +252,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | 2026-11-26 | Background 修訂：驗證模型改為 NVIDIA nemotron 或預設免費模型（TBD-6），沿用核准；舊基線 18377ce |
 | 2026-11-26 | Phase 1 探測完成，TBD-1～TBD-4 成立；另發現 subagent 一律在背景執行，回合結束的判定補進 Task 3.1 |
 | 2026-11-26 | Phase 2 完成：agent 定義、技能寫到工作區 `.opencode/`；AGENTS.md 遷移改由入口啟動時執行（不在 entrypoint、install.sh）；技能清單的精簡移到 Task 5.2 |
+| 2026-11-26 | Task 3.1 完成：回合只以 agent `wukong` 送出一次，planner 與接力鏈移除；回合等 subagent 回報才結束。真實 V2 有兩次背景工作清單漏掉執行中的 fixer，改為先看事件 |
 
 ---
 **建立日期**: 2026-11-26  

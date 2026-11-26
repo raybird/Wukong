@@ -1236,7 +1236,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_requires_token_when_set() {
-        let app = build_router(state(Some("sekret"), &["oracle", "ans"]).await);
+        let app = build_router(state(Some("sekret"), &["ans"]).await);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -1251,7 +1251,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_accepts_matching_token() {
-        let app = build_router(state(Some("sekret"), &["oracle", "ans"]).await);
+        let app = build_router(state(Some("sekret"), &["ans"]).await);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -1266,7 +1266,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_accepts_bearer_header_token() {
-        let app = build_router(state(Some("sekret"), &["oracle", "ans"]).await);
+        let app = build_router(state(Some("sekret"), &["ans"]).await);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -1282,7 +1282,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_rejects_wrong_bearer_header() {
-        let app = build_router(state(Some("sekret"), &["oracle", "ans"]).await);
+        let app = build_router(state(Some("sekret"), &["ans"]).await);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -1379,6 +1379,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "#45 Task 5.1：接力鏈移除後沒有輔助棒；subagent 的產出卡片改由 V2 事件產生，5.1 以真實事件樣本改寫這個測試"]
     async fn chat_streams_helper_step_before_answer() {
         // planner -> [explorer, fixer]; explorer (helper) emits e1, fixer (final) f2.
         let app =
@@ -1413,6 +1414,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "#45 Task 5.1：接力鏈移除後沒有輔助棒；subagent 的產出卡片改由 V2 事件產生，5.1 以真實事件樣本改寫這個測試"]
     async fn turn_persists_helper_steps_and_serves_them() {
         let app_state = state(None, &["explorer, fixer", "e1", "f2"]).await;
 
@@ -2286,8 +2288,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_applies_saved_planner_preferences_to_turn_config() {
-        let state = state(None, &["fixer|systematic-debugging", "answer"]).await;
+    // 2026-11-26（#45）：planner 移除後，保存的規劃偏好不再影響回合（設定與 API 由 Task 5.2 移除）。
+    async fn chat_ignores_saved_planner_preferences() {
+        let state = state(None, &["answer"]).await;
         let backend = state.backend.clone();
         let settings = wukong_settings::Settings {
             telegram: wukong_settings::TelegramSettings::default(),
@@ -2314,9 +2317,9 @@ mod tests {
         let _ = body_string(resp).await;
 
         let prompts = backend.prompts.lock().unwrap();
-        assert!(prompts[0].contains("[User Preferences]"));
-        assert!(prompts[0].contains("Preferred roles: fixer"));
-        assert!(prompts[0].contains("Preferred skills: systematic-debugging"));
+        assert_eq!(prompts.len(), 1);
+        assert!(!prompts[0].contains("[User Preferences]"));
+        assert!(!prompts[0].contains("Preferred skills"));
     }
 
     #[tokio::test]
@@ -2580,7 +2583,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_turn_records_user_and_assistant_messages() {
-        let app_state = state(None, &["oracle", "**ans**"]).await;
+        let app_state = state(None, &["**ans**"]).await;
         let db_url = app_state.db_url.clone();
         let app = build_router(app_state.clone());
         let resp = app
@@ -2670,7 +2673,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_turn_records_into_requested_scope() {
-        let app_state = state(None, &["oracle", "scoped answer"]).await;
+        let app_state = state(None, &["scoped answer"]).await;
         let db_url = app_state.db_url.clone();
         let app = build_router(app_state);
         let resp = app
@@ -3152,9 +3155,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_streams_role_answer_done() {
-        // [0] planner -> "oracle" => single Oracle step; [1] execute -> markdown.
-        let app = build_router(state(None, &["oracle", "**ans**"]).await);
+    async fn chat_streams_answer_done() {
+        // 2026-11-26（#45）：回合只呼叫一次 primary agent，回覆是 markdown。
+        let app = build_router(state(None, &["**ans**"]).await);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -3166,7 +3169,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
-        assert!(body.contains("event: role"), "missing role event:\n{body}");
+        // 「event: role」原本來自逐棒的 on_role，Task 5.1 改由 subagent 資訊產生。
         assert!(
             body.contains("event: answer"),
             "missing answer event:\n{body}"

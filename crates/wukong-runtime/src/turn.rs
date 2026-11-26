@@ -6,16 +6,13 @@ use wukong_memory::{
     Memory, MemoryItem, MemoryKind, MemoryRecord, RecallExplanation, RecallHit, RecallMode,
     RecallQuery, RememberInput,
 };
-use wukong_orchestrator::{PlannerPreferenceHint, Role};
-use wukong_skills::{find as find_skill, route_options};
+use wukong_orchestrator::Role;
 
 /// All errors produced by the unified turn.
 #[derive(Debug, Error)]
 pub enum WukongError {
     #[error("memory error: {0}")]
     Memory(#[from] wukong_memory::MemoryError),
-    #[error("orchestrator error: {0}")]
-    Orchestrator(#[from] wukong_orchestrator::OrchestratorError),
     #[error("backend error: {0}")]
     Backend(#[from] wukong_gateway::GatewayError),
 }
@@ -23,7 +20,6 @@ pub enum WukongError {
 /// The result of one unified turn.
 #[derive(Debug, Clone)]
 pub struct TurnOutput {
-    pub role: Role,
     pub text: String,
 }
 
@@ -33,8 +29,9 @@ pub struct ObservedStep<'a> {
     pub output: &'a str,
 }
 
-/// One unified Wukong turn: recall → route → execute (persona + role + memory)
-/// → remember. Makes two backend calls (route, then execute).
+/// One unified Wukong turn（2026-11-26，#45）：取得 session lease → recall → 以 primary agent
+/// `wukong` 送出一次（派工由 V2 的 subagent 處理，gateway 等背景工作清空才回傳）→ 輸出為空時
+/// 補送一次修復提示 → remember。
 pub async fn run_turn(
     memory: &Memory,
     backend: &impl AiBackend,
@@ -79,11 +76,8 @@ pub async fn run_turn_with_attachments(
     .await
 }
 
-/// Same as [`run_turn`], but additionally reports each *non-final* chain step's
-/// output via `on_step(role, output)` the moment it completes (empty outputs are
-/// skipped). The final step is delivered through the returned [`TurnOutput`], not
-/// `on_step`, so a front-end can surface intermediate (helper) baton results
-/// while the final answer stays the primary reply.
+/// Same as [`run_turn`], with an `on_step(role, output)` observer for intermediate
+/// results. 2026-11-26（#45）：接力鏈移除後暫時不會被呼叫，Task 5.1 改由 subagent 的回報觸發。
 pub async fn run_turn_observed(
     memory: &Memory,
     backend: &impl AiBackend,
@@ -160,8 +154,10 @@ pub async fn run_turn_traced_with_attachments(
     input: &str,
     attachments: Vec<AgentAttachment>,
     on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
-    on_role: &mut dyn FnMut(Role),
-    on_step: &mut dyn FnMut(ObservedStep<'_>),
+    // 2026-11-26（#45）：planner 與接力鏈已移除，回合本身不再有「哪一棒」可回報；
+    // Task 5.1 改由 V2 事件裡的 subagent 資訊觸發。
+    _on_role: &mut dyn FnMut(Role),
+    _on_step: &mut dyn FnMut(ObservedStep<'_>),
 ) -> Result<TurnOutput, WukongError> {
     // 2026-10-06：入口附加的檔案互動規則只給 agent；召回與記憶只用使用者原文，
     // 否則每則輸入都會因為共用規則文字而「關聯」到所有過去的記憶。
@@ -169,187 +165,91 @@ pub async fn run_turn_traced_with_attachments(
         .split(&format!("\n\n{}", persona::FILE_RULES_HEADER))
         .next()
         .unwrap_or(input);
-    // 2026-10-06：最後一棒會接續 session，最近的對話已在其中；只注入與輸入相關的記憶。
-    let recall = memory
-        .recall(RecallQuery {
-            query: user_text.to_string(),
-            top_k: cfg.recall_top_k,
-            scope: Some(cfg.scope.clone()),
-            mode: RecallMode::Relevant,
-        })
-        .await?;
-    // 輔助棒沒有 session，額外帶上一回合（最新兩筆回合記憶），讓「剛剛那個」之類的指代看得懂。
-    let previous_turn = previous_turn_records(memory, &cfg.scope).await?;
-    let helper_hits = with_previous_turn(&previous_turn, &recall.data);
-    // 2026-10-20（issue-0011）：planner 也帶上一回合，才分得出追問與新任務。
-    let planner_context = planner_previous_turn(&previous_turn);
 
-    let preference_hint = planner_preference_hint(cfg);
-    let steps = wukong_orchestrator::plan_skill_chain_with_preferences(
-        backend,
-        input,
-        &route_options(),
-        preference_hint.as_ref(),
-        planner_context.as_deref(),
-    )
-    .await?;
-
+    // 2026-11-26（#45 SCN-012）：先取得 lease 再做任何事；同一個 scope 已有回合在執行時，
+    // 這裡就被拒絕，不花任何 LLM 呼叫。
     let preparation = crate::session::prepare_final_session(memory, backend, cfg).await?;
     let stored = preparation.session_id.clone();
     let rotated_from = preparation.rotated_from.clone();
     let session_owner = preparation.owner.clone();
     let session_lease_secs = preparation.lease_secs;
-    // 2026-10-20（issue-0012）：拿到自己的 lease 之後，告訴每一棒有哪些回合同時在
+    // 2026-10-20（issue-0012）：拿到自己的 lease 之後，告訴 agent 有哪些回合同時在
     // 這個工作目錄執行，但不阻擋任何一方。
     let concurrent_notice =
         notice_for_other_turns(memory.active_session_leases().await, &cfg.scope);
     let work = async {
-        let n_steps = steps.len();
-        let mut prior: Vec<wukong_orchestrator::Outcome> = Vec::new();
-        let mut captured_session: Option<String> = None;
-        let mut final_repair: Option<(Role, Option<String>, String)> = None;
-        for (i, step) in steps.into_iter().enumerate() {
-            let role = step.role;
-            on_role(role);
-            let augmented = format!("{input}{}", wukong_orchestrator::chain_context(&prior));
-            let is_final = i + 1 == n_steps;
-            // 2026-11-03（issue-0028）：輪替的回合沒有舊 session 可接續，最後一棒也帶上一回合。
-            let hits = if is_final && rotated_from.is_none() {
-                &recall.data
-            } else {
-                &helper_hits
-            };
-            // 2026-11-26（#45）：技能交給 V2 的 skill 機制，planner 選的技能不再寫進 prompt。
-            let mut prompt = persona::build_prompt(role, hits, &augmented);
-            // Advertise the scheduling capability only on the user-facing final step,
-            // so stateless helper steps never take a side-effecting schedule action.
-            if is_final {
-                prompt.push_str("\n\n");
-                prompt.push_str(persona::final_answer_directive());
-                prompt.push_str("\n\n");
-                prompt.push_str(&persona::scheduling_capability_hint(
-                    &cfg.scope,
-                    &persona::scheduling_bin(),
-                ));
-                // Same reasoning as scheduling: only the final, user-facing step.
-                // Helper steps are stateless, so a memory they wrote would outlive
-                // the reasoning that produced it with no way to trace it back.
-                if persona::memoria_hint_enabled() {
-                    prompt.push_str("\n\n");
-                    prompt.push_str(persona::memoria_capability_hint());
-                }
-            }
-            if let Some(notice) = &concurrent_notice {
-                prompt.push_str("\n\n");
-                prompt.push_str(notice);
-            }
-            let session_id = if is_final { stored.clone() } else { None };
-            if is_final {
-                final_repair = Some((role, session_id.clone(), prompt.clone()));
-            }
-            let resp = if is_final {
-                backend
-                    .run_streaming(
-                        AgentRequest {
-                            prompt,
-                            session_id,
-                            thinking: cfg.thinking,
-                            model: cfg.default_model.clone(),
-                            agent: None,
-                            tool_overrides: std::collections::BTreeMap::new(),
-                            attachments: attachments.clone(),
-                        },
-                        on_event,
-                    )
-                    .await?
-            } else {
-                backend
-                    .run_streaming_ephemeral(
-                        AgentRequest {
-                            prompt,
-                            session_id: None,
-                            thinking: cfg.thinking,
-                            model: None,
-                            agent: None,
-                            tool_overrides: std::collections::BTreeMap::new(),
-                            attachments: attachments.clone(),
-                        },
-                        on_event,
-                    )
-                    .await?
-            };
-            if is_final {
-                captured_session = resp.session_id.clone();
-            }
-            let text = resp.text;
-            // Surface helper-baton output to observers as soon as it lands; the final
-            // step is delivered via the returned TurnOutput, not on_step.
-            if !is_final && !text.trim().is_empty() {
-                on_step(ObservedStep {
-                    role,
-                    skill_name: step.skill_name.as_deref(),
-                    output: &text,
-                });
-            }
-            prior.push(wukong_orchestrator::Outcome { role, output: text });
+        // 2026-10-06：回合接續 session，最近的對話已在其中；只注入與輸入相關的記憶。
+        let recall = memory
+            .recall(RecallQuery {
+                query: user_text.to_string(),
+                top_k: cfg.recall_top_k,
+                scope: Some(cfg.scope.clone()),
+                mode: RecallMode::Relevant,
+            })
+            .await?;
+        // 2026-11-03（issue-0028）：輪替的回合沒有舊 session 可接續，帶上上一回合，
+        // 「剛剛那個」之類的追問才看得懂。接續 session 的回合不帶（#45 SCN-004）。
+        let hits = match rotated_from {
+            Some(_) => with_previous_turn(
+                &previous_turn_records(memory, &cfg.scope).await?,
+                &recall.data,
+            ),
+            None => recall.data,
+        };
+        // 2026-11-26（#45）：人格、派工規則與 subagent 的角色卡在 agent 定義裡
+        // （crate::agent_assets），技能交給 V2 的 skill 機制；這裡不再附角色卡。
+        let mut prompt = wukong_gateway::prompt::compose_prompt(&hits, input);
+        prompt.push_str("\n\n");
+        prompt.push_str(persona::final_answer_directive());
+        prompt.push_str("\n\n");
+        prompt.push_str(&persona::scheduling_capability_hint(
+            &cfg.scope,
+            &persona::scheduling_bin(),
+        ));
+        if persona::memoria_hint_enabled() {
+            prompt.push_str("\n\n");
+            prompt.push_str(persona::memoria_capability_hint());
         }
+        if let Some(notice) = &concurrent_notice {
+            prompt.push_str("\n\n");
+            prompt.push_str(notice);
+        }
+        let request = |prompt: String, session_id: Option<String>| AgentRequest {
+            prompt,
+            session_id,
+            thinking: cfg.thinking,
+            model: cfg.default_model.clone(),
+            agent: Some(crate::agent_assets::PRIMARY_AGENT.to_string()),
+            tool_overrides: std::collections::BTreeMap::new(),
+            attachments: attachments.clone(),
+        };
 
-        let last = prior
-            .last()
-            .cloned()
-            .unwrap_or(wukong_orchestrator::Outcome {
-                role: Role::Oracle,
-                output: String::new(),
-            });
-        // The final step may be an executor that finished via tool calls without a
-        // closing message, leaving its output empty. Fall back to the most recent
-        // non-empty step so the user never receives a blank reply and memory/history
-        // are not polluted with an empty Assistant entry.
-        let answer = if last.output.trim().is_empty() {
-            if let Some(existing) = prior
-                .iter()
-                .rev()
-                .find(|o| !o.output.trim().is_empty())
-                .cloned()
-            {
-                existing
-            } else if let Some((role, session_id, prompt)) = final_repair {
-                let repair = backend
-                    .run_streaming(
-                        AgentRequest {
-                            prompt: append_empty_output_repair_directive(prompt),
-                            session_id: captured_session.clone().or(session_id),
-                            thinking: cfg.thinking,
-                            model: cfg.default_model.clone(),
-                            agent: None,
-                            tool_overrides: std::collections::BTreeMap::new(),
-                            attachments: attachments.clone(),
-                        },
-                        on_event,
-                    )
-                    .await?;
-                if let Some(id) = repair.session_id.as_deref() {
-                    captured_session = Some(id.to_string());
-                }
-                if !repair.text.trim().is_empty() {
-                    wukong_orchestrator::Outcome {
-                        role,
-                        output: repair.text,
-                    }
-                } else {
-                    wukong_orchestrator::Outcome {
-                        role,
-                        output: "(本回合未產生文字輸出)".to_string(),
-                    }
-                }
-            } else {
-                wukong_orchestrator::Outcome {
-                    role: last.role,
-                    output: "(本回合未產生文字輸出)".to_string(),
-                }
-            }
+        let resp = backend
+            .run_streaming(request(prompt.clone(), stored.clone()), on_event)
+            .await?;
+        let mut captured_session = resp.session_id.clone().or_else(|| stored.clone());
+        // 最終輸出是空的（例如只做了工具呼叫就結束）時，在同一個 session 補送一次修復提示，
+        // 使用者才不會收到空白回覆，記憶也不會留下空的 Assistant。
+        let answer = if !resp.text.trim().is_empty() {
+            resp.text
         } else {
-            last
+            let repair = backend
+                .run_streaming(
+                    request(
+                        append_empty_output_repair_directive(prompt),
+                        captured_session.clone(),
+                    ),
+                    on_event,
+                )
+                .await?;
+            if let Some(id) = repair.session_id {
+                captured_session = Some(id);
+            }
+            if repair.text.trim().is_empty() {
+                "(本回合未產生文字輸出)".to_string()
+            } else {
+                repair.text
+            }
         };
 
         // 2026-10-06：session 會跨回合沿用，不能當防重複 key（否則只有第一回合被記住）；
@@ -359,7 +259,7 @@ pub async fn run_turn_traced_with_attachments(
         memory
             .remember(RememberInput {
                 scope: cfg.scope.clone(),
-                session_id: captured_session.clone().or_else(|| stored.clone()),
+                session_id: captured_session.clone(),
                 items: vec![
                     MemoryItem {
                         kind: MemoryKind::Event,
@@ -369,7 +269,7 @@ pub async fn run_turn_traced_with_attachments(
                     },
                     MemoryItem {
                         kind: MemoryKind::Event,
-                        text: format!("Assistant: {}", answer.output),
+                        text: format!("Assistant: {answer}"),
                         importance: None,
                         dedupe_key: Some(format!("runtime:{turn_key}:assistant")),
                     },
@@ -386,9 +286,8 @@ pub async fn run_turn_traced_with_attachments(
                     stderr: format!("session lease unavailable for scope {}", cfg.scope),
                 })
             })?;
-        let turn_session_id = captured_session.clone().or(stored.clone());
         memory
-            .finish_agent_session_turn(&cfg.scope, &session_owner, turn_session_id.as_deref())
+            .finish_agent_session_turn(&cfg.scope, &session_owner, captured_session.as_deref())
             .await?
             .ok_or_else(|| {
                 WukongError::Backend(wukong_gateway::GatewayError::AgentFailed {
@@ -412,10 +311,7 @@ pub async fn run_turn_traced_with_attachments(
             }
         }
 
-        Ok(TurnOutput {
-            role: answer.role,
-            text: answer.output,
-        })
+        Ok(TurnOutput { text: answer })
     };
     // 2026-10-21（issue-0013）：單次 backend 呼叫可以比 session lease 久，執行期間續租，
     // 別的回合才不會在中途拿走 lease、和本回合共用同一個 session。
@@ -445,36 +341,6 @@ fn append_empty_output_repair_directive(mut prompt: String) -> String {
         "這次不要呼叫工具，也不要嘗試讀取環境；請直接根據使用者原問題與已知上下文，用繁體中文給出可交付的文字回覆。",
     );
     prompt
-}
-
-fn parse_preferred_role(name: &str) -> Option<Role> {
-    let normalized = name.trim().to_ascii_lowercase();
-    Role::all()
-        .into_iter()
-        .find(|role| role.name() == normalized)
-}
-
-fn planner_preference_hint(cfg: &GatewayConfig) -> Option<PlannerPreferenceHint> {
-    let prefs = cfg.planner_preferences.as_ref()?;
-    let preferred_roles = prefs
-        .preferred_roles
-        .iter()
-        .filter_map(|role| parse_preferred_role(role))
-        .collect::<Vec<_>>();
-    let preferred_skills = prefs
-        .preferred_skills
-        .iter()
-        .filter(|skill| find_skill(skill).is_some())
-        .cloned()
-        .collect::<Vec<_>>();
-    if preferred_roles.is_empty() && preferred_skills.is_empty() {
-        None
-    } else {
-        Some(PlannerPreferenceHint {
-            preferred_roles,
-            preferred_skills,
-        })
-    }
 }
 
 /// 其他仍持有 session lease 的 scope 就是同時在執行的回合。告知只是軟性提示：
@@ -507,19 +373,6 @@ async fn previous_turn_records(
         .records;
     previous.reverse();
     Ok(previous)
-}
-
-/// 每筆截到 800 字元，與注入記憶的上限一致；沒有上一回合時回 `None`。
-fn planner_previous_turn(previous: &[MemoryRecord]) -> Option<String> {
-    const MAX_CHARS: usize = 800;
-    let lines: Vec<String> = previous
-        .iter()
-        .map(|record| match record.text.char_indices().nth(MAX_CHARS) {
-            Some((cut, _)) => format!("{}…（已截斷）", &record.text[..cut]),
-            None => record.text.clone(),
-        })
-        .collect();
-    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 /// `hits` plus the previous turn, skipping any already present.
@@ -593,6 +446,7 @@ mod tests {
         prompts: Mutex<Vec<String>>,
         session_ids: Mutex<Vec<Option<String>>>,
         models: Mutex<Vec<Option<String>>>,
+        agents: Mutex<Vec<Option<String>>>,
         attachments: Mutex<Vec<Vec<AgentAttachment>>>,
         compact_error: Mutex<Option<i32>>,
         persistent_error: Mutex<bool>,
@@ -609,6 +463,7 @@ mod tests {
                 prompts: Mutex::new(Vec::new()),
                 session_ids: Mutex::new(Vec::new()),
                 models: Mutex::new(Vec::new()),
+                agents: Mutex::new(Vec::new()),
                 attachments: Mutex::new(Vec::new()),
                 compact_error: Mutex::new(None),
                 persistent_error: Mutex::new(false),
@@ -656,6 +511,7 @@ mod tests {
             self.prompts.lock().unwrap().push(req.prompt);
             self.session_ids.lock().unwrap().push(req.session_id);
             self.models.lock().unwrap().push(req.model);
+            self.agents.lock().unwrap().push(req.agent);
             self.attachments.lock().unwrap().push(req.attachments);
             if *self.fail_on_call.lock().unwrap() == Some(call) {
                 return Err(GatewayError::AgentFailed {
@@ -881,7 +737,7 @@ mod tests {
         mem.set_agent_session("project:T", "ses_existing")
             .await
             .unwrap();
-        let backend = MockBackend::new(&["oracle", "answer"]).with_persistent_error();
+        let backend = MockBackend::new(&["answer"]).with_persistent_error();
 
         let error = run_turn(
             &mem,
@@ -894,6 +750,8 @@ mod tests {
         .await
         .unwrap_err();
 
+        // 上游錯誤照舊往外傳（#45 SCN-012）
+        assert!(matches!(error, WukongError::Backend(_)), "{error:?}");
         assert!(error.to_string().contains("persistent session failed"));
         let retry = mem
             .acquire_agent_session_lease("project:T", "retry", 300)
@@ -903,9 +761,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_turn_passes_default_model_to_final_step() {
+    async fn run_turn_passes_default_model() {
         let mem = open_memory().await;
-        let backend = MockBackend::new(&["oracle", "answer"]);
+        let backend = MockBackend::new(&["answer"]);
         let mut cfg = test_cfg("project:T");
         cfg.default_model = Some("opencode/deepseek-v4-flash-free".to_string());
 
@@ -923,7 +781,7 @@ mod tests {
     #[tokio::test]
     async fn run_turn_with_attachments_forwards_paths_to_backend() {
         let mem = open_memory().await;
-        let backend = MockBackend::new(&["oracle", "answer"]);
+        let backend = MockBackend::new(&["answer"]);
         let cfg = test_cfg("project:T");
         let attachments = vec![AgentAttachment {
             path: std::path::PathBuf::from("/tmp/report.pdf"),
@@ -946,54 +804,6 @@ mod tests {
         assert_eq!(requests.last().unwrap(), &attachments);
     }
 
-    #[tokio::test]
-    async fn run_turn_sends_planner_preferences_to_skill_planner() {
-        let mem = open_memory().await;
-        let backend = MockBackend::new(&["fixer|systematic-debugging", "done"]);
-        let mut cfg = test_cfg("project:T");
-        cfg.apply_planner_preferences(
-            true,
-            vec!["fixer".to_string(), "oracle".to_string()],
-            vec!["systematic-debugging".to_string()],
-        );
-
-        run_turn(
-            &mem,
-            &backend,
-            &cfg,
-            "fix the bug",
-            &mut |_| {},
-            &mut |_| {},
-        )
-        .await
-        .unwrap();
-
-        let planner_prompt = backend.prompts.lock().unwrap()[0].clone();
-        assert!(planner_prompt.contains("[User Preferences]"));
-        assert!(planner_prompt.contains("Preferred roles: fixer, oracle"));
-        assert!(planner_prompt.contains("Preferred skills: systematic-debugging"));
-        assert!(planner_prompt.contains("not hard constraints"));
-    }
-
-    #[tokio::test]
-    async fn run_turn_drops_invalid_preference_ids_before_planning() {
-        let mem = open_memory().await;
-        let backend = MockBackend::new(&["oracle|none", "answer"]);
-        let mut cfg = test_cfg("project:T");
-        cfg.apply_planner_preferences(
-            true,
-            vec!["unknown-role".to_string()],
-            vec!["unknown-skill".to_string()],
-        );
-
-        run_turn(&mem, &backend, &cfg, "think", &mut |_| {}, &mut |_| {})
-            .await
-            .unwrap();
-
-        let planner_prompt = backend.prompts.lock().unwrap()[0].clone();
-        assert!(!planner_prompt.contains("[User Preferences]"));
-    }
-
     fn test_cfg(scope: &str) -> GatewayConfig {
         GatewayConfig {
             scope: scope.to_string(),
@@ -1008,14 +818,14 @@ mod tests {
     }
 
     /// 2026-11-26（#45 SCN-005）：技能改由 V2 的 skill 機制提供（工作區的
-    /// `.opencode/skills/`，模型依描述自己載入），planner 選到的技能不再寫進 prompt，
+    /// `.opencode/skills/`，模型依描述自己載入），prompt 不附技能規範指引，
     /// 回合也不再寫出 `.wukong/skills/superpowers`。
     #[tokio::test]
     async fn run_turn_leaves_skills_to_v2() {
         let workspace = tempfile::tempdir().unwrap();
         std::env::set_var("WUKONG_WORKSPACE", workspace.path());
         let mem = open_memory().await;
-        let backend = MockBackend::new(&["fixer|test-driven-development", "done"]);
+        let backend = MockBackend::new(&["done"]);
         let out = run_turn(
             &mem,
             &backend,
@@ -1026,21 +836,19 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(out.role, Role::Fixer);
         assert_eq!(out.text, "done");
         let prompts = backend.prompts.lock().unwrap();
-        assert_eq!(prompts.len(), 2);
-        assert!(!prompts[1].contains("[技能規範指引]"), "{}", prompts[1]);
-        assert!(!prompts[1].contains("SKILL.md"), "{}", prompts[1]);
-        assert!(prompts[1].contains("你是 Fixer"));
+        assert_eq!(prompts.len(), 1);
+        assert!(!prompts[0].contains("[技能規範指引]"), "{}", prompts[0]);
+        assert!(!prompts[0].contains("SKILL.md"), "{}", prompts[0]);
         assert!(!workspace.path().join(".wukong").exists());
         std::env::remove_var("WUKONG_WORKSPACE");
     }
 
     #[tokio::test]
-    async fn run_turn_injects_scheduling_capability_into_final_step_only() {
+    async fn run_turn_carries_the_scheduling_capability() {
         let mem = open_memory().await;
-        let backend = MockBackend::new(&["explorer, fixer", "e1", "f2"]);
+        let backend = MockBackend::new(&["f2"]);
         run_turn(
             &mem,
             &backend,
@@ -1052,12 +860,10 @@ mod tests {
         .await
         .unwrap();
         let prompts = backend.prompts.lock().unwrap();
-        // prompts[0] = planner, [1] = explorer (helper), [2] = fixer (final).
-        assert_eq!(prompts.len(), 3);
-        assert!(!prompts[1].contains("[排程能力]"));
-        assert!(prompts[2].contains("[排程能力]"));
-        assert!(prompts[2].contains("schedule add-turn"));
-        assert!(prompts[2].contains("--scope \"project:T\""));
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].contains("[排程能力]"));
+        assert!(prompts[0].contains("schedule add-turn"));
+        assert!(prompts[0].contains("--scope \"project:T\""));
     }
 
     /// Both the off and on cases live in one test on purpose: `WUKONG_MEMORIA_HINT`
@@ -1070,12 +876,12 @@ mod tests {
     /// is worse than silence — it would try, fail, and surface the failure to the
     /// user. Asserting only the on case would let a default-on regression ship.
     #[tokio::test]
-    async fn run_turn_advertises_memoria_only_when_enabled_and_only_on_the_final_step() {
+    async fn run_turn_advertises_memoria_only_when_enabled() {
         const MARKER: &str = "[長期記憶能力]";
 
         std::env::remove_var("WUKONG_MEMORIA_HINT");
         let mem = open_memory().await;
-        let backend = MockBackend::new(&["explorer, fixer", "e1", "f2"]);
+        let backend = MockBackend::new(&["f2"]);
         run_turn(
             &mem,
             &backend,
@@ -1088,7 +894,7 @@ mod tests {
         .unwrap();
         {
             let prompts = backend.prompts.lock().unwrap();
-            assert_eq!(prompts.len(), 3);
+            assert_eq!(prompts.len(), 1);
             assert!(
                 prompts.iter().all(|p| !p.contains(MARKER)),
                 "預設不得宣傳 memoria：多數部署沒有啟用 overlay，agent 的 PATH 上沒有這個 CLI"
@@ -1097,7 +903,7 @@ mod tests {
 
         std::env::set_var("WUKONG_MEMORIA_HINT", "1");
         let mem = open_memory().await;
-        let backend = MockBackend::new(&["explorer, fixer", "e1", "f2"]);
+        let backend = MockBackend::new(&["f2"]);
         let result = run_turn(
             &mem,
             &backend,
@@ -1111,46 +917,23 @@ mod tests {
         result.unwrap();
 
         let prompts = backend.prompts.lock().unwrap();
-        assert_eq!(prompts.len(), 3);
-        // prompts[0] = planner, [1] = explorer (helper), [2] = fixer (final).
-        assert!(
-            !prompts[1].contains(MARKER),
-            "輔助棒是 stateless 的，不該讓它寫入長期記憶"
-        );
-        assert!(prompts[2].contains(MARKER), "末棒應該拿到能力區塊");
-        assert!(prompts[2].contains("memoria recall"));
-        assert!(prompts[2].contains("memoria feedback"));
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].contains(MARKER), "開啟時回合應該拿到能力區塊");
+        assert!(prompts[0].contains("memoria recall"));
+        assert!(prompts[0].contains("memoria feedback"));
         // 分工必須寫在 prompt 裡：少了這句 agent 會把對話鏡射進去，把真正的決策稀釋掉。
         assert!(
-            prompts[2].contains("不需要"),
+            prompts[0].contains("不需要"),
             "必須說明對話已自動保存、不要重複寫入"
         );
     }
 
+    // 2026-11-26（#45 SCN-001）：不另跑規劃，以 primary agent `wukong` 送出一次；人格與角色卡
+    // 在 agent 定義裡，prompt 不帶角色卡。
     #[tokio::test]
-    async fn run_turn_ignores_unknown_planned_skill() {
+    async fn a_turn_is_one_call_to_the_wukong_agent_and_is_remembered() {
         let mem = open_memory().await;
-        let backend = MockBackend::new(&["oracle|unknown-skill", "answer"]);
-        run_turn(
-            &mem,
-            &backend,
-            &test_cfg("project:T"),
-            "think",
-            &mut |_| {},
-            &mut |_| {},
-        )
-        .await
-        .unwrap();
-        let prompts = backend.prompts.lock().unwrap();
-        assert_eq!(prompts.len(), 2);
-        assert!(!prompts[1].contains("[技能規範指引]"));
-        assert!(prompts[1].contains("你是 Oracle"));
-    }
-
-    #[tokio::test]
-    async fn run_turn_routes_executes_and_persists() {
-        let mem = open_memory().await;
-        let backend = MockBackend::new(&["fixer", "done"]);
+        let backend = MockBackend::new(&["done"]);
         let out = run_turn(
             &mem,
             &backend,
@@ -1161,8 +944,18 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(out.role, Role::Fixer);
         assert_eq!(out.text, "done");
+        assert_eq!(
+            backend.agents.lock().unwrap().clone(),
+            vec![Some("wukong".to_string())]
+        );
+        let prompts = backend.prompts.lock().unwrap().clone();
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].contains("fix the bug"));
+        for role in Role::all() {
+            assert!(!prompts[0].contains(role.card()), "{}", prompts[0]);
+        }
+        assert!(!prompts[0].contains("[前序協作]"));
 
         let r = mem
             .recall(RecallQuery {
@@ -1174,33 +967,39 @@ mod tests {
             .await
             .unwrap();
         assert!(r.data.iter().any(|h| h.text.contains("User: fix the bug")));
+        assert!(r.data.iter().any(|h| h.text.contains("Assistant: done")));
     }
 
+    // 2026-11-26（#45 SCN-012）：同一個 scope 已有回合在執行時，新的回合在任何 LLM 呼叫之前就被拒絕。
     #[tokio::test]
-    async fn execution_prompt_carries_role_and_not_persona() {
+    async fn a_turn_rejected_by_the_lease_makes_no_backend_call() {
         let mem = open_memory().await;
-        let backend = MockBackend::new(&["fixer", "done"]);
-        run_turn(
+        mem.acquire_agent_session_lease("project:T", "running-turn", 900)
+            .await
+            .unwrap()
+            .unwrap();
+        let backend = MockBackend::new(&["answer"]);
+
+        let error = run_turn(
             &mem,
             &backend,
             &test_cfg("project:T"),
-            "fix the bug",
+            "hello",
             &mut |_| {},
             &mut |_| {},
         )
         .await
-        .unwrap();
-        let prompts = backend.prompts.lock().unwrap();
-        assert_eq!(prompts.len(), 2);
-        assert!(!prompts[1].contains("孫悟空"));
-        assert!(prompts[1].contains("你是 Fixer"));
+        .unwrap_err();
+
+        assert!(error.to_string().contains("project:T"), "{error}");
+        assert!(backend.prompts.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn run_turn_threads_session_into_final_step() {
+    async fn run_turn_threads_the_stored_session() {
         let mem = open_memory().await;
         mem.set_agent_session("project:T", "ses_old").await.unwrap();
-        let backend = MockBackend::new(&["oracle", "answer"]);
+        let backend = MockBackend::new(&["answer"]);
         run_turn(
             &mem,
             &backend,
@@ -1213,8 +1012,7 @@ mod tests {
         .unwrap();
         {
             let ids = backend.session_ids.lock().unwrap();
-            assert_eq!(ids[0], None);
-            assert_eq!(ids[1], Some("ses_old".to_string()));
+            assert_eq!(ids.clone(), vec![Some("ses_old".to_string())]);
         }
         assert_eq!(
             mem.agent_session("project:T").await.unwrap(),
@@ -1231,25 +1029,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_turn_threads_only_final_chain_step() {
-        let mem = open_memory().await;
-        mem.set_agent_session("project:T", "ses_old").await.unwrap();
-        let backend = MockBackend::new(&["explorer, fixer", "e1", "f2"]);
-        run_turn(
-            &mem,
-            &backend,
-            &test_cfg("project:T"),
-            "go",
-            &mut |_| {},
-            &mut |_| {},
-        )
-        .await
-        .unwrap();
-        let ids = backend.session_ids.lock().unwrap();
-        assert_eq!(ids.clone(), vec![None, None, Some("ses_old".to_string())]);
-    }
-
-    #[tokio::test]
     async fn unsupported_compaction_rotates_after_new_session_succeeds() {
         let mem = open_memory().await;
         mem.set_agent_session("project:T", "ses_old").await.unwrap();
@@ -1261,8 +1040,8 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let backend = MockBackend::with_compact_error(&["oracle", "answer"], 404)
-            .with_response_session_ids(&["ses_helper", "ses_new"]);
+        let backend = MockBackend::with_compact_error(&["answer"], 404)
+            .with_response_session_ids(&["ses_new"]);
 
         run_turn(
             &mem,
@@ -1312,14 +1091,14 @@ mod tests {
         mem
     }
 
-    // issue-0028 SCN-004：舊 session 在壓縮時點改為輪替；最後一棒在新 session 執行、
-    // 帶上一回合，取得新 session 後刪掉舊的，而且不做壓縮。
+    // issue-0028 SCN-004：舊 session 在壓縮時點改為輪替；回合在新 session 執行、帶上一回合
+    // （#45 SCN-004 保留這條），取得新 session 後刪掉舊的，而且不做壓縮。
     #[tokio::test]
-    async fn an_old_session_rotates_and_the_final_step_sees_the_previous_turn() {
+    async fn an_old_session_rotates_and_the_turn_sees_the_previous_turn() {
         let mem = memory_at_the_compaction_point().await;
-        let backend = MockBackend::new(&["fixer", "answer"])
+        let backend = MockBackend::new(&["answer"])
             .with_session_created_ms(now_ms() - 8 * DAY_MS)
-            .with_response_session_ids(&["ses_helper", "ses_new"]);
+            .with_response_session_ids(&["ses_new"]);
 
         run_turn(
             &mem,
@@ -1342,7 +1121,6 @@ mod tests {
         assert!(final_prompt.contains("User: 晚餐吃什麼"), "{final_prompt}");
         assert!(final_prompt.contains("Assistant: 吃拉麵"), "{final_prompt}");
         assert_eq!(backend.session_ids.lock().unwrap().last().unwrap(), &None);
-        // planner 的 helper session 也會被刪，所以只看 `ses_old`。
         assert!(backend
             .deleted_sessions
             .lock()
@@ -1350,13 +1128,13 @@ mod tests {
             .contains(&"ses_old".to_string()));
     }
 
-    // issue-0028 SCN-005：未滿 7 天照原本壓縮、續接，最後一棒不額外帶上一回合。
+    // issue-0028 SCN-005：未滿 7 天照原本壓縮、續接，回合不額外帶上一回合。
     #[tokio::test]
-    async fn a_young_session_is_compacted_and_the_final_step_gets_no_previous_turn() {
+    async fn a_young_session_is_compacted_and_the_turn_gets_no_previous_turn() {
         let mem = memory_at_the_compaction_point().await;
-        let backend = MockBackend::new(&["fixer", "compacted", "answer"])
+        let backend = MockBackend::new(&["compacted", "answer"])
             .with_session_created_ms(now_ms() - 6 * DAY_MS)
-            .with_response_session_ids(&["ses_helper", "ses_old", "ses_old"]);
+            .with_response_session_ids(&["ses_old", "ses_old"]);
 
         run_turn(
             &mem,
@@ -1395,10 +1173,9 @@ mod tests {
     #[tokio::test]
     async fn a_rotation_turn_that_fails_keeps_the_old_session() {
         let mem = memory_at_the_compaction_point().await;
-        // 第 0 次是 planner，第 1 次是最後一棒。
-        let backend = MockBackend::new(&["fixer"])
+        let backend = MockBackend::new(&[])
             .with_session_created_ms(now_ms() - 8 * DAY_MS)
-            .failing_on_call(1);
+            .failing_on_call(0);
 
         let result = run_turn(
             &mem,
@@ -1411,11 +1188,11 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        // 走的是輪替：最後一棒沒有帶舊 session，前面也沒有做 compaction。
+        // 走的是輪替：回合沒有帶舊 session，前面也沒有做 compaction。
         {
             let prompts = backend.prompts.lock().unwrap();
             assert!(!prompts.iter().any(|p| p == "/compact"));
-            assert_eq!(backend.session_ids.lock().unwrap()[1], None);
+            assert_eq!(backend.session_ids.lock().unwrap()[0], None);
         }
         assert!(!backend
             .deleted_sessions
@@ -1440,8 +1217,8 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let backend = MockBackend::with_compact_error(&["oracle", "answer"], 500)
-            .with_response_session_ids(&["ses_helper", "ses_old"]);
+        let backend = MockBackend::with_compact_error(&["answer"], 500)
+            .with_response_session_ids(&["ses_old"]);
 
         run_turn(
             &mem,
@@ -1478,185 +1255,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn run_turn_runs_multi_role_chain() {
-        let mem = open_memory().await;
-        let backend = MockBackend::new(&["explorer, fixer", "f1", "f2"]);
-        let mut roles_seen: Vec<Role> = Vec::new();
-        let out = run_turn(
-            &mem,
-            &backend,
-            &test_cfg("project:T"),
-            "build and fix",
-            &mut |_| {},
-            &mut |r| roles_seen.push(r),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(roles_seen, vec![Role::Explorer, Role::Fixer]);
-        assert_eq!(out.text, "f2");
-        assert_eq!(out.role, Role::Fixer);
-
-        {
-            let prompts = backend.prompts.lock().unwrap();
-            assert_eq!(prompts.len(), 3);
-            assert!(prompts[2].contains("f1"));
-        }
-
-        let r = mem
-            .recall(RecallQuery {
-                query: "build and fix".to_string(),
-                top_k: 10,
-                scope: Some("project:T".to_string()),
-                mode: RecallMode::Hybrid,
-            })
-            .await
-            .unwrap();
-        assert!(r.data.iter().any(|h| h.text.contains("Assistant: f2")));
-        assert!(!r.data.iter().any(|h| h.text.contains("Assistant: f1")));
-    }
-
-    #[tokio::test]
-    async fn run_turn_observed_reports_only_non_final_steps() {
-        let mem = open_memory().await;
-        let backend = MockBackend::new(&["explorer, fixer", "e1", "f2"]);
-        let mut steps: Vec<(Role, String)> = Vec::new();
-        let out = run_turn_observed(
-            &mem,
-            &backend,
-            &test_cfg("project:T"),
-            "build and fix",
-            &mut |_| {},
-            &mut |_| {},
-            &mut |role, output| steps.push((role, output.to_string())),
-        )
-        .await
-        .unwrap();
-
-        // Only the helper (Explorer) step is observed; the final (Fixer) output
-        // is delivered via TurnOutput, not on_step.
-        assert_eq!(steps, vec![(Role::Explorer, "e1".to_string())]);
-        assert_eq!(out.role, Role::Fixer);
-        assert_eq!(out.text, "f2");
-    }
-
-    #[tokio::test]
-    async fn run_turn_observed_skips_empty_non_final_step() {
-        let mem = open_memory().await;
-        // Explorer (helper) returns empty; nothing should be observed for it.
-        let backend = MockBackend::new(&["explorer, fixer", "", "f2"]);
-        let mut steps: Vec<(Role, String)> = Vec::new();
-        let out = run_turn_observed(
-            &mem,
-            &backend,
-            &test_cfg("project:T"),
-            "go",
-            &mut |_| {},
-            &mut |_| {},
-            &mut |role, output| steps.push((role, output.to_string())),
-        )
-        .await
-        .unwrap();
-
-        assert!(steps.is_empty());
-        assert_eq!(out.text, "f2");
-    }
-
-    #[tokio::test]
-    async fn run_turn_traced_reports_role_skill_and_output_for_helper_steps() {
-        let mem = open_memory().await;
-        let backend = MockBackend::new(&["explorer|systematic-debugging\nfixer|none", "e1", "f2"]);
-        let mut steps: Vec<(Role, Option<String>, String)> = Vec::new();
-
-        let out = run_turn_traced(
-            &mem,
-            &backend,
-            &test_cfg("project:T"),
-            "build and fix",
-            &mut |_| {},
-            &mut |_| {},
-            &mut |step| {
-                steps.push((
-                    step.role,
-                    step.skill_name.map(str::to_string),
-                    step.output.to_string(),
-                ));
-            },
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            steps,
-            vec![(
-                Role::Explorer,
-                Some("systematic-debugging".to_string()),
-                "e1".to_string()
-            )]
-        );
-        assert_eq!(out.role, Role::Fixer);
-        assert_eq!(out.text, "f2");
-    }
-
-    #[tokio::test]
-    async fn run_turn_observed_remains_role_output_compatible() {
-        let mem = open_memory().await;
-        let backend = MockBackend::new(&["explorer|systematic-debugging\nfixer|none", "e1", "f2"]);
-        let mut steps: Vec<(Role, String)> = Vec::new();
-
-        run_turn_observed(
-            &mem,
-            &backend,
-            &test_cfg("project:T"),
-            "build and fix",
-            &mut |_| {},
-            &mut |_| {},
-            &mut |role, output| steps.push((role, output.to_string())),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(steps, vec![(Role::Explorer, "e1".to_string())]);
-    }
-
-    #[tokio::test]
-    async fn run_turn_falls_back_when_final_output_empty() {
-        let mem = open_memory().await;
-        // planner -> explorer,fixer; explorer reports findings; fixer (final) returns empty.
-        let backend = MockBackend::new(&["explorer, fixer", "找到了根因", ""]);
-        let out = run_turn(
-            &mem,
-            &backend,
-            &test_cfg("project:T"),
-            "find and fix the bug",
-            &mut |_| {},
-            &mut |_| {},
-        )
-        .await
-        .unwrap();
-        assert_eq!(out.role, Role::Explorer);
-        assert_eq!(out.text, "找到了根因");
-
-        let r = mem
-            .recall(RecallQuery {
-                query: "find and fix the bug".to_string(),
-                top_k: 10,
-                scope: Some("project:T".to_string()),
-                mode: RecallMode::Hybrid,
-            })
-            .await
-            .unwrap();
-        assert!(r
-            .data
-            .iter()
-            .any(|h| h.text.contains("Assistant: 找到了根因")));
-    }
-
+    // 輸出為空時，在同一個 session、同一個 agent 補送一次修復提示（#45 SCN-012）。
     #[tokio::test]
     async fn run_turn_all_empty_repairs_with_text() {
         let mem = open_memory().await;
-        let backend = MockBackend::new(&["fixer", "", "直接回答原問題"]);
+        let backend =
+            MockBackend::new(&["", "直接回答原問題"]).with_response_session_ids(&["ses_turn"]);
         let out = run_turn(
             &mem,
             &backend,
@@ -1669,11 +1273,17 @@ mod tests {
         .unwrap();
 
         assert_eq!(out.text, "直接回答原問題");
-        assert_eq!(backend.prompts.lock().unwrap().len(), 3);
-        let repair_prompt = backend.prompts.lock().unwrap()[2].clone();
+        let prompts = backend.prompts.lock().unwrap().clone();
+        assert_eq!(prompts.len(), 2);
+        let repair_prompt = &prompts[1];
         assert!(repair_prompt.contains("[修復回覆]"));
         assert!(repair_prompt.contains("不要呼叫工具"));
         assert!(repair_prompt.contains("你目前是什麼模型"));
+        assert_eq!(
+            backend.session_ids.lock().unwrap()[1].as_deref(),
+            Some("ses_turn")
+        );
+        assert_eq!(backend.agents.lock().unwrap()[1].as_deref(), Some("wukong"));
 
         let r = mem
             .recall(RecallQuery {
@@ -1693,7 +1303,7 @@ mod tests {
     #[tokio::test]
     async fn run_turn_all_empty_repair_empty_returns_sentinel() {
         let mem = open_memory().await;
-        let backend = MockBackend::new(&["fixer", "", ""]);
+        let backend = MockBackend::new(&["", ""]);
         let out = run_turn(
             &mem,
             &backend,
@@ -1706,13 +1316,13 @@ mod tests {
         .unwrap();
 
         assert_eq!(out.text, "(本回合未產生文字輸出)");
-        assert_eq!(backend.prompts.lock().unwrap().len(), 3);
+        assert_eq!(backend.prompts.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
-    async fn run_turn_injects_final_answer_directive_into_final_step_only() {
+    async fn run_turn_carries_the_final_answer_directive() {
         let mem = open_memory().await;
-        let backend = MockBackend::new(&["explorer, fixer", "e1", "f2"]);
+        let backend = MockBackend::new(&["f2"]);
         run_turn(
             &mem,
             &backend,
@@ -1724,10 +1334,8 @@ mod tests {
         .await
         .unwrap();
         let prompts = backend.prompts.lock().unwrap();
-        // prompts[0]=planner, [1]=explorer (helper), [2]=fixer (final).
-        assert_eq!(prompts.len(), 3);
-        assert!(!prompts[1].contains("[輸出要求]"));
-        assert!(prompts[2].contains("[輸出要求]"));
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].contains("[輸出要求]"));
     }
 
     async fn remember_note(mem: &Memory, scope: &str, text: &str) {
@@ -1754,7 +1362,7 @@ mod tests {
         for text in UNRELATED {
             remember_note(&mem, "project:T", text).await;
         }
-        let backend = MockBackend::new(&["fixer", "answer"]);
+        let backend = MockBackend::new(&["answer"]);
         run_turn(
             &mem,
             &backend,
@@ -1785,7 +1393,7 @@ mod tests {
         for text in UNRELATED {
             remember_note(&mem, "project:T", text).await;
         }
-        let backend = MockBackend::new(&["fixer", "answer"]);
+        let backend = MockBackend::new(&["answer"]);
         run_turn(
             &mem,
             &backend,
@@ -1825,14 +1433,14 @@ mod tests {
         }
     }
 
-    // SCN-004: stateless helper steps see the previous turn; older unrelated
-    // turns and the session-backed final step do not get it.
+    // 2026-11-26（#45 SCN-004）：接續 session 的回合不補上一回合，最近的對話已在 session 裡。
     #[tokio::test]
-    async fn helper_steps_receive_only_the_previous_turn() {
+    async fn a_continuing_session_gets_no_previous_turn() {
         let mem = open_memory().await;
+        mem.set_agent_session("project:T", "ses_old").await.unwrap();
         remember_turn(&mem, "project:T", "舊問題", "舊回答").await;
         remember_turn(&mem, "project:T", "晚餐吃什麼", "吃拉麵").await;
-        let backend = MockBackend::new(&["explorer, oracle, fixer", "e1", "o1", "f1"]);
+        let backend = MockBackend::new(&["f1"]);
         run_turn(
             &mem,
             &backend,
@@ -1845,52 +1453,15 @@ mod tests {
         .unwrap();
 
         let prompts = backend.prompts.lock().unwrap();
-        assert_eq!(prompts.len(), 4);
-        for helper in &prompts[1..3] {
-            assert!(helper.contains("User: 晚餐吃什麼"));
-            assert!(helper.contains("Assistant: 吃拉麵"));
-            assert!(!helper.contains("舊問題"));
-            assert!(!helper.contains("舊回答"));
+        assert_eq!(prompts.len(), 1);
+        for text in ["晚餐吃什麼", "吃拉麵", "舊問題", "舊回答"] {
+            assert!(!prompts[0].contains(text), "{text}: {}", prompts[0]);
         }
-        let final_prompt = &prompts[3];
-        assert!(!final_prompt.contains("晚餐吃什麼"));
-        assert!(!final_prompt.contains("吃拉麵"));
     }
 
-    // issue-0011 SCN-001: the planner sees the previous turn (each memory cut
-    // to 800 chars, like injected memories) so a follow-up reads as one.
+    // issue-0012 SCN-001：另一個回合持有 lease 時，回合會被告知，兩個方向都成立。
     #[tokio::test]
-    async fn planner_receives_the_previous_turn_truncated() {
-        let mem = open_memory().await;
-        remember_turn(&mem, "project:T", "舊問題", "舊回答").await;
-        let long_answer = format!("沒有。{}", "細".repeat(900));
-        remember_turn(&mem, "project:T", "run #869 成功了嗎", &long_answer).await;
-        let backend = MockBackend::new(&["fixer", "done"]);
-
-        run_turn(
-            &mem,
-            &backend,
-            &test_cfg("project:T"),
-            "所以沒辦法跑成功嗎",
-            &mut |_| {},
-            &mut |_| {},
-        )
-        .await
-        .unwrap();
-
-        let prompts = backend.prompts.lock().unwrap();
-        let planner = &prompts[0];
-        assert!(planner.contains("[Previous Turn]\nUser: run #869 成功了嗎\n"));
-        // "Assistant: 沒有。" is 14 chars, leaving 786 of the 900 細.
-        assert!(planner.contains(&format!("Assistant: 沒有。{}…（已截斷）", "細".repeat(786))));
-        assert!(!planner.contains(&"細".repeat(787)));
-        assert!(!planner.contains("舊問題"));
-        assert!(!planner.contains("舊回答"));
-    }
-
-    // issue-0012 SCN-001：另一個回合持有 lease 時，每一棒都被告知，兩個方向都成立。
-    #[tokio::test]
-    async fn other_running_turns_are_announced_to_every_step() {
+    async fn other_running_turns_are_announced() {
         for (own, other, listed) in [
             (
                 "user:tg-42",
@@ -1903,7 +1474,7 @@ mod tests {
             mem.acquire_agent_session_lease(other, "other-turn", 900)
                 .await
                 .unwrap();
-            let backend = MockBackend::new(&["explorer, fixer", "f1", "f2"]);
+            let backend = MockBackend::new(&["f1"]);
 
             run_turn(
                 &mem,
@@ -1917,7 +1488,8 @@ mod tests {
             .unwrap();
 
             let prompts = backend.prompts.lock().unwrap();
-            for step in &prompts[1..] {
+            assert_eq!(prompts.len(), 1);
+            for step in prompts.iter() {
                 assert!(step.contains("[其他回合正在執行]\n"), "{own}: {step}");
                 assert!(step.contains(listed), "{own}: {step}");
                 assert!(step.contains("不要修改或提交不是本回合造成的變更"));
@@ -1930,7 +1502,7 @@ mod tests {
     #[tokio::test]
     async fn without_other_running_turns_prompts_are_unchanged() {
         async fn prompts(mem: &Memory) -> Vec<String> {
-            let backend = MockBackend::new(&["explorer, fixer", "f1", "f2"]);
+            let backend = MockBackend::new(&["f1"]);
             run_turn(
                 mem,
                 &backend,
@@ -1960,31 +1532,12 @@ mod tests {
         assert_eq!(prompts(&released).await, fresh);
     }
 
-    #[tokio::test]
-    async fn planner_without_previous_turn_gets_no_context_block() {
-        let mem = open_memory().await;
-        let backend = MockBackend::new(&["fixer", "done"]);
-
-        run_turn(
-            &mem,
-            &backend,
-            &test_cfg("project:T"),
-            "所以沒辦法跑成功嗎",
-            &mut |_| {},
-            &mut |_| {},
-        )
-        .await
-        .unwrap();
-
-        assert!(!backend.prompts.lock().unwrap()[0].contains("[Previous Turn]"));
-    }
-
     // SCN-001: the session is reused across turns, so it cannot be the dedupe
     // key; every turn is remembered, even one repeating the previous input.
     #[tokio::test]
     async fn every_turn_in_a_reused_session_is_remembered() {
         let mem = open_memory().await;
-        let backend = MockBackend::new(&["fixer", "first answer", "fixer", "second answer"]);
+        let backend = MockBackend::new(&["first answer", "second answer"]);
         for expected in [2, 4] {
             run_turn(
                 &mem,
@@ -2036,7 +1589,7 @@ mod tests {
             "It is sunny in the city",
         )
         .await;
-        let backend = MockBackend::new(&["fixer", "answer"]);
+        let backend = MockBackend::new(&["answer"]);
         run_turn(
             &mem,
             &backend,
@@ -2065,7 +1618,7 @@ mod tests {
         );
         let mem = open_memory().await;
         remember_note(&mem, "project:T", &format!("User: 晚餐吃拉麵{rules}")).await;
-        let backend = MockBackend::new(&["fixer", "answer"]);
+        let backend = MockBackend::new(&["answer"]);
         run_turn(
             &mem,
             &backend,

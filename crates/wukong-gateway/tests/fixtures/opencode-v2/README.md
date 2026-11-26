@@ -12,6 +12,7 @@
 | server-compact.ndjson | `GET /api/event` | 回覆一次後 `POST /compact`，壓縮完成 |
 | server-attach-file.ndjson | `GET /api/event` | prompt 帶 `file://` 附件，回覆附件內的字 |
 | server-retry.ndjson | `GET /api/event`（`--network none`） | 上游連不到，retry.scheduled 兩次後 interrupt |
+| server-dispatch-subagent.ndjson | `GET /api/event`（2026-11-26，opencode/big-pickle，`docs/issues/issue-0045/scripts/probe-subagent.sh`） | primary 以 subagent 工具派給 fixer：primary 先結束一次執行，fixer 的子 session（`session.created` 帶 parentID）完成後以 synthetic 項目喚醒 primary，第二次執行才有最終回覆。樣本裡沒有 primary 的 `session.created`（在連上事件串流之前建立） |
 | server-free-limit.ndjson | `GET /api/event`（2026-11-25，預設免費模型，`docs/issues/issue-0044/scripts/capture-free-limit.py`） | 額度用完：第一步就 step.failed、execution.failed（provider.free-limit，status 429），沒有 retry |
 | cli-text-reasoning.ndjson | `opencode run --format json --thinking` | 正常回覆，含思考 |
 | cli-no-route.ndjson | `opencode run --format json` | 模型不存在，error（provider.no-route） |

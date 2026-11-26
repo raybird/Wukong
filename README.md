@@ -164,7 +164,7 @@ wukong/
 │   ├── wukong-memory/              # 柱1：記憶核心（lib）
 │   ├── wukong-memoryd/             # 記憶 HTTP 服務（bin）
 │   ├── wukong-gateway/             # 柱2：執行閘道（lib）
-│   ├── wukong-orchestrator/        # 柱3：角色調度與規劃（lib + demo bin wukong-orchestrate）
+│   ├── wukong-orchestrator/        # 柱3：五個專家角色的定義（lib；派工交給 OpenCode 的 subagent）
 │   ├── wukong-skills/              # 技能管理庫：內嵌 Superpowers 技能（lib）
 │   ├── wukong-settings/            # 專案設定檔管理（lib）
 │   ├── wukong-scheduler/           # 任務排程核心（lib）
@@ -187,12 +187,12 @@ wukong/
 ```bash
 cargo test -p wukong-memory          # 單一 crate 測試
 cargo test -p wukong-cli persona::   # 指定模組
-cargo run -p wukong-orchestrator --bin wukong-orchestrate -- --agent-cmd "printf fixer" "fix the bug"
+cargo test -p wukong-cli --test cli_backend   # 以假 agent（scripts/test-support/cli_backend.rs）跑真正的 wukong 回合
 ```
 
 開發遵循 TDD（測試先行）、frequent commits；每一柱皆有 `docs/superpowers/specs/` 設計與 `docs/superpowers/plans/` 計畫可循。
 
-> 提示：以 `printf fixer` 或 `echo` 當「假 agent」可在無真實 LLM 下驗證完整流程。
+> 提示：`scripts/test-support/cli_backend.rs` 的假 agent 會照 opencode 的 JSON 事件格式回覆，可在無真實 LLM 下驗證完整流程。
 
 ---
 

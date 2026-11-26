@@ -197,8 +197,8 @@ cargo test -p wukong-cli persona::
 # Lint 檢查
 cargo clippy --all-targets -- -D warnings
 
-# 執行 orchestrator demo（以假 agent 驗證流程）
-cargo run -p wukong-orchestrator --bin wukong-orchestrate -- --agent-cmd "printf fixer" "fix the bug"
+# 以假 agent 跑真正的 wukong 回合（不需要真實 LLM；假 agent 在 scripts/test-support/cli_backend.rs）
+cargo test -p wukong-cli --test cli_backend
 
 # 啟動 Web Console（開發用）
 WUKONG_AGENT_CMD="opencode run" cargo run -p wukong-web
@@ -229,7 +229,7 @@ wukong-orchestrator → wukong-gateway → wukong-memory
 |-------|------|
 | `wukong-memory` | SQLite + FTS5 記憶儲存；keyword/tree/hybrid 召回；時間衰減計分 |
 | `wukong-gateway` | 驅動底層 agent CLI（預設 `opencode run`）；inject 人格 + 記憶 + 技能 |
-| `wukong-orchestrator` | LLM 路由規劃（最多 3 棒角色：Explorer/Oracle/Librarian/Fixer/Designer） |
+| `wukong-orchestrator` | 五個專家角色（Explorer/Oracle/Librarian/Fixer/Designer）的定義；2026-11-26（#45）起派工交給 OpenCode V2 的 subagent，不再有 planner |
 | `wukong-runtime` | 串聯一回合完整執行流程（`run_turn`）：recall → plan → execute → remember；CLI、Web、Telegram、Scheduler 共用 |
 | `wukong-cli` | 統一 CLI 進入點（`wukong` binary）；含 REPL、`memory` 子命令、`schedule` 子命令 |
 
@@ -278,7 +278,7 @@ wukong-orchestrator → wukong-gateway → wukong-memory
 
 ### 關鍵設計細節
 
-- **假 agent 測試法**：`--agent-cmd "printf fixer"` 或 `echo` 可在無 LLM 下驗證完整流程。
+- **假 agent 測試法**：`scripts/test-support/cli_backend.rs` 的假 agent 照 opencode 的 JSON 事件格式回覆，可在無 LLM 下驗證完整流程（`cargo test -p <入口> --test cli_backend`）。`--agent-cmd "printf fixer"`、`echo` 這類只印純文字的命令仍可執行，但回合是串流解析，讀不到文字，回覆會是 `(本回合未產生文字輸出)`；注意 `wukong` 會照環境寫入 `WUKONG_WORKSPACE`（預設 `~/.wukong/workspace`）與 `~/.wukong/memory.db`，試跑時把 `HOME` 與 `WUKONG_WORKSPACE` 指到臨時目錄。
 - **embedding 選用**：cargo feature `embed` + `WUKONG_EMBED=1` 啟用本機 embedding（fastembed all-MiniLM-L6-v2），未啟用則退回 BM25。
 - **Web 執行緒隔離**：`run_turn` 含非 `Send` callback，Web 後端以 `std::thread::spawn` + `current_thread` 隔離，進度透過 mpsc channel → SSE 回傳。
 - **Superpowers 來源**：`crates/wukong-skills/assets/superpowers/SOURCE.md` 記錄上游版本；以 `scripts/sync-superpowers.sh` 更新。

@@ -23,6 +23,8 @@ struct State {
     /// 帶 JSON body 的請求：`METHOD path` 與 body。
     bodies: Vec<(String, Value)>,
     events: Vec<String>,
+    /// `GET /api/experimental/job` 依序回的背景工作清單；用完之後回空清單。
+    jobs: Vec<Value>,
     created: usize,
 }
 
@@ -93,6 +95,11 @@ impl FakeV2 {
         self.state.lock().unwrap().events = events;
     }
 
+    /// 之後每次 `GET /api/experimental/job` 依序回的 `data`（背景工作清單）；用完回空清單。
+    pub fn script_jobs(&self, jobs: Vec<Value>) {
+        self.state.lock().unwrap().jobs = jobs;
+    }
+
     /// 最後一次 `request`（`METHOD path`）的 JSON body。
     pub fn body_of(&self, request: &str) -> Option<Value> {
         let state = self.state.lock().unwrap();
@@ -114,17 +121,27 @@ impl FakeV2 {
     }
 }
 
-/// 讀一份 `tests/fixtures/opencode-v2/` 的真實樣本，把樣本裡的 session 換成 `session_id`。
+/// 讀一份 `tests/fixtures/opencode-v2/` 的真實樣本，把樣本裡（回合本身）的 session 換成
+/// `session_id`。回合的 session 是沒有 parentID 的 `session.created`；樣本沒有它時（session 在
+/// 連上事件串流前就建立了），取第一個帶 sessionID 的事件。
 pub(super) fn fixture_events(name: &str, session_id: &str) -> Vec<String> {
     let path = format!(
         "{}/tests/fixtures/opencode-v2/{name}.ndjson",
         env!("CARGO_MANIFEST_DIR")
     );
     let raw = std::fs::read_to_string(path).unwrap();
-    let original = raw
+    let events: Vec<Value> = raw
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .find(|event| event["type"] == "session.created")
+        .collect();
+    let original = events
+        .iter()
+        .find(|event| event["type"] == "session.created" && event["data"].get("parentID").is_none())
+        .or_else(|| {
+            events
+                .iter()
+                .find(|event| event["data"]["sessionID"].is_string())
+        })
         .and_then(|event| event["data"]["sessionID"].as_str().map(str::to_string))
         .unwrap();
     raw.lines()
@@ -243,6 +260,14 @@ fn handle(
             r#"{"version":"2.3.2","pid":1,"urls":["http://127.0.0.1:4096"],"paths":{"tmp":"/tmp/opencode"}}"#
                 .to_string(),
         ),
+        ("GET", "/api/experimental/job") => {
+            let jobs = if state.jobs.is_empty() {
+                json!([])
+            } else {
+                state.jobs.remove(0)
+            };
+            ("200 OK", JSON, json!({ "data": jobs }).to_string())
+        }
         ("POST", "/api/session") => {
             state.created += 1;
             let id = format!("ses_fake{}", state.created);
