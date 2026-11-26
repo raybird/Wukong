@@ -652,6 +652,32 @@ mod tests {
         );
     }
 
+    // #45 SCN-013：空輸出補送的修復提示也指定同一個模型與 agent；subagent 沿用 session 選取的
+    // 模型（probe-subagent.md），所以回合裡每次送出都要帶上它。
+    #[tokio::test]
+    async fn the_repair_prompt_keeps_the_turn_model() {
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["", "answer"]).with_response_session_ids(&["ses_turn"]);
+        let mut cfg = test_cfg("project:T");
+        cfg.default_model = Some("opencode/deepseek-v4-flash-free".to_string());
+
+        run_turn(&mem, &backend, &cfg, "hello", &mut |_| {}, &mut |_| {})
+            .await
+            .unwrap();
+
+        let models = backend.models.lock().unwrap().clone();
+        assert_eq!(models.len(), 2);
+        assert!(models
+            .iter()
+            .all(|m| m.as_deref() == Some("opencode/deepseek-v4-flash-free")));
+        assert!(backend
+            .agents
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|a| a.as_deref() == Some(crate::agent_assets::PRIMARY_AGENT)));
+    }
+
     #[tokio::test]
     async fn run_turn_with_attachments_forwards_paths_to_backend() {
         let mem = open_memory().await;

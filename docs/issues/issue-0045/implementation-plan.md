@@ -308,8 +308,16 @@
   - 用真實模型跑一題會派工的任務，事件裡 primary agent 與 subagent 的模型都是指定的那一個；
   - 有單元或 adapter 測試釘住送出的參數。
 - 驗證：雙迴圈。外迴圈是真實 V2；內迴圈是 gateway 送出內容的測試。
-- 狀態：📝 待實作
+- 狀態：🚧 內迴圈完成；外迴圈待免費模型額度恢復（2026-11-26）
 - 證據：
+  - 做法沿用 1.4 的結論，沒有改程式：agent 定義不寫模型，adapter 的 `send_prompt` 每次送 prompt 前都選取回合指定的模型。
+    - 新建與續接的 session 都走這條路；subagent 沿用 session 選取的模型（probe-subagent.md）。
+    - Web、排程、CLI、Telegram 都以 `apply_default_model` 把設定的模型放進 `cfg.default_model`，run_turn 帶進每次請求。
+  - 內迴圈（釘住既有行為）：
+    - gateway：`a_new_session_selects_the_agent_and_model_before_the_prompt`（新 session 的建立、選 agent、選模型都在 prompt 之前）。續接的 session 由既有的 `agent_and_model_are_selected_before_the_prompt` 釘住。
+    - runtime：`the_repair_prompt_keeps_the_turn_model`（空輸出補送的修復提示也帶同一個模型與 agent）。第一次送出由既有的 `run_turn_passes_default_model` 釘住。
+    - 反向自檢：暫時讓 adapter 不選模型，gateway 測試失敗（請求清單沒有 `POST …/model`）；暫時讓修復提示不帶模型，runtime 測試失敗。改回後兩項都通過。
+  - 外迴圈（待做）：2026-11-26 重跑 `scripts/probe-turn-dispatch.sh`，wukong 1 秒內失敗，stderr 是 `provider.free-limit` 429（`Free usage limit reached`）。照 TBD-6 不繞過，等額度恢復後重跑，並確認事件裡 primary 與 subagent 的模型相同。
 
 ### Task 3.3 — 拿掉依回合數壓縮
 - 產出與範圍：

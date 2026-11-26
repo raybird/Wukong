@@ -1829,6 +1829,43 @@ mod tests {
         );
     }
 
+    // #45 SCN-013：新建的 session 也在送 prompt 前選取 agent 與模型；subagent 沿用 session 的模型
+    // （docs/issues/issue-0045/probe-subagent.md），所以派工的子 session 也跑在這個模型上。
+    #[tokio::test]
+    async fn a_new_session_selects_the_agent_and_model_before_the_prompt() {
+        let fake = fake_v2::FakeV2::start().await;
+        fake.script_events(fake_v2::fixture_events("server-text-tool", "ses_fake1"));
+        let mut req = plain_request("hi");
+        req.agent = Some("wukong".to_string());
+        req.model = Some("opencode/big-pickle".to_string());
+
+        v2_backend(&fake)
+            .run_streaming(req, &mut |_| {})
+            .await
+            .unwrap();
+
+        let requests = fake.requests();
+        let position = |request: &str| {
+            requests
+                .iter()
+                .position(|seen| seen == request)
+                .unwrap_or_else(|| panic!("{request} not in {requests:?}"))
+        };
+        let created = position("POST /api/session");
+        let agent = position("POST /api/session/ses_fake1/agent");
+        let model = position("POST /api/session/ses_fake1/model");
+        let prompt = position("POST /api/session/ses_fake1/prompt");
+        assert!(created < agent && agent < prompt && created < model && model < prompt);
+        assert_eq!(
+            fake.body_of("POST /api/session/ses_fake1/agent"),
+            Some(json!({ "agent": "wukong" }))
+        );
+        assert_eq!(
+            fake.body_of("POST /api/session/ses_fake1/model"),
+            Some(json!({ "model": { "id": "big-pickle", "providerID": "opencode" } }))
+        );
+    }
+
     #[tokio::test]
     async fn attachments_are_sent_as_file_uris_in_the_prompt() {
         let workspace = tempfile::tempdir().unwrap();
