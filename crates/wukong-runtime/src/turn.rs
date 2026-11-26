@@ -199,10 +199,9 @@ pub async fn run_turn_traced_with_attachments(
         // 2026-11-26（#45）：人格、派工規則與 subagent 的角色卡在 agent 定義裡
         // （crate::agent_assets），技能交給 V2 的 skill 機制；這裡不再附角色卡。
         let mut prompt = wukong_gateway::prompt::compose_prompt(&hits, input);
-        prompt.push_str("\n\n");
-        prompt.push_str(persona::final_answer_directive());
-        // 2026-11-26（#45 SCN-007）：V2 backend 的排程說明在 agent 定義、scope 在 session 指令層，
-        // 都不進 user message；CLI backend 沒有指令層，照舊附在 prompt。
+        // 2026-11-26（#45 SCN-006～008）：V2 backend 的輸出要求、排程能力與長期記憶能力在 agent
+        // 定義裡，scope 在 session 指令層，都不進 user message；CLI backend 沒有指令層，照舊附在
+        // prompt。
         let session_instructions = if backend.supports_session_instructions() {
             std::collections::BTreeMap::from([(
                 persona::SCOPE_INSTRUCTION_KEY.to_string(),
@@ -210,16 +209,18 @@ pub async fn run_turn_traced_with_attachments(
             )])
         } else {
             prompt.push_str("\n\n");
+            prompt.push_str(persona::final_answer_directive());
+            prompt.push_str("\n\n");
             prompt.push_str(&persona::scheduling_capability_hint(
                 &cfg.scope,
                 &persona::scheduling_bin(),
             ));
+            if persona::memoria_hint_enabled() {
+                prompt.push_str("\n\n");
+                prompt.push_str(persona::memoria_capability_hint());
+            }
             std::collections::BTreeMap::new()
         };
-        if persona::memoria_hint_enabled() {
-            prompt.push_str("\n\n");
-            prompt.push_str(persona::memoria_capability_hint());
-        }
         if let Some(notice) = &concurrent_notice {
             prompt.push_str("\n\n");
             prompt.push_str(notice);
@@ -819,6 +820,8 @@ mod tests {
         let prompts = backend.prompts.lock().unwrap().clone();
         assert_eq!(prompts.len(), 2);
         for prompt in &prompts {
+            // #45 SCN-006：輸出要求也在 agent 定義裡。
+            assert!(!prompt.contains("[輸出要求]"), "{prompt}");
             assert!(!prompt.contains("[排程能力]"), "{prompt}");
             assert!(!prompt.contains("user:tg-42"), "{prompt}");
         }
@@ -880,8 +883,27 @@ mod tests {
             &mut |_| {},
         )
         .await;
+        // #45 SCN-008：V2 backend 的長期記憶能力在 agent 定義裡，開啟時也不進 user message。
+        let v2_mem = open_memory().await;
+        let v2 = MockBackend::new(&["f2"]).with_session_layer();
+        let v2_result = run_turn(
+            &v2_mem,
+            &v2,
+            &test_cfg("project:T"),
+            "remember this",
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await;
         std::env::remove_var("WUKONG_MEMORIA_HINT");
         result.unwrap();
+        v2_result.unwrap();
+        assert!(v2
+            .prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|p| !p.contains(MARKER)));
 
         let prompts = backend.prompts.lock().unwrap();
         assert_eq!(prompts.len(), 1);

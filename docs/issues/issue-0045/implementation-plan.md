@@ -443,8 +443,21 @@
   - 接真實 V2 的測試：查 opencode.db，Telegram 與 Web 路徑的 user message 不含上述區塊，動態區塊仍在；
   - `WUKONG_MEMORIA_HINT` 開啟時，模型能回報長期記憶能力的指令，關閉時不能。
 - 驗證：雙迴圈。外迴圈查 opencode.db 的整合測試；內迴圈是 persona 與 prompt 組裝的單元測試。
-- 狀態：📝 待實作
+- 狀態：🚧 進行中（2026-11-26）：輸出要求與長期記憶能力已移出；Telegram 檔案互動規則待決定做法
 - 證據：
+  - 角色卡：Task 2.1 起已不附在 prompt（subagent 的角色卡在各自的定義裡）。
+  - 輸出要求、長期記憶能力：V2 backend 的回合不附在 prompt，改寫在 primary agent `wukong` 的定義裡；CLI backend 照舊附在 prompt。
+    - 長期記憶能力依 Phase 4 的決定併入 agent 定義，不用 entry 或技能：和排程能力同一種做法，開關本來就是部署層級（compose 對三個服務一起設定）。
+    - 代價：開關改了要重啟才生效（啟動時才寫定義）。改用 entry 的話，切換開關時已經用過的 session 會在對話紀錄留下一則通知。
+    - `materialize_agent_definitions` 讀 `WUKONG_MEMORIA_HINT`；測試改用 `write_definitions(dir, false)` 直接傳開關，避免與 turn.rs 切換這個環境變數的測試並行時偶發失敗。
+  - 內迴圈：
+    - `the_memoria_capability_follows_the_switch`：開啟時 primary agent 的定義有 `[長期記憶能力]`，關閉時沒有。
+    - `the_scope_goes_to_the_session_layer_not_the_prompt` 加上「不含 `[輸出要求]`」。
+    - `run_turn_advertises_memoria_only_when_enabled` 加上「開啟時 V2 backend 的 prompt 也不含」。CLI 路徑的開關測試照舊。
+    - 三項先以「簽名改了、行為沒改」的版本跑出紅燈，再實作到綠燈。
+  - 文件：AGENTS.md「末棒輸出保證」、README.md「輸出要求」、`.env.example` 的 `WUKONG_MEMORIA_HINT` 說明。
+  - 其他檢查：CI 三道全過（767 passed、14 ignored）。
+  - 外迴圈（待做）：查 opencode.db 的 user message、`WUKONG_MEMORIA_HINT` 開關各一組。需要真實模型，2026-11-26 免費額度用完（429）。
 
 ## Phase 5 — 入口的角色顯示與規劃偏好移除
 

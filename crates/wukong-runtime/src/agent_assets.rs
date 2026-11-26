@@ -54,7 +54,8 @@ fn frontmatter(description: &str, mode: &str) -> String {
 }
 
 /// 依人格內容產生六個定義：primary agent `wukong` 在前，接著是五個 subagent。
-pub fn agent_definitions(soul: &str) -> Vec<AgentDefinition> {
+/// `memoria_hint` 為 [`crate::persona::memoria_hint_enabled`]：開啟時 primary agent 多一段長期記憶能力。
+pub fn agent_definitions(soul: &str, memoria_hint: bool) -> Vec<AgentDefinition> {
     let mut rules = String::new();
     for role in Role::all() {
         rules.push_str(&format!(
@@ -74,6 +75,11 @@ pub fn agent_definitions(soul: &str) -> Vec<AgentDefinition> {
         crate::persona::final_answer_directive(),
         crate::persona::scheduling_capability_guide(&crate::persona::scheduling_bin()),
     );
+    let primary = if memoria_hint {
+        format!("{primary}\n{}\n", crate::persona::memoria_capability_hint())
+    } else {
+        primary
+    };
     let mut defs = vec![AgentDefinition {
         name: PRIMARY_AGENT,
         content: primary,
@@ -99,14 +105,20 @@ fn workspace_soul(workspace: &Path) -> String {
     }
 }
 
-/// 把定義寫到 `workspace/.opencode/agents/`，回傳該目錄。
+/// 把定義寫到 `workspace/.opencode/agents/`，回傳該目錄。長期記憶能力依
+/// `WUKONG_MEMORIA_HINT`（[`crate::persona::memoria_hint_enabled`]）。
 pub fn materialize_agent_definitions(workspace: &Path) -> io::Result<PathBuf> {
+    write_definitions(workspace, crate::persona::memoria_hint_enabled())
+}
+
+/// 測試直接傳入開關：`WUKONG_MEMORIA_HINT` 是整個行程共用的，turn.rs 的測試會切換它。
+fn write_definitions(workspace: &Path, memoria_hint: bool) -> io::Result<PathBuf> {
     let _guard = WRITE_LOCK
         .lock()
         .map_err(|_| io::Error::other("agent definition write lock poisoned"))?;
     let dir = workspace.join(AGENTS_DIR);
     fs::create_dir_all(&dir)?;
-    for def in agent_definitions(&workspace_soul(workspace)) {
+    for def in agent_definitions(&workspace_soul(workspace), memoria_hint) {
         write_if_changed(&dir, &format!("{}.md", def.name), &def.content)?;
     }
     Ok(dir)
@@ -141,11 +153,20 @@ pub(crate) fn write_if_changed(dir: &Path, file_name: &str, content: &str) -> io
 
 #[cfg(test)]
 mod tests {
+    // #45 SCN-008：長期記憶能力只在 WUKONG_MEMORIA_HINT 開啟時寫進 primary agent 的定義。
+    #[test]
+    fn the_memoria_capability_follows_the_switch() {
+        let on = &agent_definitions("soul", true)[0].content;
+        let off = &agent_definitions("soul", false)[0].content;
+        assert!(on.contains("[長期記憶能力]"), "{on}");
+        assert!(!off.contains("[長期記憶能力]"), "{off}");
+    }
+
     // #45 SCN-007：排程能力的固定說明在 primary agent 的定義裡；scope 由 session 指令層提供，
     // 定義裡只寫「目前的 scope」。
     #[test]
     fn the_primary_agent_explains_scheduling_without_a_scope() {
-        let defs = agent_definitions("soul");
+        let defs = agent_definitions("soul", false);
         let primary = &defs[0].content;
         assert!(primary.contains("[排程能力]"), "{primary}");
         assert!(primary.contains("schedule add-turn"), "{primary}");
@@ -166,7 +187,7 @@ mod tests {
     fn first_write_creates_the_primary_agent_and_five_subagents() {
         let temp = tempfile::tempdir().unwrap();
 
-        let dir = materialize_agent_definitions(temp.path()).unwrap();
+        let dir = write_definitions(temp.path(), false).unwrap();
 
         assert_eq!(dir, temp.path().join(".opencode/agents"));
         let primary = read(&dir, "wukong");
@@ -208,14 +229,14 @@ mod tests {
     #[test]
     fn unchanged_content_is_not_rewritten() {
         let temp = tempfile::tempdir().unwrap();
-        let dir = materialize_agent_definitions(temp.path()).unwrap();
+        let dir = write_definitions(temp.path(), false).unwrap();
         let before = fs::metadata(dir.join("wukong.md"))
             .unwrap()
             .modified()
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
 
-        materialize_agent_definitions(temp.path()).unwrap();
+        write_definitions(temp.path(), false).unwrap();
 
         let after = fs::metadata(dir.join("wukong.md"))
             .unwrap()
@@ -231,7 +252,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("fixer.md"), "---\nmode: subagent\n---\nold\n").unwrap();
 
-        materialize_agent_definitions(temp.path()).unwrap();
+        write_definitions(temp.path(), false).unwrap();
 
         assert!(read(&dir, "fixer").contains(Role::Fixer.card()));
     }
@@ -243,7 +264,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("mine.md"), "user agent\n").unwrap();
 
-        materialize_agent_definitions(temp.path()).unwrap();
+        write_definitions(temp.path(), false).unwrap();
 
         assert_eq!(read(&dir, "mine"), "user agent\n");
     }
@@ -252,11 +273,11 @@ mod tests {
     fn the_persona_comes_from_the_workspace_soul_and_falls_back_to_the_template() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("SOUL.md"), "你是測試用的人格。\n").unwrap();
-        let dir = materialize_agent_definitions(temp.path()).unwrap();
+        let dir = write_definitions(temp.path(), false).unwrap();
         assert!(read(&dir, "wukong").contains("你是測試用的人格。"));
 
         let bare = tempfile::tempdir().unwrap();
-        let dir = materialize_agent_definitions(bare.path()).unwrap();
+        let dir = write_definitions(bare.path(), false).unwrap();
         assert!(read(&dir, "wukong").contains(DEFAULT_SOUL.trim()));
     }
 
@@ -276,7 +297,7 @@ mod tests {
     #[test]
     fn descriptions_are_single_line_plain_yaml() {
         // frontmatter 的 description 不加引號：不能換行，也不能含 ASCII 的「: 」或開頭的特殊字元
-        for def in agent_definitions(DEFAULT_SOUL) {
+        for def in agent_definitions(DEFAULT_SOUL, false) {
             let line = def
                 .content
                 .lines()
