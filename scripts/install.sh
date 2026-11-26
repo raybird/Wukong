@@ -584,6 +584,12 @@ PY
 }
 
 # 2026-10-03：停用 profile 不會停止舊容器；只停止同 project 未啟用的 server。
+# 2026-11-26（PR #46 審查 P2-1）：等服務健康（有 healthcheck 的）或執行中（沒有的）才算啟用成功；
+# 容器建立後才 unhealthy、退出或逾時都回傳失敗，讓呼叫端走還原。OpenCode V2 在 server 模式
+# 啟動時就地遷移 opencode.db，不能等寫完 metadata 才發現。
+DOCKER_WAIT_SECS=180
+# 刻意回報 unhealthy 的服務（例如 Web 對外開放卻沒設 token 的降級模式）也算失敗，訊息指出怎麼查。
+docker_health_hint() { printf "see 'docker compose -p %s ps' for the service that is not healthy" "$DOCKER_PROJECT_NAME"; }
 activate_docker_services() {
     local active available
     active="$(docker compose -p "$DOCKER_PROJECT_NAME" config --services)" || return
@@ -591,7 +597,7 @@ activate_docker_services() {
     if ! grep -Fxq opencode-server <<< "$active" && grep -Fxq opencode-server <<< "$available"; then
         docker compose -p "$DOCKER_PROJECT_NAME" --profile server stop opencode-server || return
     fi
-    docker compose -p "$DOCKER_PROJECT_NAME" up -d --force-recreate
+    docker compose -p "$DOCKER_PROJECT_NAME" up --wait --wait-timeout "$DOCKER_WAIT_SECS" -d --force-recreate
 }
 
 # 2026-10-06：v0.22.0 起預設按需本機模式，但 .env 屬於使用者、升級時保留。
@@ -729,13 +735,15 @@ install_docker() {
     skip_current_upgrade
     command -v docker >/dev/null 2>&1 || abort "Docker is required"
     docker compose version >/dev/null 2>&1 || abort "Docker Compose v2 is required"
+    docker compose up --help 2>/dev/null | grep -Fq -- '--wait-timeout' ||
+        abort "this Docker Compose has no 'up --wait-timeout'; update Docker Compose, then run the installer again (nothing was changed)"
     resolve_docker_project
     if [[ "$ACTION" == rollback ]]; then
         rollback_docker
         return
     fi
     prepare_release_metadata
-    local archive stage expected actual file previous_version="" previous_digest="" backup="" env_backup env_report line state_backups="{}"
+    local archive stage expected actual file previous_version="" previous_digest="" backup="" env_backup env_report line state_list state_backups="{}"
     local -a state_names=()
     if [[ -f .wukong-release ]]; then
         read -r previous_version previous_digest < <(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["productTag"], d["imageDigest"])' .wukong-release) || abort "invalid Docker release metadata"
@@ -757,7 +765,10 @@ install_docker() {
     docker compose -p "$DOCKER_PROJECT_NAME" --project-directory "$PWD" -f "$stage/wukong-docker/docker-compose.yml" pull
     actual="$(docker image inspect "ghcr.io/raybird/wukong:${VERSION}" --format '{{index .RepoDigests 0}}' | sed -n 's/.*@\(sha256:[0-9a-f]*\).*/\1/p')"
     [[ "$actual" == "$expected" ]] || abort "pulled image digest does not match release manifest"
-    mapfile -t state_names < <(required_state_backups "$RELEASE_DIR/release-manifest.json") || abort "invalid data compatibility in release manifest"
+    # Read the list into a variable first: a process substitution hides a failure, and a
+    # list cut short must not be taken as "nothing to back up" (PR #46 review P2-2).
+    state_list="$(required_state_backups "$RELEASE_DIR/release-manifest.json")" || abort "invalid data compatibility in release manifest"
+    [[ -z "$state_list" ]] || mapfile -t state_names <<< "$state_list"
     if [[ -n "$backup" && ${#state_names[@]} -gt 0 ]]; then
         # The old release files are still in place here, so `start` brings back exactly
         # what was running if the backup cannot be taken.
@@ -773,7 +784,7 @@ install_docker() {
     env_report="$(umask 077 && migrate_docker_env "$env_backup")" || env_report="warning: could not migrate .env; check it against .env.example"
     [[ ! -d .wukong-backups ]] || chmod 700 .wukong-backups
     [[ -z "$env_report" ]] || while IFS= read -r line; do info "$line"; done <<< "$env_report"
-    if ! activate_docker_services || ! docker compose -p "$DOCKER_PROJECT_NAME" ps >/dev/null; then
+    if ! activate_docker_services; then
         # A failed recreation must not leave release-owned files or metadata advanced.
         # State the new release may already have migrated (opencode.db under OpenCode V2)
         # goes back first, with every service stopped; when that fails the old release is
@@ -791,8 +802,8 @@ install_docker() {
             for file in "${DOCKER_RELEASE_OWNED[@]}"; do rm -f "$file"; done
         fi
         [[ "$state_restored" == true ]] || abort "Docker activation or health check failed and the state backup could not be restored; services are stopped. Restore by hand from: $(state_backup_entries "$state_backups" | cut -f2 | paste -sd' ')"
-        [[ "$state_backups" == "{}" ]] || abort "Docker activation or health check failed; restored previous release files and the state backed up before the upgrade"
-        abort "Docker activation or health check failed; restored previous release files"
+        [[ "$state_backups" == "{}" ]] || abort "Docker activation or health check failed; restored previous release files and the state backed up before the upgrade; $(docker_health_hint)"
+        abort "Docker activation or health check failed; restored previous release files; $(docker_health_hint)"
     fi
     write_json_atomically .wukong-release "$(python3 - "$VERSION" "$expected" "$previous_version" "$previous_digest" "$backup" "$DOCKER_PROJECT_NAME" "$RELEASE_DIR/release-manifest.json" "$state_backups" <<'PY'
 import json,sys
@@ -858,8 +869,7 @@ PY
             abort "rollback could not restore the state backup; services are stopped. Restore by hand from $(state_backup_entries "$state_backups" | cut -f2 | paste -sd' ') (the $current_version state is in $current_backup/volumes)"
     fi
     for file in "${DOCKER_RELEASE_OWNED[@]}"; do [[ ! -f "$file" ]] || { mkdir -p "$current_backup/$(dirname "$file")"; cp -p "$file" "$current_backup/$file"; }; [[ ! -f "$backup/$file" ]] || cp -p "$backup/$file" "$file"; done
-    activate_docker_services
-    docker compose -p "$DOCKER_PROJECT_NAME" ps >/dev/null
+    activate_docker_services || abort "rollback restored the $version files, but its services did not become healthy within ${DOCKER_WAIT_SECS}s; $(docker_health_hint)"
     write_json_atomically .wukong-release "$(python3 - "$version" "$digest" "$current_backup" "$current_version" "$current_digest" "$DOCKER_PROJECT_NAME" <<'PY'
 import json,sys
 print(json.dumps({"schemaVersion":1,"productTag":sys.argv[1],"imageDigest":sys.argv[2],"previousVersion":sys.argv[4],"previousImageDigest":sys.argv[5],"previousBackupPath":sys.argv[3],"composeProject":sys.argv[6]},sort_keys=True))

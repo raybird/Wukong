@@ -35,6 +35,13 @@
 - **共用 server 模式的閒置重啟問不到 session 列表時，log 會寫出原因。** 例如沒有密碼、密碼被拒、
   回應格式不符；以前這些情況跟「有 session 剛更新」印成同一句。判斷閒置改查 V2 的 `/api/session` 並帶
   密碼，重啟的條件不變（#44）。
+- **Docker 升級與 rollback 改為等服務健康才算成功。** installer 以 `docker compose up --wait --wait-timeout 180`
+  啟用，有 healthcheck 的服務要變成 healthy、其他服務要在執行中；新版啟動後才變 unhealthy 或退出時，照樣先還原
+  備份再啟動前一版，不再只看容器有沒有建立。Docker Compose 必須支援 `up --wait-timeout`，不支援時 installer
+  在改動任何東西之前中止。Web 對外開放卻沒設 `WUKONG_WEB_TOKEN`（刻意回報 unhealthy 的降級模式）時，升級會被
+  判為失敗，要先修好設定（PR #46）。
+- **升級要備份的 volume 清單讀不出來時，installer 在停服務之前中止。** 以前 release manifest 列了不合法的
+  名稱時，清單會被截斷，可能在沒有備份的情況下升級（PR #46）。
 
 ### Added
 

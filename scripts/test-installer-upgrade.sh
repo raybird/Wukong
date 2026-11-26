@@ -46,7 +46,8 @@ make_release() {
     python3 - "$docker_stage/data-compatibility.json" <<'PY'
 import json, os, sys
 backup = os.environ.get("FIXTURE_STATE_BACKUP") == "1"
-json.dump({"affectedState": ["opencode-state"] if backup else [], "backupRequired": backup, "instructionsUrl": None, "irreversibleMigration": False, "rollbackSafeTo": os.environ.get("FIXTURE_SAFE_TO", "v0.17.1"), "schemaVersion": 1}, open(sys.argv[1], "w"), sort_keys=True)
+state = json.loads(os.environ["FIXTURE_AFFECTED_STATE"]) if "FIXTURE_AFFECTED_STATE" in os.environ else (["opencode-state"] if backup else [])
+json.dump({"affectedState": state, "backupRequired": backup, "instructionsUrl": None, "irreversibleMigration": False, "rollbackSafeTo": os.environ.get("FIXTURE_SAFE_TO", "v0.17.1"), "schemaVersion": 1}, open(sys.argv[1], "w"), sort_keys=True)
 PY
     # The optional Memoria overlay. The fixture must mirror the real bundle's
     # shape: a fixture that is missing files the shipped bundle carries does not
@@ -64,7 +65,8 @@ PY
     python3 - "$RELEASES/release-manifest.json" "$tag" <<'PY'
 import json, os, sys
 backup = os.environ.get("FIXTURE_STATE_BACKUP") == "1"
-json.dump({"schemaVersion": 1, "productTag": sys.argv[2], "image": {"reference": "ghcr.io/raybird/wukong:" + sys.argv[2], "digest": "sha256:" + "a" * 64}, "dataCompatibility": {"schemaVersion": 1, "affectedState": ["opencode-state"] if backup else [], "backupRequired": backup, "instructionsUrl": None, "irreversibleMigration": False, "rollbackSafeTo": os.environ.get("FIXTURE_SAFE_TO", "v0.17.1")}}, open(sys.argv[1], "w"), sort_keys=True)
+state = json.loads(os.environ["FIXTURE_AFFECTED_STATE"]) if "FIXTURE_AFFECTED_STATE" in os.environ else (["opencode-state"] if backup else [])
+json.dump({"schemaVersion": 1, "productTag": sys.argv[2], "image": {"reference": "ghcr.io/raybird/wukong:" + sys.argv[2], "digest": "sha256:" + "a" * 64}, "dataCompatibility": {"schemaVersion": 1, "affectedState": state, "backupRequired": backup, "instructionsUrl": None, "irreversibleMigration": False, "rollbackSafeTo": os.environ.get("FIXTURE_SAFE_TO", "v0.17.1")}}, open(sys.argv[1], "w"), sort_keys=True)
 PY
     cp "$RELEASES/release-manifest.json" "$docker_stage/release-manifest.json"
     tar -C "$TMP" -czf "$RELEASES/wukong-docker-$tag.tar.gz" wukong-docker
@@ -92,6 +94,12 @@ SH
 set -euo pipefail
 printf 'docker %s\n' "$*" >> "$WUKONG_TEST_LOG"
 if [[ "$1" == compose && "$2" == version ]]; then exit 0; fi
+# FIXTURE_COMPOSE_NO_WAIT=1: a Compose whose `up` has no --wait-timeout.
+if [[ "$1" == compose && "$2" == up && "$3" == --help ]]; then
+    printf '      --wait                         Wait for services\n'
+    [[ "${FIXTURE_COMPOSE_NO_WAIT:-0}" == 1 ]] || printf '      --wait-timeout int             Maximum duration\n'
+    exit 0
+fi
 if [[ "${WUKONG_REQUIRE_STAGED_PULL:-}" == 1 && "$1" == compose && "${*: -1}" == pull && " $* " != *" -f "* ]]; then
     printf "pull used deployment compose\n" >> "$WUKONG_TEST_LOG"
     exit 42
@@ -151,13 +159,18 @@ if [[ "$1" == run ]]; then
 fi
 # FIXTURE_MIGRATING_TAG=<tag>: starting that release rewrites opencode.db and adds a
 # file, the way OpenCode V2 migrates the database on its first start.
-if [[ "$1" == compose && "${*: -3}" == 'up -d --force-recreate' && -n "${FIXTURE_MIGRATING_TAG:-}" ]] &&
+if [[ "$1" == compose && " $* " == *' up '* && "${*: -2}" == '-d --force-recreate' && -n "${FIXTURE_MIGRATING_TAG:-}" ]] &&
     grep -Fq "wukong:$FIXTURE_MIGRATING_TAG" docker-compose.yml && [[ -d "$WUKONG_TEST_VOLUMES/wukong_opencode-state" ]]; then
     printf 'migrated by %s\n' "$FIXTURE_MIGRATING_TAG" > "$WUKONG_TEST_VOLUMES/wukong_opencode-state/opencode.db"
     printf 'new\n' > "$WUKONG_TEST_VOLUMES/wukong_opencode-state/v2-only"
 fi
 if [[ "$1" == image && "$2" == inspect ]]; then printf 'ghcr.io/raybird/wukong@sha256:%s\n' "${FIXTURE_IMAGE_DIGEST:-$(printf 'a%.0s' {1..64})}"; exit 0; fi
-if [[ "$1" == compose && "${*: -1}" == ps && -n "${FIXTURE_DOCKER_PS_EXIT:-}" ]]; then exit "$FIXTURE_DOCKER_PS_EXIT"; fi
+# FIXTURE_UNHEALTHY_TAG=<tag>: that release's containers are created (and migrate the
+# database), but never become healthy; only `up --wait` notices (PR #46 review P2).
+if [[ "$1" == compose && " $* " == *' up --wait '* && "${*: -2}" == '-d --force-recreate' && -n "${FIXTURE_UNHEALTHY_TAG:-}" ]] &&
+    grep -Fq "wukong:$FIXTURE_UNHEALTHY_TAG" docker-compose.yml; then
+    exit 1
+fi
 exit "${FIXTURE_DOCKER_EXIT:-0}"
 SH
     cat > "$BIN/systemctl" <<'SH'
@@ -252,7 +265,7 @@ test_docker() {
     run_installer '' --mode docker --version v9.9.9 >/dev/null
     assert_file "$DEPLOYMENT/.wukong-release"
     assert_contains "$LOG" ' pull'
-    assert_contains "$LOG" 'docker compose -p wukong up -d --force-recreate'
+    assert_contains "$LOG" 'docker compose -p wukong up --wait --wait-timeout 180 -d --force-recreate'
     assert_contains "$LOG" 'docker compose -p wukong --profile server stop opencode-server'
     assert_not_contains "$LOG" 'build'
     assert_not_contains "$LOG" ' down'
@@ -318,7 +331,7 @@ test_docker_env_migration() {
     prepare
     printf '%s\n' 'WUKONG_AGENT_CMD=opencode run --dangerously-skip-permissions' > "$DEPLOYMENT/.env"
     cp "$DEPLOYMENT/.env" "$TMP/env-original"
-    ! FIXTURE_DOCKER_PS_EXIT=1 run_installer '' --mode docker --version v9.9.9 >/dev/null 2>&1 || fail "unhealthy Docker install succeeded"
+    ! FIXTURE_UNHEALTHY_TAG=v9.9.9 run_installer '' --mode docker --version v9.9.9 >/dev/null 2>&1 || fail "unhealthy Docker install succeeded"
     assert_same "$TMP/env-original" "$DEPLOYMENT/.env"
 }
 
@@ -512,7 +525,7 @@ test_forced_upgrade() {
     : > "$LOG"
     run_installer '' --mode docker --upgrade --force --version v9.9.9 >/dev/null
     assert_contains "$LOG" ' pull'
-    assert_contains "$LOG" 'docker compose -p wukong up -d --force-recreate'
+    assert_contains "$LOG" 'docker compose -p wukong up --wait --wait-timeout 180 -d --force-recreate'
 }
 
 test_systemd() {
@@ -603,7 +616,7 @@ PY
     assert_same "$TMP/metadata-before" "$DEPLOYMENT/.wukong-release"
     assert_same "$TMP/compose-before" "$DEPLOYMENT/docker-compose.yml"
     grep -Fxq 'docker compose -p wukong start' "$LOG" || fail "stopped services were not started again"
-    assert_not_contains "$LOG" 'up -d --force-recreate'
+    assert_not_contains "$LOG" 'force-recreate'
 
     : > "$LOG"
     FIXTURE_STATE_BACKUP=1 run_installer '' --mode docker --upgrade --version v9.9.7 >/dev/null
@@ -617,7 +630,7 @@ def first(pred, what):
     raise SystemExit(f"never ran: {what}\n" + "\n".join(lines))
 stop = first(lambda l: l == "docker compose -p wukong --profile server stop", "stop every service")
 archive = first(lambda l: l.startswith("docker run ") and "wukong_opencode-state:" in l, "archive opencode-state")
-start = first(lambda l: l.endswith("up -d --force-recreate"), "activate the new release")
+start = first(lambda l: l.endswith(" -d --force-recreate"), "activate the new release")
 assert stop < archive < start, (stop, archive, start)
 PY
     path="$(python3 - "$DEPLOYMENT/.wukong-release" <<'PY'
@@ -654,8 +667,9 @@ state_backup_fixture() {
 
 test_docker_state_restore() {
     state_backup_fixture
-    ! FIXTURE_MIGRATING_TAG=v9.9.7 FIXTURE_DOCKER_PS_EXIT=1 FIXTURE_STATE_BACKUP=1 \
+    ! FIXTURE_MIGRATING_TAG=v9.9.7 FIXTURE_UNHEALTHY_TAG=v9.9.7 FIXTURE_STATE_BACKUP=1 \
         run_installer '' --mode docker --upgrade --version v9.9.7 >"$TMP/out" 2>&1 || fail "unhealthy upgrade succeeded"
+    assert_contains "$TMP/out" "see 'docker compose -p wukong ps'"
     diff -r "$TMP/state-before" "$VOLUMES/wukong_opencode-state" || fail "opencode-state was not restored to the backup"
     assert_same "$TMP/metadata-before" "$DEPLOYMENT/.wukong-release"
     assert_same "$TMP/compose-before" "$DEPLOYMENT/docker-compose.yml"
@@ -663,7 +677,7 @@ test_docker_state_restore() {
     python3 - "$LOG" <<'PY'
 import sys
 lines = open(sys.argv[1]).read().splitlines()
-ups = [i for i, l in enumerate(lines) if l.endswith("up -d --force-recreate")]
+ups = [i for i, l in enumerate(lines) if l.endswith(" -d --force-recreate")]
 stops = [i for i, l in enumerate(lines) if l == "docker compose -p wukong --profile server stop"]
 restores = [i for i, l in enumerate(lines) if l.startswith("docker run ") and " -i " in f" {l} " and "wukong_opencode-state:/state " in f"{l} "]
 assert len(ups) == 2 and restores, "\n".join(lines)
@@ -673,12 +687,48 @@ PY
     # The restore itself fails: release files still go back, but nothing is started on
     # a database the old release may not be able to read; the message names the backup.
     state_backup_fixture
-    ! FIXTURE_MIGRATING_TAG=v9.9.7 FIXTURE_DOCKER_PS_EXIT=1 FIXTURE_RESTORE_EXIT=1 FIXTURE_STATE_BACKUP=1 \
+    ! FIXTURE_MIGRATING_TAG=v9.9.7 FIXTURE_UNHEALTHY_TAG=v9.9.7 FIXTURE_RESTORE_EXIT=1 FIXTURE_STATE_BACKUP=1 \
         run_installer '' --mode docker --upgrade --version v9.9.7 >"$TMP/out" 2>&1 || fail "unhealthy upgrade succeeded"
     assert_same "$TMP/compose-before" "$DEPLOYMENT/docker-compose.yml"
     assert_same "$TMP/metadata-before" "$DEPLOYMENT/.wukong-release"
-    [[ "$(grep -c 'up -d --force-recreate' "$LOG")" == 1 ]] || fail "a release was started on an unrestored opencode-state"
+    [[ "$(grep -c 'force-recreate' "$LOG")" == 1 ]] || fail "a release was started on an unrestored opencode-state"
     grep -Eq 'volumes/opencode-state\.tar' "$TMP/out" || fail "failure message does not point at the backup: $(cat "$TMP/out")"
+}
+
+# PR #46 review P2-1: activation waits for the services to be healthy, so Compose must
+# support `up --wait-timeout`; without it the upgrade stops before anything changes.
+test_docker_compose_wait_required() {
+    prepare
+    run_installer '' --mode docker --version v9.9.9 >/dev/null
+    assert_contains "$LOG" 'up --wait --wait-timeout 180 -d --force-recreate'
+    cp "$DEPLOYMENT/.wukong-release" "$TMP/metadata-before"; cp "$DEPLOYMENT/docker-compose.yml" "$TMP/compose-before"
+    FIXTURE_TAG=v9.9.7 FIXTURE_STATE_BACKUP=1 make_release
+    : > "$LOG"
+    ! FIXTURE_COMPOSE_NO_WAIT=1 FIXTURE_STATE_BACKUP=1 run_installer '' --mode docker --upgrade --version v9.9.7 >"$TMP/out" 2>&1 ||
+        fail "upgrade went ahead without a way to wait for health"
+    assert_contains "$TMP/out" 'wait-timeout'
+    assert_same "$TMP/metadata-before" "$DEPLOYMENT/.wukong-release"
+    assert_same "$TMP/compose-before" "$DEPLOYMENT/docker-compose.yml"
+    assert_not_contains "$LOG" ' stop'
+    assert_not_contains "$LOG" ' pull'
+    assert_not_contains "$LOG" 'force-recreate'
+}
+
+# PR #46 review P2-2: a backup list that cannot be read stops the upgrade before any
+# service is stopped; it is never taken as "nothing to back up".
+test_docker_state_backup_list() {
+    local state
+    for state in '["../escape", "opencode-state"]' '[1]' '["opencode-state", "../escape"]'; do
+        state_backup_fixture
+        FIXTURE_TAG=v9.9.7 FIXTURE_STATE_BACKUP=1 FIXTURE_AFFECTED_STATE="$state" make_release
+        : > "$LOG"
+        ! FIXTURE_STATE_BACKUP=1 run_installer '' --mode docker --upgrade --version v9.9.7 >"$TMP/out" 2>&1 ||
+            fail "upgrade went ahead with an unreadable backup list: $state"
+        assert_same "$TMP/metadata-before" "$DEPLOYMENT/.wukong-release"
+        assert_same "$TMP/compose-before" "$DEPLOYMENT/docker-compose.yml"
+        assert_not_contains "$LOG" ' stop'
+        assert_not_contains "$LOG" 'force-recreate'
+    done
 }
 
 # issue-0044 SCN-015: --rollback after an upgrade that backed up opencode-state brings
@@ -720,7 +770,7 @@ def first(pred, what, after=-1):
 pull = first(lambda l: l.endswith(" pull"), "pull the previous image")
 stop = first(lambda l: l == "docker compose -p wukong --profile server stop", "stop every service", pull)
 restore = first(lambda l: l.startswith("docker run ") and " -i " in l and "wukong_opencode-state:/state " in l + " ", "restore opencode-state", stop)
-first(lambda l: l.endswith("up -d --force-recreate"), "start the previous release", restore)
+first(lambda l: l.endswith(" -d --force-recreate"), "start the previous release", restore)
 PY
     # What the rolled-back release held is set aside, not destroyed.
     saved="$(ls "$DEPLOYMENT"/.wukong-backups/v9.9.9-rollback-*/volumes/opencode-state.tar)" || fail "the V2 state was not set aside"
@@ -753,6 +803,12 @@ test_docker_rollback() {
     run_installer '' --mode docker --version v9.9.9 >/dev/null
     FIXTURE_TAG=v9.9.8 FIXTURE_SAFE_TO=v9.9.9 make_release
     FIXTURE_SAFE_TO=v9.9.9 run_installer '' --mode docker --upgrade --version v9.9.8 >/dev/null
+    # The previous release never gets healthy: the files are back, the metadata is not
+    # rewritten, and the message says where to look (PR #46 review P2-1).
+    cp "$DEPLOYMENT/.wukong-release" "$TMP/metadata-before"
+    ! FIXTURE_UNHEALTHY_TAG=v9.9.9 run_installer '' --mode docker --rollback >"$TMP/out" 2>&1 || fail "rollback to an unhealthy release succeeded"
+    assert_same "$TMP/metadata-before" "$DEPLOYMENT/.wukong-release"
+    assert_contains "$TMP/out" "see 'docker compose -p wukong ps'"
     run_installer '' --mode docker --rollback >/dev/null
     python3 - "$DEPLOYMENT/.wukong-release" <<'PY'
 import json,sys
@@ -766,7 +822,7 @@ test_docker_recovery() {
     cp "$DEPLOYMENT/.wukong-release" "$TMP/docker-metadata-before"
     cp "$DEPLOYMENT/docker-compose.yml" "$TMP/compose-before"
     FIXTURE_TAG=v9.9.8 make_release
-    ! FIXTURE_DOCKER_PS_EXIT=1 run_installer '' --mode docker --upgrade --version v9.9.8 >/dev/null 2>&1 || fail "unhealthy Docker upgrade succeeded"
+    ! FIXTURE_UNHEALTHY_TAG=v9.9.8 run_installer '' --mode docker --upgrade --version v9.9.8 >/dev/null 2>&1 || fail "unhealthy Docker upgrade succeeded"
     assert_same "$TMP/docker-metadata-before" "$DEPLOYMENT/.wukong-release"
     assert_same "$TMP/compose-before" "$DEPLOYMENT/docker-compose.yml"
 }
@@ -897,13 +953,15 @@ case "$CASE" in
     docker-state-backup) test_docker_state_backup ;;
     docker-state-restore) test_docker_state_restore ;;
     docker-state-rollback) test_docker_state_rollback ;;
+    docker-state-backup-list) test_docker_state_backup_list ;;
+    docker-compose-wait) test_docker_compose_wait_required ;;
     docker-rollback) test_docker_rollback ;;
     docker-recovery) test_docker_recovery ;;
     binary-recovery) test_binary_recovery ;;
     docker-project) test_docker_project_resolution ;;
     docker-project-conflicts) test_docker_project_conflicts ;;
     docker-project-persistence) test_docker_project_persistence ;;
-    all) test_parsing; test_verification; test_docker; test_docker_env_migration; test_docker_env_server_password; test_docker_forward_compatible_bundle; test_docker_bundle_missing_required_entry; test_docker_installer_replaces_itself_mid_run; test_stdin_installer; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_docker_compose_repair; test_docker_project_resolution; test_docker_project_conflicts; test_docker_project_persistence; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_state_backup; test_docker_state_restore; test_docker_state_rollback; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
+    all) test_parsing; test_verification; test_docker; test_docker_env_migration; test_docker_env_server_password; test_docker_forward_compatible_bundle; test_docker_bundle_missing_required_entry; test_docker_installer_replaces_itself_mid_run; test_stdin_installer; test_metadata; test_binary_clean; test_binary_upgrade; test_upgrade_noop; test_docker_compose_repair; test_docker_project_resolution; test_docker_project_conflicts; test_docker_project_persistence; test_forced_upgrade; test_systemd; test_rollback_metadata; test_legacy_rollback; test_rollback_guard; test_docker_state_backup; test_docker_state_restore; test_docker_state_rollback; test_docker_state_backup_list; test_docker_compose_wait_required; test_docker_rollback; test_docker_recovery; test_binary_recovery ;;
     *) fail "unknown test case: $CASE" ;;
 esac
 

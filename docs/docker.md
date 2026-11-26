@@ -85,7 +85,11 @@ curl -fsSL https://raw.githubusercontent.com/raybird/Wukong/main/scripts/install
 
 `--upgrade` 會先比對目標 release、`.wukong-release` 與目前的 Compose image 設定；已是相同版本時會直接結束，不呼叫 Docker。需要重新部署相同版本時可加上 `--force`。
 
-目標 release 的 compatibility metadata（`data-compatibility.json` 的 `backupRequired`）要求備份時，installer 會在換上新版檔案之前先停止所有服務，把 `affectedState` 列出的 volume 打包到 `.wukong-backups/<前一版>-<時間>/volumes/<名稱>.tar`，位置記在 `.wukong-release` 的 `stateBackups`。2026-11-25 起換用 OpenCode V2 的版本會這樣備份 `opencode-state`（V2 第一次啟動時會就地遷移裡面的 `opencode.db`，issue-0044）。備份裡有 provider 憑證（`auth.json`）與完整對話，所以 `.wukong-backups/` 設為 0700、tar 設為 0600，舊版建立的目錄也會收緊；installer 建立或改寫 `.env` 時同樣設為 0600。備份失敗時 installer 會重新啟動原本的服務並中止，部署維持原版。新版啟用或健康檢查失敗時，installer 先停掉所有服務，把這些 volume 還原成備份（清空後整包解回，新版寫入的內容不保留），再換回前一版的檔案並啟動前一版；還原本身失敗時不啟動任何版本，服務維持停止，錯誤訊息會列出備份檔位置供手動還原。
+目標 release 的 compatibility metadata（`data-compatibility.json` 的 `backupRequired`）要求備份時，installer 會在換上新版檔案之前先停止所有服務，把 `affectedState` 列出的 volume 打包到 `.wukong-backups/<前一版>-<時間>/volumes/<名稱>.tar`，位置記在 `.wukong-release` 的 `stateBackups`。2026-11-25 起換用 OpenCode V2 的版本會這樣備份 `opencode-state`（V2 第一次啟動時會就地遷移裡面的 `opencode.db`，issue-0044）。備份裡有 provider 憑證（`auth.json`）與完整對話，所以 `.wukong-backups/` 設為 0700、tar 設為 0600，舊版建立的目錄也會收緊；installer 建立或改寫 `.env` 時同樣設為 0600。備份失敗時 installer 會重新啟動原本的服務並中止，部署維持原版。
+
+installer 以 `docker compose up --wait --wait-timeout 180` 啟用：有 healthcheck 的服務（wukong-web、server 模式的 opencode-server）要在 180 秒內變成 healthy，其他服務要在執行中，才算啟用成功（2026-11-26 起，PR #46）。所以 Docker Compose 必須支援 `up --wait-timeout`，不支援時 installer 在改動任何東西之前就中止。刻意回報 unhealthy 的服務也算失敗：例如 Web 對外開放卻沒設 `WUKONG_WEB_TOKEN` 的降級模式，升級與 rollback 都會被判為失敗，要先修好設定再執行；失敗訊息會提示用 `docker compose -p <project> ps` 查是哪個服務。沒有 healthcheck 的服務一啟動就退出、由重啟政策拉起時，等待結果不一定抓得到。
+
+新版啟用或健康檢查失敗時，installer 先停掉所有服務，把這些 volume 還原成備份（清空後整包解回，新版寫入的內容不保留），再換回前一版的檔案並啟動前一版；還原本身失敗時不啟動任何版本，服務維持停止，錯誤訊息會列出備份檔位置供手動還原。
 
 installer 會把 Docker Compose project 記錄在 `.wukong-release`。既有部署若尚未記錄，會從現有 Wukong container 的 `com.docker.compose.project` label 判斷並沿用，避免升級時切換到另一組 volumes。只有全新安裝可用 `COMPOSE_PROJECT_NAME=<name>` 選擇 project；既有 metadata、container labels 與手動指定值不一致，或現有 containers 的 ownership 不明確時，installer 會在覆寫檔案或重建服務前中止。這個選項不會遷移或複製 volumes。
 

@@ -593,6 +593,50 @@ SCN-001 不成立時停在本 Phase，依 acceptance.md 修訂規格並重新核
 - `test-idle-restart-decision.sh`、`test-installer-upgrade.sh all`、`test-docker-runtime.sh`、`test-resolve-opencode-version.sh` 都通過。
 - 沒有執行：shellcheck（主機沒有安裝，CI 也沒用）；需要真實模型的 `#[ignore]` 測試；完整重建 release 映像。容器驗證是把新的 binary 與腳本 bind-mount 進 Task 4.1 建的映像，Dockerfile 與打包流程這一輪沒有改動。
 
+## PR #46 審查修正（2026-11-26）
+
+PR #46 第一輪審查（raybird，2026-11-26，Reviewed HEAD 238df43）提出兩項 P2、一項 P3。使用者同日決定：P2-1、P2-2 修正，P3 記入待確認（README TBD-11）。
+
+### R8 — 升級與 rollback 等服務健康才算成功（P2-1）
+- 狀態：✅ 已完成
+- 問題：`scripts/install.sh` 以 `up -d --force-recreate` 加 `docker compose ps` 的退出狀態判定啟用成功。`ps` 只證明 compose 列得出容器；新版啟動後才變 unhealthy 或退出時，installer 照樣寫入新版 metadata，錯過還原 `opencode.db` 的時機。這個檢查 v0.25.1 就有，但 SCN-014 寫的是「啟用或健康檢查失敗」，而 V2 的遷移是單向的。
+- 修正：
+  - `activate_docker_services` 改用 `up --wait --wait-timeout 180 -d --force-recreate`，拿掉兩處 `ps`。升級、升級失敗後重啟前一版、rollback 這三個呼叫點都經過它。
+  - `install_docker` 一開始先確認 `docker compose up --help` 有 `--wait-timeout`，沒有就中止，什麼都不改。
+  - 失敗訊息提示用 `docker compose -p {project} ps` 查是哪個服務。rollback 在這一步失敗時，原本會被 `set -e` 直接結束、沒有任何訊息，現在會說明檔案已還原、服務沒有變健康。
+  - 使用者同日決定：刻意回報 unhealthy 的 Web 降級模式（對外開放卻沒設 token）也算失敗，接受，只改善訊息。
+- 測試（`scripts/test-installer-upgrade.sh`）：
+  - fake docker 新增 `FIXTURE_UNHEALTHY_TAG`：該版的容器會建立、也會模擬遷移，只有帶 `--wait` 的 `up` 會失敗。取代原本的 `FIXTURE_DOCKER_PS_EXIT`，`docker-env-migration`、`docker-state-restore`（兩個案例）、`docker-recovery` 改用它。
+  - fake docker 新增 `FIXTURE_COMPOSE_NO_WAIT`；新案例 `docker-compose-wait`。
+  - `docker-rollback` 新增前一版不健康的案例：metadata 不改寫，訊息指向 `docker compose ps`。
+  - 辨認啟用命令的地方原本比對「最後三個參數是 `up -d --force-recreate`」，插入 `--wait` 之後對不上，連 V2 遷移的模擬都沒被觸發，所以改成看 `-d --force-recreate` 結尾。
+- 紅燈（HEAD 238df43 的 `install.sh`）：
+  - `docker-compose-wait`：缺少 `up --wait --wait-timeout 180 -d --force-recreate`。
+  - `docker-state-restore`：「unhealthy upgrade succeeded」。
+  - `docker-env-migration`：「unhealthy Docker install succeeded」。
+  - `docker-rollback`：「rollback to an unhealthy release succeeded」。
+- 消融（各自只拿掉一項修正）：
+  - 拿掉 `--wait`：`docker-state-restore`、`docker-recovery`、`docker-env-migration` 失敗。
+  - 拿掉 `--wait-timeout` 支援檢查：`docker-compose-wait` 失敗。
+- 真實 Compose 2.35.1（alpine 映像的拋棄式 project，跑完 `down`，沒有殘留容器）：
+  - 有 healthcheck 且健康：exit 0，5 秒。
+  - 有 healthcheck 但一直不健康：exit 1，18 秒，「container … is unhealthy」。
+  - 沒有 healthcheck、啟動就退出（`restart: unless-stopped`）：7 次裡 5 次 exit 1（「application not healthy after 25s」），2 次剛好在重啟之間被判成功。所以 wukong-telegram、wukong-schedulerd（沒有 healthcheck）只是盡力而為，記入 README TBD-10。wukong-telegram 沒有 token 時只會等待、不會退出，不會因此每次升級都失敗。
+
+### R9 — 備份清單讀不出來時，停服務之前就中止（P2-2）
+- 狀態：✅ 已完成
+- 問題：`mapfile -t state_names < <(required_state_backups …) || abort` 不會收到 process substitution 裡命令的退出碼。前面的 manifest 驗證只確認 `affectedState` 是 list，名稱格式在 `required_state_backups` 才檢查。實測 `["opencode-state", "../escape"]` 會印出錯誤後以一個名稱繼續；無效名稱排第一個時清單是空的，就在沒有備份的情況下升級。
+- 修正：先把輸出存進 `state_list`，失敗就中止，成功才用 here-string 讀入陣列（空字串時不讀，避免多出一個空名稱）。
+- 測試：新案例 `docker-state-backup-list`，fixture 新增 `FIXTURE_AFFECTED_STATE`。三組清單 `["../escape", "opencode-state"]`、`[1]`、`["opencode-state", "../escape"]` 都要在停服務、啟用之前中止，metadata 與 compose 檔不變。
+  - 無效 JSON 與缺少 `dataCompatibility` 早就由 `validate_manifest_version` 擋下（審查建議的另外兩種負向案例），沒有另加重複的測試。
+- 紅燈：HEAD 238df43 的 `install.sh` 在第一組就失敗（「upgrade went ahead with an unreadable backup list」）。消融：改回 process substitution 時同樣失敗。
+
+### 這一輪的整體檢查（2026-11-26）
+- `bash scripts/test-installer-upgrade.sh all`：通過。
+- `test-idle-restart-decision.sh`、`test-docker-runtime.sh`、`test-resolve-opencode-version.sh`：通過。
+- 沒有改 Rust 程式，`cargo test` 沿用 c4d47d8 的結果。
+- 文件：`docs/docker.md` 說明健康等待、Compose 需求與降級模式；`CHANGELOG.md` 新增兩條。
+
 ## 使用方式對照
 
 | 情境 | 變更前 | 變更後 |
