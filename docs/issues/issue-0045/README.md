@@ -264,6 +264,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | 2026-11-26 | Task 3.2 完成：免費模型額度用完，改用 NVIDIA nemotron（憑證已恢復可用）跑派工探測 6 次全部通過，primary 與 subagent 都跑在指定模型 |
 | 2026-11-26 | Task 3.4、4.1 完成：以 NVIDIA nemotron 跑真實 V2，CLI backend 以 agent wukong 執行且不蓋過使用者的 --agent；排程建在正確的 scope，輪替後的新 session 也拿得到 scope。Task 4.2 的 SCN-008 發現常駐 server 在定義改寫後立刻送出的回合仍用舊定義，待決定處理方式 |
 | 2026-11-26 | Task 4.2 完成：依使用者決定（TBD-8），入口改寫 agent 定義後，常駐 server 讀到新定義才送下一個回合；長期記憶能力的開關以真實模型驗證 |
+| 2026-11-26 | Task 5.1 完成：Web 與 Telegram（mock transport）接真實 V2 與 NVIDIA nemotron，派工時看得到「悟空·fixer」與 fixer 的產出 |
 
 ---
 **建立日期**: 2026-11-26  

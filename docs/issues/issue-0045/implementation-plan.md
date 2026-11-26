@@ -509,7 +509,7 @@
   - 四個入口各有顯示測試；
   - 用真實模型跑一題實作任務，Web 與 Telegram（mock transport）看得到「悟空·fixer」與產出。
 - 驗證：雙迴圈。外迴圈是入口測試加真實回合；內迴圈是事件對應的單元測試。
-- 狀態：🚧 內迴圈完成；外迴圈待免費模型額度恢復（2026-11-26）
+- 狀態：✅ 已完成（2026-11-26）
 - 證據：
   - gateway：`StreamEvent` 新增 `SubagentStarted { agent }`、`SubagentReported { agent, output }`，只有 V2 server 的事件會有。
     - 開始：子 session 的 `session.created`，parentID 是本回合的 session，帶 `agent`。
@@ -530,7 +530,15 @@
     - 反向自檢：暫時讓 run_turn 不認任何角色，Web 兩項、Telegram、排程、runtime 的測試都失敗；改回後通過。
   - 文件：`docs/cli-reference.md` 的排程進度與失敗訊息範例。README.md 的時序圖、AGENTS.md「一回合資料流」等接力鏈的描述由 Task 6.5 一起更新。
   - 其他檢查：CI 三道全過（777 passed、12 ignored）。
-  - 外迴圈（待做）：真實模型跑一題實作任務，Web 與 Telegram（mock transport）看得到「悟空·fixer」與產出。2026-11-26 免費額度用完（429）。
+  - 外迴圈：2026-11-26 模型 NVIDIA nemotron（免費模型同日 429），提示詞都是「請派給 fixer 處理：在工作區建立 hello.txt…」。
+    - Web 與 Telegram：`scripts/probe-entries-dispatch.sh` 起容器裡的常駐 V2 2.3.2，以隔離 HOME 執行 `#[ignore]` 的 `web_streams_the_dispatched_subagent`、`telegram_names_the_dispatched_subagent`（`crates/wukong-{web,telegram}/tests/managed_actual.rs`，Telegram 只把 transport 換成 `MockTgClient`）。兩次執行都通過。
+      - Web：SSE 依序是 `event: role`（`data: fixer`）、`event: step`（`"role":"fixer"`、`"skill":null`，內容是 fixer 的回報）、`event: answer`；hello.txt 寫在工作區。
+      - Telegram：狀態泡泡改成「🐵　悟空·fixer 思考中…」，最後送出的回覆含 `hello from wukong`；成品照 Telegram 的規則寫進產出目錄 `.wukong/artifacts/user_tg-45/1/`。
+      - opencode.db 的 assistant 是 `wukong` 與 `fixer`，都是 nemotron。
+      - 過程：第一次兩邊都跑在免費模型上（429），因為入口每回合從設定檔取模型，`GatewayConfig.default_model` 不算數；改成把模型寫進隔離設定檔（Web 是 `AppState.settings_path`），之後才是上面的結果。
+    - CLI：3.2 的派工探測，stderr 有「🐵 悟空·fixer」。
+    - 排程：沒有接真實模型跑，階段名稱由 `the_phase_names_the_dispatched_subagent` 釘住。
+    - CI 三道全過（769 passed、14 ignored，多的 2 個是這兩個真實測試）。
   - 程序：gitnexus detect_changes 在提交 c7072c1 之後才跑（應在提交前），結果只有預期的符號（run_turn、事件對應、排程階段、各入口的 match 分支與測試）。
 
 ### Task 5.2 — 移除規劃偏好
