@@ -588,7 +588,7 @@ PY
 # 容器建立後才 unhealthy、退出或逾時都回傳失敗，讓呼叫端走還原。OpenCode V2 在 server 模式
 # 啟動時就地遷移 opencode.db，不能等寫完 metadata 才發現。
 DOCKER_WAIT_SECS=180
-# 刻意回報 unhealthy 的服務（例如 Web 對外開放卻沒設 token 的降級模式）也算失敗，訊息指出怎麼查。
+# 刻意回報 unhealthy 的服務（例如沒設 token 又沒開 WUKONG_WEB_ALLOW_INSECURE 時 Web 的降級模式）也算失敗，訊息指出怎麼查。
 docker_health_hint() { printf "see 'docker compose -p %s ps' for the service that is not healthy" "$DOCKER_PROJECT_NAME"; }
 activate_docker_services() {
     local active available
@@ -869,12 +869,16 @@ PY
             abort "rollback could not restore the state backup; services are stopped. Restore by hand from $(state_backup_entries "$state_backups" | cut -f2 | paste -sd' ') (the $current_version state is in $current_backup/volumes)"
     fi
     for file in "${DOCKER_RELEASE_OWNED[@]}"; do [[ ! -f "$file" ]] || { mkdir -p "$current_backup/$(dirname "$file")"; cp -p "$file" "$current_backup/$file"; }; [[ ! -f "$backup/$file" ]] || cp -p "$backup/$file" "$file"; done
-    activate_docker_services || abort "rollback restored the $version files, but its services did not become healthy within ${DOCKER_WAIT_SECS}s; $(docker_health_hint)"
+    # The files and state are the previous release's from here on, so the metadata says so
+    # before the health wait: a failure below must not leave .wukong-release on the release
+    # that was rolled back from, or a second --rollback would run on the wrong data
+    # (2026-11-26, PR #46 review S-1).
     write_json_atomically .wukong-release "$(python3 - "$version" "$digest" "$current_backup" "$current_version" "$current_digest" "$DOCKER_PROJECT_NAME" <<'PY'
 import json,sys
 print(json.dumps({"schemaVersion":1,"productTag":sys.argv[1],"imageDigest":sys.argv[2],"previousVersion":sys.argv[4],"previousImageDigest":sys.argv[5],"previousBackupPath":sys.argv[3],"composeProject":sys.argv[6]},sort_keys=True))
 PY
 )"
+    activate_docker_services || abort "rolled back to $version, but its services did not become healthy within ${DOCKER_WAIT_SECS}s; fix the cause, then start them with 'docker compose -p $DOCKER_PROJECT_NAME up -d'; $(docker_health_hint)"
 }
 
 parse_args "$@"

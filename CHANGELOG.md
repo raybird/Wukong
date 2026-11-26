@@ -36,12 +36,14 @@
   回應格式不符；以前這些情況跟「有 session 剛更新」印成同一句。判斷閒置改查 V2 的 `/api/session` 並帶
   密碼，重啟的條件不變（#44）。
 - **Docker 升級與 rollback 改為等服務健康才算成功。** installer 以 `docker compose up --wait --wait-timeout 180`
-  啟用，有 healthcheck 的服務要變成 healthy、其他服務要在執行中；新版啟動後才變 unhealthy 或退出時，照樣先還原
-  備份再啟動前一版，不再只看容器有沒有建立。Docker Compose 必須支援 `up --wait-timeout`，不支援時 installer
-  在改動任何東西之前中止。Web 對外開放卻沒設 `WUKONG_WEB_TOKEN`（刻意回報 unhealthy 的降級模式）時，升級會被
-  判為失敗，要先修好設定（PR #46）。
-- **升級要備份的 volume 清單讀不出來時，installer 在停服務之前中止。** 以前 release manifest 列了不合法的
-  名稱時，清單會被截斷，可能在沒有備份的情況下升級（PR #46）。
+  啟用：有 healthcheck 的服務（wukong-web、server 模式的 opencode-server）要在 180 秒內變成 healthy，其他服務
+  要在執行中。以前只看容器有沒有建立。
+  - 新版的這些服務啟動後才變 unhealthy 時，照樣先還原再啟動前一版。
+  - rollback 後前一版的服務沒有變健康時，installer 以失敗結束並說明怎麼查、修好後怎麼啟動；部署已經是前一版，
+    不要再跑一次 `--rollback`。
+  - Docker Compose 必須支援 `up --wait-timeout`，不支援時 installer 在改動任何東西之前中止。
+  - 沒設 `WUKONG_WEB_TOKEN`、又把 `WUKONG_WEB_ALLOW_INSECURE` 改成 1 以外的值時，Web 會刻意回報 unhealthy
+    （降級模式），升級會被判為失敗，要先修好設定（PR #46）。
 
 ### Added
 
@@ -52,7 +54,9 @@
     installer 會印出這一點，並把還原前的內容另存一份。
   - 登入資訊（`auth.json`）也在這個 volume，升級之後才登入的 provider，rollback 後要重新登入。
   - 備份含 provider 憑證與完整對話，所以 `.wukong-backups/` 是 0700、tar 是 0600；installer 建立或改寫
-    `.env` 時也設為 0600（#44）。
+    `.env` 時也設為 0600。
+  - 要備份的 volume 清單（release manifest 的 `affectedState`）讀不出來時，installer 在停服務之前中止，
+    不會在沒有備份的情況下升級（#44、PR #46）。
 - **binary 模式偵測到 V1 時明確報錯。** PATH 上的 `opencode` 是 1.x 時，第一個回合就回報要改裝 V2，不會等到
   agent timeout。換裝步驟與備份方式見 `docs/installation.md`「Binary 模式換用 OpenCode V2」（#44）。
 

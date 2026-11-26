@@ -803,17 +803,33 @@ test_docker_rollback() {
     run_installer '' --mode docker --version v9.9.9 >/dev/null
     FIXTURE_TAG=v9.9.8 FIXTURE_SAFE_TO=v9.9.9 make_release
     FIXTURE_SAFE_TO=v9.9.9 run_installer '' --mode docker --upgrade --version v9.9.8 >/dev/null
-    # The previous release never gets healthy: the files are back, the metadata is not
-    # rewritten, and the message says where to look (PR #46 review P2-1).
-    cp "$DEPLOYMENT/.wukong-release" "$TMP/metadata-before"
-    ! FIXTURE_UNHEALTHY_TAG=v9.9.9 run_installer '' --mode docker --rollback >"$TMP/out" 2>&1 || fail "rollback to an unhealthy release succeeded"
-    assert_same "$TMP/metadata-before" "$DEPLOYMENT/.wukong-release"
-    assert_contains "$TMP/out" "see 'docker compose -p wukong ps'"
     run_installer '' --mode docker --rollback >/dev/null
     python3 - "$DEPLOYMENT/.wukong-release" <<'PY'
 import json,sys
 assert json.load(open(sys.argv[1]))["productTag"] == "v9.9.9"
 PY
+
+    # The previous release never gets healthy (PR #46 review P2-1, follow-up S-1). Its
+    # files and state are already back, so the metadata says so too: the rollback fails,
+    # tells how to start it once fixed, and a second --rollback does not run again.
+    prepare
+    run_installer '' --mode docker --version v9.9.9 >/dev/null
+    FIXTURE_TAG=v9.9.8 FIXTURE_SAFE_TO=v9.9.9 make_release
+    FIXTURE_SAFE_TO=v9.9.9 run_installer '' --mode docker --upgrade --version v9.9.8 >/dev/null
+    ! FIXTURE_UNHEALTHY_TAG=v9.9.9 run_installer '' --mode docker --rollback >"$TMP/out" 2>&1 || fail "rollback to an unhealthy release succeeded"
+    python3 - "$DEPLOYMENT/.wukong-release" <<'PY'
+import json,sys
+d = json.load(open(sys.argv[1]))
+assert d["productTag"] == "v9.9.9" and d["previousVersion"] == "v9.9.8", d
+PY
+    assert_contains "$TMP/out" "see 'docker compose -p wukong ps'"
+    assert_contains "$TMP/out" "docker compose -p wukong up -d"
+    cp "$DEPLOYMENT/.wukong-release" "$TMP/metadata-before"; cp "$DEPLOYMENT/docker-compose.yml" "$TMP/compose-before"
+    : > "$LOG"
+    ! run_installer '' --mode docker --rollback >/dev/null 2>&1 || fail "a second rollback ran after the first one already went back"
+    assert_same "$TMP/metadata-before" "$DEPLOYMENT/.wukong-release"
+    assert_same "$TMP/compose-before" "$DEPLOYMENT/docker-compose.yml"
+    assert_not_contains "$LOG" 'force-recreate'
 }
 
 test_docker_recovery() {

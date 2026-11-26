@@ -631,6 +631,16 @@ PR #46 第一輪審查（raybird，2026-11-26，Reviewed HEAD 238df43）提出�
   - 無效 JSON 與缺少 `dataCompatibility` 早就由 `validate_manifest_version` 擋下（審查建議的另外兩種負向案例），沒有另加重複的測試。
 - 紅燈：HEAD 238df43 的 `install.sh` 在第一組就失敗（「upgrade went ahead with an unreadable backup list」）。消融：改回 process substitution 時同樣失敗。
 
+### R10 — 增量覆審的建議（review-d632fe3 S-1、N-F、N-G）
+- 狀態：✅ 已完成
+- 使用者 2026-11-26 決定三項都修正。
+- S-1：`rollback_docker` 改成檔案與 volume 換回前一版之後，先寫 rollback 後的 `.wukong-release`，再等健康。等不到時以失敗結束，訊息說明修好後用 `docker compose -p {project} up -d` 啟動，並提示用 `ps` 查是哪個服務。
+  - 原本的順序是等到健康才寫 metadata；R8 讓「不健康」也會走到這裡，於是 metadata 仍記著新版。再跑一次 `--rollback` 時，會把已經換回來的前一版 state 當成新版另存，訊息也寫錯。
+  - 測試：`docker-rollback` 的不健康案例改成：失敗結束、metadata 是前一版（`previousVersion` 是新版）、訊息含 `docker compose -p wukong up -d`；再跑一次 `--rollback` 會被拒絕，metadata、compose 檔不變，也沒有啟用任何版本。原本的成功 rollback 案例另外保留。
+  - 紅燈：b30ab56 的 `install.sh` 在 metadata 斷言失敗（`productTag` 仍是 v9.9.8）。
+- N-F：`CHANGELOG.md` 的備份清單那條併入 Added 的備份條目。v0.25.1 沒有備份 volume，「以前會截斷」是分支上的中間狀態。
+- N-G：降級模式的條件改寫成「沒設 `WUKONG_WEB_TOKEN`、又把 `WUKONG_WEB_ALLOW_INSECURE` 改成 1 以外的值」，涉及 `CHANGELOG.md`、`docs/docker.md` 健康等待那段、`install.sh` 註解。`crates/wukong-web/src/main.rs` 的判斷是沒有 token、綁非 loopback、ALLOW_INSECURE 不是 1；Docker 容器內一律綁非 loopback，而 compose 預設 ALLOW_INSECURE=1。`docs/docker.md` 其他段落原有的同類寫法不在這次範圍。CHANGELOG 的「或退出時」也拿掉了，因為沒有 healthcheck 的服務不一定抓得到（TBD-10）。
+
 ### 這一輪的整體檢查（2026-11-26）
 - `bash scripts/test-installer-upgrade.sh all`：通過。
 - `test-idle-restart-decision.sh`、`test-docker-runtime.sh`、`test-resolve-opencode-version.sh`：通過。

@@ -13,7 +13,7 @@ GitHub #44。2026-11-24 使用者決定 OpenCode 升到 V2，Wukong 只專注在
 
 ## 現況
 
-2026-11-25 第一次完整審查（review-0405603）判定 RETURN TO execute-task；同日修正後增量覆審（0405603..c4d47d8）判定 PASS；三項建議依使用者決定，N-A 記入 TBD-6，N-B、N-C 修正。2026-11-26 處理建議後的增量覆審（c4d47d8..7df8450）判定 PASS，兩項新建議依使用者決定：N-D 修正，N-E 等發版時改（TBD-8）。同日 PR #46 第一輪審查提出兩項 P2、一項 P3：P2 修正（TBD-9、TBD-10），P3 記入 TBD-11；修正後的增量覆審（7df8450..d632fe3）判定 PASS，附一項 SHOULD FIX（S-1）與兩項 NICE TO HAVE，待使用者決定。
+2026-11-25 第一次完整審查（review-0405603）判定 RETURN TO execute-task；同日修正後增量覆審（0405603..c4d47d8）判定 PASS；三項建議依使用者決定，N-A 記入 TBD-6，N-B、N-C 修正。2026-11-26 處理建議後的增量覆審（c4d47d8..7df8450）判定 PASS，兩項新建議依使用者決定：N-D 修正，N-E 等發版時改（TBD-8）。同日 PR #46 第一輪審查提出兩項 P2、一項 P3：P2 修正（TBD-9、TBD-10），P3 記入 TBD-11；修正後的增量覆審（7df8450..d632fe3）判定 PASS，附一項 SHOULD FIX（S-1）與兩項 NICE TO HAVE，使用者決定三項都修正（TBD-12），修正後待增量覆審。
 
 **現行 review**: [review-d632fe3.md](review-d632fe3.md)
 
@@ -248,6 +248,7 @@ Feature: Wukong 在 OpenCode V2 上維持 V1 時的行為
 | TBD-9 | PR #46 第一輪審查（2026-11-26）的 P2：P2-1 升級後只以 `docker compose ps` 的退出狀態判定啟用成功，看不出服務是否健康；P2-2 備份清單以 process substitution 讀入，解析失敗被吞掉，可能在沒有備份的情況下升級 | 已解決（2026-11-26 使用者選兩項都修正）：啟用改用 `up --wait --wait-timeout 180`，Compose 不支援時在改動前中止；清單先存進變數、成功才讀入；見 implementation-plan.md R8、R9。同日使用者另決定：刻意回報 unhealthy 的 Web 降級模式也算失敗，失敗訊息提示用 `docker compose ps` 查是哪個服務 | 無 |
 | TBD-10 | `up --wait` 涵蓋不到的兩種情況：按需模式下 V2 要到第一個回合才遷移 `opencode.db`，啟用時的健康等待驗不到遷移；沒有 healthcheck 的 wukong-telegram、wukong-schedulerd 啟動就退出、由重啟政策拉起時，實測 7 次有 2 次被判成功（R8） | 不影響本次交付（2026-11-26 使用者選 P2-1「修正」時一併決定記入）：追蹤：無，按需模式的遷移失敗會在第一個回合報錯，升級前的備份仍在，`--rollback` 會連同 `opencode.db` 還原（SCN-015）；那兩個服務不遷移 `opencode.db`，以前的 `ps` 檢查同樣看不出它們退出 | 按需模式升級後，遷移問題要到第一個回合才看得到；關聯 SCN-014 |
 | TBD-11 | PR #46 第一輪審查 P3：`opencode_version.rs` 以執行檔路徑字串快取「已確認是 V2」，長期執行中把同一路徑換回 V1 時會略過版本檢查 | 不影響本次交付（2026-11-26 使用者選「記入待確認」）：追蹤：無，只快取成功結果是刻意的設計（換版後不必重啟）；換回 V1 時第一個回合仍會失敗，只是錯誤訊息不會指出版本，不影響資料；Docker 映像內的執行檔不會在執行中被換掉 | binary 模式在服務執行中換回 V1 時，錯誤訊息看不出原因；關聯 SCN-011 |
+| TBD-12 | review-d632fe3 的建議：S-1 rollback 已換回前一版的檔案與 `opencode-state`、健康檢查才失敗時，`.wukong-release` 仍記著新版，再跑一次 `--rollback` 會把前一版的 state 當成新版另存；N-F CHANGELOG 備份清單那條寫成分支上的中間狀態；N-G 降級模式的條件寫成「對外開放卻沒設 token」不精確 | 已解決（2026-11-26 使用者三項都選修正）：rollback 先寫 metadata 再等健康，失敗時說明用 `docker compose up -d` 啟動；備份清單併入 Added 的備份條目；條件改寫成沒設 token、又把 `WUKONG_WEB_ALLOW_INSECURE` 改成 1 以外的值（見 implementation-plan.md R10） | 無 |
 
 ## Timeline
 
