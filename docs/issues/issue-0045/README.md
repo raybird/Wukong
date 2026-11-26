@@ -233,7 +233,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 
 | 編號 | 事項 | 狀態 | 影響 |
 |------|------|------|------|
-| TBD-1 | V2 的 skill 探索路徑與格式：2026-11-24 探測時，專案目錄的 SKILL.md 沒有出現在 /api/skill；prompt 附 skills 時模型會不會用到也未確認 | 待確認 | Phase 1 證實不成立時，範圍第 2 項的做法要回到規格修訂再決定；關聯 SCN-005 |
+| TBD-1 | V2 的 skill 探索路徑與格式：2026-11-24 探測時，專案目錄的 SKILL.md 沒有出現在 /api/skill；prompt 附 skills 時模型會不會用到也未確認 | 已解決（2026-11-26，probe-skills.md）：八個 Superpowers 技能原樣放在工作區 .opencode/skills 就出現在 /api/skill，Wukong 現在的 .wukong/skills/superpowers 讀不到；2026-11-24 沒有出現是 server 剛啟動時的競態。模型會依 description 自己呼叫 skill 工具載入，prompt 附 skills 也有效。範圍第 2 項照原做法進行 | Phase 1 證實不成立時，範圍第 2 項的做法要回到規格修訂再決定；關聯 SCN-005 |
 | TBD-2 | session instruction entries（experimental）能不能持續存在、不進對話紀錄、模型讀得到 | 待確認 | 不成立時依 2026-11-26 Q4 的退路，每回合只附一行 scope；關聯 SCN-006、SCN-007、SCN-009 |
 | TBD-3 | subagent 會不會沿用 primary agent 或 prompt 指定的模型 | 待確認 | 不會時，Wukong 要在定義或 prompt 裡為 subagent 指定模型；關聯 SCN-013 |
 | TBD-4 | V2 事件裡的 subagent 身分資訊（task 工具的參數、子 session 的事件） | 待確認 | 拿不到時，角色顯示要另找來源；關聯 SCN-002 |

@@ -97,8 +97,10 @@
   - 找到可用的路徑與格式，至少一個 Superpowers 技能出現在 `/api/skill`，用真實模型跑 1 回合時事件看得到技能被使用；
   - 或者證實不成立，記錄嘗試過的路徑，回 README 修訂 SCN-005。
 - 驗證：契約探測加最小真實請求；必要時讀 V2 的原始碼或 `/openapi.json` 找出探索規則。
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成（2026-11-26）
+- 證據：[probe-skills.md](probe-skills.md)，`scripts/probe-skills.sh` 15 項全部 PASS，模型 opencode/big-pickle（TBD-6）。
+  - 八個 Superpowers 技能原樣放在工作區 `.opencode/skills/` 就出現在 `/api/skill`；`.wukong/skills/superpowers` 讀不到。Phase 2 採用 `.opencode/skills/`。
+  - 模型依 description 自己呼叫 `skill` 工具載入技能，事件 `session.tool.called` 的 `input.id` 是技能 id；prompt 附 `skills` 也有效，但內文會寫進對話紀錄。
 
 ### Task 1.3 — session instruction entries
 - 產出與範圍：`probe-instructions.md`。內容：

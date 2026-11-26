@@ -2,7 +2,7 @@
 
 在容器內執行（server 在 127.0.0.1:4096，密碼在環境變數 PW）：
     python3 -I v2turn.py OUT_PREFIX PROMPT [--agent NAME] [--session ID] [--model provider/model]
-                         [--max-secs N]
+                         [--skill ID]... [--max-secs N]
 不帶 --session 時先建一個新的 session。先開事件串流再送 prompt，事件寫到 OUT_PREFIX.ndjson
 （每行一個事件，外加 `_t`：距送出 prompt 的秒數），結束後把以下內容寫到 OUT_PREFIX.json：
 session 的狀態（含 agent）、訊息列表、事件裡出現過的 agent／model 欄位，以及最後的回覆文字。
@@ -60,6 +60,7 @@ def main():
     ap.add_argument("--agent")
     ap.add_argument("--session")
     ap.add_argument("--model")
+    ap.add_argument("--skill", action="append", default=[], help="附在 prompt 的 skills（可重複）")
     ap.add_argument("--max-secs", type=float, default=240.0)
     args = ap.parse_args()
 
@@ -86,7 +87,10 @@ def main():
     def send():
         time.sleep(1)
         started[0] = time.monotonic()
-        status, body = call("POST", f"/api/session/{sid}/prompt", {"text": args.prompt})
+        prompt = {"text": args.prompt}
+        if args.skill:
+            prompt["skills"] = [{"id": s} for s in args.skill]
+        status, body = call("POST", f"/api/session/{sid}/prompt", prompt)
         result["steps"].append(["prompt", status, body])
 
     threading.Thread(target=send, daemon=True).start()
