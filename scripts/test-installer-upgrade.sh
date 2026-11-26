@@ -811,6 +811,8 @@ test_docker_rollback() {
     # is; here the latest is the release that was upgraded to, as after a normal upgrade
     # (review-2dd4369 M-1).
     FIXTURE_TAG=v9.9.8 run_installer '' --mode docker --rollback >"$TMP/out" 2>&1 || fail "rollback without --version was refused: $(cat "$TMP/out")"
+    # The message names the release it went back to, not the latest one (review-e48c402 M-2).
+    assert_contains "$TMP/out" 'Wukong rollback completed: v9.9.9'
     python3 - "$DEPLOYMENT/.wukong-release" <<'PY'
 import json,sys
 assert json.load(open(sys.argv[1]))["productTag"] == "v9.9.9"

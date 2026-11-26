@@ -828,6 +828,8 @@ assert compatibility.get("schemaVersion") == 1 and not compatibility.get("irreve
 print(d["previousVersion"], d["previousImageDigest"], d["previousBackupPath"], d["productTag"], d["imageDigest"])
 PY
     ) || abort "rollback source is absent or metadata is invalid"
+    # The closing message prints VERSION, which without --version is the latest release.
+    VERSION="$version"
     [[ -d "$backup" ]] || abort "Docker rollback backup is unavailable"
     # 2026-11-25（issue-0044）：升級時備份過的 state（V2 遷移過的 opencode.db）也要回到
     # 備份。每份備份都在、可讀，且升級時沒漏備份，才開始動部署。

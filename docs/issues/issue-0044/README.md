@@ -13,7 +13,7 @@ GitHub #44。2026-11-24 使用者決定 OpenCode 升到 V2，Wukong 只專注在
 
 ## 現況
 
-2026-11-25 第一次完整審查（review-0405603）判定 RETURN TO execute-task；同日修正後增量覆審（0405603..c4d47d8）判定 PASS；三項建議依使用者決定，N-A 記入 TBD-6，N-B、N-C 修正。2026-11-26 處理建議後的增量覆審（c4d47d8..7df8450）判定 PASS，兩項新建議依使用者決定：N-D 修正，N-E 等發版時改（TBD-8）。同日 PR #46 第一輪審查提出兩項 P2、一項 P3：P2 修正（TBD-9、TBD-10），P3 記入 TBD-11；修正後的增量覆審（7df8450..d632fe3）判定 PASS，附一項 SHOULD FIX（S-1）與兩項 NICE TO HAVE，使用者決定三項都修正（TBD-12）。修正後的增量覆審（d632fe3..2dd4369）判定 RETURN TO execute-task：三項都已修好，另查出既有缺陷 M-1（Docker `--rollback` 沒帶 `--version` 時拿最新 release 比對，TBD-13），使用者決定在這個 PR 修。修正後的增量覆審（2dd4369..e48c402）判定 RETURN TO execute-task：M-1 已修好，但修正讓不帶版本的 rollback 成功後印出最新 release 而不是 rollback 目標（M-2，TBD-14）。
+2026-11-25 第一次完整審查（review-0405603）判定 RETURN TO execute-task；同日修正後增量覆審（0405603..c4d47d8）判定 PASS；三項建議依使用者決定，N-A 記入 TBD-6，N-B、N-C 修正。2026-11-26 處理建議後的增量覆審（c4d47d8..7df8450）判定 PASS，兩項新建議依使用者決定：N-D 修正，N-E 等發版時改（TBD-8）。同日 PR #46 第一輪審查提出兩項 P2、一項 P3：P2 修正（TBD-9、TBD-10），P3 記入 TBD-11；修正後的增量覆審（7df8450..d632fe3）判定 PASS，附一項 SHOULD FIX（S-1）與兩項 NICE TO HAVE，使用者決定三項都修正（TBD-12）。修正後的增量覆審（d632fe3..2dd4369）判定 RETURN TO execute-task：三項都已修好，另查出既有缺陷 M-1（Docker `--rollback` 沒帶 `--version` 時拿最新 release 比對，TBD-13），使用者決定在這個 PR 修。修正後的增量覆審（2dd4369..e48c402）判定 RETURN TO execute-task：M-1 已修好，但修正讓不帶版本的 rollback 成功後印出最新 release 而不是 rollback 目標（M-2，TBD-14），已修正，待增量覆審。
 
 **現行 review**: [review-e48c402.md](review-e48c402.md)
 
@@ -250,6 +250,7 @@ Feature: Wukong 在 OpenCode V2 上維持 V1 時的行為
 | TBD-11 | PR #46 第一輪審查 P3：`opencode_version.rs` 以執行檔路徑字串快取「已確認是 V2」，長期執行中把同一路徑換回 V1 時會略過版本檢查 | 不影響本次交付（2026-11-26 使用者選「記入待確認」）：追蹤：無，只快取成功結果是刻意的設計（換版後不必重啟）；換回 V1 時第一個回合仍會失敗，只是錯誤訊息不會指出版本，不影響資料；Docker 映像內的執行檔不會在執行中被換掉 | binary 模式在服務執行中換回 V1 時，錯誤訊息看不出原因；關聯 SCN-011 |
 | TBD-12 | review-d632fe3 的建議：S-1 rollback 已換回前一版的檔案與 `opencode-state`、健康檢查才失敗時，`.wukong-release` 仍記著新版，再跑一次 `--rollback` 會把前一版的 state 當成新版另存；N-F CHANGELOG 備份清單那條寫成分支上的中間狀態；N-G 降級模式的條件寫成「對外開放卻沒設 token」不精確 | 已解決（2026-11-26 使用者三項都選修正）：rollback 先寫 metadata 再等健康，失敗時說明用 `docker compose up -d` 啟動；備份清單併入 Added 的備份條目；條件改寫成沒設 token、又把 `WUKONG_WEB_ALLOW_INSECURE` 改成 1 以外的值（見 implementation-plan.md R10） | 無 |
 | TBD-13 | review-2dd4369 M-1（既有缺陷，v0.18.0 起）：Docker `--rollback` 沒帶 `--version` 時，installer 先把版本填成 GitHub 最新的 release，再要求它等於前一版；升級到最新版後照文件執行 `--rollback` 一定被拒絕，訊息是「metadata is invalid」；另有 N-H：`docs/docker.md` 健康等待那段對 rollback 失敗的說法前後不一致 | 已解決（2026-11-26 使用者選「在這個 PR 修」與「修正」）：比照 binary 模式，只有明確指定 `--version` 時才比對；補上最新版不等於 rollback 目標、與指定錯誤版本的案例；`docs/docker.md` 分開寫升級失敗與 rollback 失敗的處理（見 implementation-plan.md R11） | 無 |
+| TBD-14 | review-e48c402 M-2（TBD-13 的修正引入）：不帶 `--version` 的 Docker rollback 成功後，最後一行印的是 GitHub 最新的 release，不是 rollback 的目標；修正前只有兩者相同時 rollback 才會成功，所以以前印的一定對 | 已解決（2026-11-26，MUST FIX，不需使用者決策）：`rollback_docker` 讀出目標版本後設定 `VERSION`，與 binary 模式相同；`docker-rollback` 補上完成訊息的斷言（見 implementation-plan.md R12） | 無 |
 
 ## Timeline
 

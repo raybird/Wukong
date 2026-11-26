@@ -654,6 +654,13 @@ PR #46 第一輪審查（raybird，2026-11-26，Reviewed HEAD 238df43）提出�
 - N-H：`docs/docker.md` 健康等待那段分開寫：升級失敗時部署已還原，修好設定後重跑升級；rollback 失敗時部署已是前一版，修好後用 `docker compose up -d` 啟動。
 - `CHANGELOG.md` 的 Fixed 新增一條。
 
+### R12 — rollback 完成訊息印出 rollback 目標（review-e48c402 M-2）
+- 狀態：✅ 已完成
+- 問題：R11 讓不帶 `--version` 的 Docker rollback 能成功，但主流程最後印 `Wukong rollback completed: ${VERSION}`，而 `VERSION` 是取到的最新 release。`rollback_binary` 早就把 `VERSION` 改成 rollback 目標，`rollback_docker` 沒有。
+- 修正：`rollback_docker` 讀出 metadata 之後設定 `VERSION="$version"`。之後在這個函式裡沒有其他地方用到 `VERSION`。
+- 測試：`docker-rollback` 在「最新版是剛升級到的 v9.9.8」那個案例，斷言輸出含 `Wukong rollback completed: v9.9.9`。
+- 紅燈：1d3ddc5 的 `install.sh` 失敗（缺少 `Wukong rollback completed: v9.9.9`）；修正後通過。
+
 ### 這一輪的整體檢查（2026-11-26）
 - `bash scripts/test-installer-upgrade.sh all`：通過。
 - `test-idle-restart-decision.sh`、`test-docker-runtime.sh`、`test-resolve-opencode-version.sh`：通過。
