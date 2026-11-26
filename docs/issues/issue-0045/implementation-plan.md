@@ -308,7 +308,7 @@
   - 用真實模型跑一題會派工的任務，事件裡 primary agent 與 subagent 的模型都是指定的那一個；
   - 有單元或 adapter 測試釘住送出的參數。
 - 驗證：雙迴圈。外迴圈是真實 V2；內迴圈是 gateway 送出內容的測試。
-- 狀態：🚧 內迴圈完成；外迴圈待免費模型額度恢復（2026-11-26）
+- 狀態：✅ 完成（2026-11-26）
 - 證據：
   - 做法沿用 1.4 的結論，沒有改程式：agent 定義不寫模型，adapter 的 `send_prompt` 每次送 prompt 前都選取回合指定的模型。
     - 新建與續接的 session 都走這條路；subagent 沿用 session 選取的模型（probe-subagent.md）。
@@ -317,7 +317,12 @@
     - gateway：`a_new_session_selects_the_agent_and_model_before_the_prompt`（新 session 的建立、選 agent、選模型都在 prompt 之前）。續接的 session 由既有的 `agent_and_model_are_selected_before_the_prompt` 釘住。
     - runtime：`the_repair_prompt_keeps_the_turn_model`（空輸出補送的修復提示也帶同一個模型與 agent）。第一次送出由既有的 `run_turn_passes_default_model` 釘住。
     - 反向自檢：暫時讓 adapter 不選模型，gateway 測試失敗（請求清單沒有 `POST …/model`）；暫時讓修復提示不帶模型，runtime 測試失敗。改回後兩項都通過。
-  - 外迴圈（待做）：2026-11-26 重跑 `scripts/probe-turn-dispatch.sh`，wukong 1 秒內失敗，stderr 是 `provider.free-limit` 429（`Free usage limit reached`）。照 TBD-6 不繞過，等額度恢復後重跑，並確認事件裡 primary 與 subagent 的模型相同。
+  - 外迴圈：2026-11-26 用 NVIDIA `nvidia/nvidia/nemotron-3-ultra-550b-a55b` 跑 `scripts/probe-turn-dispatch.sh`（新增 AUTH_JSON、MODEL 兩個參數：模型寫進隔離設定檔的 `agent.default_model`，另檢查所有 assistant 訊息的模型）。
+    - 同一天免費模型 `opencode/big-pickle` 回 429（`provider.free-limit`），照 TBD-6 改用 nemotron，沒有繞過額度。
+    - 先用一個合成請求確認 NVIDIA 憑證可用（稍早回 403，這次回 OK，opencode.db 記的模型是 nemotron）。
+    - 連跑 6 次全部通過（13～40 秒），每次 10 項：回合成功、hello.txt 內容正確、只有一個 primary session 與一則 user message、primary 是 agent `wukong`、派給 fixer、fixer 的回報回到 primary、回傳的是 primary 的最終回覆，以及 primary 與 subagent 都跑在 nemotron。
+    - 這也是 3.1 事件判斷的真實重跑：之前免費模型 8 次有 2 次只拿到派工通知，這 6 次都等到最終回覆。這幾次沒有記錄背景工作清單是否曾經是空的，所以不能證明事件判斷在那個競態下生效；那部分由 3.1 的重播測試釘住。
+    - 環境：隔離 HOME（只放 NVIDIA 一筆憑證）、容器 `wukong-issue44:v2-local`（opencode 2.3.2），只送固定的合成提示。
 
 ### Task 3.3 — 拿掉依回合數壓縮
 - 產出與範圍：

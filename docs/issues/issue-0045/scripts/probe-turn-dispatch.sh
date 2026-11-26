@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # #45 Task 3.1 外迴圈：真實的 wukong 入口（常駐 server 模式）接 V2 2.3.2，跑一題會派給 fixer 的回合。
 # 檢查回合等到 subagent 回報與 primary 的最終回覆才結束、只送出一次 prompt、指定的是 agent wukong。
-# 用法：probe-turn-dispatch.sh IMAGE WORK_DIR
+# 用法：probe-turn-dispatch.sh IMAGE WORK_DIR [AUTH_JSON MODEL]
 #   server 先啟動，wukong 之後才寫入 agent 定義並立刻送出 prompt（與既有部署升級後的第一個回合相同）。
-#   模型用 server 的預設模型（沒有憑證時是免費的 opencode/big-pickle）。只送固定的合成提示詞。
+#   沒給 AUTH_JSON／MODEL 時用 server 的預設模型（沒有憑證時是免費的 opencode/big-pickle）。
+#   給了時，AUTH_JSON 是只含那個 provider 的 auth.json，MODEL 寫進隔離設定檔的 agent.default_model，
+#   wukong 每次送 prompt 前指定它；另外檢查 primary 與 subagent 都用這個模型（#45 SCN-013）。
+#   只送固定的合成提示詞。
 # wukong 在本機執行，HOME、WUKONG_WORKSPACE、記憶庫、設定檔都在 WORK_DIR；工作區以相同路徑掛進容器，
 # server 看到的目錄與 wukong 送出的 location 一致。
 set -uo pipefail
-image="${1:?usage: probe-turn-dispatch.sh IMAGE WORK_DIR}"
+image="${1:?usage: probe-turn-dispatch.sh IMAGE WORK_DIR [AUTH_JSON MODEL]}"
 work="$(realpath "${2:?}")"
+auth="${3:-}" model="${4:-}"
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../../../.." && pwd)"
 box="probe45-dispatch-$$"
@@ -21,7 +25,12 @@ trap cleanup EXIT
 
 ws="$work/ws"
 mkdir -p "$work/home/.local/share/opencode" "$ws" "$work/out"
-echo '{}' > "$work/home/.local/share/opencode/auth.json"
+if [[ -n "$auth" ]]; then
+    install -m 600 "$auth" "$work/home/.local/share/opencode/auth.json"
+    printf '{"agent":{"default_model":"%s"}}\n' "$model" > "$work/home/settings.json"
+else
+    echo '{}' > "$work/home/.local/share/opencode/auth.json"
+fi
 (cd "$repo" && cargo build -q -p wukong-cli) || { echo "FAIL cargo build"; exit 1; }
 wukong="$repo/target/debug/wukong"
 
@@ -54,7 +63,7 @@ check "hello.txt has the requested content" $?
 
 sleep 2
 api "/api/session?location%5Bdirectory%5D=$ws&limit=50" > "$work/out/sessions.json"
-python3 - "$work/out/sessions.json" "$url" "$pw" "$work/out/stdout.txt" <<'EOF_CHECK'
+python3 - "$work/out/sessions.json" "$url" "$pw" "$work/out/stdout.txt" "$model" <<'EOF_CHECK'
 import base64, json, sys, urllib.request
 sessions = json.load(open(sys.argv[1]))["data"]
 url, pw = sys.argv[2], sys.argv[3]
@@ -96,6 +105,10 @@ for s in [*roots, *kids]:
             mm = m.get("model") or {}
             models.add(f"{mm.get('providerID')}/{mm.get('id')}")
 print(f"  models: {sorted(models)}")
+want = sys.argv[5] if len(sys.argv) > 5 else ""
+if want:
+    # MODEL 是 provider/model；V2 記的 id 不含 provider（nvidia/nvidia/x 記成 providerID nvidia、id nvidia/x）
+    report(models == {want}, f"primary and subagents all ran on {want}")
 sys.exit(bad)
 EOF_CHECK
 rc=$?; fails=$((fails + rc))
