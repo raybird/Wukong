@@ -13,9 +13,9 @@ GitHub #44。2026-11-24 使用者決定 OpenCode 升到 V2，Wukong 只專注在
 
 ## 現況
 
-2026-11-25 第一次完整審查（review-0405603）判定 RETURN TO execute-task；同日修正後增量覆審（0405603..c4d47d8）判定 PASS，沒有 MUST FIX 與 SHOULD FIX；三項 NICE TO HAVE 依使用者決定，N-A 記入 TBD-6，N-B、N-C 修正後再送增量覆審。
+2026-11-25 第一次完整審查（review-0405603）判定 RETURN TO execute-task；同日修正後增量覆審（0405603..c4d47d8）判定 PASS；三項建議依使用者決定，N-A 記入 TBD-6，N-B、N-C 修正。2026-11-26 處理建議後的增量覆審（c4d47d8..7df8450）判定 PASS，兩項新建議依使用者決定：N-D 修正，N-E 等發版時改（TBD-8）。
 
-**現行 review**: [review-c4d47d8.md](review-c4d47d8.md)
+**現行 review**: [review-7df8450.md](review-7df8450.md)
 
 ## 快速導覽
 
@@ -242,8 +242,9 @@ Feature: Wukong 在 OpenCode V2 上維持 V1 時的行為
 | TBD-3 | 上游連不到時 V2 不回錯誤：2026-11-24 Task 1.1（server 路徑）60 秒後 session 仍在執行；Task 1.2（CLI 路徑）一直送 retry 事件（error.type 為 provider.transport），120 秒內 7 次仍未結束。同條件下 V1 1.19.6 約 65 秒以 UnknownError 結束。Wukong 要自己收斂，收斂條件與回報方式待使用者決定 | 已解決（2026-11-24 使用者選「重試超過 90 秒就中止」）：任何 retry 持續超過 90 秒就中止回合，依錯誤類型回報；見 SCN-007、SCN-016 | 不處理時，上游連不到的回合要等到 agent timeout（預設 20 分鐘）才失敗；關聯 SCN-007、Task 1.3、Task 2.3 |
 | TBD-4 | SCN-005 寫的是「使用者從入口取消執行中的回合」，但 Web、Telegram、CLI 都沒有取消執行中回合的操作（V1 時也沒有）；review-0405603 的 `需決策` | 已解決（2026-11-25 使用者選「記入待確認」）：規格不動，以 gateway 層證據驗收：回合的 future 被丟掉時送 interrupt（`dropping_the_turn_interrupts_the_session`），V2 回報中止時分類為「回合被中止」；入口層的取消操作不在本 issue | 入口日後新增取消操作時，要另外驗證端到端；關聯 SCN-005 |
 | TBD-5 | 演練中 free-limit 429 約 161 秒才回報，與「重試超過 90 秒就中止」沒有對照清楚（review-0405603 S3） | 已解決（2026-11-25 實測，`docs/issues/issue-0044/scripts/capture-free-limit.py`）：V2 對 free-limit 不重試，第一步就 `step.failed`、`execution.failed`，1.1～1.8 秒結束，沒有 retry 事件；樣本存為 fixture `server-free-limit.ndjson`，以 `a_real_free_limit_fails_at_once_as_rate_limited` 釘住。三次擷取依序為 429、成功、429，間隔幾分鐘，額度的限流是斷續的；161 秒最可能是那一棒前幾步成功、之後某一步才碰到 429，但演練資料已清除，無法再對證。重試計時只在 `step.ended` 等有輸出的事件時重新起算，真實的 transport 重試樣本在兩次 retry 之間沒有這類事件 | 無：90 秒中止只針對 V2 實際會重試的錯誤；關聯 SCN-007 |
-| TBD-6 | 從 V1 升級後第一次啟動時，兩個 `--standalone` 命令同時執行，其中一個會失敗一次（`Standalone server exited before reporting readiness`）；Web 系統診斷以 `tokio::join!` 同時跑 `auth list` 與 `models`（review-c4d47d8 N-A） | 接受，不修（2026-11-25 使用者選「記入待確認」）：只在尚未遷移的 V1 DB 上發生；重新整理就正常，遷移照常完成，session 都在，`integrity_check` ok。已遷移、全新安裝、或與 serve 同時啟動時都正常 | 升級後第一個動作若是打開 Web 系統診斷，Providers 或 Models 其中一項會顯示一次錯誤；關聯 SCN-001 |
+| TBD-6 | 從 V1 升級後第一次啟動時，兩個 `--standalone` 命令同時執行，其中一個會失敗一次（`Standalone server exited before reporting readiness`）；Web 系統診斷以 `tokio::join!` 同時跑 `auth list` 與 `models`（review-c4d47d8 N-A） | 不影響本次交付（2026-11-25 使用者選「記入待確認」，2026-11-26 依 review-7df8450 N-D 改寫狀態）：追蹤：無，只在尚未遷移的 V1 DB 上發生；重新整理就正常，遷移照常完成，session 都在，`integrity_check` ok。已遷移、全新安裝、或與 serve 同時啟動時都正常 | 升級後第一個動作若是打開 Web 系統診斷，Providers 或 Models 其中一項會顯示一次錯誤；關聯 SCN-001 |
 | TBD-7 | review-c4d47d8 的其他建議：N-B CHANGELOG 兩條寫成分支上的中間狀態；N-C 新建 `.env` 的 0600 沒有測試斷言，另有實作計畫一處紅燈案例編號寫錯 | 已解決（2026-11-25 使用者選兩項都修正）：CHANGELOG 改寫成與 v0.25.1 比較的差異；`test_docker` 補上全新部署的 `.env` 為 0600 的斷言，並更正計畫裡的案例編號（見 implementation-plan.md R7） | 無 |
+| TBD-8 | CHANGELOG 閒置重啟那條舉的例子（沒有密碼、密碼被拒）在 v0.25.1 不會發生，v0.25.1 以前就會印成同一句的只有回應看不懂與請求失敗（review-7df8450 N-E） | 不影響本次交付（2026-11-26 使用者選「發版時一起改」）：追蹤：無，只是發版說明的措辭，不影響行為與驗收；發版前把 Unreleased 整理成版本區塊是 CHANGELOG.md 開頭寫明的固定步驟，屆時依此改寫 | 無 |
 
 ## Timeline
 
@@ -256,4 +257,4 @@ Feature: Wukong 在 OpenCode V2 上維持 V1 時的行為
 **建立日期**: 2026-11-24  
 **分級**: Large（gateway、三個入口、打包、release CI、compose 與 installer）  
 **風險**: High\
-**狀態**: 實作完成，待審查
+**狀態**: 已完成
