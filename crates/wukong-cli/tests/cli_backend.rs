@@ -41,17 +41,13 @@ async fn cli_binary_resumes_only_the_matching_scope() {
         prompts.contains("CLI_INTEGRATION_OK"),
         "previous answer must enter recalled prompt"
     );
-    // 2026-11-26（#45 SCN-001）：每回合只串流呼叫一次（假 agent 遇到 planner 的非串流呼叫會失敗），
-    // 指定的是 primary agent `wukong`。
+    // 2026-11-26（#45 SCN-001）：每回合只串流呼叫一次（假 agent 遇到 planner 的非串流呼叫會失敗）。
     let calls = std::fs::read_to_string(dir.path().join("sessions")).unwrap();
     assert_eq!(calls.lines().count(), 3);
-    let argv: Vec<&str> = prompts.lines().collect();
-    assert_eq!(
-        argv.windows(2)
-            .filter(|w| w == &["--agent", "wukong"])
-            .count(),
-        3,
-        "{argv:?}"
+    // #45 SCN-014：假 agent 是使用者自訂、不是 opencode 的命令，不加 --agent。
+    assert!(
+        !prompts.lines().any(|arg| arg.starts_with("--agent")),
+        "{prompts}"
     );
     assert_eq!(
         calls.lines().nth(1).unwrap(),

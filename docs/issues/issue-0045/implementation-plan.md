@@ -372,8 +372,23 @@
   - argv 測試涵蓋預設命令與自訂命令；
   - CLI backend 接真實 V2 跑 1 回合，用的是 agent `wukong`。
 - 驗證：雙迴圈。外迴圈是 #44 的 `cli-v2-actual.sh` 做法；內迴圈是 backend.rs 的 argv 測試。
-- 狀態：📝 待實作
+- 狀態：🚧 內迴圈完成；外迴圈待免費模型額度恢復（2026-11-26）
 - 證據：
+  - 預設命令：`opencode run`（可帶 `--model`）走本機按需 backend（`build_backend_from_env`），不經過 CLI 的 argv。
+    - 本機按需 backend 把請求交給 server adapter，在送 prompt 前選取 agent。run_turn 已指定 `wukong`（3.1）。
+    - 由 gateway 的 `agent_and_model_are_selected_before_the_prompt` 與 turn.rs 的 `a_turn_is_one_call_to_the_wukong_agent_and_is_remembered` 釘住。
+  - 自訂命令（走 CLI backend）：`assemble_argv` 比照 #44 對 `--standalone` 的判定。
+    - 只在命令是 opencode、而且使用者沒有自己指定 `--agent`／`--agent=` 時加上 `--agent wukong`。
+    - 原本一律附加：使用者寫的 `--agent custom` 會多一個 `--agent wukong` 蓋掉它，`printf` 這類非 opencode 的命令也會收到 `--agent`。
+  - 內迴圈：backend.rs 的 argv 測試。
+    - `a_custom_opencode_command_runs_as_wukong`；
+    - `a_custom_command_keeps_its_own_agent`（`--agent custom` 與 `--agent=custom` 兩種寫法）；
+    - `a_non_opencode_command_gets_no_agent_flag`。
+    - 紅燈：舊實作上後兩項失敗，argv 分別多出 `--agent wukong`。
+  - 入口：CLI 入口的 `cli_backend` 測試改成確認使用者自訂、不是 opencode 的假 agent 沒有收到 `--agent`。
+  - 外迴圈（待做）：照 #44 的 `docs/issues/issue-0044/scripts/cli-v2-actual.sh` 做法，CLI backend 接真實 V2 跑 1 回合，確認用的是 agent `wukong`。
+    - 2026-11-26 免費模型額度用完（`provider.free-limit` 429），照 TBD-6 不繞過，等額度恢復。
+  - 其他檢查：CI 三道全過（758 passed、14 ignored）。
 
 ## Phase 4 — 固定提示移到 agent 定義與 session 指令層
 

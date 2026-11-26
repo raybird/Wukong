@@ -254,6 +254,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | 2026-11-26 | Phase 2 完成：agent 定義、技能寫到工作區 `.opencode/`；AGENTS.md 遷移改由入口啟動時執行（不在 entrypoint、install.sh）；技能清單的精簡移到 Task 5.2 |
 | 2026-11-26 | Task 3.1 完成：回合只以 agent `wukong` 送出一次，planner 與接力鏈移除；回合等 subagent 回報才結束。真實 V2 有兩次背景工作清單漏掉執行中的 fixer，改為先看事件 |
 | 2026-11-26 | Task 3.3 完成：Wukong 不再依回合數壓縮；7 天輪替改在每回合開始時檢查，session 開始時間記在記憶庫（`agent_session_state.session_started_at`），每回合不問 backend |
+| 2026-11-26 | Task 3.4 內迴圈完成：自訂的 opencode 命令沒指定 agent 時以 `wukong` 執行，使用者指定的 agent 照舊，非 opencode 命令不加 `--agent`；3.2、3.4 的真實 V2 驗證等免費模型額度恢復 |
 
 ---
 **建立日期**: 2026-11-26  

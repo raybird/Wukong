@@ -197,10 +197,15 @@ pub fn assemble_argv(
         argv.push("--model".to_string());
         argv.push(model.to_string());
     }
-    // Route planning/aux steps to a cheaper, tool-less opencode agent when the
-    // orchestrator asks for one (e.g. `plan`). Without this the CLI backend
-    // silently ran every step with the default agent.
-    if let Some(agent) = agent.map(str::trim).filter(|a| !a.is_empty()) {
+    // 2026-11-26（#45 SCN-014）：回合以 primary agent `wukong` 執行。比照上面 --standalone 的
+    // 判定：只加給 opencode，使用者在命令裡自己指定了 --agent 就照他的，不再加一個蓋掉它。
+    let agent_chosen = command
+        .iter()
+        .any(|arg| arg == "--agent" || arg.starts_with("--agent="));
+    if let Some(agent) = agent
+        .map(str::trim)
+        .filter(|a| !a.is_empty() && is_opencode(command) && !agent_chosen)
+    {
         argv.push("--agent".to_string());
         argv.push(agent.to_string());
     }
@@ -1388,6 +1393,46 @@ mod tests {
                 "hi"
             ]
         );
+    }
+
+    fn argv_with_agent(command: &[&str]) -> Vec<String> {
+        let command: Vec<String> = command.iter().map(|s| s.to_string()).collect();
+        assemble_argv(&command, None, false, None, Some("wukong"), &[], "hi")
+    }
+
+    // #45 SCN-014：使用者自訂、但仍是 opencode 的命令，沒有自己指定 agent 時以 wukong 執行。
+    #[test]
+    fn a_custom_opencode_command_runs_as_wukong() {
+        let argv = argv_with_agent(&["opencode", "run", "--print-logs"]);
+        let at = argv
+            .iter()
+            .position(|a| a == "--agent")
+            .expect("no --agent");
+        assert_eq!(argv[at + 1], "wukong", "{argv:?}");
+    }
+
+    // #45 SCN-014：使用者自己指定的 agent 照他的，不再多加一個 --agent 蓋掉它。
+    #[test]
+    fn a_custom_command_keeps_its_own_agent() {
+        for command in [
+            &["opencode", "run", "--agent", "custom"][..],
+            &["opencode", "run", "--agent=custom"][..],
+        ] {
+            let argv = argv_with_agent(command);
+            assert!(!argv.iter().any(|a| a == "wukong"), "{argv:?}");
+            assert_eq!(
+                argv.iter().filter(|a| a.starts_with("--agent")).count(),
+                1,
+                "{argv:?}"
+            );
+        }
+    }
+
+    // #45 SCN-014：不是 opencode 的命令（例如假 agent）不加 --agent。
+    #[test]
+    fn a_non_opencode_command_gets_no_agent_flag() {
+        let argv = argv_with_agent(&["printf", "fixer"]);
+        assert_eq!(argv, vec!["printf", "fixer", "hi"]);
     }
 
     #[test]
