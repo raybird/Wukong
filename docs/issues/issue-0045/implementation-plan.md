@@ -129,8 +129,12 @@
   - 模型沿用規則與 subagent 身分欄位都有結論，fixture 已存檔；
   - 派工抽樣的 3 次結果已記錄。抽樣不當門檻，門檻在 6.1。
 - 驗證：最小真實請求；fixture 以 #44 `capture-free-limit.py` 的做法擷取事件串流，只含合成提示。
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成（2026-11-26）
+- 證據：[probe-subagent.md](probe-subagent.md)，`scripts/probe-subagent.sh`；fixture 在 [fixtures/](fixtures/v2-dispatch-fixer.ndjson)。模型用三個免費模型（TBD-6）。
+  - subagent 沿用 session 選取的模型；設定檔的模型在 server 上沒有套用，Wukong 不受影響（adapter 本來就逐 session 選取）。
+  - 身分欄位：`subagent` 工具的輸入、子 session 的 `session.created`（parentID、agent、model），產出在 primary inbox 的 `synthetic` 項目（metadata.source 為 subagent）。
+  - 派工抽樣：big-pickle 3/3 派給 fixer（第一次執行另有 1/1）；deepseek 0/2，primary 自己寫檔。
+  - 新發現：subagent 一律在背景執行，primary 先結束一次，回報後再執行一次才產生最終回覆。已補進 Task 3.1；CLI 的 `opencode run` 會等，不需處理。
 
 ## Phase 2 — agent、subagent 與技能的定義與部署
 
@@ -189,6 +193,10 @@
   - run_turn 改成：recall，拿 lease，輪替檢查，以 agent `wukong` 送出一次，空輸出補救，remember。
   - 移除 `plan_skill_chain_with_preferences`、`[前序協作]`、輔助棒，以及輔助棒的上一回合補償；保留輪替後第一回合的補償。
   - lease 在任何 LLM 呼叫之前取得。
+  - 回合等背景工作（1.4 的發現）：subagent 一律在背景執行，primary 會先結束一次，收到回報後再執行。
+    - primary 的執行結束時查 `GET /api/experimental/job?sessionID={id}&descendants=true`，清單空了才算回合結束；
+    - 本機按需模式等到那時才關 server；
+    - 等待沿用回合的逾時，中斷回合時一併中斷子 session。
   - 空輸出補救只剩修復提示這一條路徑。
   - 改寫 orchestrator、`scripts/test-support/cli_backend.rs` 的假 agent，以及受影響的測試（約 110～130 個）。
 - 相依：2.1
@@ -197,6 +205,7 @@
   - 測試確認以下各項：
     - 同一個 scope 第二個回合被拒絕時，backend 沒有收到任何呼叫；
     - 一般回合只送出一次，指定的是 agent `wukong`；
+    - 派工的回合等到 subagent 回報與 primary 的最終回覆才結束（adapter 測試以 1.4 的 fixture 重播）；
     - prompt 不含上一回合；
     - 輪替後的第一回合含上一回合；
     - 空輸出時補送一次修復提示；
@@ -207,7 +216,10 @@
 - 證據：
 
 ### Task 3.2 — 指定模型時 subagent 用同一個模型
-- 產出與範圍：依 1.4 的結論，讓 primary agent 與 subagent 都用回合指定的模型（Web、排程、`default_model`）。可能的做法是 prompt 帶模型、定義裡不寫模型，或寫入時帶模型，依 1.4 的結論選擇。
+- 產出與範圍：依 1.4 的結論，讓 primary agent 與 subagent 都用回合指定的模型（Web、排程、`default_model`）。
+  - 1.4 的結論：subagent 沿用 session 選取的模型。
+  - 做法：定義裡不寫模型，沿用 adapter 現有的逐 session 選取，並確認沒有指定模型的回合（`default_model`）也走選取。
+  - 設定檔指定的模型在 server 上沒有套用，不能依賴它。
 - 相依：1.4、3.1
 - 驗收編號：SCN-013
 - 完成判準：
@@ -389,7 +401,7 @@
 
 ## 檢查清單
 
-- [ ] Phase 1 的六項探測都有紀錄，TBD-1～TBD-4 已更新
+- [x] Phase 1 的六項探測都有紀錄，TBD-1～TBD-4 已更新（2026-11-26）
 - [x] 每個 Scenario 都有責任 Task（2026-11-26 decompose，見責任對照）
 - [ ] 真實模型的驗證只用合成提示，憑證只有 NVIDIA 一筆或沒有，正式部署沒有被碰
 - [ ] 常青文件依 project.md 全部更新

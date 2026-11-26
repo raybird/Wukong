@@ -208,7 +208,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | SCN-014 | 2026-11-26 | 已核准 |
 
 ## 重構步驟概要
-1. 📝 **Phase 1** - V2 能力的契約探測（首要驗證）
+1. ✅ **Phase 1** - V2 能力的契約探測（首要驗證）
 2. 📝 **Phase 2** - primary agent、subagent 與技能的定義與部署
 3. 📝 **Phase 3** - run_turn 改為單一 primary agent，拿掉 planner、接力鏈與依回合數壓縮
 4. 📝 **Phase 4** - 固定提示移到 agent 定義與 session 指令層
@@ -235,8 +235,8 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 |------|------|------|------|
 | TBD-1 | V2 的 skill 探索路徑與格式：2026-11-24 探測時，專案目錄的 SKILL.md 沒有出現在 /api/skill；prompt 附 skills 時模型會不會用到也未確認 | 已解決（2026-11-26，probe-skills.md）：八個 Superpowers 技能原樣放在工作區 .opencode/skills 就出現在 /api/skill，Wukong 現在的 .wukong/skills/superpowers 讀不到；2026-11-24 沒有出現是 server 剛啟動時的競態。模型會依 description 自己呼叫 skill 工具載入，prompt 附 skills 也有效。範圍第 2 項照原做法進行 | Phase 1 證實不成立時，範圍第 2 項的做法要回到規格修訂再決定；關聯 SCN-005 |
 | TBD-2 | session instruction entries（experimental）能不能持續存在、不進對話紀錄、模型讀得到 | 已解決（2026-11-26，probe-instructions.md）：三項都成立，server 重啟後仍在且模型讀得到，每個 session 各自一份。例外是模型看過之後才改值時，V2 會插一則 system 通知到對話紀錄；scope 每個 session 寫入一次不再改，不受影響。採用 Q4 的做法，不需要退路 | 不成立時依 2026-11-26 Q4 的退路，每回合只附一行 scope；關聯 SCN-006、SCN-007、SCN-009 |
-| TBD-3 | subagent 會不會沿用 primary agent 或 prompt 指定的模型 | 待確認 | 不會時，Wukong 要在定義或 prompt 裡為 subagent 指定模型；關聯 SCN-013 |
-| TBD-4 | V2 事件裡的 subagent 身分資訊（task 工具的參數、子 session 的事件） | 待確認 | 拿不到時，角色顯示要另找來源；關聯 SCN-002 |
+| TBD-3 | subagent 會不會沿用 primary agent 或 prompt 指定的模型 | 已解決（2026-11-26，probe-subagent.md）：subagent 沿用 session 選取的模型；Wukong 的 adapter 本來就逐 session 選取，定義裡不寫模型。設定檔指定的模型在 server 上沒有套用，不能依賴 | 不會時，Wukong 要在定義或 prompt 裡為 subagent 指定模型；關聯 SCN-013 |
+| TBD-4 | V2 事件裡的 subagent 身分資訊（task 工具的參數、子 session 的事件） | 已解決（2026-11-26，probe-subagent.md）：subagent 工具的輸入帶 agent，子 session 的 session.created 帶 parentID、agent 與 model，產出以 synthetic 項目回到 primary 的 inbox；fixture 已存檔。另發現 subagent 一律在背景執行，回合要等背景工作清空才算結束，已補進 Task 3.1 | 拿不到時，角色顯示要另找來源；關聯 SCN-002 |
 | TBD-5 | 範圍第 7 項：用 V2 的 session inbox（delivery 設成 queue）簡化同一 scope 並行回合的 lease | 待確認 | 只做評估，結論記入實作計畫；要改變「立即拒絕」的行為時另外取得核准；關聯 SCN-012 |
 | TBD-6 | 預設免費模型的派工與技能遵循表現 | 已解決（2026-11-26）：NVIDIA 憑證被拒（403）後，使用者表示「使用免費模型驗證也可以」。驗收可以用 NVIDIA nemotron 或預設免費模型 opencode/big-pickle判定，每份紀錄寫明實際用的模型；對照組（例如 SCN-001 的 b65b487）用同一個模型。免費模型額度用完時照實記下，不繞過額度限制 | 正式部署若用預設免費模型，派工表現可能與驗收時不同；關聯 SCN-003 |
 
@@ -247,9 +247,10 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | 2026-11-26 | 建立；逐題確認 Q1～Q4（驗證模型、規劃偏好、agent 定義的部署方式、scope 的傳遞） |
 | 2026-11-26 | SCN-001～SCN-014 全部核准 |
 | 2026-11-26 | Background 修訂：驗證模型改為 NVIDIA nemotron 或預設免費模型（TBD-6），沿用核准；舊基線 18377ce |
+| 2026-11-26 | Phase 1 探測完成，TBD-1～TBD-4 成立；另發現 subagent 一律在背景執行，回合結束的判定補進 Task 3.1 |
 
 ---
 **建立日期**: 2026-11-26  
 **分級**: Large（runtime、orchestrator、skills、gateway、三個入口與排程的顯示、部署設定）  
 **風險**: High\
-**狀態**: 待實作
+**狀態**: 實作中

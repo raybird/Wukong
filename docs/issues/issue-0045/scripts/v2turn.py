@@ -2,7 +2,7 @@
 
 在容器內執行（server 在 127.0.0.1:4096，密碼在環境變數 PW）：
     python3 -I v2turn.py OUT_PREFIX PROMPT [--agent NAME] [--session ID] [--model provider/model]
-                         [--skill ID]... [--max-secs N]
+                         [--skill ID]... [--wait-jobs] [--max-secs N]
 不帶 --session 時先建一個新的 session。先開事件串流再送 prompt，事件寫到 OUT_PREFIX.ndjson
 （每行一個事件，外加 `_t`：距送出 prompt 的秒數），結束後把以下內容寫到 OUT_PREFIX.json：
 session 的狀態（含 agent）、訊息列表、事件裡出現過的 agent／model 欄位，以及最後的回覆文字。
@@ -62,6 +62,8 @@ def main():
     ap.add_argument("--model")
     ap.add_argument("--skill", action="append", default=[], help="附在 prompt 的 skills（可重複）")
     ap.add_argument("--max-secs", type=float, default=240.0)
+    ap.add_argument("--wait-jobs", action="store_true",
+                    help="primary 的執行結束後，若仍有背景工作（subagent），繼續等到它們回報、primary 再次結束")
     args = ap.parse_args()
 
     result = {"steps": []}
@@ -97,6 +99,7 @@ def main():
     deadline = time.monotonic() + args.max_secs + 2
     end_type = None
     found = {}
+    result["executions"] = []  # primary 每次執行結束時的類型與當時的背景工作
     with open(args.out + ".ndjson", "w") as out:
         for raw in stream:
             line = raw.decode().strip()
@@ -114,11 +117,27 @@ def main():
             data = event.get("data") or {}
             if etype in END and data.get("sessionID", sid) == sid:
                 end_type = etype
-                break
+                jobs = []
+                if args.wait_jobs:
+                    jobs = (call("GET", f"/api/experimental/job?sessionID={sid}&descendants=true")[1] or {}).get("data") or []
+                result["executions"].append({"end": etype, "_t": event["_t"],
+                                             "jobs": [[j.get("kind"), j.get("agent"), j.get("status")] for j in jobs]})
+                if not jobs:
+                    break
 
     result["end"] = end_type
     result["event_fields"] = found
     result["session_state"] = call("GET", f"/api/session/{sid}")[1]
+    # 這個回合建立的子 session（subagent），以及子 session 再建立的，一併取回狀態與訊息
+    children = []
+    with open(args.out + ".ndjson") as events:
+        for line in events:
+            event = json.loads(line)
+            data = event.get("data") or {}
+            if event.get("type") == "session.created" and data.get("parentID") in [sid, *children]:
+                children.append(data["sessionID"])
+    result["children"] = {c: {"state": call("GET", f"/api/session/{c}")[1],
+                              "messages": call("GET", f"/api/session/{c}/message")[1]} for c in children}
     status, messages = call("GET", f"/api/session/{sid}/message")
     result["messages_status"] = status
     result["messages"] = messages
@@ -128,6 +147,7 @@ def main():
     with open(args.out + ".json", "w") as out:
         json.dump(result, out, ensure_ascii=False, indent=1)
     print(json.dumps({"session": sid, "end": end_type, "steps": [s[:2] for s in result["steps"]],
+                      "children": children,
                       "agent_fields": found.get("agent", []) + found.get("agentID", []),
                       "last_texts": result["texts"][-2:]}, ensure_ascii=False))
 
