@@ -244,7 +244,7 @@ mod tests {
         assert!(read(&dir, "wukong").contains(DEFAULT_SOUL.trim()));
     }
 
-    /// 外迴圈用：把 agent 定義與技能寫到 `WUKONG_AGENT_PROBE_DIR`，再交給
+    /// 外迴圈用：把 agent 定義與技能寫到 `WUKONG_AGENT_PROBE_DIR`、遷移那裡的 AGENTS.md，再交給
     /// docs/issues/issue-0045/scripts/ 的 probe-managed-agents.sh、probe-managed-skills.sh
     /// 對真實 V2 檢查。
     #[test]
@@ -253,6 +253,8 @@ mod tests {
         let dir = std::env::var("WUKONG_AGENT_PROBE_DIR").expect("WUKONG_AGENT_PROBE_DIR");
         materialize_agent_definitions(Path::new(&dir)).unwrap();
         crate::skill_assets::materialize_skills(Path::new(&dir)).unwrap();
+        let outcome = crate::workspace_template::migrate_agents_md(Path::new(&dir)).unwrap();
+        println!("agents-md: {outcome:?}");
     }
 
     #[test]

@@ -201,8 +201,26 @@
   - entrypoint 與 installer 的測試涵蓋三種工作區：全新部署、與舊範本相同（以 ac60ebe 版為例）、改過的；
   - 用真實模型問「你是誰」，三種工作區都以孫悟空回答。
 - 驗證：雙迴圈。外迴圈是 `scripts/test-docker-runtime.sh` 或新的腳本測試，加上真實回合；內迴圈是遷移判定的測試。
-- 狀態：📝 待實作
+- 狀態：✅ 已完成（2026-11-26）
 - 證據：
+  - 範本：`workspace/AGENTS.md` 拿掉人格那一句（「你目前作為孫悟空」）與整段「技能動態加載機制」，其餘專案規則不變。V2 本身就會附 skill 的使用指引，範本不再另寫技能段落。
+  - 做法調整：遷移改寫在 Rust（`crates/wukong-runtime/src/workspace_template.rs`），由四個入口啟動時的 `bootstrap::prepare_workspace_assets` 執行，不寫在 entrypoint 與 install.sh。
+    - Docker 與 binary 兩種部署都跑同一批入口，結果是同一套規則只有一份實作。
+    - 歷代範本改用原文比對，不用雜湊清單。原文取自 `git log -- workspace/AGENTS.md` 的三版（ac60ebe、e72cccd、65511d2），放在 `crates/wukong-runtime/assets/retired-agents-md/`。
+    - entrypoint 與 installer 照舊只在缺檔時複製範本（SOUL.md 也照舊）。
+  - 內迴圈：`workspace_template.rs` 的 5 個單元測試。
+    - 新範本不含人格與技能段落。
+    - 三版舊範本都先備份成 `AGENTS.md.bak-{版本}` 再換新；再啟動一次判為已是新版。
+    - 改過的不動、不備份，回報「技能動態加載機制」過時；沒有過時段落的不回報。
+    - 缺檔與新版都不動。
+    - 紅燈：把範本換回舊版時有 2 項失敗（新範本檢查，以及 65511d2 被判為已是新版）。
+  - 外迴圈：`scripts/probe-agents-md-migration.sh`（opencode/big-pickle，TBD-6）12 項全部 PASS。
+    - 三種工作區（全新、與 ac60ebe 相同、ac60ebe 加上自訂規則）各由真實的 `wukong` 入口啟動一次。
+    - 結果符合預期：全新的不動、沒有 log；相同的備份後換新，log 寫明備份位置；改過的不動，log 提醒「技能動態加載機制」過時。
+    - 再到 V2 以 wukong agent 問「你是誰」，三者都以孫悟空回答。改過的那份同時照自訂規則附上出處，可見它的 AGENTS.md 照常生效。
+    - 第一次執行時，改過的工作區回答「俺老孫乃齊天大聖」，判定只找「悟空」兩字而誤判失敗；已改成接受孫悟空的自稱。
+  - 升級後 agent 定義自動更新，由 2.1 的「舊內容被換掉」測試涵蓋。
+  - 其他檢查：CI 三道全過（801 passed、15 ignored），`scripts/test-docker-runtime.sh` 與 `scripts/test-installer-upgrade.sh` 全過。
 
 ## Phase 3 — run_turn 改為單一 primary agent
 

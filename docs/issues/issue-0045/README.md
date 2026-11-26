@@ -69,7 +69,7 @@ crates/
 └── wukong-memoryd/      # 不可觸及
 scripts/
 ├── docker-entrypoint.sh  # 可改：agent 定義、技能路徑、AGENTS.md 範本遷移
-├── install.sh            # 可改：binary 模式的範本遷移（與 entrypoint 同一套規則）
+├── install.sh            # 可改：binary 模式的範本遷移（實作在 wukong-runtime，入口啟動時執行，見 Task 2.3）
 ├── test-docker-runtime.sh # 可改：映像不再帶技能的檢查
 └── test-support/         # 可改：假 agent 不再輸出 planner 的格式
 workspace/AGENTS.md、workspace/SOUL.md  # 可改：範本內容
@@ -212,7 +212,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 
 ## 重構步驟概要
 1. ✅ **Phase 1** - V2 能力的契約探測（首要驗證）
-2. 📝 **Phase 2** - primary agent、subagent 與技能的定義與部署
+2. ✅ **Phase 2** - primary agent、subagent 與技能的定義與部署
 3. 📝 **Phase 3** - run_turn 改為單一 primary agent，拿掉 planner、接力鏈與依回合數壓縮
 4. 📝 **Phase 4** - 固定提示移到 agent 定義與 session 指令層
 5. 📝 **Phase 5** - 入口的角色顯示與規劃偏好移除
@@ -251,6 +251,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | 2026-11-26 | SCN-001～SCN-014 全部核准 |
 | 2026-11-26 | Background 修訂：驗證模型改為 NVIDIA nemotron 或預設免費模型（TBD-6），沿用核准；舊基線 18377ce |
 | 2026-11-26 | Phase 1 探測完成，TBD-1～TBD-4 成立；另發現 subagent 一律在背景執行，回合結束的判定補進 Task 3.1 |
+| 2026-11-26 | Phase 2 完成：agent 定義、技能寫到工作區 `.opencode/`；AGENTS.md 遷移改由入口啟動時執行（不在 entrypoint、install.sh）；技能清單的精簡移到 Task 5.2 |
 
 ---
 **建立日期**: 2026-11-26  

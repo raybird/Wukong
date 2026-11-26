@@ -10,6 +10,7 @@ pub mod session_retention;
 pub mod skill_assets;
 pub mod turn;
 pub mod util;
+pub mod workspace_template;
 
 pub use wukong_orchestrator::Role;
 
