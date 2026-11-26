@@ -100,7 +100,7 @@ pub async fn execute_job<B: AiBackend + QuestionResponder + Sync>(
     execute_job_observed(ctx, job, &mut |_| {}).await
 }
 
-/// 同 [`execute_job`]，另外在 Turn 回合每一棒開始時呼叫 `on_role`。
+/// 同 [`execute_job`]，另外在 Turn 回合派出 subagent 時呼叫 `on_role`。
 async fn execute_job_observed<B: AiBackend + QuestionResponder + Sync>(
     ctx: &ExecutionContext<'_, B>,
     job: &Job,
@@ -262,7 +262,8 @@ enum Phase {
     Maintenance,
     /// 2026-11-26（#45）：primary agent（悟空）在處理；planner 已移除，回合一開始就是這個階段。
     Primary,
-    Step(usize, Role),
+    /// primary agent 最近一次派工的 subagent（#45 SCN-002，取代逐棒的「第 k 棒」）。
+    Subagent(Role),
 }
 
 impl Phase {
@@ -274,25 +275,21 @@ impl Phase {
     }
 
     fn advance(&mut self, role: Role) {
-        let next = match self {
-            Phase::Step(k, _) => *k + 1,
-            _ => 1,
-        };
-        *self = Phase::Step(next, role);
+        *self = Phase::Subagent(role);
     }
 
     fn label(&self) -> String {
         match self {
             Phase::Maintenance => "維護作業".to_string(),
             Phase::Primary => "悟空".to_string(),
-            Phase::Step(k, role) => format!("第 {k} 棒 {}", role.name()),
+            Phase::Subagent(role) => format!("悟空·{}", role.name()),
         }
     }
 
     /// 角色名稱是英文，後面接「失敗」要隔一個空白。
     fn failed(&self) -> String {
         match self {
-            Phase::Step(..) => format!("{} 失敗", self.label()),
+            Phase::Subagent(_) => format!("{} 失敗", self.label()),
             _ => format!("{}失敗", self.label()),
         }
     }
@@ -353,7 +350,7 @@ async fn execute_with_heartbeat<B: AiBackend + QuestionResponder + Sync>(
             }
         }
     };
-    // 最後一棒可能剛開始就失敗，那次 on_role 還留在 channel 裡。
+    // subagent 可能剛派出回合就失敗，那次 on_role 還留在 channel 裡。
     while let Ok(role) = roles.try_recv() {
         phase.advance(role);
     }
@@ -1521,6 +1518,60 @@ mod tests {
         );
         assert!(
             run.message.contains("本機 OpenCode 回合逾時，已中止程序。"),
+            "{}",
+            run.message
+        );
+    }
+
+    /// #45 SCN-002：primary agent 派工給 fixer，fixer 還在執行時回合失敗。
+    struct DispatchThenFailBackend;
+    impl AiBackend for DispatchThenFailBackend {
+        async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+            Err(timed_out())
+        }
+
+        async fn run_streaming(
+            &self,
+            req: AgentRequest,
+            on_event: &mut dyn FnMut(StreamEvent),
+        ) -> Result<AgentResponse, GatewayError> {
+            on_event(StreamEvent::SubagentStarted {
+                agent: "fixer".to_string(),
+            });
+            self.run(req).await
+        }
+    }
+    impl QuestionResponder for DispatchThenFailBackend {
+        async fn allow_permission_once(&self, _: &str, _: &str) -> Result<(), GatewayError> {
+            unreachable!("這個 backend 不會送出詢問")
+        }
+
+        async fn reject_question(&self, _: &str, _: &str) -> Result<(), GatewayError> {
+            unreachable!("這個 backend 不會送出詢問")
+        }
+    }
+
+    // #45 SCN-002：排程的執行訊息顯示目前的角色「悟空·fixer」，不再寫「第 k 棒」。
+    #[tokio::test]
+    async fn the_phase_names_the_dispatched_subagent() {
+        let memory = open_memory().await;
+        let store = open_store().await;
+        let cfg = cfg("project:Base");
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &DispatchThenFailBackend,
+            base_config: &cfg,
+            permission_policy: PermissionPolicy::Reject,
+        };
+        let job = claimed_turn(&store, 300).await;
+
+        run_claimed_job(&store, &ctx, &job, "worker-a", 300)
+            .await
+            .unwrap();
+
+        let run = only_run(&store, &job).await;
+        assert!(
+            run.message.starts_with("悟空·fixer 失敗，已執行 "),
             "{}",
             run.message
         );

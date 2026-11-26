@@ -41,6 +41,8 @@ pub(super) struct ServerEventMapper {
     /// `shutdown`）結束執行；V1 1.19.6 同樣情況是不帶錯誤的 `session.idle`，回合照常收尾
     /// （2026-11-24 兩版實測，見 docs/issues/issue-0044/probe-reply.md）。
     declined: bool,
+    /// 本 session 直接派出的 subagent：子 session → agent 名稱（#45 SCN-002）。
+    subagents: HashMap<String, String>,
 }
 
 impl ServerEventMapper {
@@ -52,6 +54,7 @@ impl ServerEventMapper {
             texts: Vec::new(),
             retry,
             declined: false,
+            subagents: HashMap::new(),
         }
     }
 
@@ -71,6 +74,23 @@ impl ServerEventMapper {
             .to_string()
     }
 
+    /// subagent 的回報是 primary inbox 裡的 synthetic 項目，內文為
+    /// `<subagent sessionID="…" state="…" description="…">\n回報\n</subagent>`
+    /// （tests/fixtures/opencode-v2/server-dispatch-subagent.ndjson）。只認本 session 派出的。
+    fn subagent_report(&self, data: &Value) -> Option<(String, String)> {
+        let item = data.get("item")?;
+        if item.get("type").and_then(Value::as_str) != Some("synthetic") {
+            return None;
+        }
+        let text = item.get("payload")?.get("text")?.as_str()?;
+        let rest = text.strip_prefix("<subagent sessionID=\"")?;
+        let (child, rest) = rest.split_once('"')?;
+        let agent = self.subagents.get(child)?;
+        let (_, body) = rest.split_once('>')?;
+        let body = body.trim_end().strip_suffix("</subagent>").unwrap_or(body);
+        Some((agent.clone(), body.trim().to_string()))
+    }
+
     pub(super) fn map(&mut self, value: &Value) -> ServerEventAction {
         let event_type = event_type_of(value);
         let Some(data) = value.get("data") else {
@@ -81,9 +101,29 @@ impl ServerEventMapper {
             .get("sessionID")
             .or_else(|| data.get("form").and_then(|form| form.get("sessionID")))
             .and_then(Value::as_str);
+        // 子 session 的 session.created 帶 parentID 與 agent：本 session 派出的 subagent 開始執行。
+        if event_type == "session.created"
+            && data.get("parentID").and_then(Value::as_str) == Some(self.session_id.as_str())
+        {
+            if let (Some(child), Some(agent)) = (session, data.get("agent").and_then(Value::as_str))
+            {
+                self.subagents.insert(child.to_string(), agent.to_string());
+                return ServerEventAction::Emit(StreamEvent::SubagentStarted {
+                    agent: agent.to_string(),
+                });
+            }
+        }
         // 不是本 session 的事件（含子 agent 的 session）一律忽略：別人的錯誤不能中止本回合。
         if session != Some(self.session_id.as_str()) {
             return ServerEventAction::Ignore;
+        }
+        if event_type == "session.inbox.enqueued" {
+            return match self.subagent_report(data) {
+                Some((agent, output)) => {
+                    ServerEventAction::Emit(StreamEvent::SubagentReported { agent, output })
+                }
+                None => ServerEventAction::Ignore,
+            };
         }
         if let Some(message) = data.get("assistantMessageID").and_then(Value::as_str) {
             if matches!(event_type, "session.step.started" | "session.text.ended") {
@@ -382,6 +422,61 @@ mod tests {
             }
         }
         (emitted, None, mapper.final_text())
+    }
+
+    // #45 SCN-002：派工的真實樣本（1.4，primary 派給 fixer）。重播整段（含 primary 第一次執行
+    // 結束之後的回報），子 session 的 session.created 是 subagent 開始，primary inbox 的 synthetic
+    // 項目是它的回報。
+    #[test]
+    fn a_dispatched_subagent_is_reported_with_its_agent_and_output() {
+        let path = format!(
+            "{}/tests/fixtures/opencode-v2/server-dispatch-subagent.ndjson",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut mapper =
+            ServerEventMapper::new("ses_de97265f6ffeQ89qNtt1VQOxqB", RetryWatch::default());
+        let subagent_events: Vec<StreamEvent> = std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(
+                |line| match mapper.map(&serde_json::from_str(line).unwrap()) {
+                    ServerEventAction::Emit(
+                        event @ (StreamEvent::SubagentStarted { .. }
+                        | StreamEvent::SubagentReported { .. }),
+                    ) => Some(event),
+                    _ => None,
+                },
+            )
+            .collect();
+        assert_eq!(
+            subagent_events,
+            [
+                StreamEvent::SubagentStarted {
+                    agent: "fixer".to_string()
+                },
+                StreamEvent::SubagentReported {
+                    agent: "fixer".to_string(),
+                    output: "ROLE-DONE:fixer\n\n已建立檔案：`/p/ws/dispatch.txt`\n內容為單行 `hello from probe`（結尾含換行），已驗證無其他內容。".to_string()
+                },
+            ]
+        );
+    }
+
+    // 別人的 subagent（其他 session 派出的）與不是 subagent 回報的 synthetic 項目都不算。
+    #[test]
+    fn subagents_of_other_sessions_are_ignored() {
+        let mut mapper = ServerEventMapper::new("ses_me", RetryWatch::default());
+        let created = serde_json::json!({"type": "session.created", "data": {
+            "sessionID": "ses_kid", "parentID": "ses_other", "agent": "fixer"}});
+        assert_eq!(mapper.map(&created), ServerEventAction::Ignore);
+        let other = serde_json::json!({"type": "session.inbox.enqueued", "data": {
+            "sessionID": "ses_me", "item": {"type": "synthetic", "payload": {"text": "note"}}}});
+        assert_eq!(mapper.map(&other), ServerEventAction::Ignore);
+        let report = serde_json::json!({"type": "session.inbox.enqueued", "data": {
+            "sessionID": "ses_me", "item": {"type": "synthetic", "payload": {"text":
+            "<subagent sessionID=\"ses_kid\" state=\"completed\">\nout\n</subagent>"}}}});
+        assert_eq!(mapper.map(&report), ServerEventAction::Ignore);
     }
 
     // 期望值取自樣本內容本身：一次 shell 呼叫（`echo probe`），之後一步思考加上回覆 DONE。

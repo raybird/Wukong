@@ -368,6 +368,9 @@ where
                             let _ = ev_tx.send(SseMsg::Question(web_question_request(request)));
                         }
                         wukong_gateway::StreamEvent::Text(_) => {}
+                        // #45 SCN-002：角色與產出卡片由 run_turn 的 on_role／on_step 處理。
+                        wukong_gateway::StreamEvent::SubagentStarted { .. }
+                        | wukong_gateway::StreamEvent::SubagentReported { .. } => {}
                     },
                     &mut |role| {
                         let _ = role_tx.send(SseMsg::Role(role.name().to_string()));

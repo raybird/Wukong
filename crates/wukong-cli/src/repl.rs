@@ -193,7 +193,7 @@ mod tests {
         .unwrap();
         assert_eq!(turns, 2);
         assert_eq!(backend.prompt_count(), 2);
-        // 接力鏈移除後回合不再回報角色；Task 5.1 改由 subagent 資訊顯示。
+        // 2026-11-26（#45）：角色只在 primary agent 派工時回報，這個假 backend 不派工。
         assert!(roles.is_empty(), "{roles:?}");
     }
 

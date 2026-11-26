@@ -258,6 +258,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | 2026-11-26 | Task 3.4 內迴圈完成：自訂的 opencode 命令沒指定 agent 時以 `wukong` 執行，使用者指定的 agent 照舊，非 opencode 命令不加 `--agent`；3.2、3.4 的真實 V2 驗證等免費模型額度恢復 |
 | 2026-11-26 | Task 3.2 內迴圈完成，測試釘住每次送 prompt 前都選取指定模型；Task 4.1 內迴圈完成，V2 backend 的 scope 改放 session 指令層的 entry `wukong.scope`，排程能力的固定說明併入 agent 定義，CLI backend 照舊附在 prompt；重跑派工探測仍是免費額度 429 |
 | 2026-11-26 | Task 4.2 內迴圈完成：V2 backend 的輸出要求、長期記憶能力、檔案互動規則移進 agent 定義，Telegram 每回合只附產出目錄一行（TBD-7，使用者決定），CLI backend 照舊附在 prompt |
+| 2026-11-26 | Task 5.1 內迴圈完成：gateway 從 V2 事件取出 subagent 的開始與回報，觸發入口的角色顯示與產出卡片；排程的階段改成「悟空·fixer」，不再寫「第 k 棒」 |
 
 ---
 **建立日期**: 2026-11-26  

@@ -77,7 +77,7 @@ pub async fn run_turn_with_attachments(
 }
 
 /// Same as [`run_turn`], with an `on_step(role, output)` observer for intermediate
-/// results. 2026-11-26（#45）：接力鏈移除後暫時不會被呼叫，Task 5.1 改由 subagent 的回報觸發。
+/// results. 2026-11-26（#45 SCN-002）：由 V2 的 subagent 回報觸發（`StreamEvent::SubagentReported`）。
 pub async fn run_turn_observed(
     memory: &Memory,
     backend: &impl AiBackend,
@@ -154,11 +154,33 @@ pub async fn run_turn_traced_with_attachments(
     input: &str,
     attachments: Vec<AgentAttachment>,
     on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
-    // 2026-11-26（#45）：planner 與接力鏈已移除，回合本身不再有「哪一棒」可回報；
-    // Task 5.1 改由 V2 事件裡的 subagent 資訊觸發。
-    _on_role: &mut dyn FnMut(Role),
-    _on_step: &mut dyn FnMut(ObservedStep<'_>),
+    // 2026-11-26（#45 SCN-002）：planner 與接力鏈已移除，角色與產出改由 V2 的 subagent 事件觸發：
+    // subagent 開始時 `on_role`，回報送回 primary 時 `on_step`。只認 Wukong 的五個角色。
+    on_role: &mut dyn FnMut(Role),
+    on_step: &mut dyn FnMut(ObservedStep<'_>),
 ) -> Result<TurnOutput, WukongError> {
+    let role_named = |agent: &str| Role::all().into_iter().find(|role| role.name() == agent);
+    let mut on_event = |event: wukong_gateway::StreamEvent| {
+        match &event {
+            wukong_gateway::StreamEvent::SubagentStarted { agent } => {
+                if let Some(role) = role_named(agent) {
+                    on_role(role);
+                }
+            }
+            wukong_gateway::StreamEvent::SubagentReported { agent, output } => {
+                if let Some(role) = role_named(agent) {
+                    on_step(ObservedStep {
+                        role,
+                        skill_name: None,
+                        output,
+                    });
+                }
+            }
+            _ => {}
+        }
+        on_event(event);
+    };
+    let on_event: &mut dyn FnMut(wukong_gateway::StreamEvent) = &mut on_event;
     // 2026-10-06：入口附加的產出目錄只給 agent；召回與記憶只用使用者原文，
     // 否則每則輸入都會因為共用的區塊文字而「關聯」到所有過去的記憶。
     let user_text = input
@@ -471,6 +493,8 @@ mod tests {
         fail_on_call: Mutex<Option<usize>>,
         session_layer: bool,
         instructions: Mutex<Vec<std::collections::BTreeMap<String, String>>>,
+        /// 第一次串流呼叫在回覆文字之前送出的事件（模擬 V2 的 subagent 事件）。
+        events: Mutex<Vec<wukong_gateway::StreamEvent>>,
     }
 
     impl MockBackend {
@@ -488,7 +512,13 @@ mod tests {
                 fail_on_call: Mutex::new(None),
                 session_layer: false,
                 instructions: Mutex::new(Vec::new()),
+                events: Mutex::new(Vec::new()),
             }
+        }
+
+        fn with_events(self, events: Vec<wukong_gateway::StreamEvent>) -> MockBackend {
+            *self.events.lock().unwrap() = events;
+            self
         }
 
         /// 模擬 OpenCode V2 server：支援 session 指令層。
@@ -518,6 +548,19 @@ mod tests {
     impl AiBackend for MockBackend {
         fn supports_session_instructions(&self) -> bool {
             self.session_layer
+        }
+
+        async fn run_streaming(
+            &self,
+            req: AgentRequest,
+            on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
+        ) -> Result<AgentResponse, GatewayError> {
+            for event in std::mem::take(&mut *self.events.lock().unwrap()) {
+                on_event(event);
+            }
+            let resp = self.run(req).await?;
+            on_event(wukong_gateway::StreamEvent::Text(resp.text.clone()));
+            Ok(resp)
         }
 
         async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
@@ -685,6 +728,61 @@ mod tests {
             models.last().and_then(Clone::clone).as_deref(),
             Some("opencode/deepseek-v4-flash-free")
         );
+    }
+
+    // #45 SCN-002：V2 的 subagent 事件觸發入口的角色與產出回呼；不是 Wukong 五個角色的 agent
+    // （例如 V2 內建的 general）不觸發。事件本身照樣轉給入口。
+    #[tokio::test]
+    async fn subagent_events_drive_the_role_and_step_callbacks() {
+        use wukong_gateway::StreamEvent;
+        let mem = open_memory().await;
+        let backend = MockBackend::new(&["done"]).with_events(vec![
+            StreamEvent::SubagentStarted {
+                agent: "fixer".to_string(),
+            },
+            StreamEvent::SubagentStarted {
+                agent: "general".to_string(),
+            },
+            StreamEvent::SubagentReported {
+                agent: "general".to_string(),
+                output: "ignored".to_string(),
+            },
+            StreamEvent::SubagentReported {
+                agent: "fixer".to_string(),
+                output: "已建立 hello.txt".to_string(),
+            },
+        ]);
+        let mut roles = Vec::new();
+        let mut steps = Vec::new();
+        let mut forwarded = 0;
+        let out = run_turn_traced(
+            &mem,
+            &backend,
+            &test_cfg("project:T"),
+            "建立 hello.txt",
+            &mut |ev| {
+                if matches!(
+                    ev,
+                    StreamEvent::SubagentStarted { .. } | StreamEvent::SubagentReported { .. }
+                ) {
+                    forwarded += 1;
+                }
+            },
+            &mut |role| roles.push(role),
+            &mut |step| {
+                steps.push((
+                    step.role,
+                    step.skill_name.is_none(),
+                    step.output.to_string(),
+                ))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.text, "done");
+        assert_eq!(roles, [Role::Fixer]);
+        assert_eq!(steps, [(Role::Fixer, true, "已建立 hello.txt".to_string())]);
+        assert_eq!(forwarded, 4);
     }
 
     // #45 SCN-013：空輸出補送的修復提示也指定同一個模型與 agent；subagent 沿用 session 選取的

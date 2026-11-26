@@ -1046,12 +1046,15 @@ mod tests {
     struct MockBackend {
         replies: Mutex<VecDeque<String>>,
         prompts: Mutex<Vec<String>>,
+        /// 第一次串流呼叫在回覆文字之前送出的事件（模擬 V2 的 subagent 事件）。
+        events: Mutex<Vec<wukong_gateway::StreamEvent>>,
     }
     impl MockBackend {
         fn new(r: &[&str]) -> Self {
             Self {
                 replies: Mutex::new(r.iter().map(|s| s.to_string()).collect()),
                 prompts: Mutex::new(Vec::new()),
+                events: Mutex::new(Vec::new()),
             }
         }
     }
@@ -1063,6 +1066,34 @@ mod tests {
                 session_id: None,
             })
         }
+
+        async fn run_streaming(
+            &self,
+            req: AgentRequest,
+            on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
+        ) -> Result<AgentResponse, GatewayError> {
+            for event in std::mem::take(&mut *self.events.lock().unwrap()) {
+                on_event(event);
+            }
+            let resp = self.run(req).await?;
+            on_event(wukong_gateway::StreamEvent::Text(resp.text.clone()));
+            Ok(resp)
+        }
+    }
+
+    /// #45 SCN-002：primary agent 派工給 fixer，fixer 回報 `f1`，primary 回覆 `done`。
+    async fn dispatch_state() -> AppState<MockBackend> {
+        let state = state(None, &["done"]).await;
+        *state.backend.events.lock().unwrap() = vec![
+            wukong_gateway::StreamEvent::SubagentStarted {
+                agent: "fixer".to_string(),
+            },
+            wukong_gateway::StreamEvent::SubagentReported {
+                agent: "fixer".to_string(),
+                output: "f1".to_string(),
+            },
+        ];
+        state
     }
 
     macro_rules! unsupported_question_responder {
@@ -1378,12 +1409,11 @@ mod tests {
         );
     }
 
+    // #45 SCN-002：primary agent 派工給 fixer。進度顯示角色 fixer，fixer 的回報是產出卡片（step），
+    // 在最終回覆之前送出；primary 的最終回覆走 answer。
     #[tokio::test]
-    #[ignore = "#45 Task 5.1：接力鏈移除後沒有輔助棒；subagent 的產出卡片改由 V2 事件產生，5.1 以真實事件樣本改寫這個測試"]
-    async fn chat_streams_helper_step_before_answer() {
-        // planner -> [explorer, fixer]; explorer (helper) emits e1, fixer (final) f2.
-        let app =
-            build_router(state(None, &["explorer|systematic-debugging\nfixer", "e1", "f2"]).await);
+    async fn chat_streams_subagent_role_and_step_before_answer() {
+        let app = build_router(dispatch_state().await);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -1396,27 +1426,20 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
+        let role_at = body
+            .find("event: role\ndata: fixer")
+            .expect("missing role event");
         let step_at = body.find("event: step").expect("missing step event");
         let answer_at = body.find("event: answer").expect("missing answer event");
-        // Helper baton card streams before the final answer.
-        assert!(step_at < answer_at, "step must precede answer:\n{body}");
-        // The helper step carries its role and rendered output; the final (fixer)
-        // output goes through the answer event, not a step.
-        assert!(body.contains(r#""role":"explorer""#), "step role:\n{body}");
-        assert!(
-            body.contains(r#""skill":"systematic-debugging""#),
-            "step skill:\n{body}"
-        );
-        assert!(
-            !body.contains(r#""role":"fixer""#),
-            "final must not be a step:\n{body}"
-        );
+        assert!(role_at < step_at && step_at < answer_at, "order:\n{body}");
+        assert!(body.contains(r#""role":"fixer""#), "step role:\n{body}");
+        assert!(body.contains(r#""skill":null"#), "step skill:\n{body}");
     }
 
+    // #45 SCN-002：subagent 的產出卡片存進 turn_steps，之後從 steps API 讀得到。
     #[tokio::test]
-    #[ignore = "#45 Task 5.1：接力鏈移除後沒有輔助棒；subagent 的產出卡片改由 V2 事件產生，5.1 以真實事件樣本改寫這個測試"]
-    async fn turn_persists_helper_steps_and_serves_them() {
-        let app_state = state(None, &["explorer, fixer", "e1", "f2"]).await;
+    async fn turn_persists_subagent_steps_and_serves_them() {
+        let app_state = dispatch_state().await;
 
         // Reading the full SSE body waits for the turn thread (and its DB writes).
         let body = body_string(
@@ -1459,7 +1482,7 @@ mod tests {
         assert_eq!(assistant["step_count"].as_i64().unwrap(), 1);
         let mid = assistant["id"].as_i64().unwrap();
 
-        // The lazy steps endpoint returns the helper (explorer) baton, not the final.
+        // The lazy steps endpoint returns the fixer report, not the final answer.
         let steps_body = body_string(
             build_router(app_state.clone())
                 .oneshot(
@@ -1475,8 +1498,8 @@ mod tests {
         let steps: serde_json::Value = serde_json::from_str(&steps_body).unwrap();
         let steps = steps.as_array().unwrap();
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0]["role"].as_str().unwrap(), "explorer");
-        assert_eq!(steps[0]["content"].as_str().unwrap(), "e1");
+        assert_eq!(steps[0]["role"].as_str().unwrap(), "fixer");
+        assert_eq!(steps[0]["content"].as_str().unwrap(), "f1");
     }
 
     #[tokio::test]
@@ -3169,7 +3192,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
-        // 「event: role」原本來自逐棒的 on_role，Task 5.1 改由 subagent 資訊產生。
+        // 2026-11-26（#45）：「event: role」只在派工時出現（chat_streams_subagent_role_and_step_before_answer）。
         assert!(
             body.contains("event: answer"),
             "missing answer event:\n{body}"

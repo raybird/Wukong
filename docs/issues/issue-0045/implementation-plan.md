@@ -482,8 +482,28 @@
   - 四個入口各有顯示測試；
   - 用真實模型跑一題實作任務，Web 與 Telegram（mock transport）看得到「悟空·fixer」與產出。
 - 驗證：雙迴圈。外迴圈是入口測試加真實回合；內迴圈是事件對應的單元測試。
-- 狀態：📝 待實作
+- 狀態：🚧 內迴圈完成；外迴圈待免費模型額度恢復（2026-11-26）
 - 證據：
+  - gateway：`StreamEvent` 新增 `SubagentStarted { agent }`、`SubagentReported { agent, output }`，只有 V2 server 的事件會有。
+    - 開始：子 session 的 `session.created`，parentID 是本回合的 session，帶 `agent`。
+    - 回報：primary inbox 的 synthetic 項目 `<subagent sessionID="…" …>回報</subagent>`，用 sessionID 對回 agent。
+    - 只認本回合直接派出的 subagent；其他 session 的子 session、不是 subagent 回報的 synthetic 項目都忽略。
+  - runtime：run_turn 把 `SubagentStarted` 轉成 `on_role`、`SubagentReported` 轉成 `on_step`（`skill_name` 為 None），只認 Wukong 的五個角色（V2 內建的 general 等不觸發）；事件本身照樣轉給入口。
+  - 入口：
+    - Telegram 的狀態泡泡、Web 的 SSE `role`／`step`、產出卡片與 `turn_steps`、CLI 的 stderr 原本就依 `on_role`／`on_step` 顯示，沒有改顯示邏輯，只補上新事件的 match 分支（不處理，交給回呼）。
+    - 排程：階段從「第 k 棒 {角色}」改成「悟空·{角色}」（最近派出的 subagent），失敗訊息為「悟空·fixer 失敗，已執行 …」。
+  - 內迴圈：
+    - gateway：`a_dispatched_subagent_is_reported_with_its_agent_and_output` 以 1.4 的真實樣本（`server-dispatch-subagent.ndjson`）重播整段，得到 fixer 開始與回報內文；`subagents_of_other_sessions_are_ignored`。紅燈：對應前送出 0 個 subagent 事件。
+    - runtime：`subagent_events_drive_the_role_and_step_callbacks`（fixer 觸發 role 與 step，general 不觸發，4 個事件都轉給入口）。紅燈：on_role 沒被呼叫。
+    - 四個入口：
+      - Web：`chat_streams_subagent_role_and_step_before_answer`、`turn_persists_subagent_steps_and_serves_them`（取代 3.1 標成 ignored 的兩個輔助棒測試）；
+      - Telegram：`a_dispatched_subagent_shows_in_the_status_bubble_and_live_events`（泡泡出現「🐵　悟空·fixer」，live 事件有 role fixer）；
+      - 排程：`the_phase_names_the_dispatched_subagent`，紅燈時訊息是「第 1 棒 fixer 失敗…」；
+      - CLI：`role_line` 抽成函式，`a_dispatched_subagent_is_named_on_stderr`。
+    - 反向自檢：暫時讓 run_turn 不認任何角色，Web 兩項、Telegram、排程、runtime 的測試都失敗；改回後通過。
+  - 文件：`docs/cli-reference.md` 的排程進度與失敗訊息範例。README.md 的時序圖、AGENTS.md「一回合資料流」等接力鏈的描述由 Task 6.5 一起更新。
+  - 其他檢查：CI 三道全過（777 passed、12 ignored）。
+  - 外迴圈（待做）：真實模型跑一題實作任務，Web 與 Telegram（mock transport）看得到「悟空·fixer」與產出。2026-11-26 免費額度用完（429）。
 
 ### Task 5.2 — 移除規劃偏好
 - 產出與範圍：

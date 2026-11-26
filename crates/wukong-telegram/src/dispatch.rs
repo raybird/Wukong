@@ -1572,6 +1572,8 @@ pub async fn handle_message_with_responder<C, B, R>(
                         event_seq += 1;
                     }
                     StreamEvent::Text(_) => {}
+                    // #45 SCN-002：角色與產出卡片由 run_turn 的 on_role／on_step 處理。
+                    StreamEvent::SubagentStarted { .. } | StreamEvent::SubagentReported { .. } => {}
                 },
                 &mut |r| {
                     let role_name = r.name().to_string();
@@ -2115,8 +2117,8 @@ mod tests {
         };
         handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
 
-        // Status bubble deleted once the answer is ready. 2026-11-26（#45）：接力鏈移除後
-        // 不再有逐棒的角色更新；Task 5.1 改由 subagent 資訊更新泡泡。
+        // Status bubble deleted once the answer is ready. 2026-11-26（#45）：沒有派工的回合
+        // 不更新角色（派工時見 a_dispatched_subagent_shows_in_the_status_bubble_and_live_events）。
         assert!(!client.deletes.lock().unwrap().is_empty());
 
         // Final answer sent as rendered HTML.
@@ -2460,6 +2462,76 @@ mod tests {
         }
     }
 
+    /// #45 SCN-002：primary agent 派工給 fixer，fixer 回報之後 primary 回覆 done。
+    struct DispatchBackend;
+    impl AiBackend for DispatchBackend {
+        async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+            Ok(AgentResponse {
+                text: "done".to_string(),
+                session_id: None,
+            })
+        }
+
+        async fn run_streaming(
+            &self,
+            req: AgentRequest,
+            on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
+        ) -> Result<AgentResponse, GatewayError> {
+            on_event(wukong_gateway::StreamEvent::SubagentStarted {
+                agent: "fixer".to_string(),
+            });
+            on_event(wukong_gateway::StreamEvent::SubagentReported {
+                agent: "fixer".to_string(),
+                output: "已建立 hello.txt".to_string(),
+            });
+            self.run(req).await
+        }
+    }
+
+    // #45 SCN-002：派工時狀態泡泡顯示「悟空·fixer」，Web 的即時事件也有 role。
+    #[tokio::test]
+    async fn a_dispatched_subagent_shows_in_the_status_bubble_and_live_events() {
+        let client = MockTgClient::default();
+        let (mem, db_url) = open_memory_with_url().await;
+        let history = wukong_chat_history::ChatHistoryStore::open(&db_url)
+            .await
+            .unwrap();
+        let msg = TgMessage {
+            update_id: 1,
+            chat_id: 12,
+            text: "建立 hello.txt".to_string(),
+            attachments: Vec::new(),
+        };
+
+        handle_message(
+            &client,
+            &mem,
+            &base_cfg(),
+            &DispatchBackend,
+            Some(&history),
+            &[12],
+            &msg,
+        )
+        .await;
+
+        {
+            let edits = client.edits.lock().unwrap();
+            assert!(
+                edits
+                    .iter()
+                    .any(|(_, _, t)| t.starts_with("🐵　悟空·fixer")),
+                "no role edit: {edits:?}"
+            );
+        }
+        let events = history
+            .live_events_after(&scope_for_chat(12), 0, 20)
+            .await
+            .unwrap();
+        assert!(events
+            .iter()
+            .any(|e| e.kind == "role" && e.content == "fixer"));
+    }
+
     struct QuestionBackend;
     impl AiBackend for QuestionBackend {
         async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
@@ -2654,7 +2726,7 @@ mod tests {
             .await
             .unwrap();
         assert!(events.iter().any(|e| e.kind == "user" && e.content == "hi"));
-        // 2026-11-26（#45）：「role」事件原本來自逐棒的 on_role，Task 5.1 改由 subagent 資訊產生。
+        // 2026-11-26（#45）：「role」事件只在派工時出現（a_dispatched_subagent_shows_in_the_status_bubble_and_live_events）。
         assert!(events
             .iter()
             .any(|e| e.kind == "tool" && e.label.as_deref() == Some("read")));

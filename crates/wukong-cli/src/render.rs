@@ -45,6 +45,8 @@ impl<'a> StreamRenderer<'a> {
                 let _ = self.err.flush();
             }
             StreamEvent::StepStart | StreamEvent::StepFinish => {}
+            // 角色由 run_turn 的 on_role 印出（main.rs 的 role_line），這裡不重複。
+            StreamEvent::SubagentStarted { .. } | StreamEvent::SubagentReported { .. } => {}
         }
     }
 }
