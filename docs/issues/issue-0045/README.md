@@ -245,8 +245,8 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | TBD-6 | 預設免費模型的派工與技能遵循表現 | 已解決（2026-11-26）：NVIDIA 憑證被拒（403）後，使用者表示「使用免費模型驗證也可以」。驗收可以用 NVIDIA nemotron 或預設免費模型 opencode/big-pickle判定，每份紀錄寫明實際用的模型；對照組（例如 SCN-001 的 b65b487）用同一個模型。免費模型額度用完時照實記下，不繞過額度限制 | 正式部署若用預設免費模型，派工表現可能與驗收時不同；關聯 SCN-003 |
 | TBD-7 | SCN-006 的「檔案互動規則」：Telegram 的產出目錄每回合不同（`artifacts/<scope>/<turn_id>`），不能整段放進 agent 定義 | 已解決（2026-11-26，使用者選「規則進定義，只留路徑（建議）」）：規則文字寫進 agent `wukong` 的定義，user message 只留一行 `[產出目錄] <路徑>`，視為和召回記憶一樣的動態區塊；SCN-006 的「檔案互動規則」指規則文字。沒有採用的做法：每個 scope 固定一個產出目錄（要改檔案回傳流程）、路徑也放 entry（每回合在對話紀錄多一則通知） | Task 4.2 的外迴圈檢查 user message 時，產出目錄那一行屬於動態區塊；關聯 SCN-006 |
 | TBD-8 | 常駐 V2 server 在 agent 定義改寫後幾十毫秒內送出的回合，仍用舊定義（Task 4.2 外迴圈：WUKONG_MEMORIA_HINT 開關的答案相反） | 已解決（2026-11-26）：使用者選「等 server 讀到再送」。入口改寫過 primary agent 的定義時，下一個回合送 prompt 前輪詢 /api/agent，等 wukong 的 system 與新內文相同才送，最多 5 秒，逾時警告後照送；按需本機模式與 CLI backend 不用等 | 只影響常駐 server 模式、緊接在定義改寫之後的回合（CLI 單次執行、入口重啟時積壓的訊息或到期的排程）；SCN-008 |
-| TBD-9 | NVIDIA nemotron 上，查找題（讀程式碼、寫 README）只有 1/3 派給 librarian：primary 自己讀完模組、寫好整份 README，只把存檔派給 fixer（[dispatch-eval.md](dispatch-eval.md) 第 3、4 輪） | 待確認 | SCN-003 以 big-pickle 通過（使用者 2026-11-27 指示 NVIDIA 限流時改用 opencode 的模型）；nemotron 的這個差距沒有修。要不要再改措辭（例如「文件內容由 librarian 撰寫，不要自己寫好再請別人存檔」），或修訂查找題的門檻，由使用者決定 |
-| TBD-10 | 最終的 agent 定義（f0ce34a：多了「派工後就結束這次回覆、等它回報」）還沒有完整跑過一輪派工評估：2026-11-27 nemotron 的實作題 3 次都被限流或逾時打斷，big-pickle 的免費額度同日用完（[dispatch-eval.md](dispatch-eval.md) 第 6 輪） | 待確認 | 前一版定義已在 big-pickle 上 6 題全部通過，這句話在派工決定之後才生效；額度恢復後以同一個模型補跑完整的一輪，不輪換免費模型繞過額度 |
+| TBD-9 | NVIDIA nemotron 上，查找題（讀程式碼、寫 README）只有 1/3 派給 librarian：primary 自己讀完模組、寫好整份 README，只把存檔派給 fixer（[dispatch-eval.md](dispatch-eval.md) 第 3、4 輪） | 已解決（2026-11-27，使用者選「記為已知差距，不修」）：這是 nemotron 的模型行為，文件內容仍由悟空產生、只有存檔派錯角色，不影響結果；big-pickle 上 3/3 正確 | SCN-003 以 big-pickle 通過（使用者 2026-11-27 指示 NVIDIA 限流時改用 opencode 的模型）；nemotron 的這個差距沒有修。要不要再改措辭（例如「文件內容由 librarian 撰寫，不要自己寫好再請別人存檔」），或修訂查找題的門檻，由使用者決定 |
+| TBD-10 | 最終的 agent 定義（f0ce34a：多了「派工後就結束這次回覆、等它回報」）還沒有完整跑過一輪派工評估：2026-11-27 nemotron 的實作題 3 次都被限流或逾時打斷，big-pickle 的免費額度同日用完（[dispatch-eval.md](dispatch-eval.md) 第 6 輪） | 待確認（2026-11-27 使用者選「先送審，額度恢復後補跑」：補跑結果只更新 dispatch-eval.md 與這一列，不動交付內容） | 前一版定義已在 big-pickle 上 6 題全部通過，這句話在派工決定之後才生效；額度恢復後以同一個模型補跑完整的一輪，不輪換免費模型繞過額度 |
 
 ## Timeline
 
@@ -274,6 +274,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | 2026-11-27 | Task 6.2 完成：對照 b65b487，short 任務步數 3 → 1、opencode 啟動 2 → 1，兩種任務成功率都是 7/7；tool 任務步數中位數 7（b65b487 為 4），照修訂後的 SCN-001 記錄 |
 | 2026-11-27 | Task 6.3 完成：dind 裡從假發版 rc.44（b65b487）升級到本分支，本機與 server 模式各跑一輪（[rehearsal.md](rehearsal.md)）。發現 server 模式以對話建立的排程寫進 opencode-server 自己的資料庫、永遠不執行（v0.25.1 起的既有問題），使用者選在 #45 修（e70e4e2）；Telegram 因沒有 bot token 未執行 |
 | 2026-11-27 | Task 6.5 完成：根目錄 AGENTS.md、README.md、docs/docker.md、docs/entrypoints.md、docs/cli-reference.md、docs/memory.md、crate README 與 CHANGELOG `[Unreleased]` 改成單次呼叫加派工的現況 |
+| 2026-11-27 | 使用者確認：Task 5.2 維持移除整個 Skills 分頁、`/api/skills/*` 與 `/skills` 指令；TBD-9 記為已知差距不修；TBD-10 先送審，big-pickle 額度恢復後補跑 |
 
 ---
 **建立日期**: 2026-11-26  
