@@ -42,6 +42,9 @@ services:
       - USER_ID=${USER_ID:-1000}
       - GROUP_ID=${GROUP_ID:-1000}
       - WUKONG_WORKSPACE=/workspace
+      # issue-0045（SCN-007）：模型在這裡的 shell 執行 `wukong schedule add-turn`，排程要寫進
+      # 入口與 schedulerd 讀的同一份記憶庫，否則會寫進容器自己的預設資料庫、永遠不執行。
+      - WUKONG_MEMORY_DB=sqlite:///data/memory.db
       # OpenCode V2 always requires a password (it generates a random one when unset,
       # which no entrance could know). The entrances get the same .env value as
       # WUKONG_AGENT_SERVER_PASSWORD; set it in .env (issue-0044 SCN-003).
@@ -61,6 +64,7 @@ services:
       - WUKONG_OPENCODE_CONN_GRACE_SECS=${WUKONG_OPENCODE_CONN_GRACE_SECS:-1800}
     volumes:
       - ${WUKONG_HOST_WORKSPACE:-./workspace}:/workspace
+      - wukong-data:/data
       - opencode-config:/home/wukong/.config/opencode
       - opencode-state:/home/wukong/.local/share/opencode
       - agent-reach-state:/home/wukong/.agent-reach

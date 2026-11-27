@@ -165,6 +165,26 @@ for path in sys.argv[1:]:
         assert env["WUKONG_AGENT_CMD"] == "${WUKONG_AGENT_CMD:-opencode run}", (path, name)
         assert service["mem_limit"] == "${WUKONG_SVC_MEM:-2g}", (path, name)
 PY_LOCAL
+# issue-0045 Task 6.3（SCN-007，2026-11-27）：server 模式下 agent 的 shell 在 opencode-server 裡跑，
+# 模型用 `wukong schedule add-turn` 建的排程要寫進入口與 schedulerd 讀的同一份記憶庫。少了 /data
+# 或 WUKONG_MEMORY_DB，排程會寫進容器自己的預設資料庫：模型回「已建立」，排程卻永遠不執行。
+python3 - "$compose_file" "$release_compose" <<'PY_SERVER_MEMORY'
+import sys
+import yaml
+failed = []
+for path in sys.argv[1:]:
+    services = yaml.safe_load(open(path))["services"]
+    server = services["opencode-server"]
+    env = dict(str(i).split("=", 1) if "=" in str(i) else (str(i), None) for i in server.get("environment") or [])
+    want_db = dict(str(i).split("=", 1) for i in services["wukong-schedulerd"]["environment"] if "=" in str(i))["WUKONG_MEMORY_DB"]
+    if env.get("WUKONG_MEMORY_DB") != want_db:
+        failed.append(f"{path} opencode-server must get WUKONG_MEMORY_DB={want_db} like wukong-schedulerd")
+    if "wukong-data:/data" not in (server.get("volumes") or []):
+        failed.append(f"{path} opencode-server must mount wukong-data:/data like wukong-schedulerd")
+for line in failed:
+    print("FAIL:", line, file=sys.stderr)
+sys.exit(1 if failed else 0)
+PY_SERVER_MEMORY
 # The point is which files the installer replaces, not how the array is typed.
 # Pinning the single-line literal made a formatting change look like a contract
 # break, and — worse — it silently stopped asserting anything the moment the real
