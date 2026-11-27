@@ -270,6 +270,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | 2026-11-26 | Task 6.4 完成：評估 V2 session inbox，結論是不用它取代 scope lease，維持立即拒絕（TBD-5 已解決） |
 | 2026-11-27 | Task 6.1 完成：SCN-003 派工門檻以 opencode/big-pickle 6 題全部通過（NVIDIA 限流，依使用者指示改用 opencode 的模型）；依使用者決定，primary agent 不能改檔，shell 只能跑排程與 memoria 指令；nemotron 查找題的差距記為 TBD-9 |
 | 2026-11-27 | 規格修訂並重新核准 SCN-001：步數少於 b65b487 只要求 short 任務，tool 任務照實記錄（primary 不能改檔、建檔要派工的代價）；primary 的派工說明加上「派工後就結束這次回覆、等回報」 |
+| 2026-11-27 | Task 6.2 完成：對照 b65b487，short 任務步數 3 → 1、opencode 啟動 2 → 1，兩種任務成功率都是 7/7；tool 任務步數中位數 7（b65b487 為 4），照修訂後的 SCN-001 記錄 |
 
 ---
 **建立日期**: 2026-11-26  

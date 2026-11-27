@@ -609,8 +609,14 @@
   - 本分支兩種任務的成功率都不低於 b65b487，short 任務每回合 LLM step 數較少，本機按需模式每回合啟動一次 opencode；tool 任務的 step 數照實記錄（2026-11-27 SCN-001 修訂）；
   - step 數的取法先在 b65b487 上驗證：要量得到 planner 那一步。
 - 驗證：觀測式驗收，附反向自檢。
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成
+- 證據：[bench-v2-slim.md](bench-v2-slim.md)，原始結果在 [bench/](bench/)（2026-11-27，NVIDIA nemotron，1.5 CPU、3 GiB，各 7 回合）
+  - 反向自檢：在 b65b487 上量得到 planner（每回合 `plan` 2 步、`build` 1 步，啟動 2 次）。planner 的 session 回合後就被刪掉，所以改用 opencode.db 的 trigger 記錄步數。
+  - b65b487 與 f0ce34a 對照：
+    - short：成功率 7/7 對 7/7，步數 3 → 1，每回合啟動 opencode 2 → 1 次；
+    - tool：成功率 7/7 對 7/7，步數 4 → 中位數 7（6～10），照修訂後的 SCN-001 只記錄不設門檻。
+  - ef3f74a 時 tool 中位數 8 步，primary 派工後反覆讀檔；依使用者 2026-11-27 的決定加上「派工後就結束回覆」並修訂 SCN-001（f0ce34a）。
+  - 映像照 release workflow 的方式建（`scripts/build-image.sh`）。這個腳本遇過一個陷阱：兩個提交共用 cargo target 時，`git archive` 的檔案時間比上一次的產物舊，cargo 會不重編；解壓後改成現在的時間來修正。
 
 ### Task 6.3 — 隔離環境的端到端演練
 - 產出與範圍：`rehearsal.md`。在獨立的 Docker daemon（#44 的做法）裡，從 v0.25.1 之後的 V2 版本升級到本分支，本機按需與 server 模式各跑一輪。

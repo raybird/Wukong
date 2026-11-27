@@ -1,0 +1,14 @@
+{"image":"wukong-issue45:f0ce34a","task":"short","run":1,"turn_ms":1987,"rc":0,"bench_file":"n/a","out_bytes":3,"cpu_usec":2465485,"llm_steps":1,"steps_by_agent":{"wukong": 1},"opencode_serves":1}
+{"image":"wukong-issue45:f0ce34a","task":"short","run":2,"turn_ms":2869,"rc":0,"bench_file":"n/a","out_bytes":3,"cpu_usec":1881128,"llm_steps":1,"steps_by_agent":{"wukong": 1},"opencode_serves":1}
+{"image":"wukong-issue45:f0ce34a","task":"short","run":3,"turn_ms":2316,"rc":0,"bench_file":"n/a","out_bytes":3,"cpu_usec":1894060,"llm_steps":1,"steps_by_agent":{"wukong": 1},"opencode_serves":1}
+{"image":"wukong-issue45:f0ce34a","task":"short","run":4,"turn_ms":2638,"rc":0,"bench_file":"n/a","out_bytes":3,"cpu_usec":2030630,"llm_steps":1,"steps_by_agent":{"wukong": 1},"opencode_serves":1}
+{"image":"wukong-issue45:f0ce34a","task":"short","run":5,"turn_ms":3288,"rc":0,"bench_file":"n/a","out_bytes":3,"cpu_usec":1954774,"llm_steps":1,"steps_by_agent":{"wukong": 1},"opencode_serves":1}
+{"image":"wukong-issue45:f0ce34a","task":"short","run":6,"turn_ms":2432,"rc":0,"bench_file":"n/a","out_bytes":3,"cpu_usec":1886623,"llm_steps":1,"steps_by_agent":{"wukong": 1},"opencode_serves":1}
+{"image":"wukong-issue45:f0ce34a","task":"short","run":7,"turn_ms":5040,"rc":0,"bench_file":"n/a","out_bytes":3,"cpu_usec":2218129,"llm_steps":1,"steps_by_agent":{"wukong": 1},"opencode_serves":1}
+{"image":"wukong-issue45:f0ce34a","task":"tool","run":1,"turn_ms":162890,"rc":0,"bench_file":"ok","out_bytes":90,"cpu_usec":4273372,"llm_steps":10,"steps_by_agent":{"fixer": 4, "wukong": 6},"opencode_serves":1}
+{"image":"wukong-issue45:f0ce34a","task":"tool","run":2,"turn_ms":108176,"rc":0,"bench_file":"ok","out_bytes":90,"cpu_usec":3224102,"llm_steps":8,"steps_by_agent":{"fixer": 3, "wukong": 5},"opencode_serves":1}
+{"image":"wukong-issue45:f0ce34a","task":"tool","run":3,"turn_ms":119163,"rc":0,"bench_file":"ok","out_bytes":90,"cpu_usec":3163067,"llm_steps":7,"steps_by_agent":{"fixer": 3, "wukong": 4},"opencode_serves":1}
+{"image":"wukong-issue45:f0ce34a","task":"tool","run":4,"turn_ms":74597,"rc":0,"bench_file":"ok","out_bytes":90,"cpu_usec":2695599,"llm_steps":7,"steps_by_agent":{"fixer": 3, "wukong": 4},"opencode_serves":1}
+{"image":"wukong-issue45:f0ce34a","task":"tool","run":5,"turn_ms":68656,"rc":0,"bench_file":"ok","out_bytes":90,"cpu_usec":2967063,"llm_steps":7,"steps_by_agent":{"fixer": 3, "wukong": 4},"opencode_serves":1}
+{"image":"wukong-issue45:f0ce34a","task":"tool","run":6,"turn_ms":66846,"rc":0,"bench_file":"ok","out_bytes":90,"cpu_usec":2644566,"llm_steps":6,"steps_by_agent":{"fixer": 3, "wukong": 3},"opencode_serves":1}
+{"image":"wukong-issue45:f0ce34a","task":"tool","run":7,"turn_ms":148523,"rc":0,"bench_file":"ok","out_bytes":90,"cpu_usec":3455265,"llm_steps":7,"steps_by_agent":{"fixer": 3, "wukong": 4},"opencode_serves":1}
