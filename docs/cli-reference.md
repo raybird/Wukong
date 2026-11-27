@@ -113,7 +113,7 @@ wukong-schedulerd
 - Cron 使用 5 欄格式：`minute hour day-of-month month day-of-week`。
 - V1 以 UTC 評估 cron，避免容器與 host timezone 不一致。
 - 多個 daemon 同時執行時會用 DB lease claim job，避免同一輪 due job 被重複執行。回合執行中會持續續租，執行時間超過 `--lease-secs` 也不會被另一個 daemon 或 `trigger` 重複執行；同一次掃描取得、還在排隊的 job，輪到時會先確認 lease 還在自己手上，等待期間已被別人取得執行，或被停用、重新啟用、刪除的就跳過。執行的行程中止後就不再續租，lease 照原本的時間到期。
-- 執行中的 run 訊息是進度，例如 `進行中：悟空·fixer，已執行 312 秒`，換階段時更新，之後至少每 30 秒更新一次；結束時改成最終結果。回合一開始是「悟空」（primary agent 在處理），派工給 subagent 後顯示最近派出的那一個（2026-11-26，#45）。Turn 回合失敗時，訊息開頭標出失敗的階段，例如 `悟空·fixer 失敗，已執行 1203 秒：<原錯誤>`。
+- 執行中的 run 訊息是進度，例如 `進行中：悟空·fixer，已執行 312 秒`，換階段時更新，之後至少每 30 秒更新一次；結束時改成最終結果。回合一開始是「悟空」（primary agent 在處理），派工給 subagent 後顯示最近派出、還沒回報的那一個，subagent 都回報後回到「悟空」（2026-11-26，#45；回報後回到悟空自 2026-11-27 起）。Turn 回合失敗時，訊息開頭標出失敗的階段，例如 `悟空·fixer 失敗，已執行 1203 秒：<原錯誤>`。
 - Turn job 的 `--scope` 是擁有者：Telegram 回送與聊天紀錄依它決定。回合本身的記憶、召回與 opencode session 在 `agent:schedule-<job id>`，同一個排程的多次觸發共用、不同排程互不相通，也不讀寫擁有者的記憶。要看排程回報過什麼，用 `schedule runs --id ID`。
 - Turn job 的模型：有指定時，該排程每次執行都用它，不受預設模型（`agent.default_model`，Web Settings 或 `/set_models` 設定）變更影響；沒指定時用執行當下的預設模型。套用範圍跟預設模型相同：回合本身、派出的 subagent，以及空輸出的補救重送。升級前建立的排程都視為沒指定。
 - Scheduled turn 需要底層 OpenCode provider/auth 已設定；Docker 模式會使用共用的 `opencode-config` volume。

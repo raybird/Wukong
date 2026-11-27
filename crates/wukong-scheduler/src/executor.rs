@@ -100,13 +100,20 @@ pub async fn execute_job<B: AiBackend + QuestionResponder + Sync>(
     execute_job_observed(ctx, job, &mut |_| {}).await
 }
 
-/// 同 [`execute_job`]，另外在 Turn 回合派出 subagent 時呼叫 `on_role`。
+/// Turn 回合裡 subagent 的進出，用來推進排程的階段。
+#[derive(Debug, Clone, Copy)]
+enum SubagentChange {
+    Dispatched(Role),
+    Reported(Role),
+}
+
+/// 同 [`execute_job`]，另外在 Turn 回合派出 subagent、subagent 回報時呼叫 `on_change`。
 async fn execute_job_observed<B: AiBackend + QuestionResponder + Sync>(
     ctx: &ExecutionContext<'_, B>,
     job: &Job,
-    on_role: &mut dyn FnMut(Role),
+    on_change: &mut dyn FnMut(SubagentChange),
 ) -> ExecutionOutput {
-    match execute_job_inner(ctx, job, on_role).await {
+    match execute_job_inner(ctx, job, on_change).await {
         Ok(message) => ExecutionOutput {
             success: true,
             message,
@@ -260,36 +267,52 @@ pub async fn run_claimed_job<B: AiBackend + QuestionResponder + Sync>(
 /// 排程 run 目前的階段（issue-0013），寫進執行中的 run 訊息，以及失敗訊息的開頭。
 enum Phase {
     Maintenance,
-    /// 2026-11-26（#45）：primary agent（悟空）在處理；planner 已移除，回合一開始就是這個階段。
-    Primary,
-    /// primary agent 最近一次派工的 subagent（#45 SCN-002，取代逐棒的「第 k 棒」）。
-    Subagent(Role),
+    /// 2026-11-26（#45 SCN-002，取代逐棒的「第 k 棒」）：Turn 回合。`running` 是派出後還沒回報的
+    /// subagent，依派出順序；空的時候是 primary agent（悟空）在處理，否則顯示最近派出的那一個。
+    /// 2026-11-27（review-65e960a）起 subagent 回報後就移出，之後的失敗記成悟空失敗。
+    Turn {
+        running: Vec<Role>,
+    },
 }
 
 impl Phase {
     fn initial(job: &Job) -> Self {
         match job.kind {
-            JobKind::Turn { .. } => Phase::Primary,
+            JobKind::Turn { .. } => Phase::Turn {
+                running: Vec::new(),
+            },
             JobKind::Maintenance { .. } => Phase::Maintenance,
         }
     }
 
-    fn advance(&mut self, role: Role) {
-        *self = Phase::Subagent(role);
+    fn apply(&mut self, change: SubagentChange) {
+        let Phase::Turn { running } = self else {
+            return;
+        };
+        match change {
+            SubagentChange::Dispatched(role) => running.push(role),
+            SubagentChange::Reported(role) => {
+                if let Some(i) = running.iter().rposition(|r| *r == role) {
+                    running.remove(i);
+                }
+            }
+        }
     }
 
     fn label(&self) -> String {
         match self {
             Phase::Maintenance => "維護作業".to_string(),
-            Phase::Primary => "悟空".to_string(),
-            Phase::Subagent(role) => format!("悟空·{}", role.name()),
+            Phase::Turn { running } => match running.last() {
+                Some(role) => format!("悟空·{}", role.name()),
+                None => "悟空".to_string(),
+            },
         }
     }
 
     /// 角色名稱是英文，後面接「失敗」要隔一個空白。
     fn failed(&self) -> String {
         match self {
-            Phase::Subagent(_) => format!("{} 失敗", self.label()),
+            Phase::Turn { running } if !running.is_empty() => format!("{} 失敗", self.label()),
             _ => format!("{}失敗", self.label()),
         }
     }
@@ -313,11 +336,11 @@ async fn execute_with_heartbeat<B: AiBackend + QuestionResponder + Sync>(
     started_at: i64,
 ) -> ExecutionOutput {
     let elapsed = || chrono::Utc::now().timestamp() - started_at;
-    let (tx, mut roles) = tokio::sync::mpsc::unbounded_channel();
-    let mut on_role = move |role| {
-        let _ = tx.send(role);
+    let (tx, mut changes) = tokio::sync::mpsc::unbounded_channel();
+    let mut on_change = move |change| {
+        let _ = tx.send(change);
     };
-    let work = execute_job_observed(ctx, job, &mut on_role);
+    let work = execute_job_observed(ctx, job, &mut on_change);
     tokio::pin!(work);
 
     let mut phase = Phase::initial(job);
@@ -335,8 +358,8 @@ async fn execute_with_heartbeat<B: AiBackend + QuestionResponder + Sync>(
     let mut output = loop {
         tokio::select! {
             output = &mut work => break output,
-            Some(role) = roles.recv() => {
-                phase.advance(role);
+            Some(change) = changes.recv() => {
+                phase.apply(change);
                 report(progress(&phase)).await;
             }
             _ = ticker.tick() => {
@@ -350,9 +373,9 @@ async fn execute_with_heartbeat<B: AiBackend + QuestionResponder + Sync>(
             }
         }
     };
-    // subagent 可能剛派出回合就失敗，那次 on_role 還留在 channel 裡。
-    while let Ok(role) = roles.try_recv() {
-        phase.advance(role);
+    // subagent 可能剛派出或剛回報，回合就失敗，那次變化還留在 channel 裡。
+    while let Ok(change) = changes.try_recv() {
+        phase.apply(change);
     }
     if !output.success && !matches!(phase, Phase::Maintenance) {
         output.message = format!(
@@ -368,7 +391,7 @@ async fn execute_with_heartbeat<B: AiBackend + QuestionResponder + Sync>(
 async fn execute_job_inner<B: AiBackend + QuestionResponder + Sync>(
     ctx: &ExecutionContext<'_, B>,
     job: &Job,
-    on_role: &mut dyn FnMut(Role),
+    on_change: &mut dyn FnMut(SubagentChange),
 ) -> Result<String, WukongError> {
     match &job.kind {
         // job 的 scope 是擁有者，回送與聊天紀錄用它；回合本身在排程自己的 scope 執行。
@@ -379,7 +402,7 @@ async fn execute_job_inner<B: AiBackend + QuestionResponder + Sync>(
                 cfg.apply_default_model(model.as_deref());
             }
             let prompt = format!("{prompt}{SCHEDULED_TURN_AUTONOMY_HINT}");
-            run_unattended_turn(ctx, &cfg, &prompt, on_role).await
+            run_unattended_turn(ctx, &cfg, &prompt, on_change).await
         }
         JobKind::Maintenance { scope, task } => match task {
             MaintenanceTask::Snapshot => memory_snapshot(ctx.memory, scope.as_deref()).await,
@@ -409,16 +432,32 @@ async fn run_unattended_turn<B: AiBackend + QuestionResponder + Sync>(
     ctx: &ExecutionContext<'_, B>,
     cfg: &GatewayConfig,
     prompt: &str,
-    on_role: &mut dyn FnMut(Role),
+    on_change: &mut dyn FnMut(SubagentChange),
 ) -> Result<String, WukongError> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut on_event = |event: StreamEvent| {
-        if let StreamEvent::QuestionRequest(request) = event {
+    // 派出由 run_turn 的 on_role 通知；回報只在事件裡（run_turn 照樣把事件轉給入口）。兩個回呼都
+    // 在 run_turn 裡同步呼叫、不會重疊，所以共用同一個 on_change。
+    let on_change = std::cell::RefCell::new(on_change);
+    let mut on_event = |event: StreamEvent| match event {
+        StreamEvent::QuestionRequest(request) => {
             let _ = tx.send(request);
         }
+        StreamEvent::SubagentReported { agent, .. } => {
+            if let Some(role) = Role::all().into_iter().find(|role| role.name() == agent) {
+                (on_change.borrow_mut())(SubagentChange::Reported(role));
+            }
+        }
+        _ => {}
     };
-    let turn =
-        wukong_runtime::run_turn(ctx.memory, ctx.backend, cfg, prompt, &mut on_event, on_role);
+    let mut on_role = |role| (on_change.borrow_mut())(SubagentChange::Dispatched(role));
+    let turn = wukong_runtime::run_turn(
+        ctx.memory,
+        ctx.backend,
+        cfg,
+        prompt,
+        &mut on_event,
+        &mut on_role,
+    );
     tokio::pin!(turn);
 
     let mut notes: Vec<String> = Vec::new();
@@ -1548,6 +1587,65 @@ mod tests {
         async fn reject_question(&self, _: &str, _: &str) -> Result<(), GatewayError> {
             unreachable!("這個 backend 不會送出詢問")
         }
+    }
+
+    /// 派出 fixer、fixer 回報之後，primary 才失敗。
+    struct ReportThenFailBackend;
+    impl AiBackend for ReportThenFailBackend {
+        async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+            Err(timed_out())
+        }
+
+        async fn run_streaming(
+            &self,
+            req: AgentRequest,
+            on_event: &mut dyn FnMut(StreamEvent),
+        ) -> Result<AgentResponse, GatewayError> {
+            on_event(StreamEvent::SubagentStarted {
+                agent: "fixer".to_string(),
+            });
+            on_event(StreamEvent::SubagentReported {
+                agent: "fixer".to_string(),
+                output: "已建立 hello.txt".to_string(),
+            });
+            self.run(req).await
+        }
+    }
+    impl QuestionResponder for ReportThenFailBackend {
+        async fn allow_permission_once(&self, _: &str, _: &str) -> Result<(), GatewayError> {
+            unreachable!("這個 backend 不會送出詢問")
+        }
+
+        async fn reject_question(&self, _: &str, _: &str) -> Result<(), GatewayError> {
+            unreachable!("這個 backend 不會送出詢問")
+        }
+    }
+
+    // review-65e960a NICE TO HAVE 9（2026-11-27）：subagent 回報之後是 primary 在處理，階段回到
+    // 「悟空」；之後的失敗不能記成 fixer 失敗。
+    #[tokio::test]
+    async fn the_phase_returns_to_wukong_after_the_subagent_reports() {
+        let memory = open_memory().await;
+        let store = open_store().await;
+        let cfg = cfg("project:Base");
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &ReportThenFailBackend,
+            base_config: &cfg,
+            permission_policy: PermissionPolicy::Reject,
+        };
+        let job = claimed_turn(&store, 300).await;
+
+        run_claimed_job(&store, &ctx, &job, "worker-a", 300)
+            .await
+            .unwrap();
+
+        let run = only_run(&store, &job).await;
+        assert!(
+            run.message.starts_with("悟空失敗，已執行 "),
+            "{}",
+            run.message
+        );
     }
 
     // #45 SCN-002：排程的執行訊息顯示目前的角色「悟空·fixer」，不再寫「第 k 棒」。
