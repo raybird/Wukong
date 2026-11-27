@@ -22,7 +22,7 @@ GitHub issue 內文「留在 Wukong」清單裡的行為維持不變。正式部
 
 ## 現況
 
-- **現行 review**: review-65e960a.md
+- **現行 review**: review-623c436.md
 
 ## 快速導覽
 
@@ -284,6 +284,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | 2026-11-27 | 完整交付範圍 f9bc86e..65e960a 獨立審查 PASS（review-65e960a.md，無 MUST FIX，SHOULD FIX 6 項、NICE TO HAVE 7 項）；核准 commit 回填推導出的基線 f0ce34a |
 | 2026-11-27 | 使用者對審查建議的決定記為 TBD-11、TBD-12；Task 6.6 修正選修的六項（64e95b8、0c54bf0、a091c4f 與本次文件提交），CI 三道全綠；PASS 的範圍不含這些修正，TBD-10 補跑後送增量覆審 |
 | 2026-11-27 | TBD-10 已解決：big-pickle 額度未恢復，依使用者指示改用 NVIDIA nemotron-3.5-super-vl-120b-a12b 以最終定義補跑完整一輪，6 題全部通過（dispatch-eval.md 第 7 輪）；接著送 d900bda 之後的增量覆審 |
+| 2026-11-27 | 增量覆審 65e960a..623c436 PASS（review-623c436.md，無 MUST FIX、SHOULD FIX，NICE TO HAVE 4 項）；上一份 PASS 選修的六項與 TBD-10、TBD-11 都確認處理完成 |
 
 ---
 **建立日期**: 2026-11-26  
