@@ -11,6 +11,26 @@
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-11-28
+
+### ⚠️ 升級注意（Breaking）
+
+- **共用 server 模式（設了 `WUKONG_AGENT_SERVER_URL`）必須設定密碼。** 沒設時三個入口啟動就報錯。用
+  `install.sh --upgrade` 升級時，installer 會先備份 `.env` 再自動產生一組；自己用 compose 部署的，在 `.env`
+  加上：
+
+  ```dotenv
+  WUKONG_AGENT_SERVER_PASSWORD=<openssl rand -hex 24 的輸出>
+  ```
+
+- **只支援 OpenCode V2。** Docker 映像已內建 V2（2.3.2），不用另外處理。binary 模式要自己把 PATH 上的
+  `opencode` 換成 V2，步驟與備份方式見 `docs/installation.md`「Binary 模式換用 OpenCode V2」；還是 1.x 時，
+  第一個回合就會報錯。
+- **Docker 升級會先停服務、備份 `opencode-state`。** V2 第一次啟動會就地遷移 `opencode.db`，而且是單向的，
+  所以這次升級會花比較久；備份放在 `.wukong-backups/`，`--rollback` 時一起還原。
+- **悟空不再自己改檔。** 建檔、改程式、跑測試一律派給 subagent，這類任務比以前多幾步、慢一些；
+  規劃偏好與 Web 的技能偏好頁已移除。
+
 ### Changed
 
 - **每個回合只呼叫一次悟空，規劃、技能與壓縮交給 OpenCode V2。** 以前每回合先跑一次 planner 選角色與技能，
@@ -1166,7 +1186,8 @@ server 模式補回那個 CLI 免費獲得的週期性重置，同時保留暖�
   不安全綁定（`0.0.0.0` + 空 token）啟動即拒絕（fail-closed，可用
   `WUKONG_WEB_ALLOW_INSECURE=1` 覆寫）；Telegram callback 加白名單檢查。
 
-[Unreleased]: https://github.com/raybird/Wukong/compare/v0.25.1...HEAD
+[Unreleased]: https://github.com/raybird/Wukong/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/raybird/Wukong/compare/v0.25.1...v0.26.0
 [0.25.1]: https://github.com/raybird/Wukong/compare/v0.25.0...v0.25.1
 [0.25.0]: https://github.com/raybird/Wukong/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/raybird/Wukong/compare/v0.23.0...v0.24.0
