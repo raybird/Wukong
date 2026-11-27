@@ -34,10 +34,20 @@ const RETIRED: &[(&str, &str)] = &[
         "65511d2",
         include_str!("../assets/retired-agents-md/65511d2.md"),
     ),
+    // 2026-11-27（review-65e960a SHOULD FIX 2）：#45 第一版新範本仍要 agent 自己跑測試與指令，
+    // primary 的權限收緊後會先被擋下再派工，多花一次模型呼叫。
+    (
+        "828fe85",
+        include_str!("../assets/retired-agents-md/828fe85.md"),
+    ),
 ];
 
 /// 改過的 AGENTS.md 裡出現這些字樣時，回報對應的段落已過時。
 const OUTDATED: &[(&str, &str)] = &[
+    (
+        "你目前作為孫悟空",
+        "人格那一句「你目前作為孫悟空……」：人格改由 Wukong 管理的 agent 定義（取自 SOUL.md）提供，這句可以刪掉",
+    ),
     (
         "[技能規範指引]",
         "「技能動態加載機制」：prompt 已不再附技能規範指引，技能改由 OpenCode 的 skill 機制提供",
@@ -117,6 +127,15 @@ mod tests {
         assert!(!CURRENT.contains("SKILL.md"));
     }
 
+    // review-65e960a SHOULD FIX 2：主要助手不能改檔、終端機只能跑排程與記憶指令（agent_assets），
+    // 範本不能再叫 agent 自己跑測試或 `command -v` 檢查，否則每次都先被權限擋下才派工。
+    #[test]
+    fn the_new_template_leaves_files_and_commands_to_subagents() {
+        assert!(CURRENT.contains("派給 subagent"), "{CURRENT}");
+        assert!(!CURRENT.contains("必須主動執行測試"), "{CURRENT}");
+        assert!(!CURRENT.contains("只有 `memoria` 指令存在時"), "{CURRENT}");
+    }
+
     #[test]
     fn every_retired_template_is_backed_up_and_replaced() {
         for (sha, text) in RETIRED {
@@ -154,8 +173,18 @@ mod tests {
         let AgentsMdMigration::Customized { outdated } = outcome else {
             panic!("{outcome:?}");
         };
-        assert_eq!(outdated.len(), 1, "{outdated:?}");
-        assert!(outdated[0].contains("技能動態加載機制"));
+        // review-65e960a SHOULD FIX 3（2026-11-27）：人格那一句也要提醒，CHANGELOG 寫了會提醒。
+        assert_eq!(outdated.len(), 2, "{outdated:?}");
+        assert!(
+            outdated.iter().any(|note| note.contains("人格")),
+            "{outdated:?}"
+        );
+        assert!(
+            outdated
+                .iter()
+                .any(|note| note.contains("技能動態加載機制")),
+            "{outdated:?}"
+        );
         assert!(fs::read_dir(temp.path()).unwrap().all(|e| !e
             .unwrap()
             .file_name()
