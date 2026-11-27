@@ -627,8 +627,16 @@
 - 驗收編號：SCN-001、SCN-002、SCN-004～SCN-007、SCN-009（端到端支援）
 - 完成判準：每一項都有實際回合的紀錄；沒跑到的項目照實寫出原因。
 - 驗證：垂直切片。最需要驗證的是升級後各入口的整合；單元測試與探測都不涵蓋部署之後的組合。
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成（2026-11-27）
+- 證據：[rehearsal.md](rehearsal.md)
+  - 環境：dind 裡從假發版 rc.44（b65b487）以本分支的 installer 升級到 rc.45（f0ce34a），再到 rc.46（e70e4e2）；模型 NVIDIA nemotron，只用合成提示詞。
+  - SCN-009：舊範本 AGENTS.md 先備份成 `AGENTS.md.bak-65511d2` 再換新，`.opencode/agents` 6 份定義、`.opencode/skills` 8 個技能；兩種模式問「你是誰」都以孫悟空回答。全新部署與改過的 AGENTS.md 沿用 Task 2.3 的證據。
+  - SCN-004：rc.44 建立的 session 在升級後、切到 server 模式後都答對暗號，prompt 沒有補上一回合。
+  - SCN-002：兩種模式的建檔都派給 fixer，SSE 有 `role: fixer` 與 fixer 的 step；排程執行中的訊息是「進行中：悟空」。
+  - SCN-007：本機模式以對話建立的排程擁有者正確。server 模式在 rc.45 建進 opencode-server 自己的資料庫、永遠不執行（v0.25.1 起的既有問題）；使用者 2026-11-27 選在 #45 修，e70e4e2 讓 opencode-server 共用記憶庫，rc.46 上以對話建立的排程由 schedulerd 執行成功。
+  - SCN-005：server 模式的除錯任務中，primary 以 `skill` 工具載入 systematic-debugging 與 test-driven-development，Web 的 SSE 有 `tool: skill`。本機模式 1 次沒載入（題目明講 TDD，模型直接照做）、1 次被 429 打斷。
+  - SCN-006：升級後所有回合的 user message 都沒有角色卡與固定區塊，`[相關記憶]`、`[無人值守排程]`、`[其他回合正在…]` 照常附加。
+  - 未執行：Telegram（部署沒有 bot token，沿用 Task 5.1 的 mock transport 證據）。
 
 ### Task 6.4 — inbox 評估
 - 產出與範圍：在實作計畫寫評估結論：V2 session inbox（delivery 設成 queue 或 steer）能否取代或簡化 scope lease 的協調，以及會改變哪些可觀察行為。附 1 次最小真實請求，確認 queue 的行為。
