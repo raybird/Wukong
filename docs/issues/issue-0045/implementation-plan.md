@@ -773,6 +773,24 @@
   - NICE 5：Task 6.8 的「`Job.cancelSession` 全檔只出現一次」改成「只有一處呼叫」；Task 6.8 的驗收編號拿掉 SCN-012（它的 Gherkin 沒寫取消中斷）。
   - CI 三道（2026-11-27）：`cargo fmt --all -- --check` 通過；`cargo clippy --all-targets --locked -- -D warnings` 通過；`cargo test --workspace --locked --no-fail-fast` 782 passed、0 failed、14 ignored；gateway lib 連跑三次都是 194 passed。
 
+### Task 6.10 — 增量覆審建議修正（review-794daea）
+- 產出與範圍：使用者 2026-11-27 選修的 SHOULD FIX 1（清單查詢失敗的原因要留在 log 裡）、併入它的 NICE 1（讀回應的程式與 `send_json` 共用）、NICE 2（TBD-15 影響欄）；NICE 3 記為已知差距（README TBD-17）。
+- 相依：6.9、review-794daea
+- 驗收編號：SCN-002；修正既有行為，不新增驗收
+- 完成判準：清單查詢失敗的錯誤帶出 source 鏈裡的原因（例如逾時）；讀回應、檢查狀態、解析 JSON 只有一份；CI 三道全綠。
+- 驗證：gateway 走紅燈到綠燈；`send_json` 的七個呼叫者以 gateway 全部測試前後都通過證明行為不變；文件以靜態核對。
+- 狀態：✅ 已完成（2026-11-27）
+- 證據：
+  - 讀回應那段抽成模組層級的 `request_json`（送出、讀 body、非 2xx 與不是 JSON 都算失敗，錯誤經 `http_error` 展開 source 鏈）：
+    - `send_json` 改成授權後呼叫它；
+    - `ServerHandle::background_jobs` 改回傳 `GatewayError`，加上單次逾時後呼叫它。
+  - 新測試 `a_failed_job_lookup_says_why`：清單查詢卡住、100ms 逾時。
+    - 改之前錯誤只有 `error sending request for url (…)`（紅燈）；
+    - 改之後含 `background_jobs` 與 `timed out`。
+  - NICE 2：README TBD-15 的影響欄改成「SCN-002 與 #44 起取消時中斷 session 的既有保障」，與 Task 6.8 一致。
+  - gateway lib 連跑三次都是 195 passed。
+  - CI 三道（2026-11-27）：`cargo fmt --all -- --check` 通過；`cargo clippy --all-targets --locked -- -D warnings` 通過；`cargo test --workspace --locked --no-fail-fast` 783 passed、0 failed、14 ignored。
+
 ## 測試策略
 
 - **真實模型**：派工、技能遵循、追問、人格，unit test 證明不了，以接真實 V2 加真實模型（TBD-6）的整合測試或演練腳本驗證（`#[ignore]`，與 #44 的 `managed_actual` 相同的做法）。同一題重複執行，記錄每次的結果。

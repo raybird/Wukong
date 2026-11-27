@@ -255,8 +255,9 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | TBD-12 | review-65e960a 的 SHOULD FIX 與 NICE TO HAVE 怎麼處理 | 已解決（2026-11-27，使用者決定）：修正 SHOULD FIX 1（背景工作只算 subagent）、2（工作區範本改成派工）、3（人格那句的過時提醒）、6（原始派工紀錄進版控），NICE TO HAVE 9（排程階段回報後回到悟空）、13（文件小修），見計畫 Task 6.6；SHOULD FIX 4、5 由 TBD-11、TBD-10 處理。NICE TO HAVE 7（`ObservedStep.skill_name` 固定是 None）、8（固定提示有兩條組裝路徑）、10 併入 13 的文件說明、11（只有搶先改寫定義的入口會等 server 重新載入）、12（subagent 被限流時回合仍算成功）沒有選，留作已知差距 | 沒選的各項不影響驗收；修正後依「補跑後增量覆審」的決定，TBD-10 補跑後送增量覆審 |
 | TBD-13 | review-623c436 的 NICE TO HAVE 怎麼處理 | 已解決（2026-11-27，使用者決定）：修正 1（Telegram 泡泡回報後回到悟空；查證時發現 Web 也一樣，一併修正）與 4（README 凍結內容兩處），見計畫 Task 6.7；2（新的工作區 AGENTS.md 範本沒有真實模型證據：派工評估的工作區不放 AGENTS.md）與 3（用名稱找角色的寫法有兩份：`executor.rs`、`turn.rs`，目前一致）記為已知差距 | 2、3 不影響驗收；修正後再送增量覆審 |
 | TBD-14 | review-4ccfcec 的 NICE TO HAVE 怎麼處理 | 已解決（2026-11-27，使用者選「三項都記入待確認」）：1（CHANGELOG、docs/entrypoints.md 寫回報後回到「悟空」，Telegram 與 Web 實際顯示「🐵 思考中…」，只有排程字面是「悟空」）、2（「回報後取目前角色」的三行在 Telegram 與 Web 各一份，可讓 `ActiveSubagents::reported` 回傳目前角色）、3（`wukong-orchestrator` 的模組說明與 AGENTS.md 的 crate 表沒提到 `ActiveSubagents`）都記為已知差距，不修 | 都不影響行為與驗收；PASS 沿用 review-4ccfcec |
-| TBD-15 | PR #47 第三方審查（[留言](https://github.com/raybird/Wukong/pull/47#issuecomment-7214581086)，Reviewed HEAD cf47307，CONDITIONAL PASS）的 P2-1、P2-2、P3 怎麼處理 | 已解決（2026-11-27，使用者決定）：P2-1 查背景工作失敗時有限重試，仍失敗以目前的回覆收尾；P2-2 查證 V2 2.3.2 中斷父 session 不會取消背景 subagent，取消時改從背景工作清單補中斷子 session；修正見計畫 Task 6.8，之後送增量覆審，再回覆 PR 請第三方做第二輪。P3（agent 定義同步狀態只在單一行程內）就是 TBD-12 沒選修的第 11 項，維持已知差距 | SCN-002、SCN-012 的既有保障補強，不新增驗收 |
+| TBD-15 | PR #47 第三方審查（[留言](https://github.com/raybird/Wukong/pull/47#issuecomment-7214581086)，Reviewed HEAD cf47307，CONDITIONAL PASS）的 P2-1、P2-2、P3 怎麼處理 | 已解決（2026-11-27，使用者決定）：P2-1 查背景工作失敗時有限重試，仍失敗以目前的回覆收尾；P2-2 查證 V2 2.3.2 中斷父 session 不會取消背景 subagent，取消時改從背景工作清單補中斷子 session；修正見計畫 Task 6.8，之後送增量覆審，再回覆 PR 請第三方做第二輪。P3（agent 定義同步狀態只在單一行程內）就是 TBD-12 沒選修的第 11 項，維持已知差距 | SCN-002（派工後等 subagent 回報）與 #44 起取消時中斷 session 的既有保障補強，不新增驗收 |
 | TBD-16 | review-364cebf 的 NICE TO HAVE 怎麼處理 | 已解決（2026-11-27，使用者決定）：修正 1（每次查背景工作最多等 10 秒）、2（取消時去重補測試）、3（等待與取消共用一份清單查詢，取消也看 HTTP 狀態）、5（Task 6.8 措辭兩處），見計畫 Task 6.9；4（需決策：子 session 結束時回報會喚醒 primary，取消之後 primary 可能再跑一次；被中斷的子 session 會不會送回報，原始碼看不出定論，#45 起就有）記為已知差距 | 不影響驗收；修正後再送增量覆審 |
+| TBD-17 | review-794daea 的 SHOULD FIX 與 NICE TO HAVE 怎麼處理 | 已解決（2026-11-27，使用者決定）：修正 SHOULD FIX 1 與併入它的 NICE 1（清單查詢的錯誤原因被 `err.to_string()` 丟掉；讀回應的程式與 `send_json` 重複），以及 NICE 2（TBD-15 影響欄拿掉 SCN-012），見計畫 Task 6.10；NICE 3（假 server 沒有「header 回了、body 卡住」的情境；reqwest 單次逾時涵蓋到 body 讀完）記為已知差距 | 不影響驗收；修正後再送增量覆審 |
 
 ## Timeline
 
@@ -296,6 +297,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | 2026-11-27 | 增量覆審 4ccfcec..364cebf PASS（review-364cebf.md，無 MUST FIX、SHOULD FIX，NICE TO HAVE 5 項，其中 1 項需決策） |
 | 2026-11-27 | 使用者對 review-364cebf 建議的決定記為 TBD-16；Task 6.9 修正 NICE TO HAVE 1、2、3、5，再送增量覆審 |
 | 2026-11-27 | 增量覆審 364cebf..794daea PASS（review-794daea.md，無 MUST FIX，SHOULD FIX 1 項、NICE TO HAVE 3 項） |
+| 2026-11-27 | 使用者對 review-794daea 建議的決定記為 TBD-17；Task 6.10 修正 SHOULD FIX 1、NICE TO HAVE 1、2，再送增量覆審 |
 
 ---
 **建立日期**: 2026-11-26  

@@ -163,24 +163,15 @@ impl ServerHandle {
 
     /// 查一次這個 session 與它的子 session 的背景工作清單（`GET /api/experimental/job`），最多等
     /// `jobs_lookup_timeout`。非 2xx 與不是 JSON 的回應都算失敗。
-    async fn background_jobs(&self, session_id: &str) -> Result<Value, String> {
+    async fn background_jobs(&self, session_id: &str) -> Result<Value, GatewayError> {
         let url = format!(
             "{}/api/experimental/job?sessionID={session_id}&descendants=true",
             self.base_url
         );
-        let response = self
+        let request = self
             .authorize(self.client.get(url))
-            .timeout(self.jobs_lookup_timeout)
-            .send()
-            .await
-            .map_err(|err| err.to_string())?;
-        let status = response.status();
-        let text = response.text().await.map_err(|err| err.to_string())?;
-        if !status.is_success() {
-            return Err(format!("returned {status}: {text}"));
-        }
-        serde_json::from_str(&text)
-            .map_err(|err| format!("returned invalid JSON: {err}; body: {text}"))
+            .timeout(self.jobs_lookup_timeout);
+        request_json("background_jobs", request).await
     }
 
     async fn interrupt(&self, session_id: &str) -> Result<u16, reqwest::Error> {
@@ -188,6 +179,30 @@ impl ServerHandle {
         let response = self.authorize(self.client.post(url)).send().await?;
         Ok(response.status().as_u16())
     }
+}
+
+/// 送出已授權的請求並讀回 JSON。非 2xx 與不是 JSON 的回應都算失敗；送出與讀取的錯誤經
+/// [`http_error`] 展開原因。
+async fn request_json(
+    phase: &'static str,
+    request: reqwest::RequestBuilder,
+) -> Result<Value, GatewayError> {
+    let response = request.send().await.map_err(|err| http_error(phase, err))?;
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|err| http_error(phase, err))?;
+    if !status.is_success() {
+        return Err(GatewayError::AgentFailed {
+            code: Some(status.as_u16() as i32),
+            stderr: format!("opencode server {phase} returned {status}: {text}"),
+        });
+    }
+    serde_json::from_str(&text).map_err(|err| GatewayError::AgentFailed {
+        code: None,
+        stderr: format!("opencode server {phase} returned invalid JSON: {err}; body: {text}"),
+    })
 }
 
 fn authorize(request: reqwest::RequestBuilder, password: Option<&str>) -> reqwest::RequestBuilder {
@@ -757,23 +772,7 @@ impl OpencodeServerBackend {
         phase: &'static str,
         request: reqwest::RequestBuilder,
     ) -> Result<Value, GatewayError> {
-        let request = self.authorize(request);
-        let response = request.send().await.map_err(|err| http_error(phase, err))?;
-        let status = response.status();
-        let text = response
-            .text()
-            .await
-            .map_err(|err| http_error(phase, err))?;
-        if !status.is_success() {
-            return Err(GatewayError::AgentFailed {
-                code: Some(status.as_u16() as i32),
-                stderr: format!("opencode server {phase} returned {status}: {text}"),
-            });
-        }
-        serde_json::from_str(&text).map_err(|err| GatewayError::AgentFailed {
-            code: None,
-            stderr: format!("opencode server {phase} returned invalid JSON: {err}; body: {text}"),
-        })
+        request_json(phase, self.authorize(request)).await
     }
 
     async fn send_empty(
@@ -2035,6 +2034,26 @@ mod tests {
             fake.requests().iter().filter(|r| *r == JOBS_QUERY).count(),
             3
         );
+    }
+
+    // review-794daea SHOULD FIX 1（2026-11-27）：查詢失敗的原因要留在 log 裡。reqwest 的 Display 只有
+    // 「error sending request」，逾時、連線被拒都長這樣，要展開 source 鏈才分得出來（`http_error`）。
+    #[tokio::test]
+    async fn a_failed_job_lookup_says_why() {
+        let fake = fake_v2::FakeV2::start().await;
+        fake.script_jobs(vec![json!("hang")]);
+        let mut backend = v2_backend(&fake);
+        backend.jobs_lookup_timeout = std::time::Duration::from_millis(100);
+
+        let err = backend
+            .server_handle()
+            .background_jobs("ses_fake1")
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("background_jobs"), "{err}");
+        assert!(err.contains("timed out"), "{err}");
     }
 
     /// 派工樣本到 fixer 的子 session 建立之後（含）的前 `extra` 則事件。
