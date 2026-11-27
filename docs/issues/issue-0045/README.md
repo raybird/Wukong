@@ -250,7 +250,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | TBD-7 | SCN-006 的「檔案互動規則」：Telegram 的產出目錄每回合不同（`artifacts/<scope>/<turn_id>`），不能整段放進 agent 定義 | 已解決（2026-11-26，使用者選「規則進定義，只留路徑（建議）」）：規則文字寫進 agent `wukong` 的定義，user message 只留一行 `[產出目錄] <路徑>`，視為和召回記憶一樣的動態區塊；SCN-006 的「檔案互動規則」指規則文字。沒有採用的做法：每個 scope 固定一個產出目錄（要改檔案回傳流程）、路徑也放 entry（每回合在對話紀錄多一則通知） | Task 4.2 的外迴圈檢查 user message 時，產出目錄那一行屬於動態區塊；關聯 SCN-006 |
 | TBD-8 | 常駐 V2 server 在 agent 定義改寫後幾十毫秒內送出的回合，仍用舊定義（Task 4.2 外迴圈：WUKONG_MEMORIA_HINT 開關的答案相反） | 已解決（2026-11-26）：使用者選「等 server 讀到再送」。入口改寫過 primary agent 的定義時，下一個回合送 prompt 前輪詢 /api/agent，等 wukong 的 system 與新內文相同才送，最多 5 秒，逾時警告後照送；按需本機模式與 CLI backend 不用等 | 只影響常駐 server 模式、緊接在定義改寫之後的回合（CLI 單次執行、入口重啟時積壓的訊息或到期的排程）；SCN-008 |
 | TBD-9 | NVIDIA nemotron 上，查找題（讀程式碼、寫 README）只有 1/3 派給 librarian：primary 自己讀完模組、寫好整份 README，只把存檔派給 fixer（[dispatch-eval.md](dispatch-eval.md) 第 3、4 輪） | 已解決（2026-11-27，使用者選「記為已知差距，不修」）：這是 nemotron 的模型行為，文件內容仍由悟空產生、只有存檔派錯角色，不影響結果；big-pickle 上 3/3 正確 | SCN-003 以 big-pickle 通過（使用者 2026-11-27 指示 NVIDIA 限流時改用 opencode 的模型）；nemotron 的這個差距沒有修。要不要再改措辭（例如「文件內容由 librarian 撰寫，不要自己寫好再請別人存檔」），或修訂查找題的門檻，由使用者決定 |
-| TBD-10 | 最終的 agent 定義（f0ce34a：多了「派工後就結束這次回覆、等它回報」）還沒有完整跑過一輪派工評估：2026-11-27 nemotron 的實作題 3 次都被限流或逾時打斷，big-pickle 的免費額度同日用完（[dispatch-eval.md](dispatch-eval.md) 第 6 輪） | 待確認（2026-11-27 使用者選「先送審，額度恢復後補跑」：補跑結果只更新 dispatch-eval.md 與這一列，不動交付內容） | 前一版定義已在 big-pickle 上 6 題全部通過，這句話在派工決定之後才生效；額度恢復後以同一個模型補跑完整的一輪，不輪換免費模型繞過額度 |
+| TBD-10 | 最終的 agent 定義（f0ce34a：多了「派工後就結束這次回覆、等它回報」）還沒有完整跑過一輪派工評估：2026-11-27 nemotron 的實作題 3 次都被限流或逾時打斷，big-pickle 的免費額度同日用完（[dispatch-eval.md](dispatch-eval.md) 第 6 輪） | 已解決（2026-11-27）：big-pickle 額度到 14:38 仍未恢復，使用者要求改試 NVIDIA 上回應較快的模型；以 nemotron-3.5-super-vl-120b-a12b 用最終定義跑完整一輪，6 題全部通過（[dispatch-eval.md](dispatch-eval.md) 第 7 輪），使用者選「採用 super-vl 這輪」，big-pickle 不再補跑 | TBD-6 約定的驗證模型另加 super-vl（使用者 2026-11-27 指示），整輪只用這一個模型；結果不和第 5 輪 big-pickle 直接比較 |
 | TBD-11 | review-65e960a 需決策：Task 3.3 在 wukong-memory 新增 `agent_session_state.session_started_at` 欄位（7 天輪替不必每回合問 backend），涉及檔案表把 wukong-memory 列為不可觸及 | 已解決（2026-11-27，使用者選「接受並記錄」）：保留這個欄位與遷移，不改回每回合查 backend | 既有資料庫自動加欄位；舊列沒有值時，下一回合向 backend 查一次 session 開始時間補上（`backfill_session_started`）；涉及檔案表的「不可觸及」以這一列為例外 |
 | TBD-12 | review-65e960a 的 SHOULD FIX 與 NICE TO HAVE 怎麼處理 | 已解決（2026-11-27，使用者決定）：修正 SHOULD FIX 1（背景工作只算 subagent）、2（工作區範本改成派工）、3（人格那句的過時提醒）、6（原始派工紀錄進版控），NICE TO HAVE 9（排程階段回報後回到悟空）、13（文件小修），見計畫 Task 6.6；SHOULD FIX 4、5 由 TBD-11、TBD-10 處理。NICE TO HAVE 7（`ObservedStep.skill_name` 固定是 None）、8（固定提示有兩條組裝路徑）、10 併入 13 的文件說明、11（只有搶先改寫定義的入口會等 server 重新載入）、12（subagent 被限流時回合仍算成功）沒有選，留作已知差距 | 沒選的各項不影響驗收；修正後依「補跑後增量覆審」的決定，TBD-10 補跑後送增量覆審 |
 
@@ -283,6 +283,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | 2026-11-27 | 使用者確認：Task 5.2 維持移除整個 Skills 分頁、`/api/skills/*` 與 `/skills` 指令；TBD-9 記為已知差距不修；TBD-10 先送審，big-pickle 額度恢復後補跑 |
 | 2026-11-27 | 完整交付範圍 f9bc86e..65e960a 獨立審查 PASS（review-65e960a.md，無 MUST FIX，SHOULD FIX 6 項、NICE TO HAVE 7 項）；核准 commit 回填推導出的基線 f0ce34a |
 | 2026-11-27 | 使用者對審查建議的決定記為 TBD-11、TBD-12；Task 6.6 修正選修的六項（64e95b8、0c54bf0、a091c4f 與本次文件提交），CI 三道全綠；PASS 的範圍不含這些修正，TBD-10 補跑後送增量覆審 |
+| 2026-11-27 | TBD-10 已解決：big-pickle 額度未恢復，依使用者指示改用 NVIDIA nemotron-3.5-super-vl-120b-a12b 以最終定義補跑完整一輪，6 題全部通過（dispatch-eval.md 第 7 輪）；接著送 d900bda 之後的增量覆審 |
 
 ---
 **建立日期**: 2026-11-26  

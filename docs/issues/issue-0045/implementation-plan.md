@@ -597,7 +597,7 @@
     - shell 收緊後，`probe-session-layer.sh` 19/19 PASS，排程仍建得出來。
     - CI 三道全過（771 passed、14 ignored）。
   - 已知差距：nemotron 上查找題第 3、4 輪都只有 1/3 派給 librarian（primary 自己寫好 README，只派 fixer 存檔）。記為 README TBD-9。
-  - 最終定義（f0ce34a，Task 6.2 加上「派工後就結束回覆」）還沒有完整的一輪：2026-11-27 的 nemotron 重跑中實作題 3 次都被限流或逾時打斷（dispatch-eval.md 第 6 輪），big-pickle 的免費額度同日用完。記為 README TBD-10，額度恢復後補跑。
+  - 最終定義（f0ce34a，Task 6.2 加上「派工後就結束回覆」）還沒有完整的一輪：2026-11-27 的 nemotron 重跑中實作題 3 次都被限流或逾時打斷（dispatch-eval.md 第 6 輪），big-pickle 的免費額度同日用完。記為 README TBD-10，額度恢復後補跑。2026-11-27 big-pickle 額度仍未恢復，依使用者指示改用 NVIDIA nemotron-3.5-super-vl-120b-a12b 補跑完整一輪（dispatch-eval.md 第 7 輪），6 題全部通過，使用者同意以此結案 TBD-10。
 
 ### Task 6.2 — 效能對照
 - 產出與範圍：

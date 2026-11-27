@@ -6,8 +6,9 @@
 
 ## 結論
 
+- **最終定義（f0ce34a）在 NVIDIA nemotron-3.5-super-vl-120b-a12b 上通過門檻（第 7 輪，2026-11-27）**：6 題各 3 次，全部 PASS，18 個回合都成功、整輪 18 分鐘。big-pickle 額度沒恢復，依使用者指示改找回應較快的 NVIDIA 模型；使用者同意以這一輪作為 TBD-10 的補跑。
 - **第 4 輪的定義在 opencode/big-pickle 上通過門檻**：6 題各 3 次，全部 PASS。
-- **最終定義（f0ce34a）只多了一句「派工後就結束這次回覆、等它回報」**（Task 6.2 為了消掉 primary 的輪詢而加），派工的決定在這句話之前就做完了。在 nemotron 上重跑（第 6 輪）：探索、架構、設計、直接回答通過；實作題 3 次都被限流或逾時打斷而無效。big-pickle 的免費額度同日用完，還沒在最終定義上跑完整的一輪。
+- **最終定義（f0ce34a）只多了一句「派工後就結束這次回覆、等它回報」**（Task 6.2 為了消掉 primary 的輪詢而加），派工的決定在這句話之前就做完了。在 nemotron 上重跑（第 6 輪）：探索、架構、設計、直接回答通過；實作題 3 次都被限流或逾時打斷而無效。big-pickle 的免費額度同日用完；最終定義的完整一輪由第 7 輪補上。
 - **NVIDIA nemotron 沒有跑出完整的一輪。**
   - 第四輪（最終定義）的實作題被上游限流（HTTP 429）打斷；之後重跑的前兩次也是 429，就停掉了。
   - 使用者 2026-11-27 指示「nvidia 限流可以換成 opencode 的模型」，所以改用 big-pickle 完整跑一輪，沒有把不同模型的回合混在同一輪判定。
@@ -76,6 +77,7 @@ bash docs/issues/issue-0045/scripts/dispatch-eval.sh wukong-issue44:v2-local "$(
 | 4 | nemotron | 第 3 輪＋文件與 fixer 的界線寫清楚 | 無效（429） | 3/3 | 1/3 ✗ | 3/3 | 3/3 | 3/3 |
 | 5 | big-pickle | 第 4 輪的定義 | **3/3** | **3/3** | **3/3** | **3/3** | **3/3** | **3/3** |
 | 6 | nemotron | 第 4 輪＋「派工後就結束回覆」（f0ce34a，最終定義） | 無效（429、逾時） | 3/3 | 1/3（1 次 429） | 2/3 | 3/3 | 3/3 |
+| 7 | super-vl | 同第 6 輪（以 61da5e5 建置，定義與 f0ce34a 相同） | **3/3** | **3/3** | **3/3** | **2/3** | **3/3** | **3/3** |
 
 ### 第 1 輪：primary 自己動手
 
@@ -133,6 +135,18 @@ bash docs/issues/issue-0045/scripts/dispatch-eval.sh wukong-issue44:v2-local "$(
 - 查找題 1 次被限流，重試 10 次、超過 90 秒仍失敗；其餘 2 次是 fixer、librarian 各 1。
 - 架構題 1 次 primary 自己回答（2/3，仍通過）；探索、設計、直接回答都通過。
 
+### 第 7 輪：最終定義（super-vl）
+
+- 2026-11-27 14:38 再確認 big-pickle 仍回「Free usage limit reached」。使用者問 NVIDIA 有沒有別的模型、有沒有回應更快的模型，所以在隔離容器裡列出 NVIDIA 的模型，逐一試跑（每個模型自成一次試跑，沒有混進同一輪判定）：
+  - 直接回答題各 1 次：deepseek-v4.1-flash、gpt-oss-20b、gemma-4-31b-it 已下架（410）；glm-5.3-flash 129 秒；minimax-m3.1-flash 14 秒；nemotron-3.5-lightning、laguna-xs-2.1、step-5-preview、nemotron-3.5-super-vl 在 4 秒內。
+  - minimax-m3.1-flash 跑了完整一輪的前 9 次就停掉：實作題 3 次都載入技能、派 explorer 之後提出設計並問「請確認是否依上述建議實作？」，沒有派 fixer；查找題 3 次都在 500 秒逾時。第一次嘗試另因主機暫存目錄的磁碟配額用完，18 次全部無效，不列入。
+  - 四個快的模型各跑 1 次實作題：super-vl 80 秒派 fixer、函式與測試都寫了；lightning 62 秒派 fixer 但沒寫測試檔；step-5-preview 383 秒；laguna-xs-2.1 沒派工。
+- 選 super-vl 跑完整一輪：wukong 以分支 61da5e5 建置，`.opencode/agents/` 的內容與 f0ce34a 相同（之後只改了 `role.rs` 的註解），評估的工作區沒有 AGENTS.md，所以這一輪驗的是 f0ce34a 的最終定義。
+- 6 題全部通過，18 個回合都成功，沒有限流或逾時：
+  - 查找題 3/3 派給 librarian（2 次先派 explorer 看程式），nemotron 上的 TBD-9 差距在這個模型上沒有出現；
+  - 架構題 1 次 primary 自己比較兩個方案（2/3，仍通過）。
+- 這是第一次在 super-vl 上評估，結果不和第 5 輪 big-pickle 直接比較；同一題的派工對象與前幾輪一致。
+
 ## 原始紀錄
 
 2026-11-27 依 review-65e960a 的建議存進版控，每行一個回合：題目、第幾次、回合是否成功、秒數、派出的 subagent、用到的模型、primary 用過的工具與 session ID。內容只有合成題目的抽取結果，沒有提示詞與回覆內文。
@@ -145,8 +159,9 @@ bash docs/issues/issue-0045/scripts/dispatch-eval.sh wukong-issue44:v2-local "$(
 | 4 | [dispatch/round-4.jsonl](dispatch/round-4.jsonl)；實作題重跑 2 次仍 429：[dispatch/round-4-implement-retry.jsonl](dispatch/round-4-implement-retry.jsonl) |
 | 5 | [dispatch/round-5.jsonl](dispatch/round-5.jsonl) |
 | 6 | [dispatch/round-6.jsonl](dispatch/round-6.jsonl) |
+| 7 | [dispatch/round-7.jsonl](dispatch/round-7.jsonl) |
 
-重判：`python3 -I docs/issues/issue-0045/scripts/dispatch_judge.py docs/issues/issue-0045/dispatch/round-<N>.jsonl <MODEL>`，MODEL 是 `nvidia/nvidia/nemotron-3-ultra-550b-a55b`（第 5 輪是 `opencode/big-pickle`）。2026-11-27 重判 6 輪，結果與上方各輪表格相同。
+重判：`python3 -I docs/issues/issue-0045/scripts/dispatch_judge.py docs/issues/issue-0045/dispatch/round-<N>.jsonl <MODEL>`，MODEL 是 `nvidia/nvidia/nemotron-3-ultra-550b-a55b`（第 5 輪是 `opencode/big-pickle`，第 7 輪是 `nvidia/nvidia/nemotron-3.5-super-vl-120b-a12b`）。2026-11-27 重判 7 輪，結果與上方各輪表格相同。
 
 ## 其他確認
 
