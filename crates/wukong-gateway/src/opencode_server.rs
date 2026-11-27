@@ -591,10 +591,14 @@ impl OpencodeServerBackend {
         self.authorize(self.client.post(url))
     }
 
-    /// 2026-11-26（#45）：這個 session 與它的子 session 還有沒有背景工作（執行中，或回報還沒被
+    /// 2026-11-26（#45）：這個 session 與它的子 session 還有沒有 subagent 工作（執行中，或回報還沒被
     /// 讀取）。subagent 一律在背景執行：primary 派工後先結束一次執行，收到回報再執行一次，
-    /// 清單空了回合才真的結束（docs/issues/issue-0045/probe-subagent.md）。查詢失敗時當作沒有，
-    /// 回合以目前的回覆收尾，與派工之前的行為相同。
+    /// 清單裡沒有 subagent 了回合才真的結束（docs/issues/issue-0045/probe-subagent.md）。查詢失敗時
+    /// 當作沒有，回合以目前的回覆收尾，與派工之前的行為相同。
+    ///
+    /// 只看 `kind` 為 subagent 的工作（2026-11-27，review-65e960a）：清單也列出 subagent 開的背景
+    /// shell，結束後沒被讀取的也留著；`npm run dev` 這類不會自己結束的程式會讓回合等到逾時。
+    /// 在用戶端過濾，不依賴 server 端的 `kind` 參數。
     async fn has_background_jobs(&self, session_id: &str) -> bool {
         let url = format!(
             "{}/api/experimental/job?sessionID={session_id}&descendants=true",
@@ -607,7 +611,10 @@ impl OpencodeServerBackend {
             Ok(value) => value
                 .get("data")
                 .and_then(Value::as_array)
-                .is_some_and(|jobs| !jobs.is_empty()),
+                .is_some_and(|jobs| {
+                    jobs.iter()
+                        .any(|job| job.get("kind").and_then(Value::as_str) == Some("subagent"))
+                }),
             Err(err) => {
                 eprintln!("background_jobs_lookup_failed session_id={session_id}: {err}");
                 false
@@ -1803,6 +1810,30 @@ mod tests {
     async fn a_turn_without_background_work_ends_at_the_first_execution() {
         let fake = fake_v2::FakeV2::start().await;
         fake.script_events(fake_v2::fixture_events("server-text-tool", "ses_fake1"));
+
+        let response = v2_backend(&fake)
+            .run_streaming(plain_request("hi"), &mut |_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(response.text, "DONE");
+        assert_eq!(
+            fake.requests().iter().filter(|r| *r == JOBS_QUERY).count(),
+            1
+        );
+    }
+
+    // #45 審查 review-65e960a SHOULD FIX 1（2026-11-27）：V2 的清單也列出 subagent 開的背景 shell，
+    // 而且結束後還沒被讀取的工作也留在清單裡（Job.Kind 有 shell、subagent、image、codemode）。fixer 開了
+    // 不會自己結束的程式（例如 `npm run dev`）時，回合不能因此一直等到逾時；只有 subagent 讓回合繼續。
+    #[tokio::test]
+    async fn background_shells_of_a_subagent_do_not_keep_the_turn_open() {
+        let fake = fake_v2::FakeV2::start().await;
+        fake.script_events(fake_v2::fixture_events("server-text-tool", "ses_fake1"));
+        fake.script_jobs(vec![json!([
+            {"kind": "shell", "status": "running", "command": "npm run dev"},
+            {"kind": "image", "status": "completed"}
+        ])]);
 
         let response = v2_backend(&fake)
             .run_streaming(plain_request("hi"), &mut |_| {})
