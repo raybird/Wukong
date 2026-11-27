@@ -220,24 +220,25 @@ Wukong 是 Rust Workspace，包含 15 個 crate，分為四柱核心與周邊進
 ### 四柱核心（依賴方向單向）
 
 ```
-wukong-cli → { wukong-runtime, wukong-memory, wukong-orchestrator }
-wukong-runtime → { wukong-gateway, wukong-memory, wukong-orchestrator, wukong-skills, wukong-settings }
-wukong-orchestrator → wukong-gateway → wukong-memory
+wukong-cli → { wukong-runtime, wukong-gateway, wukong-memory, wukong-scheduler, wukong-settings }
+wukong-runtime → { wukong-gateway, wukong-memory, wukong-orchestrator, wukong-skills }
+wukong-gateway → wukong-memory
+wukong-orchestrator、wukong-skills：沒有內部依賴
 ```
 
 | crate | 職責 |
 |-------|------|
 | `wukong-memory` | SQLite + FTS5 記憶儲存；keyword/tree/hybrid 召回；時間衰減計分 |
-| `wukong-gateway` | 驅動底層 agent CLI（預設 `opencode run`）；inject 人格 + 記憶 + 技能 |
-| `wukong-orchestrator` | 五個專家角色（Explorer/Oracle/Librarian/Fixer/Designer）的定義；2026-11-26（#45）起派工交給 OpenCode V2 的 subagent，不再有 planner |
-| `wukong-runtime` | 串聯一回合完整執行流程（`run_turn`）：recall → plan → execute → remember；CLI、Web、Telegram、Scheduler 共用 |
+| `wukong-gateway` | 驅動底層 agent：OpenCode V2 的 server backend 與 CLI backend（預設 `opencode run`）；把召回的記憶與使用者輸入組成 prompt（`prompt::compose_prompt`），解析事件與上游錯誤 |
+| `wukong-orchestrator` | 五個專家角色（Explorer/Oracle/Librarian/Fixer/Designer）的定義與角色卡；2026-11-26（#45）起它們是 OpenCode V2 的 subagent，由 primary agent 自己決定派工，不再有 planner |
+| `wukong-runtime` | 串聯一回合完整執行流程（`run_turn`）：取得 session lease → recall → 呼叫 primary agent `wukong` 一次 → remember；入口啟動時把 agent 定義與技能寫進工作區（`bootstrap::prepare_workspace_assets`）。CLI、Web、Telegram、Scheduler 共用 |
 | `wukong-cli` | 統一 CLI 進入點（`wukong` binary）；含 REPL、`memory` 子命令、`schedule` 子命令 |
 
 ### 周邊 crate
 
 | crate | 職責 |
 |-------|------|
-| `wukong-skills` | 以 `include_str!` 內嵌 Superpowers 技能（`assets/superpowers/`） |
+| `wukong-skills` | 以 `include_str!` 內嵌 Superpowers 技能（`assets/superpowers/`）；`wukong-runtime` 在入口啟動時寫到工作區的 `.opencode/skills/`，由 V2 的 skill 機制提供給模型 |
 | `wukong-settings` | 讀寫 JSON 設定檔（Telegram、預設模型）：路徑取 `WUKONG_SETTINGS_FILE`，沒設時固定是 `/data/settings.json`（Docker 的資料 volume；在主機上執行也是這個路徑，要換位置就設變數）；檔案不存在時用預設值。不加 `deny_unknown_fields`，舊檔留著的 `planner_preferences`（2026-11-26，#45 移除）照常載入 |
 | `wukong-scheduler` | 排程核心 lib；SQLite lease 防止重複執行 |
 | `wukong-schedulerd` | 排程 daemon binary |
@@ -250,12 +251,13 @@ wukong-orchestrator → wukong-gateway → wukong-memory
 
 ### 一回合資料流（`run_turn`）
 
-1. `wukong-memory` recall（`relevant` 模式：BM25 + 語意向量，不含「最近」來源，不相關就不注入）
-2. `wukong-orchestrator` plan（LLM 規劃角色 + 技能鏈；另帶上一回合，每筆上限 800 字，用來分辨追問與新任務）
-3. 逐棒 `wukong-gateway` execute（注入人格 + 角色 + 技能規範 + 記憶；每筆記憶上限 800 字。最後一棒靠 session 接續近期對話，只注入相關記憶；輔助棒另帶上一回合）
-4. `wukong-memory` remember（落盤本輪 User + Assistant；每回合一個識別碼，不再以 session 去重；入口附加的產出目錄那一行（`persona::ARTIFACT_DIR_HEADER`）不寫入，也不用於召回）
+2026-11-26（#45）起一回合只呼叫一次 primary agent，規劃、技能與壓縮交給 OpenCode V2：
 
-會話隔離：只有最後一棒才帶入 / 更新 scope 的 `session_id`，前面輔助棒為 stateless。
+1. 取得 scope 的 session lease（`session::prepare_final_session`，在任何 LLM 呼叫之前；同一個 scope 已有回合在執行就在這裡被拒絕）。session 開始超過 7 天就換新的
+2. `wukong-memory` recall（`relevant` 模式：BM25 + 語意向量，不含「最近」來源，不相關就不注入；每筆上限 800 字）。session 剛輪替時另帶上一回合，接續 session 時不帶
+3. `wukong-gateway` 以 agent `wukong` 送出一次 prompt。prompt 只有使用者輸入與動態區塊（`[相關記憶]`、`[產出目錄]`、`[其他回合正在執行]`、排程的 `[無人值守排程]`）；人格、輸出要求、排程能力、長期記憶能力、派工規則都在 agent 定義裡，scope 在 session 指令層（CLI backend 沒有這兩層，照舊附在 prompt）。primary 依任務自己回答，或用 V2 的 subagent 工具派給五個角色；技能由模型依 description 以 V2 的 `skill` 工具載入。subagent 開始與回報時觸發入口的 `on_role`／`on_step`
+4. 最終輸出是空的時，在同一個 session 補送一次修復提示
+5. `wukong-memory` remember（落盤本輪 User + Assistant；每回合一個識別碼，不再以 session 去重；入口附加的產出目錄那一行（`persona::ARTIFACT_DIR_HEADER`）不寫入，也不用於召回）
 
 ### 驗證紀律
 
@@ -289,12 +291,16 @@ wukong-orchestrator → wukong-gateway → wukong-memory
   - `wukong` 指令路徑可用 `WUKONG_BIN` 覆寫；V2 backend 在啟動寫入 agent 定義時讀取它。
   - server 模式下 agent 的 shell 在 opencode-server 容器裡執行，所以這個容器也掛 `wukong-data:/data`、設 `WUKONG_MEMORY_DB`，和入口、schedulerd 共用同一份記憶庫（2026-11-27，#45 Task 6.3 演練發現；v0.25.1 起就漏了，模型回「已建立」，排程卻寫進容器自己的預設資料庫，永遠不執行）。`scripts/test-docker-runtime.sh` 檢查兩個 compose 檔。
   - Turn job 的 scope 只代表擁有者（回送與聊天紀錄的對象）；回合本身的記憶、召回與 session 在 `agent:schedule-<job id>`（`wukong-scheduler` executor 的 `scheduled_turn_scope`），不寫進使用者 scope，也讀不到它。對話中要查排程回報過什麼，用 `wukong schedule runs --id <id>`。刪除排程（`executor::delete_job`，CLI 與 Web 共用）會清掉這個 scope 的記憶與 session 指向（`Memory::delete_scope`，只用等號比對）；刪除當下排程正被持有（執行中，或已被取得、還在排隊）時只刪 job，由 `run_claimed_job` 在回合結束或排隊跳過時發現排程已不在，再清 scope，並回 `ClaimedJobOutcome::Deleted`，daemon 照常回送結果。回合結束時才寫入記憶，並以 `acquire_agent_session_lease` 重建 session 狀態列，所以提早清也會被寫回去，只有回合結束後清才清得乾淨（提早清不會讓回合失敗）。執行中刪除後行程當掉時，scope 由 daemon 下次以常駐模式啟動時清掉（`executor::clear_orphan_turn_scopes`：只清後綴是排程 id 寫法（小寫、有連字號的 UUID）、而且排程查不到的 `agent:schedule-<id>`；任何一個排程查詢出錯就整批不刪；`--once` 不做；見 `docs/issues/issue-0017/`、`docs/issues/issue-0022/`）。
+- **Wukong 管理的 agent 定義與技能**（2026-11-26，#45）：四個入口啟動時由 `bootstrap::prepare_workspace_assets` 寫進工作區，寫入失敗只警告、不讓入口起不來。
+  - agent 定義（`agent_assets`）：`.opencode/agents/` 底下的 `wukong.md`（primary：SOUL.md 的人格、派工規則、輸出要求、排程能力，開啟時另含長期記憶能力）與五個 subagent（`Role` 的描述與角色卡，加 `[檔案互動規則]`）。本機按需、常駐 server 與 CLI 三種模式都讀這裡；不寫全域設定目錄，因為 binary 模式的 HOME 是使用者自己的家目錄。只寫這六個檔案，內容沒變不寫，有變時以暫存檔改名替換。所以升級後定義跟著新版更新，改 SOUL.md、`WUKONG_MEMORIA_HINT`、`WUKONG_BIN` 要重啟入口才生效。
+  - 技能（`skill_assets`）：八個 Superpowers 技能寫到 `.opencode/skills/{name}/SKILL.md`，V2 的 `/api/skill` 列得到，模型依 description 自己用 `skill` 工具載入；prompt 不再附技能規範與 SKILL.md 路徑，舊的 `.wukong/skills/superpowers` 不再寫入。上游出處 `SOURCE.md` 不寫進工作區：V2 會把那個目錄底下的任何 .md 當成技能。
+  - 工作區 AGENTS.md（`workspace_template`）：與某一版舊範本（`assets/retired-agents-md/`）完全相同時先備份成 `AGENTS.md.bak-{版本}` 再換成新版；改過的不動，只在 log 提醒過時的段落。之後再改 `workspace/AGENTS.md` 範本時，把改之前的版本加進 `RETIRED`。
 - **primary agent 不能改檔、只能跑排程與記憶指令**（2026-11-26，#45 Task 6.1，使用者決定）：`wukong` 定義的 frontmatter 帶 `permission`（`agent_assets::primary_permission`）：`edit` 與 `execute` 拒絕，`shell` 先拒絕全部，再只允許 `<WUKONG_BIN> schedule *`，長期記憶能力開啟時另外允許 `memoria *`、`memoria-vector-sync*`（V2 依序比對、後面的規則優先）。改檔、跑測試與其他指令都只能派給 subagent；read、glob、grep 照用。原因是實測 nemotron 的 primary 不限權限時實作題 0/3 派工、都自己改檔；只關 `edit` 時改用 shell 的 heredoc 與 `execute` 寫檔（`docs/issues/issue-0045/dispatch-eval.md`）。subagent 看不到使用者的原始訊息，派工說明要求 primary 把路徑、附件位置與 `[產出目錄]` 寫進交代內容；五個 subagent 的定義也帶 `[檔案互動規則]`。
 - **agent 定義改寫後的重新載入**（2026-11-26，#45）：常駐 V2 server 靠檔案監看重新載入 `.opencode/agents/`，改寫後幾十毫秒內送出的 prompt 仍用舊定義。入口啟動時改寫過 primary agent 的定義（`agent_assets::materialize_agent_definitions`），下一個 V2 回合送 prompt 前先等 `GET /api/agent` 列出的 `wukong` 與新內文相同（`AiBackend::wait_for_agent_system`，最多 5 秒，逾時警告後照送）；只等一次，內容沒變時不等。按需本機模式與 CLI backend 每次都重新讀，不用等。只看 primary agent：subagent 要等模型推理之後才派出，間隔遠大於實測的重新載入時間（幾百毫秒內），沒有另外等。
-- **末棒輸出保證**：`[輸出要求]`（`persona::final_answer_directive`）寫在 agent `wukong` 的定義裡（2026-11-26，#45；CLI backend 沒有讀定義的保證，照舊附在每回合的 prompt），要求即使全程用工具操作也要文字總結。長期記憶能力（`WUKONG_MEMORIA_HINT`）也一樣：開啟時在啟動寫入定義，CLI backend 附在 prompt。收尾後若末棒輸出為空，回退取最近一棒非空輸出（全空才回 `(本回合未產生文字輸出)`），確保 `TurnOutput`、記憶與對話歷史皆非空。詳見 `docs/superpowers/specs/2026-06-22-final-output-fallback-design.md`。
+- **輸出保證**：`[輸出要求]`（`persona::final_answer_directive`）寫在 agent `wukong` 的定義裡（2026-11-26，#45；CLI backend 沒有讀定義的保證，照舊附在每回合的 prompt），要求即使全程用工具操作也要文字總結。長期記憶能力（`WUKONG_MEMORIA_HINT`）也一樣：開啟時在啟動寫入定義，CLI backend 附在 prompt。最終輸出仍是空的時，`run_turn` 在同一個 session 補送一次修復提示（`append_empty_output_repair_directive`），補送也是空的才回 `(本回合未產生文字輸出)`，確保 `TurnOutput`、記憶與對話歷史皆非空。#45 之前是回退取最近一棒的輸出，見 `docs/superpowers/specs/2026-06-22-final-output-fallback-design.md`。
 - **排程結果回送**：`wukong-schedulerd` 觸發 Turn job 後，若擁有者 scope 可由 `chat_id_from_scope` 還原成 `user:tg-<id>`，透過 `wukong-tg-client` 把結果回送 Telegram（成功 HTML、失敗一行）；HTML 段落被拒收（400 `can't parse entities`）時由 `send_html_with_plain_fallback` 改以純文字重送該段，聊天回覆共用同一個函式；best-effort 不影響 job 狀態。`WUKONG_SCHED_NOTIFY=0` 關閉，需 `WUKONG_TG_TOKEN`。
-- **同時執行的回合告知**：聊天與排程各在自己的 scope 執行、共用同一個 `WUKONG_WORKSPACE`，彼此沒有互斥。`run_turn` 取得自己的 session lease 後，查詢其他仍持有 lease 的 scope（`Memory::active_session_leases`），有的話在之後每一棒的 prompt 加上 `[其他回合正在執行]`（`persona::concurrent_turns_notice`），不阻擋任何一方。限制：只在取得 lease 的那一刻算一次，所以先開始的回合不會得知後來者；planner 階段還沒有 lease，看不到；回合執行中會持續續租 session lease（issue-0013），所以長回合在執行期間都看得到；只有當掉的回合會殘留到 lease 過期。設計與重現見 `docs/issues/issue-0012/`。
-- **lease 在執行中續租**（issue-0013）：`run_turn` 用 `session::hold_session_lease` 包住回合的執行，向 backend 補查 session 建立時間的呼叫也包；每隔 lease 時間的三分之一續租一次 session lease（預設 900 秒，`WUKONG_SESSION_LEASE_SECS`）。排程的 `run_claimed_job` 每隔 `min(30 秒, job lease/3)` 續租 job lease（daemon `--lease-secs`，手動 trigger 固定 300 秒），並把 `進行中：<階段>，已執行 N 秒` 寫進執行中的 run 訊息；階段 2026-11-26（#45）起固定是「悟空」（回合只呼叫一次 primary agent，取得 session lease 也算在內，拿不到 session lease 會標成「悟空失敗」；由 subagent 事件推進階段是 Task 5.1 的範圍）。同一次掃描取得的其他 job 排隊時不續租，`run_claimed_job` 開始前先續租一次，lease 已不在自己手上（排隊期間被別人取得，或被停用、重新啟用、刪除）就回 `NotHeld`、不執行。續租和回合在同一個 task，行程中止後就不再續租，lease 照原本的時間到期，所以不用另外清理。行程中途結束（issue-0022）：Turn 排程在 `start_run` 之後就以 `advance_next_run` 把 `next_run_at` 推進到開始時間之後的下一個 cron 時間點，所以開始執行過的那一次不會被重跑；只取得、還沒開始的排程，以及維護排程，都不推進，lease 到期後照常補跑。`run_scan` 每輪（包括 `--once`）在取得排程之前先呼叫 `interrupt_stale_runs`，lease 到期的 running run 就標成 interrupted，不必等下次重啟。標記只在掃描時做，啟動時不另外檢查：設定檔讀不到時，主迴圈整輪跳過掃描，標記也跟著延後到設定檔恢復；同一時間到期的記憶維護也可能先跑，讓第一輪掃描晚一點開始。有兩個執行者同時在跑時（多個 daemon，或 daemon 加上 CLI `schedule trigger`），執行中被停用或重新啟用的排程會清掉 lease，它的 run 會先被標成 interrupted，回合結束時 `finish_run` 再覆寫成最終狀態。當掉的回合留下的 session lease 最多占用 900 秒，這段期間同一個 scope 的回合會在規劃階段失敗。不處理的部分：回合沒有總上限（見 `docs/issues/issue-0013/` 待確認事項）。
+- **同時執行的回合告知**：聊天與排程各在自己的 scope 執行、共用同一個 `WUKONG_WORKSPACE`，彼此沒有互斥。`run_turn` 取得自己的 session lease 後，查詢其他仍持有 lease 的 scope（`Memory::active_session_leases`），有的話在本回合的 prompt 加上 `[其他回合正在執行]`（`persona::concurrent_turns_notice`），不阻擋任何一方。限制：只在取得 lease 的那一刻算一次，所以先開始的回合不會得知後來者；回合執行中會持續續租 session lease（issue-0013），所以長回合在執行期間都看得到；只有當掉的回合會殘留到 lease 過期。設計與重現見 `docs/issues/issue-0012/`。
+- **lease 在執行中續租**（issue-0013）：`run_turn` 用 `session::hold_session_lease` 包住回合的執行，向 backend 補查 session 建立時間的呼叫也包；每隔 lease 時間的三分之一續租一次 session lease（預設 900 秒，`WUKONG_SESSION_LEASE_SECS`）。排程的 `run_claimed_job` 每隔 `min(30 秒, job lease/3)` 續租 job lease（daemon `--lease-secs`，手動 trigger 固定 300 秒），並把 `進行中：<階段>，已執行 N 秒` 寫進執行中的 run 訊息；階段 2026-11-26（#45）起是「悟空」（primary agent 在處理，取得 session lease 也算在內，拿不到 session lease 會標成「悟空失敗」），派工後換成最近派出的 subagent，例如「悟空·fixer」。同一次掃描取得的其他 job 排隊時不續租，`run_claimed_job` 開始前先續租一次，lease 已不在自己手上（排隊期間被別人取得，或被停用、重新啟用、刪除）就回 `NotHeld`、不執行。續租和回合在同一個 task，行程中止後就不再續租，lease 照原本的時間到期，所以不用另外清理。行程中途結束（issue-0022）：Turn 排程在 `start_run` 之後就以 `advance_next_run` 把 `next_run_at` 推進到開始時間之後的下一個 cron 時間點，所以開始執行過的那一次不會被重跑；只取得、還沒開始的排程，以及維護排程，都不推進，lease 到期後照常補跑。`run_scan` 每輪（包括 `--once`）在取得排程之前先呼叫 `interrupt_stale_runs`，lease 到期的 running run 就標成 interrupted，不必等下次重啟。標記只在掃描時做，啟動時不另外檢查：設定檔讀不到時，主迴圈整輪跳過掃描，標記也跟著延後到設定檔恢復；同一時間到期的記憶維護也可能先跑，讓第一輪掃描晚一點開始。有兩個執行者同時在跑時（多個 daemon，或 daemon 加上 CLI `schedule trigger`），執行中被停用或重新啟用的排程會清掉 lease，它的 run 會先被標成 interrupted，回合結束時 `finish_run` 再覆寫成最終狀態。當掉的回合留下的 session lease 最多占用 900 秒，這段期間同一個 scope 的回合會在取得 session lease 時失敗。不處理的部分：回合沒有總上限（見 `docs/issues/issue-0013/` 待確認事項）。
 - **OpenCode V2 adapter**（issue-0044，2026-11-25）：Wukong 只支援 OpenCode V2（`@opencode/cli`，版本由 `release/runtime-inputs.env` 釘選，目前 2.3.2）。
   - **server backend**（`opencode_server.rs`）走 `/api/...`，回應包在 `data` 裡；session 列表照 cursor 分頁走完；回合是 `POST …/prompt` 之後等事件，完成判定看 execution 事件。
   - **認證**：basic auth 使用者名稱固定是 `opencode`，`WUKONG_AGENT_SERVER_USERNAME` 不再讀取。V2 server 一定有密碼，所以設了 `WUKONG_AGENT_SERVER_URL` 卻沒有 `WUKONG_AGENT_SERVER_PASSWORD` 時，入口啟動就報錯。

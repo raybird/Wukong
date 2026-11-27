@@ -29,7 +29,7 @@ CLI 顯示選項編號，輸入編號或選項文字回答；多選用逗號分�
 
 `wukong-telegram` 將對話引擎無縫串接至 Telegram，其內部運作流程如下：
 - **基本流程**：透過 Long-Polling 接收訊息 $\rightarrow$ 白名單過濾過後 $\rightarrow$ 依據對話群組指派獨立 Scope（`user:tg-<id>`） $\rightarrow$ 重用核心的 `run_turn` $\rightarrow$ 回覆答案。
-- **即時狀態回饋**：執行期間會建立一個**單一狀態泡泡**（原地隨調度角色即時更新狀態並保持 Typing 狀態），任務完成後該狀態泡泡會自動刪除並送出最終回答。私人聊天用 `sendMessageDraft` 草稿，群組退回一則狀態訊息；草稿不刷新約 60 秒會被 Telegram 收掉，所以超過 20 秒沒有更新就以目前內容重送。agent 提問時進度先收起、問題訊息留在最下方，等待回答期間的角色、思考與工具事件只累積、不顯示；回答送出成功後馬上在問題下方重新顯示「已收到回答，繼續處理…」，取消或逾時後顯示「繼續處理…」。思考內容放得下就全文顯示；整則超過約 4000 字（Telegram 上限 4096）時只留最後面放得下的部分、前面加「…」（#39）。
+- **即時狀態回饋**：執行期間會建立一個**單一狀態泡泡**（原地更新並保持 Typing 狀態；顯示正在處理的角色：悟空自己處理時是「悟空」，派工後換成「悟空·fixer」這類 subagent 名稱，2026-11-26 起，#45），任務完成後該狀態泡泡會自動刪除並送出最終回答。私人聊天用 `sendMessageDraft` 草稿，群組退回一則狀態訊息；草稿不刷新約 60 秒會被 Telegram 收掉，所以超過 20 秒沒有更新就以目前內容重送。agent 提問時進度先收起、問題訊息留在最下方，等待回答期間的角色、思考與工具事件只累積、不顯示；回答送出成功後馬上在問題下方重新顯示「已收到回答，繼續處理…」，取消或逾時後顯示「繼續處理…」。思考內容放得下就全文顯示；整則超過約 4000 字（Telegram 上限 4096）時只留最後面放得下的部分、前面加「…」（#39）。
 - **格式渲染**：最終答案會經由 `wukong-render` 渲染為 Telegram 支援的 HTML 格式（支援粗體、程式碼區塊、表格自動降級呈現）。清單每項各占一行，子清單每層縮 2 空白、符號依層級為 •、◦、▪，編號清單保留原號碼，項目裡的第二段與換行對齊該項文字；H1 為粗體加底線、其他標題為粗體；`<think>` 區塊連同內容不輸出（巢狀、表格內與沒有結尾的都算；程式碼裡的，以及 HTML 屬性值、註解、處理指令、CDATA、宣告裡的照常顯示）；巢狀引言攤平成一層；連結網址裡的 `"`、`<`、`>` 寫成 `%22`、`%3C`、`%3E`（Telegram 會無聲丟掉含這些字元的連結），網址跳脫後超過 2048 bytes 的連結改寫成「文字 (網址)」純文字；超過 4096 bytes 的回答切成多則，切點不落在實體中間。某一段 HTML 被 Telegram 拒收（400 `can't parse entities`）時，同一段改以純文字重送（拿掉標籤、連結寫成「文字 (網址)」），stderr 記一行 `Telegram 拒收 HTML（answer）` 警告；排程結果回送也一樣（警告標 `schedule`）。
 - **上傳與接續操作**：支援 Telegram `document`／`photo`（單檔 25 MiB、每則最多 5 份）。第一次上傳會把文字與 file part 一起送入目前 OpenCode session；後續可直接文字追問。回覆先前的檔案訊息會重新帶入該附件；上傳新檔並回覆舊檔可比較兩份。
 - **原檔、工作副本、回傳產物分離**：原始檔保存於 `.wukong/uploads`，OpenCode 實際操作 `.wukong/workfiles` 的副本；要求「修改後傳回」時，成品寫入該回合專屬 `.wukong/artifacts`，Wukong 再以 Telegram document 回傳。
@@ -49,7 +49,8 @@ cargo run -p wukong-telegram
 ## Web Console（選用）
 
 `wukong-web` 提供了零建置、隨開即用的瀏覽器進入點：
-- **核心設計**：重用與 CLI 相同的 `run_turn` 引擎與記憶資料庫，透過 Server-Sent Events (SSE) 即時串流專家角色的執行進度與渲染後的答案。
+- **核心設計**：重用與 CLI 相同的 `run_turn` 引擎與記憶資料庫，透過 Server-Sent Events (SSE) 即時串流執行進度與渲染後的答案。
+- **角色與產出（2026-11-26，#45）**：送出後先顯示「🐵 收到，思考中…」；悟空派工時 SSE 送出 `role` 事件，進度換成「🐵 悟空·fixer 思考中…」，subagent 回報時送出 `step` 事件，對話裡多一張「🔍 悟空·fixer 的產出」卡片，重新開啟對話時照樣看得到。技能偏好頁（`Skills` 分頁與 `/api/skills/*`）已移除：派工與技能由悟空和 OpenCode V2 自己決定，設定檔裡留著的 `planner_preferences` 照常載入但不使用。
 - **前端實作**：採用原生 ES Modules 與自定義的 `<wukong-chat>` Custom Element（遵循 `raybird/plainvanillaweb` 核心慣例之 SafeHTML 設計）。
 - **共享對話歷史**：Web、Telegram 與 Scheduler 共用 scope-based chat history；Web 對話頁可從來源選單切換 `Global`、`Project ...` 或 `Telegram <chat_id>`，查看同一份對話脈絡與排程推送紀錄。
 - **模型設定**：Settings 的「預設模型」與排程頁每個對話排程的卡片，都用「先選 Provider，再選模型」的兩級選單。清單來自 `GET /api/models`：後端執行 `opencode models --standalone`，依 Provider 分組，快取 5 分鐘。所以只會列出容器裡已設定或有憑證的 Provider。清單取不到時退回手動輸入；已存的模型不在清單中時，照原值顯示並標示「目前的模型不在清單中。」。排程卡片的「改回預設」會清除該排程的模型（`PATCH /api/schedules/:id`，body `{"model": null}`）。

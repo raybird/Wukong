@@ -32,19 +32,19 @@
 | :- | :------- | :---- | :--- |
 | 1 | 鬥戰勝佛・本我 | `wukong-memory` | 持久記憶：SQLite + FTS5、keyword/tree/hybrid/relevant 召回、scope 隔離、時間衰減 |
 | 2 | 齊天大聖・肉身 | `wukong-gateway` | 驅動可設定的 agent CLI、記憶注入回合（函式庫） |
-| 3 | 七十二變・分身 | `wukong-orchestrator` | LLM 路由到五專家角色（Explorer/Oracle/Librarian/Fixer/Designer）並以該角色執行 |
+| 3 | 七十二變・分身 | `wukong-orchestrator` | 五專家角色（Explorer/Oracle/Librarian/Fixer/Designer）的定義，作為 OpenCode V2 的 subagent 由悟空派工 |
 | 4 | 修成正果・金箍棒 | `wukong-cli` → **`wukong`** | 合體：人格 + 記憶 + 角色調度於一回合，統一進入點 |
 
 ```
         wukong (金箍棒 / 統一 CLI)
         ├── 人格層（孫悟空口吻）
         ├── recall ─────────────►  wukong-memory   (本我)
-        ├── route  ─────────────►  wukong-orchestrator (分身)
-        ├── execute ────────────►  wukong-gateway → agent CLI (肉身)
+        ├── execute ────────────►  wukong-gateway → OpenCode V2 (肉身)
+        │                           └─ 悟空派工 ─► 五個 subagent（wukong-orchestrator，分身）
         └── remember ───────────►  wukong-memory   (本我)
 ```
 
-依賴方向（單向、無循環）：`wukong-cli → { memory, gateway, orchestrator }`，`orchestrator → gateway → memory`。
+依賴方向（單向、無循環）：`wukong-cli → { runtime, gateway, memory }`，`runtime → { gateway, memory, orchestrator, skills }`，`gateway → memory`。
 
 ### 一回合的資料流
 
@@ -54,49 +54,45 @@ sequenceDiagram
     actor User as 使用者
     participant CLI as wukong-cli (金箍棒)
     participant Mem as wukong-memory (本我)
-    participant Orch as wukong-orchestrator (分身)
     participant GW as wukong-gateway (肉身)
-    participant Agent as Agent CLI (opencode)
+    participant Agent as OpenCode V2：agent wukong
+    participant Sub as subagent (分身，例如 fixer)
 
     User->>CLI: 輸入: wukong "幫我修這個 bug"
     activate CLI
-    
-    CLI->>Mem: 1. recall (回想此 scope 相關記憶)
-    Mem-->>CLI: 回傳 hits[] (相關記憶)
-    
-    CLI->>Orch: 2. plan_skill_chain (規劃角色 + 技能協作鏈)
-    Orch->>Agent: 呼叫 routing planner
-    Agent-->>Orch: 回傳角色與技能鏈 (例如 [Fixer + test-driven-development])
-    Orch-->>CLI: 傳回執行角色鏈
-    
-    Note over CLI, Agent: 3. 逐棒接力執行 (最多 3 棒)
-    loop 每一個角色 (例如 Fixer)
-        CLI->>GW: 4. execute (人格 + 角色卡 + 記憶 hits + 前序協作)
-        GW->>Agent: 以該角色執行 (帶 session_id 與 thinking)
-        Agent-->>GW: 回傳回答與新 session_id
-        GW-->>CLI: 傳回執行結果
+
+    CLI->>Mem: 1. 取得 scope 的 session lease、recall 相關記憶
+    Mem-->>CLI: 回傳 hits[]
+
+    CLI->>GW: 2. 送出一次 prompt（使用者輸入 + 相關記憶）
+    GW->>Agent: 以 agent wukong 執行（帶 session_id、模型與 thinking）
+    opt 需要改檔、跑測試或專門分析
+        Agent->>Sub: 用 subagent 工具派工
+        Sub-->>Agent: 回報產出
     end
-    
-    CLI->>Mem: 5. remember (落盤 User + 最終 Assistant 輸出)
-    
+    Agent-->>GW: 回答與 session_id
+    GW-->>CLI: 傳回結果
+
+    CLI->>Mem: 3. remember (落盤 User + Assistant)
+
     CLI-->>User: 輸出結果 (stderr: 角色狀態 / stdout: 回答)
     deactivate CLI
 ```
 
-> 每回合對底層 agent 進行兩次呼叫（路由 + 執行）。各 crate 另有自己的 README。
+> 2026-11-26（#45）起每回合只呼叫一次 primary agent `wukong`，不再另跑規劃；規劃、技能與壓縮交給 OpenCode V2。各 crate 另有自己的 README。
 
-### 角色協作鏈 (Collaboration Chain) 與會話隔離
+### 派工與 session
 
-- **輸入接力與前序協作**：當 planner 規劃出多角色協作鏈（例如 `explorer, fixer`）時，前一個步驟角色的輸出會被以 `[前序協作]` 格式標記，並拼接到下一步的 Task 輸入中，實現接力分析。
-- **會話狀態隔離 (Session Isolation)**：為避免中間角色步驟的暫存輸出污染對話歷史，**只有最後一棒的執行才會帶入並更新該 Scope 的 `session_id`**，前面的所有輔助步驟皆為無狀態（Stateless）執行，確保最終對話的連貫與乾淨。
-- **空輸出回退 (Final Output Fallback)**：末棒若為 executor、只用工具收尾而未吐文字時，`run_turn` 會回退取「最近一棒非空輸出」作為最終答覆（全空才回 `(本回合未產生文字輸出)`），保證使用者不收到空白，也不以空字串污染記憶與對話歷史。
-- **輸出要求**：agent `wukong` 的定義裡有 `[輸出要求]`（`persona::final_answer_directive`；CLI backend 改附在每回合的 prompt），要求即使工作都用工具完成也必須以文字總結，降低 executor 靜默收尾的機率。
+- **悟空決定自己回答或派工**：人格（工作區的 `SOUL.md`）、派工規則、輸出要求與排程能力寫在 Wukong 管理的 agent 定義（工作區的 `.opencode/agents/`），入口啟動時寫入、升級時跟著更新。悟空不能自己改檔，終端機只能跑排程與長期記憶指令，需要改檔、跑測試的工作一律派給 subagent。
+- **入口看得到誰在處理**：Telegram 的狀態泡泡、Web 的進度與排程的執行訊息顯示「悟空」或「悟空·fixer」，Web 另外顯示 subagent 的產出卡片。
+- **同一個 scope 接續同一個 session**：對話脈絡由 session 保存；session 開始超過 7 天時換新的，換新後的第一個回合另帶上一回合，追問照樣看得懂。壓縮交給 OpenCode 自己的自動壓縮。
+- **空輸出補救**：最終回覆是空的（例如只用工具收尾）時，在同一個 session 補送一次修復提示；仍是空的才回 `(本回合未產生文字輸出)`，使用者不會收到空白，記憶與對話歷史也不會留下空字串。
+- **輸出要求**：agent `wukong` 的定義裡有 `[輸出要求]`（`persona::final_answer_directive`；CLI backend 改附在每回合的 prompt），要求即使工作都用工具完成也必須以文字總結。
 
-### 技能路由 (Skill Routing)
+### 技能 (Skills)
 
 - **本地技能庫**：Wukong 內建 selected Superpowers 技能於 `crates/wukong-skills/assets/superpowers/`，由 `wukong-skills` catalog 以 `include_str!` 內嵌進 runtime。
-- **角色 + 技能規劃**：每回合 planner 回傳最多三個步驟，每步包含角色與可選技能，例如 `fixer|test-driven-development`。
-- **Prompt 注入**：執行每棒時，若技能可解析，`wukong-cli` 會把對應 `SKILL.md` 放入 `[技能規範]` 區塊，再接上人格、角色卡、記憶與任務。
+- **由 V2 的 skill 機制提供**：入口啟動時把技能寫到工作區的 `.opencode/skills/`，模型依技能的 description 自己用 `skill` 工具載入（2026-11-26，#45）；prompt 不再附技能規範。
 - **更新來源**：使用 `scripts/sync-superpowers.sh <commit-or-tag> --dry-run` 預覽，再用 `scripts/sync-superpowers.sh <commit-or-tag>` 同步上游 Superpowers；來源版本記錄於 `crates/wukong-skills/assets/superpowers/SOURCE.md`。
 
 ---
@@ -199,7 +195,7 @@ cargo test -p wukong-cli --test cli_backend   # 以假 agent（scripts/test-supp
 ## Roadmap（v2+）
 
 - ~~Telegram bot 進入點~~ ✅ v0.6.0;~~Web Console 進入點~~ ✅(TeleNexus 完整願景,持續)
-- ~~角色協作鏈（多角色依序接力）~~ ✅ v0.5.0;~~技能路由（Superpowers 本地技能注入）~~ ✅;平行多角色調度(後續)
+- ~~角色協作鏈（多角色依序接力）~~ ✅ v0.5.0，#45 起改為悟空派工給 OpenCode V2 的 subagent;~~技能路由（Superpowers 本地技能注入）~~ ✅，#45 起改由 V2 的 skill 機制提供;平行多角色調度(後續)
 - ~~記憶 markdown 雙持久化、consolidation/prune、可觀測性快照~~ ✅ v0.4.0
 - ~~助手自然語言建立排程（提示詞注入排程能力）+ 排程結果回送 Telegram~~ ✅ 2026-06-16
 

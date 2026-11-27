@@ -13,6 +13,26 @@
 
 ### Changed
 
+- **每個回合只呼叫一次悟空，規劃、技能與壓縮交給 OpenCode V2。** 以前每回合先跑一次 planner 選角色與技能，
+  再依序接力執行最多三棒；現在悟空直接回答，需要時自己用 V2 的 subagent 派給 explorer、oracle、librarian、
+  fixer、designer（#45）：
+  - 不用工具的簡單問題，每回合的模型呼叫從 3 次降到 1 次，本機模式每回合只啟動一次 opencode。
+  - 悟空不能自己改檔，終端機只能跑排程與長期記憶指令；建檔、改程式、跑測試一律派給 subagent，所以這類任務
+    比以前多幾步、慢一些。
+  - 排程或 Web 指定了模型時，派出的 subagent 也用同一個模型。
+  - 最終回覆是空的時，改成在同一個 session 補送一次修復提示，不再取前一棒的輸出。
+- **人格、派工規則與各種能力說明寫進 Wukong 管理的 agent 定義，不再附在每則訊息裡。** 入口啟動時寫到工作區的
+  `.opencode/agents/`（`wukong.md` 與五個 subagent），升級後自動換成新版；改了 `SOUL.md`、`WUKONG_MEMORIA_HINT`
+  或 `WUKONG_BIN` 要重啟入口才生效。這六個檔案不要手改，下次啟動會被覆寫（#45）。
+- **技能改由 V2 的 skill 機制提供。** 八個 Superpowers 技能寫到工作區的 `.opencode/skills/`，模型依技能的說明
+  自己載入；prompt 不再附技能規範。舊的 `.wukong/skills/superpowers` 不再寫入，可以刪掉（#45）。
+- **工作區的 `AGENTS.md` 與舊範本相同時自動換成新版。** 先備份成 `AGENTS.md.bak-{版本}`；改過的不動，log 會
+  提醒其中過時的段落（人格那一句、「技能動態加載機制」）（#45）。
+- **正在處理的角色改顯示成「悟空」或「悟空·fixer」。** Telegram 的狀態泡泡、Web 的進度、排程執行中的訊息
+  都一樣，排程失敗訊息從「第 2 棒 fixer 失敗」改成「悟空·fixer 失敗」；Web 另外顯示 subagent 的產出卡片（#45）。
+- **Wukong 不再每 20 回合壓縮一次 session。** 壓縮交給 OpenCode 自己的自動壓縮；`WUKONG_SESSION_COMPACT_EVERY_TURNS`
+  不再讀取，留在 `.env` 裡也不會報錯。session 開始超過 7 天時，改成在下一個回合開始時就換新的（以前要等到
+  壓縮的時點）（#45）。
 - **換用 OpenCode V2。** 映像內建的 opencode 從 V1（`opencode-ai` 1.19.6）換成 V2（`@opencode/cli`，固定
   2.3.2），Wukong 只支援 V2。Telegram、Web、排程與 CLI 的使用方式不變：
   - V1 時期的對話換版後照常接續。V2 第一次啟動時會就地遷移 `opencode.db`。
@@ -60,8 +80,17 @@
 - **binary 模式偵測到 V1 時明確報錯。** PATH 上的 `opencode` 是 1.x 時，第一個回合就回報要改裝 V2，不會等到
   agent timeout。換裝步驟與備份方式見 `docs/installation.md`「Binary 模式換用 OpenCode V2」（#44）。
 
+### Removed
+
+- **Web 的技能偏好頁。** `Skills` 分頁、`/skills` 指令與 `/api/skills/catalog`、`/api/skills/preferences` 已移除：
+  planner 拿掉之後偏好不再影響回合。設定檔裡留著的 `planner_preferences` 照常載入，不會報錯（#45）。
+
 ### Fixed
 
+- **共用 server 模式下，用對話建立的排程現在會執行。** 這個模式的 agent 在 `opencode-server` 容器裡執行指令，
+  而它沒有掛 Wukong 的資料 volume：助手回覆「已建立排程」，排程卻寫進容器自己的資料庫，Web 看不到、也永遠
+  不會執行（v0.25.1 起就是如此）。compose 現在讓 `opencode-server` 共用 `/data/memory.db`。升級前在這個模式
+  建立、列不出來的排程，請重新建立一次（#45）。
 - **Docker `--rollback` 不再一律被拒絕。** `release/data-compatibility.json` 的 `rollbackSafeTo` 自 2026-07 起停在
   v0.17.1，之後所有版本的 rollback 都因此被拒絕；現在改成 v0.25.1（#44）。
 - **Docker `--rollback` 不帶 `--version` 時回到前一版。** v0.18.0 起，沒指定版本時 installer 會拿 GitHub 上

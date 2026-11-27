@@ -273,6 +273,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | 2026-11-27 | 規格修訂並重新核准 SCN-001：步數少於 b65b487 只要求 short 任務，tool 任務照實記錄（primary 不能改檔、建檔要派工的代價）；primary 的派工說明加上「派工後就結束這次回覆、等回報」 |
 | 2026-11-27 | Task 6.2 完成：對照 b65b487，short 任務步數 3 → 1、opencode 啟動 2 → 1，兩種任務成功率都是 7/7；tool 任務步數中位數 7（b65b487 為 4），照修訂後的 SCN-001 記錄 |
 | 2026-11-27 | Task 6.3 完成：dind 裡從假發版 rc.44（b65b487）升級到本分支，本機與 server 模式各跑一輪（[rehearsal.md](rehearsal.md)）。發現 server 模式以對話建立的排程寫進 opencode-server 自己的資料庫、永遠不執行（v0.25.1 起的既有問題），使用者選在 #45 修（e70e4e2）；Telegram 因沒有 bot token 未執行 |
+| 2026-11-27 | Task 6.5 完成：根目錄 AGENTS.md、README.md、docs/docker.md、docs/entrypoints.md、docs/cli-reference.md、docs/memory.md、crate README 與 CHANGELOG `[Unreleased]` 改成單次呼叫加派工的現況 |
 
 ---
 **建立日期**: 2026-11-26  

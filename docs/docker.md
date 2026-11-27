@@ -29,6 +29,22 @@
 - **首次升級遷移**：若既有 `opencode.json` 是舊版 seed 出來的（沒有 `.wukong-baseline` 標記），entrypoint 會備份成 `opencode.json.pre-baseline.bak`，並把內容複製到 `user.json`，避免手改過的規則消失。想回到純預設，刪掉 `user.json` 再重啟即可。
 - **注意合併順序**：opencode 以「最後符合的規則勝出」解析權限，而兩個 rule 物件合併後，你的鍵落在順序中的哪個位置沒有保證。自訂規則請寫得具體、自足，不要依賴它與 baseline 規則的相對順序。
 
+### 工作區裡由 Wukong 管理的檔案（2026-11-26，#45）
+
+四個入口（Web、Telegram、schedulerd、CLI）每次啟動都會整理掛載進來的 `/workspace`：
+
+| 路徑 | 內容 | 行為 |
+|------|------|------|
+| `.opencode/agents/` | primary agent `wukong.md` 與五個 subagent（explorer、oracle、librarian、fixer、designer） | 內容與這個版本不同時覆寫，所以**升級後定義自動更新**。同目錄裡你自己加的定義不動 |
+| `.opencode/skills/` | 八個 Superpowers 技能，每個一個 `{name}/SKILL.md` | 同上。模型依技能的 description 自己載入 |
+| `AGENTS.md` | 專案規則（新版範本不再有人格與「技能動態加載機制」段落） | 與某一版舊範本完全相同時，備份成 `AGENTS.md.bak-{版本}` 再換新；改過的不動，log 會提醒過時的段落 |
+| `SOUL.md` | 人格 | 只在缺檔時建立；內容寫進 `wukong.md` |
+
+- **人格與能力在 agent 定義裡**：`wukong.md` 含 SOUL.md 的人格、派工規則、輸出要求、排程能力，`WUKONG_MEMORIA_HINT` 開啟時另含長期記憶能力。改了 SOUL.md、`WUKONG_MEMORIA_HINT` 或 `WUKONG_BIN`，要重啟入口才會寫進定義。不要手改這六個定義檔，下次啟動會被覆寫。
+- **primary agent 的權限**：`wukong.md` 的 frontmatter 拒絕 `edit` 與 `execute`，shell 只允許 `wukong schedule *`（長期記憶開啟時另外允許 `memoria` 指令）。改檔、跑測試都由 subagent 執行。
+- **舊路徑**：`.wukong/skills/superpowers` 不再寫入（V2 讀不到那裡），既有部署留著的目錄可以刪掉。
+- **移除的變數**：`WUKONG_SESSION_COMPACT_EVERY_TURNS` 不再讀取，見下方環境變數表。
+
 ## 按需執行與選用共用 server（2026-10-04）
 
 預設 `WUKONG_AGENT_CMD=opencode run`、`WUKONG_AGENT_SERVER_URL` 留空。Wukong 在需要執行時啟動本機 `opencode serve`，回合結束就停止；閒置時沒有 OpenCode 控制程序。session 與設定仍在既有 volumes 中，跨程序、容器升級都能續接。這個方案使用本機 HTTP 控制 API，並非純 `opencode run` 的 stdin 問答。
@@ -51,6 +67,7 @@ WUKONG_AGENT_SERVER_PASSWORD=<openssl rand -hex 24 的輸出>
 - installer 升級時若偵測到 server 模式沒有密碼，會先把 `.env` 備份到 `.wukong-backups/`，再產生一組 48 字元的密碼寫進 `.env`；輸出只說明有產生，不印出密碼。
 - 密碼錯誤時，入口的就緒檢查回報「認證被拒」。
 - opencode-server 的 healthcheck 帶 basic auth 查 `/api/info`，密碼不對或 server 沒有回應就判為 unhealthy。V2 的網頁不帶認證也回 200，所以不能拿它判斷健康。
+- opencode-server 也掛 `wukong-data:/data`、設 `WUKONG_MEMORY_DB`：server 模式下 agent 的 shell 在這個容器裡執行，模型以 `wukong schedule add-turn` 建的排程要寫進入口與 schedulerd 讀的同一份記憶庫（2026-11-27，#45；之前的版本會寫進容器自己的資料庫，排程永遠不執行）。
 
 連接自行管理的遠端 server 則只設定 URL。共用 `/workspace` 時附件用 `shared`，沒有共享檔案系統的遠端可改用 `inline`（單檔 10 MiB）。本機程序固定使用入口的工作目錄與共享檔案，不套用遠端路徑映射。
 
@@ -243,7 +260,7 @@ services:
 | `WUKONG_OPENCODE_CPUS` / `_MEM` / `_PIDS` | `opencode-server` 與 `cli` profile 的 cgroup 上限（agent 實際幹活的容器）。溫度壓不下來就調降 CPU；回合明顯變慢且溫度尚可再往上加 | `1.5` / `2g` / `256` |
 | `WUKONG_SVC_CPUS` / `_MEM` / `_PIDS` | `wukong-web`／`wukong-telegram`／`wukong-schedulerd` 的 cgroup 上限。2026-10-04：預設也執行本機 agent；開 embedding 時另留模型空間 | `1.5` / `2g` / `256` |
 
-**關於 opencode session 的保留期清理：** opencode 把每個 session 的訊息、片段與事件歷史存在 `opencode.db`，不會自己刪。Wukong 只在輔助棒跑完、session 輪替與 `/new` 時刪除 session，其餘（回合失敗留下的、人工探測建立的）會一直留著。`wukong-schedulerd` 因此在啟動 6 小時後第一次、之後每 6 小時，刪除超過 `WUKONG_OPENCODE_SESSION_RETENTION_DAYS` 天、且沒有任何 scope 指向的 session，每輪最多 500 個、最長 5 分鐘。**仍被 scope 指向的 session 不論多舊都保留**（scope 指向子 session 時，整棵 session 樹都保留），所以對話延續不受影響；Wukong 自己另存對話，不讀舊的 opencode session。讀不到 scope 對應或列不出 session 時整輪不刪。生效條件依 backend 而定：
+**關於 opencode session 的保留期清理：** opencode 把每個 session 的訊息、片段與事件歷史存在 `opencode.db`，不會自己刪。Wukong 只在暫時的輔助 session（例如摘要）跑完、本回合新建的 session 執行失敗、session 輪替與 `/new` 時刪除 session，其餘（例如人工探測建立的）會一直留著。`wukong-schedulerd` 因此在啟動 6 小時後第一次、之後每 6 小時，刪除超過 `WUKONG_OPENCODE_SESSION_RETENTION_DAYS` 天、且沒有任何 scope 指向的 session，每輪最多 500 個、最長 5 分鐘。**仍被 scope 指向的 session 不論多舊都保留**（scope 指向子 session 時，整棵 session 樹都保留），所以對話延續不受影響；Wukong 自己另存對話，不讀舊的 opencode session。讀不到 scope 對應或列不出 session 時整輪不刪。生效條件依 backend 而定：
 
 - **共用 server**：預設 30 天。
 - **按需本機模式**：只有明確設定 `WUKONG_OPENCODE_SESSION_RETENTION_DAYS` 時才清（2026-11-03 起）。compose 會替每個服務設定這個變數，容器專屬的 `opencode-state` 因此會被清；在主機上直接執行、沒有設定這個變數時，`opencode.db` 視為與你自己的 opencode 共用，不清。本機模式每刪一個 session 都要啟動一次 opencode（實測約 0.7 秒），一輪 5 分鐘大約只刪得完 400 個；舊部署第一次清理時，剩下的會留到 6 小時後的下一輪。
@@ -312,6 +329,6 @@ docker compose exec -u wukong wukong-schedulerd wukong opencode prune --dry-run
 - **立即失敗**：收到上游錯誤後立即中止回合，保留原始錯誤原因，不再等待 1200 秒逾時。
 - **排程診斷**：排程 run 結果標記為 failure，並標記 `[上游失敗: 達到請求頻率或額度上限]` 與詳細錯誤內容，可直接透過 `wukong schedule runs` 檢視。
 - **處置方式**：
-  1. **調整 Wukong 明確模型設定**：若已在 Wukong 設定了預設模型（例如 `/data/settings.json` 的 `agent.default_model`），回合最後一棒會明確傳入該模型覆寫 OpenCode 預設值。可透過 Web Console 設定頁面（`/settings`）切換為其他可用模型，亦可進入 Wukong REPL 使用 `/set_models <model>` 指令設定。若欲完全移除覆寫、交由 OpenCode 預設決策，需手動自 `/data/settings.json` 中將 `agent.default_model` 設為 `null` 或刪除該欄位（現有 Web 與 REPL 介面不接受空值輸入）。
+  1. **調整 Wukong 明確模型設定**：若已在 Wukong 設定了預設模型（例如 `/data/settings.json` 的 `agent.default_model`），每個回合會明確傳入該模型覆寫 OpenCode 預設值，派出的 subagent 也用同一個模型。可透過 Web Console 設定頁面（`/settings`）切換為其他可用模型，亦可進入 Wukong REPL 使用 `/set_models <model>` 指令設定。若欲完全移除覆寫、交由 OpenCode 預設決策，需手動自 `/data/settings.json` 中將 `agent.default_model` 設為 `null` 或刪除該欄位（現有 Web 與 REPL 介面不接受空值輸入）。
   2. **配置 OpenCode 模型與補充額度**：若未在 Wukong 指定明確模型，可在 `opencode-config` Volume 的 `user.json` 中配置替代模型；或至模型供應商處確認 API 金鑰並補充帳戶額度。
 

@@ -676,8 +676,21 @@
 - 驗收編號：全部（文件）
 - 完成判準：依 project.md 常青文件表逐項核對，文件內容與產物一致（W-1）。
 - 驗證：等價證據，以靜態核對逐項記錄。不改變可觀察行為。
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成（2026-11-27）
+- 證據：依 `docs/agents/project.md`「常青文件更新責任」逐項靜態核對，內容對照現行程式（`turn.rs` 的 `run_turn`、`bootstrap.rs`、`agent_assets.rs`、`skill_assets.rs`、`workspace_template.rs`、各 crate 的 `Cargo.toml`）：
+  - `run_turn` 資料流與相依方向 → 根目錄 `AGENTS.md`：
+    - 相依圖照 `Cargo.toml` 改寫（#45 拿掉了 `wukong-orchestrator → wukong-gateway`；`wukong-cli`、`wukong-runtime` 那兩行在 #45 之前就與實際不符，一併修正）；
+    - 「一回合資料流」改成 lease → recall → primary agent 一次 → 空輸出補救 → remember，拿掉 planner、逐棒與會話隔離；
+    - 新增「Wukong 管理的 agent 定義與技能」；「末棒輸出保證」改成「輸出保證」，描述補送修復提示；同時執行與 lease 續租兩則拿掉「每一棒」「規劃階段」，排程階段補上「悟空·fixer」。
+  - compose 與容器 → `docs/docker.md`：新增「工作區裡由 Wukong 管理的檔案」（agent 定義、技能路徑、AGENTS.md 遷移、primary 的權限、`.wukong/skills` 舊路徑、移除的變數）；server 模式段落補上 opencode-server 共用 `/data`；保留期清理與模型兩句拿掉「輔助棒」「最後一棒」。`.env.example` 沒有新增 `WUKONG_*` 變數（`WUKONG_SESSION_COMPACT_EVERY_TURNS` 已在 Task 3.3 註明不再讀取）。
+  - Telegram／Web → `docs/entrypoints.md`：狀態泡泡的角色顯示、Web 的 `role`／`step` 與產出卡片、技能偏好頁移除。`docs/web-console-sop-v1.md` 已在 Task 5.2 更新。
+  - CLI → `docs/cli-reference.md`：`schedule add-turn` 不再寫 planner；排程模型的套用範圍改成回合、subagent 與補救重送。
+  - 記憶 → `docs/memory.md`：召回那句拿掉「最後一棒」「輔助棒」。
+  - 功能總覽 → `README.md`：四柱表與架構圖、相依方向、時序圖改成一次呼叫加選擇性派工、「派工與 session」取代「角色協作鏈與會話隔離」、技能段落與 Roadmap。
+  - 使用者看得到的變更 → `CHANGELOG.md` `[Unreleased]`：Changed 6 則、Removed 1 則（技能偏好頁）、Fixed 1 則（server 模式的排程）。
+  - 安裝與發版：installer 與發版流程沒有變（AGENTS.md 遷移在入口啟動時做），`docs/installation.md`、`docs/release-rehearsal.md` 不用改。
+  - crate README：`wukong-orchestrator` 改寫成只剩角色定義；`wukong-cli`、`wukong-telegram` 拿掉協作鏈的描述。`Role::description`、`Role::card` 的 doc comment 改成 subagent 定義（只動註解）。
+  - 檢查：以 `planner`、`末棒`、`一棒`、`輔助棒`、`逐棒`、`前序協作`、`技能偏好`、`.wukong/skills` 搜尋常青文件與 crate README，剩下的都是說明「已移除」的句子；`docs/issues/`、`docs/superpowers/`、handover 是歷史紀錄，不改。
 
 ## 測試策略
 
@@ -693,5 +706,5 @@
 
 - [x] Phase 1 的六項探測都有紀錄，TBD-1～TBD-4 已更新（2026-11-26）
 - [x] 每個 Scenario 都有責任 Task（2026-11-26 decompose，見責任對照）
-- [ ] 真實模型的驗證只用合成提示，憑證只有 NVIDIA 一筆或沒有，正式部署沒有被碰
-- [ ] 常青文件依 project.md 全部更新
+- [x] 真實模型的驗證只用合成提示，憑證只有 NVIDIA 一筆或沒有，正式部署沒有被碰（2026-11-27：Task 6.1～6.3 都在隔離容器或 dind 裡執行，big-pickle 不需要憑證）
+- [x] 常青文件依 project.md 全部更新（2026-11-27，Task 6.5）

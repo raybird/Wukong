@@ -2,9 +2,9 @@
 
 > 柱 4 ──「修成正果・金箍棒」：統一 CLI（`wukong` 二進位）
 
-把三柱合為一個產品。一回合 = recall → **plan_skill_chain** → execute×N（人格 + 角色 + 技能 + 記憶 + 前序協作）→ remember。
+把三柱合為一個產品。一回合 = 取得 session lease → recall → 以 OpenCode V2 的 primary agent `wukong` 執行一次 → remember。
 
-> 一回合走**協作鏈**:planner 自動決定要哪幾個角色、什麼順序(簡單任務單角色 = 今日行為;複雜任務最多 3 棒)。每棒在 stderr 印自己的角色 header,前一棒輸出累加餵給後一棒;記憶只存最終輸出。
+> 2026-11-26（#45）起不再有 planner 與協作鏈：悟空自己回答，或用 V2 的 subagent 派給五個角色；派工時 stderr 印出 subagent 的角色。人格、角色卡與能力說明在工作區的 `.opencode/agents/`，技能在 `.opencode/skills/`。
 
 ## 進入點
 
@@ -58,11 +58,11 @@ use wukong_cli::repl::run_repl_loop;
 - `repl::{run_repl_loop, classify_line, LineAction}` — REPL 迴圈與行解析
 - `WukongError` — 收斂 memory / orchestrator / backend 三柱錯誤
 
-依賴：`wukong-cli → { wukong-memory, wukong-gateway, wukong-orchestrator, wukong-skills }`（單向，頂層）。
+依賴：`wukong-cli → { wukong-runtime, wukong-gateway, wukong-memory, wukong-scheduler, wukong-settings }`（單向，頂層）。
 
-## 技能路由
+## 技能
 
-`run_turn` 會呼叫 `wukong-orchestrator::plan_skill_chain` 規劃角色與技能。若 planner 回傳的技能存在於 `wukong-skills` catalog，該技能的 `SKILL.md` 會被注入 `[技能規範]` 區塊。
+`wukong-skills` 內嵌的技能在入口啟動時寫到工作區的 `.opencode/skills/`，模型依 description 自己以 V2 的 `skill` 工具載入（#45）。
 
 同步 selected Superpowers 技能：
 

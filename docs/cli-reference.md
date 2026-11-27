@@ -100,7 +100,7 @@ wukong-schedulerd
 | 子命令 | 說明 |
 | :--- | :--- |
 | `schedule list` | 列出所有排程 job；Turn job 的 `kind` 會顯示模型，例如 `turn(scope=project:Wukong,model=使用預設)` |
-| `schedule add-turn --name N --cron C --scope S --prompt P [--model M]` | 新增定時 Wukong turn，執行時沿用既有 planner 自動選 role/skill；`--scope` 是擁有者，`--model` 是這個排程專用的模型（見下方排程語意） |
+| `schedule add-turn --name N --cron C --scope S --prompt P [--model M]` | 新增定時 Wukong turn，執行時由悟空自己回答或派工（2026-11-26 起不再有 planner，#45）；`--scope` 是擁有者，`--model` 是這個排程專用的模型（見下方排程語意） |
 | `schedule set-model --id ID [--model M]` | 指定 Turn job 的模型，省略 `--model` 就改回使用預設模型；不存在的 id 印「找不到排程」，維護 job 印「維護排程不使用模型，無法設定」 |
 | `schedule add-maintenance --name N --cron C --task snapshot\|consolidate\|prune [--scope S]` | 新增定時記憶維護 job |
 | `schedule rm --id ID` | 刪除排程 job，並清掉 Turn 排程的 scope（`agent:schedule-<id>`）的記憶與 session 指向；排程正在執行時先刪 job，回合結束後才清，結果照常回送 |
@@ -115,7 +115,7 @@ wukong-schedulerd
 - 多個 daemon 同時執行時會用 DB lease claim job，避免同一輪 due job 被重複執行。回合執行中會持續續租，執行時間超過 `--lease-secs` 也不會被另一個 daemon 或 `trigger` 重複執行；同一次掃描取得、還在排隊的 job，輪到時會先確認 lease 還在自己手上，等待期間已被別人取得執行，或被停用、重新啟用、刪除的就跳過。執行的行程中止後就不再續租，lease 照原本的時間到期。
 - 執行中的 run 訊息是進度，例如 `進行中：悟空·fixer，已執行 312 秒`，換階段時更新，之後至少每 30 秒更新一次；結束時改成最終結果。回合一開始是「悟空」（primary agent 在處理），派工給 subagent 後顯示最近派出的那一個（2026-11-26，#45）。Turn 回合失敗時，訊息開頭標出失敗的階段，例如 `悟空·fixer 失敗，已執行 1203 秒：<原錯誤>`。
 - Turn job 的 `--scope` 是擁有者：Telegram 回送與聊天紀錄依它決定。回合本身的記憶、召回與 opencode session 在 `agent:schedule-<job id>`，同一個排程的多次觸發共用、不同排程互不相通，也不讀寫擁有者的記憶。要看排程回報過什麼，用 `schedule runs --id ID`。
-- Turn job 的模型：有指定時，該排程每次執行都用它，不受預設模型（`agent.default_model`，Web Settings 或 `/set_models` 設定）變更影響；沒指定時用執行當下的預設模型。套用範圍跟預設模型相同：產生回覆的那一棒、補救重送與 session 壓縮，規劃與輔助棒不指定模型。升級前建立的排程都視為沒指定。
+- Turn job 的模型：有指定時，該排程每次執行都用它，不受預設模型（`agent.default_model`，Web Settings 或 `/set_models` 設定）變更影響；沒指定時用執行當下的預設模型。套用範圍跟預設模型相同：回合本身、派出的 subagent，以及空輸出的補救重送。升級前建立的排程都視為沒指定。
 - Scheduled turn 需要底層 OpenCode provider/auth 已設定；Docker 模式會使用共用的 `opencode-config` volume。
 
 Docker 模式下 schedulerd 預設會隨 `docker compose up -d` 啟動，讓排程功能安裝後即可運作。若你不想執行排程 daemon，可手動停止該 service：`docker compose stop wukong-schedulerd`。
