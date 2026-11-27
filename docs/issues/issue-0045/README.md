@@ -244,6 +244,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | TBD-6 | 預設免費模型的派工與技能遵循表現 | 已解決（2026-11-26）：NVIDIA 憑證被拒（403）後，使用者表示「使用免費模型驗證也可以」。驗收可以用 NVIDIA nemotron 或預設免費模型 opencode/big-pickle判定，每份紀錄寫明實際用的模型；對照組（例如 SCN-001 的 b65b487）用同一個模型。免費模型額度用完時照實記下，不繞過額度限制 | 正式部署若用預設免費模型，派工表現可能與驗收時不同；關聯 SCN-003 |
 | TBD-7 | SCN-006 的「檔案互動規則」：Telegram 的產出目錄每回合不同（`artifacts/<scope>/<turn_id>`），不能整段放進 agent 定義 | 已解決（2026-11-26，使用者選「規則進定義，只留路徑（建議）」）：規則文字寫進 agent `wukong` 的定義，user message 只留一行 `[產出目錄] <路徑>`，視為和召回記憶一樣的動態區塊；SCN-006 的「檔案互動規則」指規則文字。沒有採用的做法：每個 scope 固定一個產出目錄（要改檔案回傳流程）、路徑也放 entry（每回合在對話紀錄多一則通知） | Task 4.2 的外迴圈檢查 user message 時，產出目錄那一行屬於動態區塊；關聯 SCN-006 |
 | TBD-8 | 常駐 V2 server 在 agent 定義改寫後幾十毫秒內送出的回合，仍用舊定義（Task 4.2 外迴圈：WUKONG_MEMORIA_HINT 開關的答案相反） | 已解決（2026-11-26）：使用者選「等 server 讀到再送」。入口改寫過 primary agent 的定義時，下一個回合送 prompt 前輪詢 /api/agent，等 wukong 的 system 與新內文相同才送，最多 5 秒，逾時警告後照送；按需本機模式與 CLI backend 不用等 | 只影響常駐 server 模式、緊接在定義改寫之後的回合（CLI 單次執行、入口重啟時積壓的訊息或到期的排程）；SCN-008 |
+| TBD-9 | NVIDIA nemotron 上，查找題（讀程式碼、寫 README）只有 1/3 派給 librarian：primary 自己讀完模組、寫好整份 README，只把存檔派給 fixer（[dispatch-eval.md](dispatch-eval.md) 第 3、4 輪） | 待確認 | SCN-003 以 big-pickle 通過（使用者 2026-11-27 指示 NVIDIA 限流時改用 opencode 的模型）；nemotron 的這個差距沒有修。要不要再改措辭（例如「文件內容由 librarian 撰寫，不要自己寫好再請別人存檔」），或修訂查找題的門檻，由使用者決定 |
 
 ## Timeline
 
@@ -266,6 +267,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | 2026-11-26 | Task 4.2 完成：依使用者決定（TBD-8），入口改寫 agent 定義後，常駐 server 讀到新定義才送下一個回合；長期記憶能力的開關以真實模型驗證 |
 | 2026-11-26 | Task 5.1 完成：Web 與 Telegram（mock transport）接真實 V2 與 NVIDIA nemotron，派工時看得到「悟空·fixer」與 fixer 的產出 |
 | 2026-11-26 | Task 6.4 完成：評估 V2 session inbox，結論是不用它取代 scope lease，維持立即拒絕（TBD-5 已解決） |
+| 2026-11-27 | Task 6.1 完成：SCN-003 派工門檻以 opencode/big-pickle 6 題全部通過（NVIDIA 限流，依使用者指示改用 opencode 的模型）；依使用者決定，primary agent 不能改檔，shell 只能跑排程與 memoria 指令；nemotron 查找題的差距記為 TBD-9 |
 
 ---
 **建立日期**: 2026-11-26  

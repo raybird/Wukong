@@ -583,8 +583,20 @@
   - 實作題 3/3 派給 fixer，直接回答題 3/3 不派工，其他各題至少 2/3 派給預期的 subagent。
   - 判準先以對照組自檢：用固定回覆的假 agent 確認腳本判得出「沒派工」與「派錯」，避免判準失效。
 - 驗證：觀測式驗收，附反向自檢。
-- 狀態：📝 待實作
-- 證據：
+- 狀態：✅ 已完成
+- 證據：[dispatch-eval.md](dispatch-eval.md)，`scripts/dispatch-eval.sh`、`scripts/dispatch_judge.py`（2026-11-26～2026-11-27）
+  - 判準自檢 8/8 PASS（`dispatch_judge.py --self-check`）。改用已知答案的紀錄做對照組，取代假 agent；理由見 dispatch-eval.md。
+  - **門檻：最終定義在 `opencode/big-pickle` 上 6 題全部 PASS**（實作、探索、查找、架構、設計各 3/3 派給預期的 subagent，直接回答 3/3 不派工；18 回合都只用這個模型）。
+    - NVIDIA nemotron 在最終定義的那一輪被限流（HTTP 429）打斷實作題，重跑仍 429。
+    - 使用者 2026-11-27 指示「nvidia 限流可以換成 opencode 的模型」，所以以 big-pickle 完整跑一輪，沒有混用模型。
+  - 評估中改了 primary 的定義（使用者 2026-11-26 的兩次決定，見 dispatch-eval.md 各輪）：
+    - 第 1 輪（不限權限）實作 0/3：primary 自己用 edit／write 改檔。
+    - 第 2 輪（`edit: deny`）：primary 改用 shell heredoc 與 `execute` 寫檔。
+    - 第 3 輪起：`execute` 拒絕，shell 只允許 `<WUKONG_BIN> schedule *`（記憶能力開啟時另允許 memoria 指令）；派工說明要求交代路徑與 `[產出目錄]`；subagent 帶 `[檔案互動規則]`。
+    - 單元測試：`only_the_primary_agent_is_denied_file_edits`、`the_primary_shell_only_allows_scheduling_and_memoria`，都先紅燈。
+    - shell 收緊後，`probe-session-layer.sh` 19/19 PASS，排程仍建得出來。
+    - CI 三道全過（771 passed、14 ignored）。
+  - 已知差距：nemotron 上查找題第 3、4 輪都只有 1/3 派給 librarian（primary 自己寫好 README，只派 fixer 存檔）。記為 README TBD-9。
 
 ### Task 6.2 — 效能對照
 - 產出與範圍：

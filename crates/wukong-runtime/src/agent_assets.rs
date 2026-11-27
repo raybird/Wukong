@@ -43,24 +43,55 @@ pub struct AgentDefinition {
 }
 
 /// 什麼樣的任務派給這個角色，寫進 primary agent 的派工規則。
-/// 措辭沿用 #45 Task 1.4 抽樣時的版本（big-pickle 實作題 3/3 派給 fixer）。
+/// 2026-11-26（#45 Task 6.1）：Task 1.4 的措辭在 nemotron 上實作題 0/3、探索 1/3、寫文件
+/// 0/3 派工，primary 都自己讀檔改檔；改成指明「不要自己逐檔讀」「文件交給 librarian」。
+/// 第三輪（primary 已不能改檔）新建 README 有 3 次交給 fixer：寫明新建文件檔也算文件，
+/// fixer 只管文件以外的檔案。
 fn dispatch_rule(role: Role) -> &'static str {
     match role {
-        Role::Explorer => "掃描專案結構、追蹤依賴",
+        Role::Explorer => "掃描專案結構、整理模組之間的關係或依賴（不要自己逐一讀檔整理）",
         Role::Oracle => "架構取捨、重構方案、難解的 Bug",
-        Role::Librarian => "撰寫文件、註解、翻譯",
-        Role::Fixer => "建立或修改工作區裡的檔案、寫程式、補測試",
-        Role::Designer => "介面結構、互動與視覺",
+        Role::Librarian => {
+            "撰寫或更新文件（README、說明文件、*.md）、註解、翻譯；新建文件檔也派給 librarian，不交給 fixer"
+        }
+        Role::Fixer => {
+            "文件以外的檔案與執行指令：寫程式、補測試、跑測試、改設定、產出要回傳的檔案"
+        }
+        Role::Designer => "介面結構、互動與視覺的設計建議",
     }
 }
 
-fn frontmatter(description: &str, mode: &str) -> String {
-    format!("---\n{MANAGED_NOTE}\ndescription: {description}\nmode: {mode}\n---\n")
+/// primary agent 不能改檔，也只能執行排程與 memoria 指令（#45 Task 6.1，使用者 2026-11-26 決定）：
+/// 改檔、跑測試與其他指令都要派工。
+/// - `edit`：V2 套用到所有改檔工具；
+/// - `execute`：跑程式碼的工具；
+/// - `shell`：資源是整段指令。只關 `edit` 時，primary 改用 heredoc 寫檔（dispatch-eval.md 第二輪）。
+///
+/// V2 依序比對、後面的規則優先，所以先拒絕全部再逐項允許。`bin` 是排程說明裡寫的指令
+/// （[`crate::persona::scheduling_bin`]）；memoria 指令只在長期記憶能力開啟時允許。
+fn primary_permission(bin: &str, memoria_hint: bool) -> String {
+    let mut allowed = vec![format!("{bin} schedule *")];
+    if memoria_hint {
+        allowed.push("memoria *".to_string());
+        allowed.push("memoria-vector-sync*".to_string());
+    }
+    let mut out =
+        String::from("permission:\n  edit: deny\n  execute: deny\n  shell:\n    \"*\": deny\n");
+    for pattern in allowed {
+        let quoted = pattern.replace('\\', "\\\\").replace('"', "\\\"");
+        out.push_str(&format!("    \"{quoted}\": allow\n"));
+    }
+    out
+}
+
+fn frontmatter(description: &str, mode: &str, extra: &str) -> String {
+    format!("---\n{MANAGED_NOTE}\ndescription: {description}\nmode: {mode}\n{extra}---\n")
 }
 
 /// 依人格內容產生六個定義：primary agent `wukong` 在前，接著是五個 subagent。
 /// `memoria_hint` 為 [`crate::persona::memoria_hint_enabled`]：開啟時 primary agent 多一段長期記憶能力。
 pub fn agent_definitions(soul: &str, memoria_hint: bool) -> Vec<AgentDefinition> {
+    let bin = crate::persona::scheduling_bin();
     let mut rules = String::new();
     for role in Role::all() {
         rules.push_str(&format!(
@@ -70,15 +101,19 @@ pub fn agent_definitions(soul: &str, memoria_hint: bool) -> Vec<AgentDefinition>
         ));
     }
     let primary = format!(
-        "{}{}\n\n[派工]\n依任務性質決定自己回答，或用 subagent 工具派工：\n{rules}\
-         簡單的問題直接回答，不要派工。\n\n{}\n\n{}\n\n{}\n",
+        "{}{}\n\n[派工]\n你不能自己建立或修改檔案，終端機也只能執行這份說明列出的排程與長期記憶指令（權限已關閉）；\
+         需要改檔、跑測試或執行其他指令的工作一律派工。依任務性質決定自己回答，\
+         或用 subagent 工具派工：\n{rules}\
+         簡單的問題直接回答，不要派工。派工時把使用者提到的路徑、附件位置與訊息裡的\
+         `[產出目錄]` 一併寫進交代內容，subagent 看不到使用者的原始訊息。\n\n{}\n\n{}\n\n{}\n",
         frontmatter(
             "孫悟空，主要助手，決定自己回答或派工給專門的 subagent",
-            "primary"
+            "primary",
+            &primary_permission(&bin, memoria_hint),
         ),
         soul.trim(),
         crate::persona::final_answer_directive(),
-        crate::persona::scheduling_capability_guide(&crate::persona::scheduling_bin()),
+        crate::persona::scheduling_capability_guide(&bin),
         crate::persona::file_interaction_rules(),
     );
     let primary = if memoria_hint {
@@ -94,9 +129,10 @@ pub fn agent_definitions(soul: &str, memoria_hint: bool) -> Vec<AgentDefinition>
         defs.push(AgentDefinition {
             name: role.name(),
             content: format!(
-                "{}{}\n\n完成後回報：你做了什麼、結果如何、有無注意事項。\n",
-                frontmatter(role.description(), "subagent"),
+                "{}{}\n\n{}\n\n完成後回報：你做了什麼、結果如何、有無注意事項。\n",
+                frontmatter(role.description(), "subagent", ""),
                 role.card(),
+                crate::persona::file_interaction_rules(),
             ),
         });
     }
@@ -292,6 +328,54 @@ mod tests {
         let off = &agent_definitions("soul", false)[0].content;
         assert!(on.contains("[長期記憶能力]"), "{on}");
         assert!(!off.contains("[長期記憶能力]"), "{off}");
+    }
+
+    #[test]
+    fn only_the_primary_agent_is_denied_file_edits() {
+        // #45 Task 6.1：nemotron 的 primary 實作題 0/3 派工，都是自己改檔（dispatch-eval.md）
+        let defs = agent_definitions("soul", false);
+        let frontmatter_of = |content: &str| content.split_once("\n---\n").unwrap().0.to_string();
+        let primary = &defs[0].content;
+        assert!(
+            frontmatter_of(primary).ends_with(&format!(
+                "\n{}",
+                primary_permission(&crate::persona::scheduling_bin(), false).trim_end()
+            )),
+            "{primary}"
+        );
+        assert!(
+            system_of(primary).contains("不能自己建立或修改檔案"),
+            "{primary}"
+        );
+        assert!(system_of(primary).contains("[產出目錄]"), "{primary}");
+        for sub in &defs[1..] {
+            assert!(
+                !frontmatter_of(&sub.content).contains("permission"),
+                "{}",
+                sub.name
+            );
+            assert!(sub.content.contains("[檔案互動規則]"), "{}", sub.name);
+        }
+    }
+
+    // 第二輪 primary 改用 shell 的 heredoc 與 execute 寫檔（dispatch-eval.md）：shell 只留排程與
+    // memoria 指令，其他都拒絕；規則依序比對、後面的優先，所以先拒絕全部再逐項允許。
+    #[test]
+    fn the_primary_shell_only_allows_scheduling_and_memoria() {
+        let off = primary_permission("/opt/my \"bin\"/wukong", false);
+        assert_eq!(
+            off,
+            "permission:\n  edit: deny\n  execute: deny\n  shell:\n    \"*\": deny\n    \
+             \"/opt/my \\\"bin\\\"/wukong schedule *\": allow\n"
+        );
+        let on = primary_permission("wukong", true);
+        assert!(on.ends_with(
+            "    \"wukong schedule *\": allow\n    \"memoria *\": allow\n    \
+             \"memoria-vector-sync*\": allow\n"
+        ));
+        assert!(agent_definitions("soul", true)[0]
+            .content
+            .contains("\"memoria *\": allow"));
     }
 
     // #45 SCN-007：排程能力的固定說明在 primary agent 的定義裡；scope 由 session 指令層提供，
