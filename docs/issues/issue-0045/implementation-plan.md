@@ -586,7 +586,7 @@
 - 狀態：✅ 已完成
 - 證據：[dispatch-eval.md](dispatch-eval.md)，`scripts/dispatch-eval.sh`、`scripts/dispatch_judge.py`（2026-11-26～2026-11-27）
   - 判準自檢 8/8 PASS（`dispatch_judge.py --self-check`）。改用已知答案的紀錄做對照組，取代假 agent；理由見 dispatch-eval.md。
-  - **門檻：最終定義在 `opencode/big-pickle` 上 6 題全部 PASS**（實作、探索、查找、架構、設計各 3/3 派給預期的 subagent，直接回答 3/3 不派工；18 回合都只用這個模型）。
+  - **門檻：第 4 輪的定義在 `opencode/big-pickle` 上 6 題全部 PASS**（實作、探索、查找、架構、設計各 3/3 派給預期的 subagent，直接回答 3/3 不派工；18 回合都只用這個模型）。
     - NVIDIA nemotron 在最終定義的那一輪被限流（HTTP 429）打斷實作題，重跑仍 429。
     - 使用者 2026-11-27 指示「nvidia 限流可以換成 opencode 的模型」，所以以 big-pickle 完整跑一輪，沒有混用模型。
   - 評估中改了 primary 的定義（使用者 2026-11-26 的兩次決定，見 dispatch-eval.md 各輪）：
@@ -597,6 +597,7 @@
     - shell 收緊後，`probe-session-layer.sh` 19/19 PASS，排程仍建得出來。
     - CI 三道全過（771 passed、14 ignored）。
   - 已知差距：nemotron 上查找題第 3、4 輪都只有 1/3 派給 librarian（primary 自己寫好 README，只派 fixer 存檔）。記為 README TBD-9。
+  - 最終定義（f0ce34a，Task 6.2 加上「派工後就結束回覆」）還沒有完整的一輪：2026-11-27 的 nemotron 重跑中實作題 3 次都被限流或逾時打斷（dispatch-eval.md 第 6 輪），big-pickle 的免費額度同日用完。記為 README TBD-10，額度恢復後補跑。
 
 ### Task 6.2 — 效能對照
 - 產出與範圍：

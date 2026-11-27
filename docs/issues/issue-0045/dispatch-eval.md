@@ -6,7 +6,8 @@
 
 ## 結論
 
-- **最終定義在 opencode/big-pickle 上通過門檻**：6 題各 3 次，全部 PASS。
+- **第 4 輪的定義在 opencode/big-pickle 上通過門檻**：6 題各 3 次，全部 PASS。
+- **最終定義（f0ce34a）只多了一句「派工後就結束這次回覆、等它回報」**（Task 6.2 為了消掉 primary 的輪詢而加），派工的決定在這句話之前就做完了。在 nemotron 上重跑（第 6 輪）：探索、架構、設計、直接回答通過；實作題 3 次都被限流或逾時打斷而無效。big-pickle 的免費額度同日用完，還沒在最終定義上跑完整的一輪。
 - **NVIDIA nemotron 沒有跑出完整的一輪。**
   - 第四輪（最終定義）的實作題被上游限流（HTTP 429）打斷；之後重跑的前兩次也是 429，就停掉了。
   - 使用者 2026-11-27 指示「nvidia 限流可以換成 opencode 的模型」，所以改用 big-pickle 完整跑一輪，沒有把不同模型的回合混在同一輪判定。
@@ -72,8 +73,9 @@ bash docs/issues/issue-0045/scripts/dispatch-eval.sh wukong-issue44:v2-local "$(
 | 1 | nemotron | Task 2 的定義（不限權限） | 0/3 ✗ | 1/3 ✗ | 0/3 ✗ | 3/3 | 2/3 | 3/3 |
 | 2 | nemotron | `edit: deny`，派工說明加強 | 1/3 ✗ | 3/3 | 1/3 ✗ | 3/3 | 3/3 | 3/3 |
 | 3 | nemotron | 再加 `execute: deny`，shell 只允許排程與 memoria | 3/3 | 3/3 | 1/3 ✗ | 3/3 | 3/3 | 3/3 |
-| 4 | nemotron | 第 3 輪＋文件與 fixer 的界線寫清楚（最終定義） | 無效（429） | 3/3 | 1/3 ✗ | 3/3 | 3/3 | 3/3 |
-| 5 | big-pickle | 最終定義 | **3/3** | **3/3** | **3/3** | **3/3** | **3/3** | **3/3** |
+| 4 | nemotron | 第 3 輪＋文件與 fixer 的界線寫清楚 | 無效（429） | 3/3 | 1/3 ✗ | 3/3 | 3/3 | 3/3 |
+| 5 | big-pickle | 第 4 輪的定義 | **3/3** | **3/3** | **3/3** | **3/3** | **3/3** | **3/3** |
+| 6 | nemotron | 第 4 輪＋「派工後就結束回覆」（f0ce34a，最終定義） | 無效（429、逾時） | 3/3 | 1/3（1 次 429） | 2/3 | 3/3 | 3/3 |
 
 ### 第 1 輪：primary 自己動手
 
@@ -116,11 +118,20 @@ bash docs/issues/issue-0045/scripts/dispatch-eval.sh wukong-issue44:v2-local "$(
 
 ### 第 5 輪：big-pickle
 
-- 先用一則合成請求確認 big-pickle 沒被限流（回 `OK`），再以最終定義跑完整的一輪。
+- 先用一則合成請求確認 big-pickle 沒被限流（回 `OK`），再以第 4 輪的定義跑完整的一輪。
 - 18 回合全部成功，都只用 `opencode/big-pickle`，6 題全部 PASS：
   - 實作題 3 次都派 fixer，其中第 1 次先派 explorer 看結構；
   - 查找題 3 次都是先派 explorer 讀程式，再派 librarian 寫 README；
   - primary 沒有呼叫任何改檔工具，只有一次讀檔失敗（`read:error`）。
+
+### 第 6 輪：最終定義（nemotron）
+
+- 2026-11-27 Task 6.2 加上「派工後就結束這次回覆、等它回報」之後，用 nemotron 重跑（big-pickle 的免費額度用完，13:12 再確認仍是「Free usage limit reached」）。
+- 實作題 3 次都無效：
+  - 1 次在 500 秒內沒跑完（`opencode server stream timed out before session became idle`）；
+  - 2 次被限流（429）。
+- 查找題 1 次被限流，重試 10 次、超過 90 秒仍失敗；其餘 2 次是 fixer、librarian 各 1。
+- 架構題 1 次 primary 自己回答（2/3，仍通過）；探索、設計、直接回答都通過。
 
 ## 其他確認
 
