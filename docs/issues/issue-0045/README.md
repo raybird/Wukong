@@ -92,7 +92,8 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
     When 使用者送出不需要工具的問題
     Then 回合不另跑規劃，以 primary agent「wukong」回答
     And 本機按需模式每回合只啟動一次 opencode
-    And 以 bench-turn.sh 的 short 與 tool 任務，在相同條件下對照 #44 合併版本（b65b487）：成功率不低於它，每回合的 LLM step 數少於它
+    And 以 bench-turn.sh 的 short 與 tool 任務，在相同條件下對照 #44 合併版本（b65b487）：兩種任務的成功率都不低於它，short 任務每回合的 LLM step 數少於它
+    And tool 任務每回合的 LLM step 數照實記錄：primary agent 不能改檔，建檔要派給 fixer，步數可以高於 b65b487
 
   @SCN-002
   Scenario: 需要實作的任務派給 fixer，入口看得到是誰在處理
@@ -191,11 +192,11 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 
 ## Gherkin 核准紀錄
 - **核准 commit**: `待提交`
-- **核准來源**: 範圍與「留在 Wukong」來自 GitHub #45 內文與使用者 2026-11-24 的決定（拆成兩個 issue，#44 合併後開始）；2026-11-26 使用者要求「好開始 /dev-cycle #45」。同日逐題確認：Q1「NVIDIA 為準（建議）」→ Background、SCN-003；Q2「移除（建議）」→ SCN-011；Q3「Wukong 管理、自動更新（建議）」→ SCN-009；Q4「session 指令層（建議）」→ SCN-007。同日總結確認推導行為（派工門檻、輪替後仍補上一回合、保留的動態區塊、舊壓縮變數忽略且 7 天輪替改每回合檢查、lease 在任何 LLM 呼叫前取得、subagent 沿用指定模型、自訂命令不加旗標、inbox 只評估）選「全部核准（建議）」→ SCN-001～SCN-014。同日 NVIDIA 憑證被拒（403）後，使用者表示「使用免費模型驗證也可以」→ Background、TBD-6
+- **核准來源**: 範圍與「留在 Wukong」來自 GitHub #45 內文與使用者 2026-11-24 的決定（拆成兩個 issue，#44 合併後開始）；2026-11-26 使用者要求「好開始 /dev-cycle #45」。同日逐題確認：Q1「NVIDIA 為準（建議）」→ Background、SCN-003；Q2「移除（建議）」→ SCN-011；Q3「Wukong 管理、自動更新（建議）」→ SCN-009；Q4「session 指令層（建議）」→ SCN-007。同日總結確認推導行為（派工門檻、輪替後仍補上一回合、保留的動態區塊、舊壓縮變數忽略且 7 天輪替改每回合檢查、lease 在任何 LLM 呼叫前取得、subagent 沿用指定模型、自訂命令不加旗標、inbox 只評估）選「全部核准（建議）」→ SCN-001～SCN-014。同日 NVIDIA 憑證被拒（403）後，使用者表示「使用免費模型驗證也可以」→ Background、TBD-62026-11-27 修訂：Task 6.2 實測 tool 任務步數 4 → 中位數 8（primary 不能改檔，建檔要派給 fixer），使用者選「消掉輪詢，修訂 tool 的步數條件（建議）」→ SCN-001 的步數條件只適用 short 任務，tool 任務照實記錄；同日使用者指示「nvidia 限流可以換成 opencode 的模型」→ SCN-003 以 opencode/big-pickle 驗收（Task 6.1）。
 
 | Scenario | 核准日期 | 狀態 |
 |----------|---------|------|
-| SCN-001 | 2026-11-26 | 已核准 |
+| SCN-001 | 2026-11-27 | 已核准（修訂） |
 | SCN-002 | 2026-11-26 | 已核准 |
 | SCN-003 | 2026-11-26 | 已核准 |
 | SCN-004 | 2026-11-26 | 已核准 |
@@ -268,6 +269,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | 2026-11-26 | Task 5.1 完成：Web 與 Telegram（mock transport）接真實 V2 與 NVIDIA nemotron，派工時看得到「悟空·fixer」與 fixer 的產出 |
 | 2026-11-26 | Task 6.4 完成：評估 V2 session inbox，結論是不用它取代 scope lease，維持立即拒絕（TBD-5 已解決） |
 | 2026-11-27 | Task 6.1 完成：SCN-003 派工門檻以 opencode/big-pickle 6 題全部通過（NVIDIA 限流，依使用者指示改用 opencode 的模型）；依使用者決定，primary agent 不能改檔，shell 只能跑排程與 memoria 指令；nemotron 查找題的差距記為 TBD-9 |
+| 2026-11-27 | 規格修訂並重新核准 SCN-001：步數少於 b65b487 只要求 short 任務，tool 任務照實記錄（primary 不能改檔、建檔要派工的代價）；primary 的派工說明加上「派工後就結束這次回覆、等回報」 |
 
 ---
 **建立日期**: 2026-11-26  

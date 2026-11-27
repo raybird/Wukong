@@ -105,7 +105,9 @@ pub fn agent_definitions(soul: &str, memoria_hint: bool) -> Vec<AgentDefinition>
          需要改檔、跑測試或執行其他指令的工作一律派工。依任務性質決定自己回答，\
          或用 subagent 工具派工：\n{rules}\
          簡單的問題直接回答，不要派工。派工時把使用者提到的路徑、附件位置與訊息裡的\
-         `[產出目錄]` 一併寫進交代內容，subagent 看不到使用者的原始訊息。\n\n{}\n\n{}\n\n{}\n",
+         `[產出目錄]` 一併寫進交代內容，subagent 看不到使用者的原始訊息。\
+         subagent 在背景執行，完成時會回報給你：派工後就結束這次回覆、等它回報，\
+         不要在等待時反覆讀檔或查詢進度。\n\n{}\n\n{}\n\n{}\n",
         frontmatter(
             "孫悟空，主要助手，決定自己回答或派工給專門的 subagent",
             "primary",
@@ -348,6 +350,11 @@ mod tests {
             "{primary}"
         );
         assert!(system_of(primary).contains("[產出目錄]"), "{primary}");
+        // Task 6.2：subagent 在背景執行，primary 派工後反覆 read 檢查檔案，tool 任務多出 3～8 步
+        assert!(
+            system_of(primary).contains("派工後就結束這次回覆"),
+            "{primary}"
+        );
         for sub in &defs[1..] {
             assert!(
                 !frontmatter_of(&sub.content).contains("permission"),
