@@ -83,12 +83,6 @@ where
                 let settings = wukong_settings::load_settings(&settings_path).unwrap_or_default();
                 let agent_settings = wukong_settings::effective_agent_settings(&settings);
                 cfg.apply_default_model(agent_settings.default_model.as_deref());
-                let planner_preferences = wukong_settings::effective_planner_preferences(&settings);
-                cfg.apply_planner_preferences(
-                    planner_preferences.enabled,
-                    planner_preferences.roles,
-                    planner_preferences.skills,
-                );
                 // Forward the routed role (as name) to the loop's on_role sink.
                 run_turn(memory, backend, &cfg, &input, on_event, &mut |r| {
                     on_role(r.name())
@@ -112,16 +106,23 @@ mod tests {
 
     struct MockBackend {
         replies: Mutex<VecDeque<String>>,
+        calls: Mutex<usize>,
     }
     impl MockBackend {
         fn new(replies: &[&str]) -> Self {
             Self {
                 replies: Mutex::new(replies.iter().map(|s| s.to_string()).collect()),
+                calls: Mutex::new(0),
             }
+        }
+
+        fn prompt_count(&self) -> usize {
+            *self.calls.lock().unwrap()
         }
     }
     impl AiBackend for MockBackend {
         async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+            *self.calls.lock().unwrap() += 1;
             let text = self.replies.lock().unwrap().pop_front().unwrap_or_default();
             Ok(AgentResponse {
                 text,
@@ -143,7 +144,6 @@ mod tests {
             db_url: String::new(),
             agent_command: vec![],
             default_model: None,
-            planner_preferences: None,
             thinking: true,
             recall_top_k: 5,
             stream: true,
@@ -169,8 +169,8 @@ mod tests {
     #[tokio::test]
     async fn loop_runs_turns_until_exit_and_continues_session() {
         let mem = open_memory().await;
-        // route+execute per turn => 2 replies per turn; 2 turns then /exit.
-        let backend = MockBackend::new(&["fixer", "ans1", "oracle", "ans2"]);
+        // 2026-11-26（#45）：每回合只呼叫一次 primary agent；2 turns then /exit.
+        let backend = MockBackend::new(&["ans1", "ans2"]);
         let lines = vec![
             "first question".to_string(),
             "".to_string(), // skipped
@@ -185,8 +185,9 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(turns, 2);
-        // route reply "fixer" => Role::Fixer (name "fixer"); "oracle" => "oracle".
-        assert_eq!(roles, vec!["fixer".to_string(), "oracle".to_string()]);
+        assert_eq!(backend.prompt_count(), 2);
+        // 2026-11-26（#45）：角色只在 primary agent 派工時回報，這個假 backend 不派工。
+        assert!(roles.is_empty(), "{roles:?}");
     }
 
     #[test]

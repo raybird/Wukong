@@ -22,9 +22,10 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
+# 2026-11-26（#45）：回合只以 primary agent 串流執行一次；原本給 planner 的非串流呼叫不該再出現。
 if [ "$stream" = false ]; then
-    printf 'fixer|none\n'
-    exit 0
+    printf 'unexpected non-streaming call (planner removed in #45)\n' >&2
+    exit 1
 fi
 printf 'resumed=%s\n' "$session" >> "$state/sessions"
 session=${session:-ses_$$}
@@ -53,7 +54,6 @@ printf '{"type":"step_finish"}\n'
         db_url: format!("sqlite://{}", dir.path().join("memory.db").display()),
         agent_command: command.clone(),
         default_model: None,
-        planner_preferences: None,
         thinking: false,
         recall_top_k: 5,
         stream: true,

@@ -1,45 +1,20 @@
-use std::path::Path;
-use wukong_memory::RecallHit;
-use wukong_orchestrator::Role;
-use wukong_skills::SkillSpec;
-
 /// The Sun Wukong persona is managed globally at the system level via `SOUL.md`.
 /// This constant is kept for documentation and fallback reference.
 pub const WUKONG_PERSONA: &str = "你是孫悟空（齊天大聖、鬥戰勝佛），一位全知全能的助手。\
      以略帶豪氣、機敏的口吻回應，但內容務必專業、精準、可執行。";
 
-/// Build the execution prompt: role card + (memory context + input).
-/// The memory/input section reuses gateway's compose_prompt.
-pub fn build_prompt(role: Role, hits: &[RecallHit], input: &str) -> String {
-    let body = wukong_gateway::prompt::compose_prompt(hits, input);
-    format!("{}\n\n{body}", role.card())
-}
+/// 2026-11-26（#45 SCN-006）：Telegram 每回合附在使用者原文後的一行，後面接這個回合的產出
+/// 目錄。規則本身（[`file_interaction_rules`]）在 agent 定義裡。`run_turn` 以它切出使用者原文
+/// （2026-10-06 起的做法）：這一行只進 prompt，不進記憶與召回查詢。
+pub const ARTIFACT_DIR_HEADER: &str = "[產出目錄]";
 
-pub fn build_prompt_with_skill(
-    role: Role,
-    skill: Option<&SkillSpec>,
-    skill_root: &Path,
-    hits: &[RecallHit],
-    input: &str,
-) -> String {
-    let body = wukong_gateway::prompt::compose_prompt(hits, input);
-    let mut prompt = role.card().to_string();
-    if let Some(skill) = skill {
-        let skill_path = skill_root.join(skill.name).join("SKILL.md");
-        prompt.push_str(&format!(
-            "\n\n[技能規範指引]\n你必須遵循 `{}` 的流程。請先閱讀並遵循 runtime 已準備好的技能規範文件：\n路徑：{}",
-            skill.name,
-            skill_path.display()
-        ));
-    }
-    prompt.push_str("\n\n");
-    prompt.push_str(&body);
-    prompt
+/// 檔案互動規則：寫在 primary agent 的定義裡；CLI backend 在回合帶有產出目錄時附在 prompt。
+pub fn file_interaction_rules() -> &'static str {
+    "[檔案互動規則]\n\
+     使用者上傳的附件已是可修改的工作副本，不要修改 .wukong/uploads 內的原始檔。\
+     訊息最後有 `[產出目錄] <路徑>` 這一行時，若使用者要求建立、轉換、修改或回傳檔案，\
+     請將每個最終成品直接寫入該目錄；只把要回傳給使用者的成品放入該目錄。"
 }
-
-/// 2026-10-06：入口附加給 agent 的檔案互動規則區塊標頭。`run_turn` 以它切出
-/// 使用者原文，規則只進 prompt，不進記憶與召回查詢。
-pub const FILE_RULES_HEADER: &str = "[Wukong 檔案互動規則]";
 
 /// A directive appended to the final step instructing the agent to always
 /// produce a textual summary — even when its work was done entirely via tool
@@ -131,106 +106,47 @@ pub fn scheduling_bin() -> String {
         .unwrap_or_else(|| "wukong".to_string())
 }
 
-/// An always-on capability block telling the agent it can create and manage
-/// scheduled (cron) jobs by shelling out to the `wukong schedule` CLI. `scope`
-/// is the current turn's memory scope; it becomes the job's owner, which
-/// receives the results. The scheduled turns themselves run in their own scope.
-pub fn scheduling_capability_hint(scope: &str, bin: &str) -> String {
+/// 2026-11-26（#45 SCN-007）：session 指令層放 scope 的 entry key。
+pub const SCOPE_INSTRUCTION_KEY: &str = "wukong.scope";
+
+/// 排程能力的固定說明：寫在 primary agent 的定義裡（[`crate::agent_assets`]），不隨回合改變。
+/// 排程的擁有者取自 [`current_scope_instruction`]：V2 backend 放在 session 指令層，CLI backend
+/// 跟這段說明一起附在 prompt（[`scheduling_capability_hint`]）。
+pub fn scheduling_capability_guide(bin: &str) -> String {
     format!(
         "[排程能力]\n\
          你具備為使用者建立與管理定時排程（cron）的真實能力。當使用者要求「定時、每天、每隔、提醒、排程、固定時間執行」之類任務時，\
          請直接在終端機執行下列指令完成設定——這是可用的內建功能，不要拒絕，也不要只用文字描述而不執行：\n\
-         - 新增定時對話：`{bin} schedule add-turn --name \"<名稱>\" --cron \"<分 時 日 月 週>\" --scope \"{scope}\" --prompt \"<到時要執行的提示詞>\"`\n\
+         - 新增定時對話：`{bin} schedule add-turn --name \"<名稱>\" --cron \"<分 時 日 月 週>\" --scope \"<目前的 scope>\" --prompt \"<到時要執行的提示詞>\"`\n\
          - 指定排程使用的模型：新增時加 `--model \"<provider/model>\"`；修改既有排程用 `{bin} schedule set-model --id <id> --model \"<provider/model>\"`，省略 `--model` 就改回使用預設模型\n\
          - 列出所有排程：`{bin} schedule list`\n\
          - 立即觸發一次：`{bin} schedule trigger --id <id>`\n\
          - 查看排程的執行結果：`{bin} schedule runs --id <id>`\n\
          - 停用／啟用／刪除：`{bin} schedule disable|enable|rm --id <id>`\n\
-         規則：cron 為標準 5 欄位（分 時 日 月 週）。除非使用者另外指定 scope，否則一律沿用上面的 `--scope`。\
+         規則：cron 為標準 5 欄位（分 時 日 月 週）。`<目前的 scope>` 是 [目前的 scope] 寫的值；除非使用者另外指定 scope，否則一律用它。\
          `--scope` 是排程的擁有者，執行結果會回送給它；排程回合本身在獨立的記憶 scope 執行，\
          所以使用者問起排程回報過什麼時，用上面的查看指令取得，不要憑記憶回答。\
          建立完成後，用一句話回報排程名稱、cron 設定與用途即可。"
     )
 }
 
+/// 這個對話的 scope（記憶與排程的擁有者）。
+pub fn current_scope_instruction(scope: &str) -> String {
+    format!("[目前的 scope]\n這個對話的 scope 是 `{scope}`，建立排程時 `--scope` 填這個值。")
+}
+
+/// 不支援 session 指令層的 backend（CLI）每回合附在 prompt 的排程能力：固定說明加上 scope。
+pub fn scheduling_capability_hint(scope: &str, bin: &str) -> String {
+    format!(
+        "{}\n\n{}",
+        scheduling_capability_guide(bin),
+        current_scope_instruction(scope)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wukong_memory::{MemoryKind, RecallExplanation};
-
-    fn hit(scope: &str, text: &str) -> RecallHit {
-        RecallHit {
-            id: 1,
-            scope: scope.to_string(),
-            kind: MemoryKind::Note,
-            text: text.to_string(),
-            score: 1.0,
-            explanation: RecallExplanation {
-                lexical: 1.0,
-                semantic: 0.0,
-                relevance: 1.0,
-                decay: 1.0,
-                importance: 1.0,
-                recall_bonus: 0.0,
-                age_seconds: 0,
-                recall_count: 0,
-                source_signals: vec!["keyword".to_string()],
-            },
-        }
-    }
-
-    #[test]
-    fn build_prompt_includes_role_and_input() {
-        let p = build_prompt(Role::Fixer, &[], "fix the bug");
-        assert!(!p.contains("孫悟空"));
-        assert!(p.contains("你是 Fixer"));
-        assert!(p.contains("fix the bug"));
-    }
-
-    #[test]
-    fn build_prompt_includes_memory_block_when_hits_present() {
-        let hits = vec![hit("project:Wukong", "earlier decision")];
-        let p = build_prompt(Role::Oracle, &hits, "what now?");
-        assert!(p.contains("[相關記憶]"));
-        assert!(p.contains("earlier decision"));
-        assert!(p.contains("你是 Oracle"));
-    }
-
-    #[test]
-    fn build_prompt_with_skill_includes_skill_block() {
-        let skill = wukong_skills::find("test-driven-development").unwrap();
-        let p = build_prompt_with_skill(
-            Role::Fixer,
-            Some(skill),
-            "/tmp/project/.wukong/skills/superpowers".as_ref(),
-            &[],
-            "fix the bug",
-        );
-        assert!(p.contains("[技能規範指引]"));
-        assert!(p.contains("test-driven-development"));
-        assert!(
-            p.contains("/tmp/project/.wukong/skills/superpowers/test-driven-development/SKILL.md")
-        );
-        assert!(!p.contains("/workspace/.wukong/skills/superpowers"));
-        assert!(!p.contains("Docker runtime"));
-        assert!(!p.contains("crates/wukong-skills/assets/superpowers"));
-        assert!(p.contains("你是 Fixer"));
-        assert!(p.contains("fix the bug"));
-    }
-
-    #[test]
-    fn build_prompt_with_skill_omits_skill_block_when_absent() {
-        let p = build_prompt_with_skill(
-            Role::Oracle,
-            None,
-            "/tmp/project/.wukong/skills/superpowers".as_ref(),
-            &[],
-            "think about it",
-        );
-        assert!(!p.contains("[技能規範指引]"));
-        assert!(p.contains("你是 Oracle"));
-        assert!(p.contains("think about it"));
-    }
 
     #[test]
     fn final_answer_directive_requires_text_summary() {
@@ -244,7 +160,8 @@ mod tests {
         let hint = scheduling_capability_hint("project:Wukong", "wukong");
         assert!(hint.contains("[排程能力]"));
         assert!(hint.contains("schedule add-turn"));
-        assert!(hint.contains("--scope \"project:Wukong\""));
+        assert!(hint.contains("--scope \"<目前的 scope>\""));
+        assert!(hint.contains("[目前的 scope]\n這個對話的 scope 是 `project:Wukong`"));
         assert!(hint.contains("`wukong schedule list`"));
     }
 

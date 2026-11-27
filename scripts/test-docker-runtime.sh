@@ -75,10 +75,11 @@ require_in_file 'mkdir -p "$AGENT_REACH_STATE"' "$entrypoint" \
     "entrypoint must create Agent Reach state directory before gosu"
 require_in_file 'chown -R wukong:wukong "$AGENT_REACH_STATE"' "$entrypoint" \
     "entrypoint must chown Docker-created Agent Reach state volume"
-require_in_file "COPY crates/wukong-skills/assets/superpowers /usr/local/share/wukong/skills/superpowers" "$dockerfile" \
-    "Docker image must package Superpowers skill assets"
-require_in_file "/usr/local/share/wukong/skills/superpowers" "$dockerfile" \
-    "Dockerfile must use the canonical image skill asset path"
+# 2026-11-26（#45）：技能由 wukong 的入口寫到工作區的 .opencode/skills，映像不再帶一份。
+for file in "$dockerfile" Dockerfile.release "$entrypoint" "$release_workflow"; do
+    require_count_in_file "superpowers" 0 "$file" \
+        "$file must not package or sync the old .wukong/skills/superpowers copy"
+done
 require_in_file "# Development-only Compose" "$compose_file" \
     "development Compose must identify its local-build role"
 require_in_file "# Release deployment template" "$release_compose" \
@@ -88,18 +89,6 @@ for service in wukong opencode-server wukong-telegram wukong-web wukong-schedule
 done
 require_in_file 'WUKONG_WEB_BIND:-127.0.0.1' "$release_compose" \
     "release Compose must retain the loopback web default"
-require_in_file 'IMAGE_SKILLS="/usr/local/share/wukong/skills/superpowers"' "$entrypoint" \
-    "entrypoint must define image skill asset source"
-require_in_file 'WORKSPACE_SKILLS="$WUKONG_WORKSPACE/.wukong/skills/superpowers"' "$entrypoint" \
-    "entrypoint must define workspace skill asset destination"
-require_in_file 'sync_wukong_skills()' "$entrypoint" \
-    "entrypoint must provide a skill asset sync function"
-require_in_file 'cmp -s "$IMAGE_SKILLS/SOURCE.md" "$WORKSPACE_SKILLS/SOURCE.md"' "$entrypoint" \
-    "entrypoint must skip skill sync when SOURCE.md matches"
-require_in_file 'cp -a "$IMAGE_SKILLS/." "$tmp_dir/"' "$entrypoint" \
-    "entrypoint must copy image skill assets into a temporary directory"
-require_in_file 'mv "$tmp_dir" "$WORKSPACE_SKILLS"' "$entrypoint" \
-    "entrypoint must atomically install workspace skill assets"
 require_in_file 'OPENCODE_CONFIG_DIR="/home/wukong/.config/opencode"' "$entrypoint" \
     "entrypoint must keep the config directory out of the OPENCODE_CONFIG variable name"
 require_in_file 'export OPENCODE_CONFIG="$OPENCODE_USER_CONFIG_FILE"' "$entrypoint" \
@@ -176,6 +165,26 @@ for path in sys.argv[1:]:
         assert env["WUKONG_AGENT_CMD"] == "${WUKONG_AGENT_CMD:-opencode run}", (path, name)
         assert service["mem_limit"] == "${WUKONG_SVC_MEM:-2g}", (path, name)
 PY_LOCAL
+# issue-0045 Task 6.3（SCN-007，2026-11-27）：server 模式下 agent 的 shell 在 opencode-server 裡跑，
+# 模型用 `wukong schedule add-turn` 建的排程要寫進入口與 schedulerd 讀的同一份記憶庫。少了 /data
+# 或 WUKONG_MEMORY_DB，排程會寫進容器自己的預設資料庫：模型回「已建立」，排程卻永遠不執行。
+python3 - "$compose_file" "$release_compose" <<'PY_SERVER_MEMORY'
+import sys
+import yaml
+failed = []
+for path in sys.argv[1:]:
+    services = yaml.safe_load(open(path))["services"]
+    server = services["opencode-server"]
+    env = dict(str(i).split("=", 1) if "=" in str(i) else (str(i), None) for i in server.get("environment") or [])
+    want_db = dict(str(i).split("=", 1) for i in services["wukong-schedulerd"]["environment"] if "=" in str(i))["WUKONG_MEMORY_DB"]
+    if env.get("WUKONG_MEMORY_DB") != want_db:
+        failed.append(f"{path} opencode-server must get WUKONG_MEMORY_DB={want_db} like wukong-schedulerd")
+    if "wukong-data:/data" not in (server.get("volumes") or []):
+        failed.append(f"{path} opencode-server must mount wukong-data:/data like wukong-schedulerd")
+for line in failed:
+    print("FAIL:", line, file=sys.stderr)
+sys.exit(1 if failed else 0)
+PY_SERVER_MEMORY
 # The point is which files the installer replaces, not how the array is typed.
 # Pinning the single-line literal made a formatting change look like a contract
 # break, and — worse — it silently stopped asserting anything the moment the real

@@ -21,6 +21,8 @@ use wukong_runtime::util::{now_unix, upload_root};
 /// Progress updates fed to the single status bubble.
 enum Progress {
     Role(Role),
+    /// 派出的 subagent 都回報了，回到悟空自己處理（2026-11-27，review-623c436）。
+    Primary,
     Reasoning(String),
     ToolUse(String),
     QuestionRequest(QuestionRequest),
@@ -163,6 +165,11 @@ async fn run_progress<C: TgClient>(
         let show = match msg {
             Progress::Role(r) => {
                 role = Some(r.name().to_string());
+                status = bubble_text(role.as_deref(), &reasoning);
+                true
+            }
+            Progress::Primary => {
+                role = None;
                 status = bubble_text(role.as_deref(), &reasoning);
                 true
             }
@@ -932,10 +939,11 @@ fn agent_visible_path(path: &Path) -> Result<PathBuf, String> {
 
 fn prompt_with_artifact_instruction(input: &str, artifact_dir: &Path) -> Result<String, String> {
     let visible_dir = agent_visible_path(artifact_dir)?;
-    // 標頭用 runtime 的常數：run_turn 靠它把規則切出記憶與召回。
+    // 標頭用 runtime 的常數：run_turn 靠它把這一行切出記憶與召回。規則本身在 agent 定義裡
+    // （#45 SCN-006），CLI backend 由 run_turn 補上。
     Ok(format!(
-        "{input}\n\n{}\n上傳附件已是可修改的工作副本，不要修改 .wukong/uploads 內的原始檔。若使用者要求建立、轉換、修改或回傳檔案，請將每個最終成品直接寫入此目錄：{}。只把要回傳給使用者的成品放入該目錄。",
-        wukong_runtime::persona::FILE_RULES_HEADER,
+        "{input}\n\n{} {}",
+        wukong_runtime::persona::ARTIFACT_DIR_HEADER,
         visible_dir.display()
     ))
 }
@@ -1260,12 +1268,6 @@ pub async fn handle_message_with_responder<C, B, R>(
             let settings = wukong_settings::load_settings(&settings_path).unwrap_or_default();
             let agent_settings = wukong_settings::effective_agent_settings(&settings);
             cfg.apply_default_model(agent_settings.default_model.as_deref());
-            let planner_preferences = wukong_settings::effective_planner_preferences(&settings);
-            cfg.apply_planner_preferences(
-                planner_preferences.enabled,
-                planner_preferences.roles,
-                planner_preferences.skills,
-            );
             let user_message_id =
                 record_chat(history, &cfg.scope, "user", &msg.text, None, "complete").await;
             record_live_event(
@@ -1332,12 +1334,6 @@ pub async fn handle_message_with_responder<C, B, R>(
             let settings = wukong_settings::load_settings(&settings_path).unwrap_or_default();
             let agent_settings = wukong_settings::effective_agent_settings(&settings);
             cfg.apply_default_model(agent_settings.default_model.as_deref());
-            let planner_preferences = wukong_settings::effective_planner_preferences(&settings);
-            cfg.apply_planner_preferences(
-                planner_preferences.enabled,
-                planner_preferences.roles,
-                planner_preferences.skills,
-            );
             let (live_tx, live_writer) = if let Some(history) = history {
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LiveEventWrite>();
                 let history = history.clone();
@@ -1491,6 +1487,8 @@ pub async fn handle_message_with_responder<C, B, R>(
             let tx_ev = tx.clone();
             let mut events_buf: Vec<(i64, String, Option<String>, String, i64)> = Vec::new();
             let mut event_seq: i64 = 0;
+            // on_role 與 on_step 都要更新它；兩者由 run_turn 同步、依序呼叫，不會重疊。
+            let active = std::cell::RefCell::new(wukong_orchestrator::ActiveSubagents::default());
             let result = run_turn_observed_with_attachments(
                 mem,
                 backend,
@@ -1571,13 +1569,27 @@ pub async fn handle_message_with_responder<C, B, R>(
                         event_seq += 1;
                     }
                     StreamEvent::Text(_) => {}
+                    // #45 SCN-002：角色與產出卡片由 run_turn 的 on_role／on_step 處理。
+                    StreamEvent::SubagentStarted { .. } | StreamEvent::SubagentReported { .. } => {}
                 },
                 &mut |r| {
+                    active.borrow_mut().dispatched(r);
                     let role_name = r.name().to_string();
                     queue_live_event(&live_tx, "role", None, &role_name, None);
                     let _ = tx.send(Progress::Role(r));
                 },
-                &mut |_, _| {},
+                // 回報後顯示還沒回報的 subagent，都回報了就回到悟空；Web 的即時事件以空的 role
+                // 表示悟空。
+                &mut |r, _| {
+                    let current = {
+                        let mut active = active.borrow_mut();
+                        active.reported(r);
+                        active.current()
+                    };
+                    let role_name = current.map(|r| r.name()).unwrap_or_default();
+                    queue_live_event(&live_tx, "role", None, role_name, None);
+                    let _ = tx.send(current.map_or(Progress::Primary, Progress::Role));
+                },
             )
             .await;
             drop(tx);
@@ -2077,7 +2089,6 @@ mod tests {
             db_url: String::new(),
             agent_command: vec![],
             default_model: None,
-            planner_preferences: None,
             thinking: true,
             recall_top_k: 5,
             stream: false,
@@ -2088,7 +2099,7 @@ mod tests {
     async fn ignores_messages_outside_allowlist() {
         let client = MockTgClient::default();
         let mem = open_memory().await;
-        let backend = MockBackend::new(&["oracle", "answer"]);
+        let backend = MockBackend::new(&["answer"]);
         let msg = TgMessage {
             update_id: 1,
             chat_id: 999,
@@ -2104,8 +2115,8 @@ mod tests {
     async fn turn_renders_answer_and_consolidates_messages() {
         let client = MockTgClient::default();
         let mem = open_memory().await;
-        // planner -> single role; then execute answer with markdown.
-        let backend = MockBackend::new(&["oracle", "**重點** 答案"]);
+        // 2026-11-26（#45）：回合只呼叫一次 primary agent，回覆含 markdown。
+        let backend = MockBackend::new(&["**重點** 答案"]);
         let msg = TgMessage {
             update_id: 1,
             chat_id: 12,
@@ -2114,8 +2125,8 @@ mod tests {
         };
         handle_message(&client, &mem, &base_cfg(), &backend, None, &[12], &msg).await;
 
-        // Status bubble edited per role, then deleted.
-        assert!(!client.edits.lock().unwrap().is_empty());
+        // Status bubble deleted once the answer is ready. 2026-11-26（#45）：沒有派工的回合
+        // 不更新角色（派工時見 a_dispatched_subagent_shows_in_the_status_bubble_and_live_events）。
         assert!(!client.deletes.lock().unwrap().is_empty());
 
         // Final answer sent as rendered HTML.
@@ -2149,7 +2160,7 @@ mod tests {
         let mem = open_memory().await;
         // 三段各約 3000 bytes，切成三則；第二則被拒。
         let answer = ["甲", "乙", "丙"].map(|c| c.repeat(1000)).join("\n\n");
-        let backend = MockBackend::new(&["oracle", &answer]);
+        let backend = MockBackend::new(&[&answer]);
         let msg = TgMessage {
             update_id: 1,
             chat_id: 12,
@@ -2181,7 +2192,7 @@ mod tests {
         let history = wukong_chat_history::ChatHistoryStore::open(&db_url)
             .await
             .unwrap();
-        let backend = MockBackend::new(&["oracle", "telegram answer"]);
+        let backend = MockBackend::new(&["telegram answer"]);
         let msg = TgMessage {
             update_id: 1,
             chat_id: 12,
@@ -2215,7 +2226,7 @@ mod tests {
         let upload_dir = tempfile::tempdir().unwrap();
         std::env::set_var("WUKONG_WORKSPACE", upload_dir.path());
         let mem = open_memory().await;
-        let backend = RecordingBackend::new(&["oracle", "attachment answer"]);
+        let backend = RecordingBackend::new(&["attachment answer"]);
         let client =
             MockTgClient::default().with_file("doc_file", "documents/report.pdf", b"pdf".to_vec());
         let (_, db_url) = open_memory_with_url().await;
@@ -2266,6 +2277,22 @@ mod tests {
             .join(".wukong/uploads")
             .join(&attachments[0].relative_path);
         assert_eq!(std::fs::read(original_path).unwrap(), b"pdf");
+    }
+
+    // #45 SCN-006：檔案互動規則在 agent 定義裡，每回合只附產出目錄這一行。
+    #[test]
+    fn the_artifact_instruction_is_only_the_directory_line() {
+        let workspace = tempfile::tempdir().unwrap();
+        let dir = workspace.path().join("out");
+        std::fs::create_dir(&dir).unwrap();
+
+        let prompt = prompt_with_artifact_instruction("做一份報表", &dir).unwrap();
+
+        let visible = agent_visible_path(&dir).unwrap();
+        assert_eq!(
+            prompt,
+            format!("做一份報表\n\n[產出目錄] {}", visible.display())
+        );
     }
 
     #[tokio::test]
@@ -2441,6 +2468,127 @@ mod tests {
             on_event(wukong_gateway::StreamEvent::ToolUse("read".to_string()));
             self.run(req).await
         }
+    }
+
+    /// #45 SCN-002：primary agent 派工給 fixer，fixer 回報之後 primary 回覆 done。
+    struct DispatchBackend;
+    impl AiBackend for DispatchBackend {
+        async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+            Ok(AgentResponse {
+                text: "done".to_string(),
+                session_id: None,
+            })
+        }
+
+        async fn run_streaming(
+            &self,
+            req: AgentRequest,
+            on_event: &mut dyn FnMut(wukong_gateway::StreamEvent),
+        ) -> Result<AgentResponse, GatewayError> {
+            on_event(wukong_gateway::StreamEvent::SubagentStarted {
+                agent: "fixer".to_string(),
+            });
+            on_event(wukong_gateway::StreamEvent::SubagentReported {
+                agent: "fixer".to_string(),
+                output: "已建立 hello.txt".to_string(),
+            });
+            self.run(req).await
+        }
+    }
+
+    // #45 SCN-002：派工時狀態泡泡顯示「悟空·fixer」，Web 的即時事件也有 role。
+    #[tokio::test]
+    async fn a_dispatched_subagent_shows_in_the_status_bubble_and_live_events() {
+        let client = MockTgClient::default();
+        let (mem, db_url) = open_memory_with_url().await;
+        let history = wukong_chat_history::ChatHistoryStore::open(&db_url)
+            .await
+            .unwrap();
+        let msg = TgMessage {
+            update_id: 1,
+            chat_id: 12,
+            text: "建立 hello.txt".to_string(),
+            attachments: Vec::new(),
+        };
+
+        handle_message(
+            &client,
+            &mem,
+            &base_cfg(),
+            &DispatchBackend,
+            Some(&history),
+            &[12],
+            &msg,
+        )
+        .await;
+
+        {
+            let edits = client.edits.lock().unwrap();
+            assert!(
+                edits
+                    .iter()
+                    .any(|(_, _, t)| t.starts_with("🐵　悟空·fixer")),
+                "no role edit: {edits:?}"
+            );
+        }
+        let events = history
+            .live_events_after(&scope_for_chat(12), 0, 20)
+            .await
+            .unwrap();
+        assert!(events
+            .iter()
+            .any(|e| e.kind == "role" && e.content == "fixer"));
+    }
+
+    // review-623c436 NICE TO HAVE 1（2026-11-27）：fixer 回報之後是悟空在處理，泡泡拿掉「·fixer」；
+    // Web 看的即時事件也補一個空的 role，代表回到悟空。
+    #[tokio::test]
+    async fn the_status_bubble_returns_to_wukong_after_the_subagent_reports() {
+        let client = MockTgClient::default();
+        let (mem, db_url) = open_memory_with_url().await;
+        let history = wukong_chat_history::ChatHistoryStore::open(&db_url)
+            .await
+            .unwrap();
+        let msg = TgMessage {
+            update_id: 1,
+            chat_id: 12,
+            text: "建立 hello.txt".to_string(),
+            attachments: Vec::new(),
+        };
+
+        handle_message(
+            &client,
+            &mem,
+            &base_cfg(),
+            &DispatchBackend,
+            Some(&history),
+            &[12],
+            &msg,
+        )
+        .await;
+
+        {
+            let edits = client.edits.lock().unwrap();
+            let fixer = edits
+                .iter()
+                .position(|(_, _, t)| t.starts_with("🐵　悟空·fixer"))
+                .expect("no fixer edit");
+            assert!(
+                edits[fixer + 1..]
+                    .iter()
+                    .any(|(_, _, t)| t.starts_with("🐵　思考中…")),
+                "bubble stays on fixer: {edits:?}"
+            );
+        }
+        let roles: Vec<String> = history
+            .live_events_after(&scope_for_chat(12), 0, 20)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "role")
+            .map(|e| e.content)
+            .collect();
+        assert_eq!(roles, vec!["fixer".to_string(), String::new()]);
     }
 
     struct QuestionBackend;
@@ -2637,7 +2785,7 @@ mod tests {
             .await
             .unwrap();
         assert!(events.iter().any(|e| e.kind == "user" && e.content == "hi"));
-        assert!(events.iter().any(|e| e.kind == "role"));
+        // 2026-11-26（#45）：「role」事件只在派工時出現（a_dispatched_subagent_shows_in_the_status_bubble_and_live_events）。
         assert!(events
             .iter()
             .any(|e| e.kind == "tool" && e.label.as_deref() == Some("read")));
@@ -2663,7 +2811,7 @@ mod tests {
     async fn turn_sends_status_bubble_and_typing() {
         let client = MockTgClient::default();
         let mem = open_memory().await;
-        let backend = MockBackend::new(&["oracle", "答案"]);
+        let backend = MockBackend::new(&["答案"]);
         let msg = TgMessage {
             update_id: 1,
             chat_id: 12,

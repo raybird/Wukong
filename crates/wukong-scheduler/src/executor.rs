@@ -6,7 +6,7 @@ use wukong_gateway::stream::{permission_id, QuestionRequest, PERMISSION_ALLOW_ON
 use wukong_gateway::{GatewayError, StreamEvent};
 use wukong_memory::Memory;
 use wukong_runtime::maintenance::{memory_consolidate, memory_prune, memory_snapshot};
-use wukong_runtime::{Role, WukongError};
+use wukong_runtime::{ActiveSubagents, Role, WukongError};
 
 const SCHEDULED_TURN_AUTONOMY_HINT: &str = "\n\n[無人值守排程]\n這是由 scheduler 觸發的無人值守任務。不得呼叫 question 或要求使用者確認；如果流程、技能或工具規則需要使用者選擇，請直接自動採用推薦選項，並繼續完成任務。";
 const QUESTION_NOTE_HEADER: &str = "[無人值守權限]";
@@ -100,13 +100,20 @@ pub async fn execute_job<B: AiBackend + QuestionResponder + Sync>(
     execute_job_observed(ctx, job, &mut |_| {}).await
 }
 
-/// 同 [`execute_job`]，另外在 Turn 回合每一棒開始時呼叫 `on_role`。
+/// Turn 回合裡 subagent 的進出，用來推進排程的階段。
+#[derive(Debug, Clone, Copy)]
+enum SubagentChange {
+    Dispatched(Role),
+    Reported(Role),
+}
+
+/// 同 [`execute_job`]，另外在 Turn 回合派出 subagent、subagent 回報時呼叫 `on_change`。
 async fn execute_job_observed<B: AiBackend + QuestionResponder + Sync>(
     ctx: &ExecutionContext<'_, B>,
     job: &Job,
-    on_role: &mut dyn FnMut(Role),
+    on_change: &mut dyn FnMut(SubagentChange),
 ) -> ExecutionOutput {
-    match execute_job_inner(ctx, job, on_role).await {
+    match execute_job_inner(ctx, job, on_change).await {
         Ok(message) => ExecutionOutput {
             success: true,
             message,
@@ -260,38 +267,50 @@ pub async fn run_claimed_job<B: AiBackend + QuestionResponder + Sync>(
 /// 排程 run 目前的階段（issue-0013），寫進執行中的 run 訊息，以及失敗訊息的開頭。
 enum Phase {
     Maintenance,
-    Planning,
-    Step(usize, Role),
+    /// 2026-11-26（#45 SCN-002，取代逐棒的「第 k 棒」）：Turn 回合。`running` 是派出後還沒回報的
+    /// subagent，依派出順序；空的時候是 primary agent（悟空）在處理，否則顯示最近派出的那一個。
+    /// 2026-11-27（review-65e960a）起 subagent 回報後就移出，之後的失敗記成悟空失敗。
+    Turn {
+        running: ActiveSubagents,
+    },
 }
 
 impl Phase {
     fn initial(job: &Job) -> Self {
         match job.kind {
-            JobKind::Turn { .. } => Phase::Planning,
+            JobKind::Turn { .. } => Phase::Turn {
+                running: ActiveSubagents::default(),
+            },
             JobKind::Maintenance { .. } => Phase::Maintenance,
         }
     }
 
-    fn advance(&mut self, role: Role) {
-        let next = match self {
-            Phase::Step(k, _) => *k + 1,
-            _ => 1,
+    fn apply(&mut self, change: SubagentChange) {
+        let Phase::Turn { running } = self else {
+            return;
         };
-        *self = Phase::Step(next, role);
+        match change {
+            SubagentChange::Dispatched(role) => running.dispatched(role),
+            SubagentChange::Reported(role) => running.reported(role),
+        }
     }
 
     fn label(&self) -> String {
         match self {
             Phase::Maintenance => "維護作業".to_string(),
-            Phase::Planning => "規劃中".to_string(),
-            Phase::Step(k, role) => format!("第 {k} 棒 {}", role.name()),
+            Phase::Turn { running } => match running.current() {
+                Some(role) => format!("悟空·{}", role.name()),
+                None => "悟空".to_string(),
+            },
         }
     }
 
     /// 角色名稱是英文，後面接「失敗」要隔一個空白。
     fn failed(&self) -> String {
         match self {
-            Phase::Step(..) => format!("{} 失敗", self.label()),
+            Phase::Turn { running } if running.current().is_some() => {
+                format!("{} 失敗", self.label())
+            }
             _ => format!("{}失敗", self.label()),
         }
     }
@@ -315,11 +334,11 @@ async fn execute_with_heartbeat<B: AiBackend + QuestionResponder + Sync>(
     started_at: i64,
 ) -> ExecutionOutput {
     let elapsed = || chrono::Utc::now().timestamp() - started_at;
-    let (tx, mut roles) = tokio::sync::mpsc::unbounded_channel();
-    let mut on_role = move |role| {
-        let _ = tx.send(role);
+    let (tx, mut changes) = tokio::sync::mpsc::unbounded_channel();
+    let mut on_change = move |change| {
+        let _ = tx.send(change);
     };
-    let work = execute_job_observed(ctx, job, &mut on_role);
+    let work = execute_job_observed(ctx, job, &mut on_change);
     tokio::pin!(work);
 
     let mut phase = Phase::initial(job);
@@ -337,8 +356,8 @@ async fn execute_with_heartbeat<B: AiBackend + QuestionResponder + Sync>(
     let mut output = loop {
         tokio::select! {
             output = &mut work => break output,
-            Some(role) = roles.recv() => {
-                phase.advance(role);
+            Some(change) = changes.recv() => {
+                phase.apply(change);
                 report(progress(&phase)).await;
             }
             _ = ticker.tick() => {
@@ -352,9 +371,9 @@ async fn execute_with_heartbeat<B: AiBackend + QuestionResponder + Sync>(
             }
         }
     };
-    // 最後一棒可能剛開始就失敗，那次 on_role 還留在 channel 裡。
-    while let Ok(role) = roles.try_recv() {
-        phase.advance(role);
+    // subagent 可能剛派出或剛回報，回合就失敗，那次變化還留在 channel 裡。
+    while let Ok(change) = changes.try_recv() {
+        phase.apply(change);
     }
     if !output.success && !matches!(phase, Phase::Maintenance) {
         output.message = format!(
@@ -370,7 +389,7 @@ async fn execute_with_heartbeat<B: AiBackend + QuestionResponder + Sync>(
 async fn execute_job_inner<B: AiBackend + QuestionResponder + Sync>(
     ctx: &ExecutionContext<'_, B>,
     job: &Job,
-    on_role: &mut dyn FnMut(Role),
+    on_change: &mut dyn FnMut(SubagentChange),
 ) -> Result<String, WukongError> {
     match &job.kind {
         // job 的 scope 是擁有者，回送與聊天紀錄用它；回合本身在排程自己的 scope 執行。
@@ -381,7 +400,7 @@ async fn execute_job_inner<B: AiBackend + QuestionResponder + Sync>(
                 cfg.apply_default_model(model.as_deref());
             }
             let prompt = format!("{prompt}{SCHEDULED_TURN_AUTONOMY_HINT}");
-            run_unattended_turn(ctx, &cfg, &prompt, on_role).await
+            run_unattended_turn(ctx, &cfg, &prompt, on_change).await
         }
         JobKind::Maintenance { scope, task } => match task {
             MaintenanceTask::Snapshot => memory_snapshot(ctx.memory, scope.as_deref()).await,
@@ -411,16 +430,32 @@ async fn run_unattended_turn<B: AiBackend + QuestionResponder + Sync>(
     ctx: &ExecutionContext<'_, B>,
     cfg: &GatewayConfig,
     prompt: &str,
-    on_role: &mut dyn FnMut(Role),
+    on_change: &mut dyn FnMut(SubagentChange),
 ) -> Result<String, WukongError> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut on_event = |event: StreamEvent| {
-        if let StreamEvent::QuestionRequest(request) = event {
+    // 派出由 run_turn 的 on_role 通知；回報只在事件裡（run_turn 照樣把事件轉給入口）。兩個回呼都
+    // 在 run_turn 裡同步呼叫、不會重疊，所以共用同一個 on_change。
+    let on_change = std::cell::RefCell::new(on_change);
+    let mut on_event = |event: StreamEvent| match event {
+        StreamEvent::QuestionRequest(request) => {
             let _ = tx.send(request);
         }
+        StreamEvent::SubagentReported { agent, .. } => {
+            if let Some(role) = Role::all().into_iter().find(|role| role.name() == agent) {
+                (on_change.borrow_mut())(SubagentChange::Reported(role));
+            }
+        }
+        _ => {}
     };
-    let turn =
-        wukong_runtime::run_turn(ctx.memory, ctx.backend, cfg, prompt, &mut on_event, on_role);
+    let mut on_role = |role| (on_change.borrow_mut())(SubagentChange::Dispatched(role));
+    let turn = wukong_runtime::run_turn(
+        ctx.memory,
+        ctx.backend,
+        cfg,
+        prompt,
+        &mut on_event,
+        &mut on_role,
+    );
     tokio::pin!(turn);
 
     let mut notes: Vec<String> = Vec::new();
@@ -712,7 +747,6 @@ mod tests {
             db_url: String::new(),
             agent_command: vec![],
             default_model: None,
-            planner_preferences: None,
             thinking: true,
             recall_top_k: 5,
             stream: false,
@@ -905,7 +939,8 @@ mod tests {
     async fn turn_longer_than_job_lease_keeps_the_job_claimed() {
         let memory = open_memory().await;
         let store = open_store().await;
-        let backend = SlowBackend::new(1600, vec![Ok("oracle"), Ok("完成")]);
+        // 一次呼叫 3.2 秒，比 2 秒的 job lease 久，也比 2.6 秒才來的 worker-b 晚結束。
+        let backend = SlowBackend::new(3200, vec![Ok("完成")]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory: &memory,
@@ -1027,7 +1062,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(claimed, vec![job.clone()]);
-        let backend = SlowBackend::new(1000, vec![Ok("oracle"), Ok("不該完成")]);
+        let backend = SlowBackend::new(1000, vec![Ok("不該完成")]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory: &memory,
@@ -1151,7 +1186,7 @@ mod tests {
             .claim_due_jobs(chrono::Utc::now().timestamp(), "worker-a", 300, 10)
             .await
             .unwrap();
-        let backend = MockBackend::new(vec![Ok("oracle"), Ok("年度提醒完成")]);
+        let backend = MockBackend::new(vec![Ok("年度提醒完成")]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory: &memory,
@@ -1178,7 +1213,7 @@ mod tests {
         let memory = open_memory().await;
         let store = open_store().await;
         let job = claimed_turn(&store, 5).await;
-        let backend = SlowBackend::new(1000, vec![Ok("oracle"), Ok("不該完成")]);
+        let backend = SlowBackend::new(1000, vec![Ok("不該完成")]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory: &memory,
@@ -1334,7 +1369,7 @@ mod tests {
     async fn deleting_a_running_job_cleans_up_after_the_turn() {
         let memory = open_memory().await;
         let store = open_store().await;
-        let backend = SlowBackend::new(1000, vec![Ok("oracle"), Ok("提醒完成")]);
+        let backend = SlowBackend::new(1000, vec![Ok("提醒完成")]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory: &memory,
@@ -1369,7 +1404,7 @@ mod tests {
     async fn deleting_a_queued_job_skips_it_and_clears_its_scope() {
         let memory = open_memory().await;
         let store = open_store().await;
-        let backend = MockBackend::new(vec![Ok("oracle"), Ok("不該執行")]);
+        let backend = MockBackend::new(vec![Ok("不該執行")]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory: &memory,
@@ -1405,7 +1440,7 @@ mod tests {
     async fn queued_job_whose_lease_was_taken_is_skipped() {
         let memory = open_memory().await;
         let store = open_store().await;
-        let backend = MockBackend::new(vec![Ok("oracle"), Ok("不該執行")]);
+        let backend = MockBackend::new(vec![Ok("不該執行")]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory: &memory,
@@ -1450,13 +1485,14 @@ mod tests {
     }
 
     // SCN-001：執行中的 run 訊息顯示目前階段與已執行秒數，同一階段內也會更新。
+    // 2026-11-26（#45）：回合只呼叫一次 primary agent，階段是「悟空」。
     #[tokio::test]
     async fn running_run_shows_phase_and_elapsed_seconds() {
         let memory = open_memory().await;
         let store = open_store().await;
-        // planner 與唯一一棒各 2.5 秒；lease 3 秒時每 1 秒更新一次進度。每個讀取點與它要讀到的
-        // 那次寫入、以及下一次換階段，都至少隔 0.7 秒，CI 上資料庫寫入變慢也不會讀到舊訊息。
-        let backend = SlowBackend::new(2500, vec![Ok("oracle"), Ok("完成")]);
+        // 唯一的一次呼叫 4 秒；lease 3 秒時每 1 秒更新一次進度。每個讀取點與它要讀到的那次寫入
+        // 至少隔 0.7 秒，CI 上資料庫寫入變慢也不會讀到舊訊息。
+        let backend = SlowBackend::new(4000, vec![Ok("完成")]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory: &memory,
@@ -1469,7 +1505,7 @@ mod tests {
         let probe = async {
             let start = tokio::time::Instant::now();
             let mut messages = Vec::new();
-            for at in [800u64, 1800, 3600] {
+            for at in [800u64, 1800, 2800] {
                 tokio::time::sleep_until(start + std::time::Duration::from_millis(at)).await;
                 let run = only_run(&store, &job).await;
                 assert_eq!(run.status, RunStatus::Running);
@@ -1481,27 +1517,18 @@ mod tests {
             tokio::join!(run_claimed_job(&store, &ctx, &job, "worker-a", 3), probe);
         outcome.unwrap();
 
+        for message in &messages {
+            assert!(message.starts_with("進行中：悟空，已執行 "), "{messages:?}");
+        }
         assert!(
-            messages[0].starts_with("進行中：規劃中，已執行 "),
-            "{messages:?}"
-        );
-        assert!(
-            messages[1].starts_with("進行中：規劃中，已執行 "),
-            "{messages:?}"
-        );
-        assert!(
-            elapsed_secs(&messages[1]) >= 1,
+            elapsed_secs(&messages[2]) >= 2,
             "同一階段內沒有更新：{messages:?}"
-        );
-        assert!(
-            messages[2].starts_with("進行中：第 1 棒 oracle，已執行 "),
-            "{messages:?}"
         );
     }
 
     // SCN-002：失敗時訊息開頭標出失敗的階段與已執行秒數，後面保留原錯誤。
     #[tokio::test]
-    async fn failure_message_names_the_planning_phase() {
+    async fn failure_message_names_the_phase() {
         let memory = open_memory().await;
         let store = open_store().await;
         let backend = SlowBackend::new(0, vec![Err(timed_out())]);
@@ -1521,7 +1548,7 @@ mod tests {
         let run = only_run(&store, &job).await;
         assert_eq!(run.status, RunStatus::Failure);
         assert!(
-            run.message.starts_with("規劃中失敗，已執行 "),
+            run.message.starts_with("悟空失敗，已執行 "),
             "{}",
             run.message
         );
@@ -1532,18 +1559,76 @@ mod tests {
         );
     }
 
+    /// #45 SCN-002：primary agent 派工給 fixer，fixer 還在執行時回合失敗。
+    struct DispatchThenFailBackend;
+    impl AiBackend for DispatchThenFailBackend {
+        async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+            Err(timed_out())
+        }
+
+        async fn run_streaming(
+            &self,
+            req: AgentRequest,
+            on_event: &mut dyn FnMut(StreamEvent),
+        ) -> Result<AgentResponse, GatewayError> {
+            on_event(StreamEvent::SubagentStarted {
+                agent: "fixer".to_string(),
+            });
+            self.run(req).await
+        }
+    }
+    impl QuestionResponder for DispatchThenFailBackend {
+        async fn allow_permission_once(&self, _: &str, _: &str) -> Result<(), GatewayError> {
+            unreachable!("這個 backend 不會送出詢問")
+        }
+
+        async fn reject_question(&self, _: &str, _: &str) -> Result<(), GatewayError> {
+            unreachable!("這個 backend 不會送出詢問")
+        }
+    }
+
+    /// 派出 fixer、fixer 回報之後，primary 才失敗。
+    struct ReportThenFailBackend;
+    impl AiBackend for ReportThenFailBackend {
+        async fn run(&self, _req: AgentRequest) -> Result<AgentResponse, GatewayError> {
+            Err(timed_out())
+        }
+
+        async fn run_streaming(
+            &self,
+            req: AgentRequest,
+            on_event: &mut dyn FnMut(StreamEvent),
+        ) -> Result<AgentResponse, GatewayError> {
+            on_event(StreamEvent::SubagentStarted {
+                agent: "fixer".to_string(),
+            });
+            on_event(StreamEvent::SubagentReported {
+                agent: "fixer".to_string(),
+                output: "已建立 hello.txt".to_string(),
+            });
+            self.run(req).await
+        }
+    }
+    impl QuestionResponder for ReportThenFailBackend {
+        async fn allow_permission_once(&self, _: &str, _: &str) -> Result<(), GatewayError> {
+            unreachable!("這個 backend 不會送出詢問")
+        }
+
+        async fn reject_question(&self, _: &str, _: &str) -> Result<(), GatewayError> {
+            unreachable!("這個 backend 不會送出詢問")
+        }
+    }
+
+    // review-65e960a NICE TO HAVE 9（2026-11-27）：subagent 回報之後是 primary 在處理，階段回到
+    // 「悟空」；之後的失敗不能記成 fixer 失敗。
     #[tokio::test]
-    async fn failure_message_names_the_failing_step() {
+    async fn the_phase_returns_to_wukong_after_the_subagent_reports() {
         let memory = open_memory().await;
         let store = open_store().await;
-        let backend = SlowBackend::new(
-            0,
-            vec![Ok("explorer, fixer"), Ok("看過了"), Err(timed_out())],
-        );
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory: &memory,
-            backend: &backend,
+            backend: &ReportThenFailBackend,
             base_config: &cfg,
             permission_policy: PermissionPolicy::Reject,
         };
@@ -1554,14 +1639,34 @@ mod tests {
             .unwrap();
 
         let run = only_run(&store, &job).await;
-        assert_eq!(run.status, RunStatus::Failure);
         assert!(
-            run.message.starts_with("第 2 棒 fixer 失敗，已執行 "),
+            run.message.starts_with("悟空失敗，已執行 "),
             "{}",
             run.message
         );
+    }
+
+    // #45 SCN-002：排程的執行訊息顯示目前的角色「悟空·fixer」，不再寫「第 k 棒」。
+    #[tokio::test]
+    async fn the_phase_names_the_dispatched_subagent() {
+        let memory = open_memory().await;
+        let store = open_store().await;
+        let cfg = cfg("project:Base");
+        let ctx = ExecutionContext {
+            memory: &memory,
+            backend: &DispatchThenFailBackend,
+            base_config: &cfg,
+            permission_policy: PermissionPolicy::Reject,
+        };
+        let job = claimed_turn(&store, 300).await;
+
+        run_claimed_job(&store, &ctx, &job, "worker-a", 300)
+            .await
+            .unwrap();
+
+        let run = only_run(&store, &job).await;
         assert!(
-            run.message.contains("本機 OpenCode 回合逾時，已中止程序。"),
+            run.message.starts_with("悟空·fixer 失敗，已執行 "),
             "{}",
             run.message
         );
@@ -1572,7 +1677,7 @@ mod tests {
     async fn short_turn_result_and_leases_are_unchanged() {
         let memory = open_memory().await;
         let store = open_store().await;
-        let backend = SlowBackend::new(0, vec![Ok("oracle"), Ok("完成")]);
+        let backend = SlowBackend::new(0, vec![Ok("完成")]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory: &memory,
@@ -1775,9 +1880,9 @@ mod tests {
             .collect()
     }
 
-    /// 跑一次 Turn job（planner 一棒 + 執行一棒），回傳 backend 收到的所有 prompt。
+    /// 跑一次 Turn job（呼叫一次 primary agent），回傳 backend 收到的所有 prompt。
     async fn run_turn_job(memory: &Memory, job: &Job, reply: &str) -> Vec<String> {
-        let backend = MockBackend::new(vec![Ok("oracle"), Ok(reply)]);
+        let backend = MockBackend::new(vec![Ok(reply)]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory,
@@ -1868,10 +1973,26 @@ mod tests {
             .join("\n");
         let beta_second = run_turn_job(&memory, &beta, "beta-second").await.join("\n");
 
-        assert!(alpha_second.contains("Assistant: alpha-first"));
+        // 2026-11-26（#45 SCN-004）：接續 session 的回合不再補上一回合，所以 prompt 裡兩邊都看不到；
+        // 各自只接續自己的 scope，由兩個 scope 的回合記憶確認。
         assert!(!alpha_second.contains("beta-first"));
-        assert!(beta_second.contains("Assistant: beta-first"));
         assert!(!beta_second.contains("alpha-first"));
+        let alpha_events = event_texts(&memory, "agent:schedule-job-1").await;
+        let beta_events = event_texts(&memory, "agent:schedule-job-2").await;
+        for (events, own, other) in [
+            (&alpha_events, "alpha", "beta"),
+            (&beta_events, "beta", "alpha"),
+        ] {
+            assert!(
+                events.contains(&format!("Assistant: {own}-first")),
+                "{events:?}"
+            );
+            assert!(
+                events.contains(&format!("Assistant: {own}-second")),
+                "{events:?}"
+            );
+            assert!(!events.iter().any(|e| e.contains(other)), "{events:?}");
+        }
     }
 
     #[tokio::test]
@@ -2009,7 +2130,7 @@ mod tests {
     #[tokio::test]
     async fn turn_job_instructs_agent_to_auto_choose_recommended_options() {
         let memory = open_memory().await;
-        let backend = MockBackend::new(vec![Ok("oracle"), Ok("done")]);
+        let backend = MockBackend::new(vec![Ok("done")]);
         let cfg = cfg("project:Base");
         let ctx = ExecutionContext {
             memory: &memory,
@@ -2033,7 +2154,7 @@ mod tests {
 
     async fn models_sent_for_turn(job_model: Option<&str>) -> Vec<Option<String>> {
         let memory = open_memory().await;
-        let backend = MockBackend::new(vec![Ok("oracle"), Ok("done")]);
+        let backend = MockBackend::new(vec![Ok("done")]);
         let mut cfg = cfg("project:Base");
         cfg.default_model = Some("opencode/default".to_string());
         let ctx = ExecutionContext {

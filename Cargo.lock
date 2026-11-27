@@ -3995,12 +3995,6 @@ dependencies = [
 [[package]]
 name = "wukong-orchestrator"
 version = "0.1.0"
-dependencies = [
- "clap",
- "thiserror 1.0.69",
- "tokio",
- "wukong-gateway",
-]
 
 [[package]]
 name = "wukong-render"
@@ -4073,9 +4067,6 @@ dependencies = [
 [[package]]
 name = "wukong-skills"
 version = "0.1.0"
-dependencies = [
- "wukong-orchestrator",
-]
 
 [[package]]
 name = "wukong-telegram"
@@ -4124,12 +4115,10 @@ dependencies = [
  "wukong-cli",
  "wukong-gateway",
  "wukong-memory",
- "wukong-orchestrator",
  "wukong-render",
  "wukong-runtime",
  "wukong-scheduler",
  "wukong-settings",
- "wukong-skills",
 ]
 
 [[package]]

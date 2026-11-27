@@ -30,65 +30,8 @@ if [[ -n "${WUKONG_WORKSPACE:-}" ]]; then
     mkdir -p "$WUKONG_WORKSPACE"
     chown wukong:wukong "$WUKONG_WORKSPACE" 2>/dev/null || true
 
-    IMAGE_SKILLS="/usr/local/share/wukong/skills/superpowers"
-    WORKSPACE_SKILLS="$WUKONG_WORKSPACE/.wukong/skills/superpowers"
-
-    sync_wukong_skills() {
-        if [[ ! -d "$IMAGE_SKILLS" ]]; then
-            echo "[wukong] Warning: image skill assets missing at $IMAGE_SKILLS" >&2
-            return 0
-        fi
-
-        if [[ -f "$IMAGE_SKILLS/SOURCE.md" && -f "$WORKSPACE_SKILLS/SOURCE.md" ]] && \
-            cmp -s "$IMAGE_SKILLS/SOURCE.md" "$WORKSPACE_SKILLS/SOURCE.md"; then
-            return 0
-        fi
-
-        local parent_dir tmp_dir old_dir
-        parent_dir="$(dirname "$WORKSPACE_SKILLS")"
-        tmp_dir="$parent_dir/.superpowers.tmp.$$"
-        old_dir="$parent_dir/.superpowers.old.$$"
-
-        if ! mkdir -p "$parent_dir"; then
-            echo "[wukong] Warning: cannot create skill asset directory at $parent_dir" >&2
-            return 0
-        fi
-
-        rm -rf "$tmp_dir" "$old_dir" 2>/dev/null || true
-        if ! mkdir -p "$tmp_dir"; then
-            echo "[wukong] Warning: cannot prepare temporary skill asset directory at $tmp_dir" >&2
-            return 0
-        fi
-
-        if ! cp -a "$IMAGE_SKILLS/." "$tmp_dir/"; then
-            echo "[wukong] Warning: failed to copy skill assets into $tmp_dir" >&2
-            rm -rf "$tmp_dir" 2>/dev/null || true
-            return 0
-        fi
-
-        if [[ -d "$WORKSPACE_SKILLS" ]]; then
-            if ! mv "$WORKSPACE_SKILLS" "$old_dir"; then
-                echo "[wukong] Warning: cannot replace existing skill assets at $WORKSPACE_SKILLS" >&2
-                rm -rf "$tmp_dir" 2>/dev/null || true
-                return 0
-            fi
-        fi
-
-        if ! mv "$tmp_dir" "$WORKSPACE_SKILLS"; then
-            echo "[wukong] Warning: failed to install skill assets at $WORKSPACE_SKILLS" >&2
-            if [[ -d "$old_dir" ]]; then
-                mv "$old_dir" "$WORKSPACE_SKILLS" 2>/dev/null || true
-            fi
-            rm -rf "$tmp_dir" 2>/dev/null || true
-            return 0
-        fi
-
-        rm -rf "$old_dir" 2>/dev/null || true
-        chown -R wukong:wukong "$WUKONG_WORKSPACE/.wukong" 2>/dev/null || true
-        echo "[wukong] Workspace skill assets ready at $WORKSPACE_SKILLS"
-    }
-
-    sync_wukong_skills
+    # 2026-11-26（#45）：Superpowers 技能與 agent 定義由 wukong 的入口啟動時寫到
+    # $WUKONG_WORKSPACE/.opencode/（V2 讀得到的位置），這裡不再從映像複製技能。
 
     # ── Auto-initialize workspace templates if missing ──
     if [[ ! -f "$WUKONG_WORKSPACE/SOUL.md" && -f "/usr/local/share/wukong/SOUL.md" ]]; then
@@ -163,9 +106,9 @@ mkdir -p "$OPENCODE_CONFIG_DIR"
 #                 Disabling it also disables opencode's own revert/undo.
 #   tool_output - tool results are the bulk of part payloads; capping them caps
 #                 what gets re-serialised on every subsequent update.
-#   compaction  - lets opencode trim its own context. Complements (does not
-#                 replace) Wukong's WUKONG_SESSION_COMPACT_EVERY_TURNS, which
-#                 compacts on turn count rather than on context pressure.
+#   compaction  - lets opencode trim its own context. Since 2026-11-26 (#45)
+#                 this is the only compaction: Wukong no longer compacts on
+#                 turn count (WUKONG_SESSION_COMPACT_EVERY_TURNS is ignored).
 #                 `background` is off: V2 would otherwise pre-write a summary as a
 #                 session nears the limit, spending tokens on summaries that may
 #                 never be used, which V1 never did. V1's prune and tail_turns

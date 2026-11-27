@@ -235,6 +235,11 @@ impl LocalProcessBackend {
 }
 
 impl AiBackend for LocalProcessBackend {
+    /// 每回合起的 server 是同一份 opencode.db，entry 跨重啟仍在（probe-instructions.md）。
+    fn supports_session_instructions(&self) -> bool {
+        true
+    }
+
     async fn run(&self, mut req: AgentRequest) -> Result<AgentResponse, GatewayError> {
         req.tool_overrides.insert("question".into(), false);
         self.execute(Operation::Run(req, false, false), &mut |_| {})
@@ -472,6 +477,7 @@ mod tests {
             agent: None,
             tool_overrides: BTreeMap::new(),
             attachments: vec![],
+            session_instructions: Default::default(),
         }
     }
 

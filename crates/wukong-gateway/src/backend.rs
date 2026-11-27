@@ -36,6 +36,10 @@ pub struct AgentRequest {
     /// Per-tool opencode server overrides. `false` disables a tool for this request.
     pub tool_overrides: BTreeMap<String, bool>,
     pub attachments: Vec<AgentAttachment>,
+    /// 2026-11-26（#45 SCN-007）：要放在 session 指令層的內容（key → 文字），例如
+    /// `wukong.scope`。支援的 backend（[`AiBackend::supports_session_instructions`]）在送
+    /// prompt 前確認 session 上有這些 entry，缺少或值不同才寫入；其他 backend 忽略。
+    pub session_instructions: BTreeMap<String, String>,
 }
 
 /// The backend's textual response.
@@ -68,6 +72,22 @@ pub struct SessionListing {
 #[allow(async_fn_in_trait)]
 pub trait AiBackend {
     async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError>;
+
+    /// 2026-11-26（#45 SCN-007）：會不會把 [`AgentRequest::session_instructions`] 放進
+    /// session 指令層。只有 OpenCode V2 server（常駐與本機按需）會；不會的 backend 由呼叫端
+    /// 改把內容寫進 prompt。
+    fn supports_session_instructions(&self) -> bool {
+        false
+    }
+
+    /// 2026-11-26（#45 SCN-008）：等 backend 用上剛改寫的 agent 定義，`system` 是定義
+    /// frontmatter 之後的內文。常駐 V2 server 靠檔案監看非同步重新載入，改寫後幾十毫秒內
+    /// 送出的 prompt 仍用舊定義（docs/issues/issue-0045/implementation-plan.md Task 4.2）。
+    /// 其他 backend 每次執行都重新讀定義（按需本機模式啟動新的 server，CLI 啟動新的程序），
+    /// 不用等。回傳 `timeout` 內有沒有看到新內容；沒看到時呼叫端照常送出。
+    async fn wait_for_agent_system(&self, _agent: &str, _system: &str, _timeout: Duration) -> bool {
+        true
+    }
 
     /// Run, invoking `on_event` as events arrive, returning the full response.
     /// Default: call `run`, then emit the whole text as a single Text event.
@@ -119,6 +139,7 @@ pub trait AiBackend {
                 agent: None,
                 tool_overrides: BTreeMap::new(),
                 attachments: Vec::new(),
+                session_instructions: Default::default(),
             },
             &mut |_| {},
         )
@@ -197,10 +218,15 @@ pub fn assemble_argv(
         argv.push("--model".to_string());
         argv.push(model.to_string());
     }
-    // Route planning/aux steps to a cheaper, tool-less opencode agent when the
-    // orchestrator asks for one (e.g. `plan`). Without this the CLI backend
-    // silently ran every step with the default agent.
-    if let Some(agent) = agent.map(str::trim).filter(|a| !a.is_empty()) {
+    // 2026-11-26（#45 SCN-014）：回合以 primary agent `wukong` 執行。比照上面 --standalone 的
+    // 判定：只加給 opencode，使用者在命令裡自己指定了 --agent 就照他的，不再加一個蓋掉它。
+    let agent_chosen = command
+        .iter()
+        .any(|arg| arg == "--agent" || arg.starts_with("--agent="));
+    if let Some(agent) = agent
+        .map(str::trim)
+        .filter(|a| !a.is_empty() && is_opencode(command) && !agent_chosen)
+    {
         argv.push("--agent".to_string());
         argv.push(agent.to_string());
     }
@@ -393,6 +419,28 @@ impl AgentBackend {
 }
 
 impl AiBackend for AgentBackend {
+    fn supports_session_instructions(&self) -> bool {
+        match self {
+            AgentBackend::Cli(backend) => backend.supports_session_instructions(),
+            AgentBackend::Local(backend) => backend.supports_session_instructions(),
+            AgentBackend::Server(backend) => backend.supports_session_instructions(),
+        }
+    }
+
+    async fn wait_for_agent_system(&self, agent: &str, system: &str, timeout: Duration) -> bool {
+        match self {
+            AgentBackend::Cli(backend) => {
+                backend.wait_for_agent_system(agent, system, timeout).await
+            }
+            AgentBackend::Local(backend) => {
+                backend.wait_for_agent_system(agent, system, timeout).await
+            }
+            AgentBackend::Server(backend) => {
+                backend.wait_for_agent_system(agent, system, timeout).await
+            }
+        }
+    }
+
     async fn run(&self, req: AgentRequest) -> Result<AgentResponse, GatewayError> {
         match self {
             AgentBackend::Cli(backend) => backend.run(req).await,
@@ -1390,6 +1438,46 @@ mod tests {
         );
     }
 
+    fn argv_with_agent(command: &[&str]) -> Vec<String> {
+        let command: Vec<String> = command.iter().map(|s| s.to_string()).collect();
+        assemble_argv(&command, None, false, None, Some("wukong"), &[], "hi")
+    }
+
+    // #45 SCN-014：使用者自訂、但仍是 opencode 的命令，沒有自己指定 agent 時以 wukong 執行。
+    #[test]
+    fn a_custom_opencode_command_runs_as_wukong() {
+        let argv = argv_with_agent(&["opencode", "run", "--print-logs"]);
+        let at = argv
+            .iter()
+            .position(|a| a == "--agent")
+            .expect("no --agent");
+        assert_eq!(argv[at + 1], "wukong", "{argv:?}");
+    }
+
+    // #45 SCN-014：使用者自己指定的 agent 照他的，不再多加一個 --agent 蓋掉它。
+    #[test]
+    fn a_custom_command_keeps_its_own_agent() {
+        for command in [
+            &["opencode", "run", "--agent", "custom"][..],
+            &["opencode", "run", "--agent=custom"][..],
+        ] {
+            let argv = argv_with_agent(command);
+            assert!(!argv.iter().any(|a| a == "wukong"), "{argv:?}");
+            assert_eq!(
+                argv.iter().filter(|a| a.starts_with("--agent")).count(),
+                1,
+                "{argv:?}"
+            );
+        }
+    }
+
+    // #45 SCN-014：不是 opencode 的命令（例如假 agent）不加 --agent。
+    #[test]
+    fn a_non_opencode_command_gets_no_agent_flag() {
+        let argv = argv_with_agent(&["printf", "fixer"]);
+        assert_eq!(argv, vec!["printf", "fixer", "hi"]);
+    }
+
     #[test]
     fn assemble_argv_omits_agent_when_none_or_blank() {
         let none = assemble_argv(
@@ -1488,6 +1576,7 @@ mod tests {
                 agent: None,
                 tool_overrides: BTreeMap::new(),
                 attachments: Vec::new(),
+                session_instructions: Default::default(),
             })
             .await
             .unwrap();
@@ -1510,6 +1599,7 @@ mod tests {
                 agent: None,
                 tool_overrides: BTreeMap::new(),
                 attachments: Vec::new(),
+                session_instructions: Default::default(),
             })
             .await
             .unwrap_err();
@@ -1535,6 +1625,7 @@ mod tests {
                 agent: None,
                 tool_overrides: BTreeMap::new(),
                 attachments: Vec::new(),
+                session_instructions: Default::default(),
             }),
         )
         .await;
@@ -1580,6 +1671,7 @@ mod tests {
                     agent: None,
                     tool_overrides: BTreeMap::new(),
                     attachments: Vec::new(),
+                    session_instructions: Default::default(),
                 },
                 &mut |e| events.push(e),
             )
@@ -1624,6 +1716,7 @@ mod tests {
                 agent: None,
                 tool_overrides: BTreeMap::new(),
                 attachments: Vec::new(),
+                session_instructions: Default::default(),
             })
             .await
             .unwrap();
@@ -1671,6 +1764,7 @@ mod tests {
                     agent: None,
                     tool_overrides: BTreeMap::new(),
                     attachments: Vec::new(),
+                    session_instructions: Default::default(),
                 },
                 &mut |e| events.push(e),
             )
@@ -1712,6 +1806,7 @@ mod tests {
             agent: None,
             tool_overrides: BTreeMap::new(),
             attachments: Vec::new(),
+            session_instructions: Default::default(),
         }
     }
 
@@ -1954,6 +2049,7 @@ mod tests {
                     agent: None,
                     tool_overrides: BTreeMap::new(),
                     attachments: Vec::new(),
+                    session_instructions: Default::default(),
                 },
                 &mut |e| events.push(e),
             )
@@ -1992,6 +2088,7 @@ mod tests {
                     agent: None,
                     tool_overrides: BTreeMap::new(),
                     attachments: Vec::new(),
+                    session_instructions: Default::default(),
                 },
                 &mut |_| {},
             ),
@@ -2038,6 +2135,7 @@ mod tests {
                     agent: None,
                     tool_overrides: BTreeMap::new(),
                     attachments: Vec::new(),
+                    session_instructions: Default::default(),
                 };
                 if streaming {
                     backend.run_streaming(req, &mut |_| {}).await
@@ -2096,6 +2194,7 @@ mod tests {
                     agent: None,
                     tool_overrides: BTreeMap::new(),
                     attachments: Vec::new(),
+                    session_instructions: Default::default(),
                 },
                 &mut |e| events.push(e),
             ),

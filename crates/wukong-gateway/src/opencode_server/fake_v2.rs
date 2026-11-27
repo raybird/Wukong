@@ -14,6 +14,8 @@ use tokio::net::TcpListener;
 pub(super) const PASSWORD: &str = "fake-v2-secret";
 /// 真的 V2 不設上限；假 server 每頁最多回這麼多，確認呼叫端照 cursor 走，不是信任 limit。
 pub(super) const PAGE_CAP: usize = 50;
+/// `handle` 回這個狀態時，連線保持開著、一直不回應。
+const HANG: &str = "hang";
 
 #[derive(Default)]
 struct State {
@@ -23,6 +25,12 @@ struct State {
     /// 帶 JSON body 的請求：`METHOD path` 與 body。
     bodies: Vec<(String, Value)>,
     events: Vec<String>,
+    /// `GET /api/experimental/job` 依序回的背景工作清單；用完之後回空清單。
+    jobs: Vec<Value>,
+    /// session 指令層：session → (key, value)，依寫入順序。
+    entries: Vec<(String, String, Value)>,
+    /// `GET /api/agent` 依序回的 agent 清單；剩最後一份時之後都回它。
+    agents: Vec<Value>,
     created: usize,
 }
 
@@ -54,6 +62,10 @@ impl FakeV2 {
                         return;
                     }
                     let (status, content_type, body) = handle(&state, &method, &path, auth, &body);
+                    if status == HANG {
+                        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                        return;
+                    }
                     let response = format!(
                         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
@@ -93,6 +105,39 @@ impl FakeV2 {
         self.state.lock().unwrap().events = events;
     }
 
+    /// 之後每次 `GET /api/experimental/job` 依序回的 `data`（背景工作清單）；用完回空清單。
+    /// 項目是字串 `"fail"` 時，那一次回 503；是 `"hang"` 時，那一次一直不回應。
+    pub fn script_jobs(&self, jobs: Vec<Value>) {
+        self.state.lock().unwrap().jobs = jobs;
+    }
+
+    /// 之後每次 `GET /api/agent` 依序回的 `data`；剩最後一份時一直回它，沒有時回空清單。
+    pub fn script_agents(&self, agents: Vec<Value>) {
+        self.state.lock().unwrap().agents = agents;
+    }
+
+    /// 預先放一筆 session 指令層的 entry。
+    pub fn set_entry(&self, session: &str, key: &str, value: Value) {
+        let mut state = self.state.lock().unwrap();
+        state
+            .entries
+            .retain(|(s, k, _)| !(s == session && k == key));
+        state
+            .entries
+            .push((session.to_string(), key.to_string(), value));
+    }
+
+    /// session 指令層目前的 entry（key → value）。
+    pub fn entries_of(&self, session: &str) -> Vec<(String, Value)> {
+        let state = self.state.lock().unwrap();
+        state
+            .entries
+            .iter()
+            .filter(|(s, _, _)| s == session)
+            .map(|(_, k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
     /// 最後一次 `request`（`METHOD path`）的 JSON body。
     pub fn body_of(&self, request: &str) -> Option<Value> {
         let state = self.state.lock().unwrap();
@@ -114,17 +159,27 @@ impl FakeV2 {
     }
 }
 
-/// 讀一份 `tests/fixtures/opencode-v2/` 的真實樣本，把樣本裡的 session 換成 `session_id`。
+/// 讀一份 `tests/fixtures/opencode-v2/` 的真實樣本，把樣本裡（回合本身）的 session 換成
+/// `session_id`。回合的 session 是沒有 parentID 的 `session.created`；樣本沒有它時（session 在
+/// 連上事件串流前就建立了），取第一個帶 sessionID 的事件。
 pub(super) fn fixture_events(name: &str, session_id: &str) -> Vec<String> {
     let path = format!(
         "{}/tests/fixtures/opencode-v2/{name}.ndjson",
         env!("CARGO_MANIFEST_DIR")
     );
     let raw = std::fs::read_to_string(path).unwrap();
-    let original = raw
+    let events: Vec<Value> = raw
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .find(|event| event["type"] == "session.created")
+        .collect();
+    let original = events
+        .iter()
+        .find(|event| event["type"] == "session.created" && event["data"].get("parentID").is_none())
+        .or_else(|| {
+            events
+                .iter()
+                .find(|event| event["data"]["sessionID"].is_string())
+        })
         .and_then(|event| event["data"]["sessionID"].as_str().map(str::to_string))
         .unwrap();
     raw.lines()
@@ -243,6 +298,32 @@ fn handle(
             r#"{"version":"2.3.2","pid":1,"urls":["http://127.0.0.1:4096"],"paths":{"tmp":"/tmp/opencode"}}"#
                 .to_string(),
         ),
+        ("GET", "/api/agent") => {
+            let agents = match state.agents.len() {
+                0 => json!([]),
+                1 => state.agents[0].clone(),
+                _ => state.agents.remove(0),
+            };
+            ("200 OK", JSON, json!({ "location": {"directory": "/workspace"}, "data": agents }).to_string())
+        }
+        ("GET", "/api/experimental/job") => {
+            let jobs = if state.jobs.is_empty() {
+                json!([])
+            } else {
+                state.jobs.remove(0)
+            };
+            if jobs == HANG {
+                return (HANG, JSON, String::new());
+            }
+            if jobs == "fail" {
+                return (
+                    "503 Service Unavailable",
+                    JSON,
+                    r#"{"_tag":"ServiceUnavailable","message":"job store busy"}"#.to_string(),
+                );
+            }
+            ("200 OK", JSON, json!({ "data": jobs }).to_string())
+        }
         ("POST", "/api/session") => {
             state.created += 1;
             let id = format!("ses_fake{}", state.created);
@@ -285,6 +366,36 @@ fn handle(
                 JSON,
                 json!({"data": page, "cursor": {"previous": null, "next": next}}).to_string(),
             )
+        }
+        (method, route) if route.starts_with("/api/experimental/session/") => {
+            let rest = &route["/api/experimental/session/".len()..];
+            let (id, action) = rest.split_once('/').unwrap_or((rest, ""));
+            if !state.sessions.iter().any(|s| s["id"] == id) {
+                return not_found(id);
+            }
+            let id = id.to_string();
+            match (method, action.strip_prefix("instructions/entries")) {
+                ("GET", Some("")) => {
+                    let data: Vec<Value> = state
+                        .entries
+                        .iter()
+                        .filter(|(s, _, _)| *s == id)
+                        .map(|(_, k, v)| json!({"key": k, "value": v}))
+                        .collect();
+                    ("200 OK", JSON, json!({ "data": data }).to_string())
+                }
+                ("PUT", Some(key)) if key.starts_with('/') => {
+                    let key = key[1..].to_string();
+                    let value = serde_json::from_str::<Value>(body)
+                        .ok()
+                        .and_then(|b| b.get("value").cloned())
+                        .unwrap_or(Value::Null);
+                    state.entries.retain(|(s, k, _)| !(*s == id && *k == key));
+                    state.entries.push((id, key, value));
+                    ("204 No Content", JSON, String::new())
+                }
+                _ => not_found(&id),
+            }
         }
         (method, route) if route.starts_with("/api/session/") => {
             let rest = &route["/api/session/".len()..];

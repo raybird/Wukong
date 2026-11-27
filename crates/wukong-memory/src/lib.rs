@@ -168,6 +168,18 @@ impl Memory {
             .await
     }
 
+    /// 補記 scope 目前 session 的開始時間（Unix 秒），見 [`AgentSessionState::session_started_at`]。
+    pub async fn set_agent_session_started(
+        &self,
+        scope: &str,
+        session_id: &str,
+        started_at: i64,
+    ) -> Result<bool> {
+        self.store
+            .set_agent_session_started(scope, session_id, started_at)
+            .await
+    }
+
     pub async fn release_agent_session_lease(&self, scope: &str, owner: &str) -> Result<bool> {
         self.store
             .release_agent_session_lease(scope, owner, now_unix())
@@ -182,14 +194,6 @@ impl Memory {
     ) -> Result<bool> {
         self.store
             .mark_agent_session_compacted(scope, owner, session_id, now_unix())
-            .await
-    }
-
-    /// Consume the compaction budget after a failed compaction attempt, so the
-    /// next retry is a full threshold away rather than on the very next turn.
-    pub async fn defer_agent_session_compaction(&self, scope: &str, owner: &str) -> Result<bool> {
-        self.store
-            .defer_agent_session_compaction(scope, owner, now_unix())
             .await
     }
 

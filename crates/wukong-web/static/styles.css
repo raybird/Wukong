@@ -656,7 +656,7 @@ wukong-chat { display: flex; flex-direction: column; flex: 1; min-height: 0; }
   gap: 0.75rem;
   margin-bottom: 1rem;
 }
-.stat-card, .control-card, .record-card, .skill-card {
+.stat-card, .control-card, .record-card {
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
   border-radius: var(--border-radius);
@@ -665,8 +665,7 @@ wukong-chat { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .stat-card strong { display: block; font-size: 1.35rem; color: var(--accent-gold); }
 .control-row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
 .control-row input, .control-row select, .control-row button { font: inherit; }
-.record-list, .skill-grid { display: grid; gap: 0.75rem; }
-.skill-grid { grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); }
+.record-list { display: grid; gap: 0.75rem; }
 .tag {
   display: inline-block;
   border: 1px solid var(--border-color);

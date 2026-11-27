@@ -9,6 +9,7 @@ pub(crate) const APP_JS: &str = include_str!("../static/app.js");
 pub(crate) const HTML_JS: &str = include_str!("../static/lib/html.js");
 pub(crate) const CHAT_LAYOUT_JS: &str = include_str!("../static/lib/chat-layout.mjs");
 pub(crate) const UNREAD_MARKER_JS: &str = include_str!("../static/lib/unread-marker.mjs");
+pub(crate) const CHAT_PROGRESS_JS: &str = include_str!("../static/lib/chat-progress.mjs");
 pub(crate) const MODEL_PICKER_JS: &str = include_str!("../static/lib/model-picker.mjs");
 pub(crate) const CHAT_JS: &str = include_str!("../static/components/wukong-chat.js");
 pub(crate) const CHAT_THREAD_HEADER_JS: &str =
@@ -18,7 +19,6 @@ pub(crate) const CHAT_ACTIVITY_JS: &str = include_str!("../static/components/cha
 pub(crate) const CHAT_QUESTION_CARD_JS: &str =
     include_str!("../static/components/chat-question-card.js");
 pub(crate) const MEMORY_JS: &str = include_str!("../static/components/wukong-memory.js");
-pub(crate) const SKILLS_JS: &str = include_str!("../static/components/wukong-skills.js");
 pub(crate) const SETTINGS_JS: &str = include_str!("../static/components/wukong-settings.js");
 pub(crate) const SCHEDULES_JS: &str = include_str!("../static/components/wukong-schedules.js");
 pub(crate) const SYSTEM_JS: &str = include_str!("../static/components/wukong-system.js");
@@ -46,6 +46,10 @@ pub(crate) async fn chat_layout_js() -> axum::response::Response {
 pub(crate) async fn unread_marker_js() -> axum::response::Response {
     asset(JS, UNREAD_MARKER_JS)
 }
+
+pub(crate) async fn chat_progress_js() -> axum::response::Response {
+    asset(JS, CHAT_PROGRESS_JS)
+}
 pub(crate) async fn model_picker_js() -> axum::response::Response {
     asset(JS, MODEL_PICKER_JS)
 }
@@ -66,9 +70,6 @@ pub(crate) async fn chat_question_card_js() -> axum::response::Response {
 }
 pub(crate) async fn memory_js() -> axum::response::Response {
     asset(JS, MEMORY_JS)
-}
-pub(crate) async fn skills_js() -> axum::response::Response {
-    asset(JS, SKILLS_JS)
 }
 pub(crate) async fn settings_js() -> axum::response::Response {
     asset(JS, SETTINGS_JS)

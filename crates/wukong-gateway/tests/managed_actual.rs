@@ -29,6 +29,7 @@ async fn managed_actual_question_reply_and_session_resume() {
                 agent: None,
                 tool_overrides: BTreeMap::new(),
                 attachments: vec![],
+                session_instructions: Default::default(),
             },
             &mut sink,
         );
@@ -105,6 +106,7 @@ async fn managed_native_compact_delete_and_unattended_permission() {
             agent: None,
             tool_overrides: BTreeMap::new(),
             attachments: vec![],
+            session_instructions: Default::default(),
         }),
     )
     .await
@@ -134,6 +136,7 @@ async fn managed_native_compact_delete_and_unattended_permission() {
             agent: None,
             tool_overrides: BTreeMap::new(),
             attachments: vec![],
+            session_instructions: Default::default(),
         })
         .await;
     assert_ne!(
@@ -164,6 +167,7 @@ async fn managed_pending_turn_drop_invalidates_reply() {
             agent: None,
             tool_overrides: BTreeMap::new(),
             attachments: vec![],
+            session_instructions: Default::default(),
         },
         &mut sink,
     );
@@ -196,6 +200,7 @@ async fn managed_ephemeral_returns_no_resumable_session() {
         agent: None,
         tool_overrides: BTreeMap::new(),
         attachments: vec![],
+        session_instructions: Default::default(),
     };
     let plain = backend.run_ephemeral(request.clone()).await.unwrap();
     assert!(
@@ -226,6 +231,7 @@ async fn managed_concurrent_questions_use_distinct_sessions_and_routes() {
         agent: None,
         tool_overrides: BTreeMap::new(),
         attachments: vec![],
+        session_instructions: Default::default(),
     };
     let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
     let (tx_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();

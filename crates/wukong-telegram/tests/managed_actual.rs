@@ -76,3 +76,55 @@ async fn telegram_managed_question_can_be_answered_by_callback() {
     assert!(delivered);
     assert!(!pending.lock().unwrap().contains_key(&7));
 }
+
+// #45 SCN-002：真實的 V2 server 派工給 fixer 時，狀態泡泡寫出「悟空·fixer」，最後送出回覆。
+#[tokio::test]
+#[ignore = "requires a resident OpenCode V2 server and a real model"]
+async fn telegram_names_the_dispatched_subagent() {
+    let (_dir, backend, cfg) = support::server_fixture("user:tg-45");
+    let workspace = std::env::var("WUKONG_WORKSPACE").expect("set WUKONG_WORKSPACE");
+    wukong_runtime::agent_assets::materialize_agent_definitions(std::path::Path::new(&workspace))
+        .unwrap();
+    let memory = Memory::open(&cfg.db_url).await.unwrap();
+    let client = MockTgClient::default();
+    let message = TgMessage {
+        update_id: 1,
+        chat_id: 45,
+        text: support::DISPATCH_PROMPT.into(),
+        attachments: vec![],
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        handle_message_with_responder(
+            &client,
+            &memory,
+            &cfg,
+            &backend,
+            &backend,
+            None,
+            &[45],
+            Arc::new(Mutex::new(PendingQuestions::new())),
+            &message,
+        ),
+    )
+    .await
+    .unwrap();
+    let edits = client.edits.lock().unwrap().clone();
+    let sent = client.sent.lock().unwrap().clone();
+    println!(
+        "edits: {:?}",
+        edits.iter().map(|e| &e.2).collect::<Vec<_>>()
+    );
+    println!(
+        "sent: {:?}",
+        sent.iter().map(|m| &m.text).collect::<Vec<_>>()
+    );
+    assert!(
+        edits.iter().any(|e| e.2.contains("悟空·fixer")),
+        "{edits:?}"
+    );
+    assert!(
+        sent.iter().any(|m| m.text.contains("hello from wukong")),
+        "{sent:?}"
+    );
+}

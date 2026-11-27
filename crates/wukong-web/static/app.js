@@ -1,13 +1,11 @@
 import { WukongChat } from '/components/wukong-chat.js';
 import { WukongMemory } from '/components/wukong-memory.js';
-import { WukongSkills } from '/components/wukong-skills.js';
 import { WukongSettings } from '/components/wukong-settings.js';
 import { WukongSchedules } from '/components/wukong-schedules.js';
 import { WukongSystem } from '/components/wukong-system.js';
 
 customElements.define('wukong-chat', WukongChat);
 customElements.define('wukong-memory', WukongMemory);
-customElements.define('wukong-skills', WukongSkills);
 customElements.define('wukong-settings', WukongSettings);
 customElements.define('wukong-schedules', WukongSchedules);
 customElements.define('wukong-system', WukongSystem);
@@ -17,7 +15,6 @@ const app = document.querySelector('#app');
 const routes = {
   '#/chat': '<wukong-chat></wukong-chat>',
   '#/memory': '<wukong-memory></wukong-memory>',
-  '#/skills': '<wukong-skills></wukong-skills>',
   '#/schedules': '<wukong-schedules></wukong-schedules>',
   '#/system': '<wukong-system></wukong-system>',
   '#/settings': '<wukong-settings></wukong-settings>',

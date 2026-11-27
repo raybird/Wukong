@@ -8,6 +8,38 @@
 
 use wukong_memory::Memory;
 
+/// 2026-11-26（#45）：入口啟動時把 Wukong 管理的 agent 定義
+/// （[`crate::agent_assets`]）與技能（[`crate::skill_assets`]）寫進工作區。
+/// 寫入失敗只警告、不讓入口起不來：指定的 agent 不存在時，V2 會讓回合以
+/// 「Agent not found」失敗，錯誤會照常回報給使用者；少了技能只是模型用不到它。
+/// 同時把與舊範本相同的工作區 AGENTS.md 換成新版（[`crate::workspace_template`]）。
+pub fn prepare_workspace_assets() {
+    if let Err(e) = crate::agent_assets::materialize_default_agent_definitions() {
+        eprintln!("warning: failed to write agent definitions: {e}");
+    }
+    if let Err(e) = crate::skill_assets::materialize_default_skills() {
+        eprintln!("warning: failed to write skills: {e}");
+    }
+    use crate::workspace_template::{migrate_default_agents_md, AgentsMdMigration};
+    match migrate_default_agents_md() {
+        Ok((path, AgentsMdMigration::Replaced { from, backup })) => eprintln!(
+            "[wukong] {} 與舊範本 {from} 相同，已備份到 {} 並換成新版",
+            path.display(),
+            backup.display()
+        ),
+        Ok((path, AgentsMdMigration::Customized { outdated })) => {
+            for note in outdated {
+                eprintln!(
+                    "[wukong] {} 有過時的段落，請自行更新：{note}",
+                    path.display()
+                );
+            }
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("warning: failed to migrate AGENTS.md: {e}"),
+    }
+}
+
 /// Open [`Memory`] from a resolved `db_url`, attaching the embedder and markdown
 /// mirror per environment.
 ///

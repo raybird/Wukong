@@ -1,58 +1,28 @@
 # wukong-orchestrator
 
-> 柱 3 ──「七十二變・分身」：角色調度引擎
+> 柱 3 ──「七十二變・分身」：五個專家角色
 
-把一項任務交給最合適的專家角色。兩段式：先讓 LLM 路由選角色，再以該角色卡執行。
-
-## 五角色
-
-`Explorer`（結構洞察）、`Oracle`（架構）、`Librarian`（文件）、`Fixer`（實作）、`Designer`（設計）。
+定義五個專家角色：`Explorer`（結構洞察）、`Oracle`（架構）、`Librarian`（文件）、`Fixer`（實作）、`Designer`（設計）。
 角色卡以精簡常數內嵌（取自 tao-of-coding）。
+
+2026-11-26（#45）起，路由、planner 與協作鏈都已移除：`wukong-runtime` 把每個角色寫成 OpenCode V2 的 subagent
+定義（工作區的 `.opencode/agents/`），由 primary agent `wukong` 自己決定要不要派工、派給誰。
 
 ## 公開 API（lib）
 
 ```rust
-use wukong_orchestrator::{orchestrate, route, Role, Outcome};
+use wukong_orchestrator::Role;
 
-// 兩段式：route（選角色）→ execute（以角色執行）
-let outcome: Outcome = orchestrate(&backend, "fix the failing test").await?;
-println!("{} -> {}", outcome.role.name(), outcome.text);
-
-// 也可只取路由結果
-let role: Role = route(&backend, "重構這個模組").await?;
+for role in Role::all() {
+    println!("{}：{}", role.name(), role.description());
+    let card: &str = role.card(); // subagent 定義的內文
+}
 ```
 
-`backend` 為任何實作 `wukong_gateway::backend::AiBackend` 的型別。
-路由解析大小寫無關掃描角色名，解析失敗 fallback `Oracle`。
+- `name()`：subagent 名稱（`explorer`、`oracle`、`librarian`、`fixer`、`designer`），也是入口顯示「悟空·fixer」的依據。
+- `description()`：subagent 定義的 description，V2 用它讓 primary agent 判斷派給誰。
+- `card()`：角色卡。
 
-## 協作鏈（sequential collaboration chain）
+沒有內部依賴。
 
-單角色路由的延伸:一項任務可由數個角色**依序接力**,前一棒輸出累加成後一棒的 context。
-
-```rust
-use wukong_orchestrator::{plan_chain, orchestrate_chain, ChainOutcome, Role};
-
-// planner 一次 LLM call 回有序角色清單(取代單角色 route)
-let roles: Vec<Role> = plan_chain(&backend, "探查、實作、再寫文件").await?;
-
-// 規劃後逐棒執行,回整鏈
-let chain: ChainOutcome = orchestrate_chain(&backend, "探查、實作、再寫文件").await?;
-println!("最終輸出:{}", chain.final_output());   // 最後一棒
-for step in &chain.steps { println!("{} -> {}", step.role.name(), step.output); }
-```
-
-- **`plan_chain`/`planning_prompt`/`parse_chain`**:planner 對應物(對映 `route`/`routing_prompt`/`parse_role`)。`parse_chain` 依角色名出現位置排序、去重、**cap 3**;無角色 fallback `[Oracle]`。
-- **`chain_context(&[Outcome])`**:把前序步驟渲染成 `[前序協作]` context 區塊(空 prior → 空字串)。
-- **`ChainOutcome { steps }`** + `final_output()`:整鏈結果與最終輸出。
-- 簡單任務 planner 回單角色 → 退化為長度 1 的鏈,行為與成本同今日。
-
-## Demo bin
-
-```bash
-cargo run -p wukong-orchestrator --bin wukong-orchestrate -- \
-  --agent-cmd "opencode run" "幫我把這段程式加上測試"
-```
-
-依賴方向：`wukong-orchestrator → wukong-gateway`（單向）。
-
-詳見 [`docs/superpowers/specs/2026-06-05-wukong-orchestrator-design.md`](../../docs/superpowers/specs/2026-06-05-wukong-orchestrator-design.md)。
+早期的兩段式路由與協作鏈設計見 [`docs/superpowers/specs/2026-06-05-wukong-orchestrator-design.md`](../../docs/superpowers/specs/2026-06-05-wukong-orchestrator-design.md)（歷史文件）。

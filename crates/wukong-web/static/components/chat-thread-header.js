@@ -12,7 +12,6 @@ export function threadHeaderTemplate() {
       </div>
       <div class="thread-status" aria-live="polite">
         <span id="chat-model-status" class="tag">模型：載入中</span>
-        <span id="chat-skill-status" class="tag">技能偏好：Phase 2</span>
       </div>
     </section>
   `.toString();

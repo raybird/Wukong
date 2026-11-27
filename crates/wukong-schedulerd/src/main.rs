@@ -61,6 +61,7 @@ async fn run(cli: Cli) -> Result<(), String> {
     let settings = wukong_settings::load_settings(&settings_path).unwrap_or_default();
     let agent_settings = wukong_settings::effective_agent_settings(&settings);
     cfg.apply_default_model(agent_settings.default_model.as_deref());
+    wukong_runtime::bootstrap::prepare_workspace_assets();
     let memory = wukong_runtime::bootstrap::open_memory_from_env(&cfg.db_url).await?;
     let backend = build_backend_from_env(cfg.agent_command.clone(), workspace_dir())
         .map_err(|e| e.to_string())?;
@@ -373,7 +374,6 @@ fn resolve_config(cli: &Cli) -> GatewayConfig {
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| vec!["opencode".to_string(), "run".to_string()]),
         default_model: None,
-        planner_preferences: None,
         thinking: std::env::var("WUKONG_THINKING").as_deref() != Ok("0"),
         recall_top_k: 5,
         stream: false,
@@ -632,7 +632,6 @@ mod tests {
             db_url: url.clone(),
             agent_command: vec![],
             default_model: None,
-            planner_preferences: None,
             thinking: false,
             recall_top_k: 5,
             stream: false,

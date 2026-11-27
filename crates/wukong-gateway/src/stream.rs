@@ -63,6 +63,11 @@ pub enum StreamEvent {
     StepStart,
     /// A step ends.
     StepFinish,
+    /// 2026-11-26（#45 SCN-002）：primary agent 派出的 subagent 開始執行；`agent` 是定義名稱
+    /// （例如 `fixer`）。只有 OpenCode V2 server 的事件有。
+    SubagentStarted { agent: String },
+    /// subagent 的回報送回 primary agent；`output` 是回報內文。
+    SubagentReported { agent: String, output: String },
 }
 
 /// Parse one NDJSON line into a StreamEvent. Unrecognized or malformed lines

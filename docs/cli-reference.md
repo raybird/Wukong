@@ -12,7 +12,7 @@
 | `--agent-cmd <CMD>` | agent 指令（空白分隔） | `opencode run` |
 | `--no-stream` | 關閉活動渲染，純文字一次輸出 | off（預設串流） |
 
-環境變數：`WUKONG_MEMORY_DB`、`WUKONG_AGENT_CMD`、`WUKONG_STREAM`（設 `0` 等同 `--no-stream`）、`WUKONG_MD_DIR`（設定後每次 remember 同步把記憶鏡像成 per-scope markdown）、`WUKONG_BIN`（注入「排程能力」提示詞時使用的 `wukong` 指令路徑，預設 `wukong`）。
+環境變數：`WUKONG_MEMORY_DB`、`WUKONG_AGENT_CMD`、`WUKONG_STREAM`（設 `0` 等同 `--no-stream`）、`WUKONG_MD_DIR`（設定後每次 remember 同步把記憶鏡像成 per-scope markdown）、`WUKONG_BIN`（「排程能力」說明裡使用的 `wukong` 指令路徑，預設 `wukong`）。
 
 ## 使用範例
 
@@ -100,7 +100,7 @@ wukong-schedulerd
 | 子命令 | 說明 |
 | :--- | :--- |
 | `schedule list` | 列出所有排程 job；Turn job 的 `kind` 會顯示模型，例如 `turn(scope=project:Wukong,model=使用預設)` |
-| `schedule add-turn --name N --cron C --scope S --prompt P [--model M]` | 新增定時 Wukong turn，執行時沿用既有 planner 自動選 role/skill；`--scope` 是擁有者，`--model` 是這個排程專用的模型（見下方排程語意） |
+| `schedule add-turn --name N --cron C --scope S --prompt P [--model M]` | 新增定時 Wukong turn，執行時由悟空自己回答或派工（2026-11-26 起不再有 planner，#45）；`--scope` 是擁有者，`--model` 是這個排程專用的模型（見下方排程語意） |
 | `schedule set-model --id ID [--model M]` | 指定 Turn job 的模型，省略 `--model` 就改回使用預設模型；不存在的 id 印「找不到排程」，維護 job 印「維護排程不使用模型，無法設定」 |
 | `schedule add-maintenance --name N --cron C --task snapshot\|consolidate\|prune [--scope S]` | 新增定時記憶維護 job |
 | `schedule rm --id ID` | 刪除排程 job，並清掉 Turn 排程的 scope（`agent:schedule-<id>`）的記憶與 session 指向；排程正在執行時先刪 job，回合結束後才清，結果照常回送 |
@@ -113,22 +113,22 @@ wukong-schedulerd
 - Cron 使用 5 欄格式：`minute hour day-of-month month day-of-week`。
 - V1 以 UTC 評估 cron，避免容器與 host timezone 不一致。
 - 多個 daemon 同時執行時會用 DB lease claim job，避免同一輪 due job 被重複執行。回合執行中會持續續租，執行時間超過 `--lease-secs` 也不會被另一個 daemon 或 `trigger` 重複執行；同一次掃描取得、還在排隊的 job，輪到時會先確認 lease 還在自己手上，等待期間已被別人取得執行，或被停用、重新啟用、刪除的就跳過。執行的行程中止後就不再續租，lease 照原本的時間到期。
-- 執行中的 run 訊息是進度，例如 `進行中：第 2 棒 fixer，已執行 312 秒`，換階段時更新，之後至少每 30 秒更新一次；結束時改成最終結果。「規劃中」涵蓋第一棒開始前的所有步驟：召回、planner、取得 session lease，以及（預設每 20 回合一次的）session 壓縮。Turn 回合失敗時，訊息開頭標出失敗的階段，例如 `第 2 棒 fixer 失敗，已執行 1203 秒：<原錯誤>`。
+- 執行中的 run 訊息是進度，例如 `進行中：悟空·fixer，已執行 312 秒`，換階段時更新，之後至少每 30 秒更新一次；結束時改成最終結果。回合一開始是「悟空」（primary agent 在處理），派工給 subagent 後顯示最近派出、還沒回報的那一個，subagent 都回報後回到「悟空」（2026-11-26，#45；回報後回到悟空自 2026-11-27 起）。Turn 回合失敗時，訊息開頭標出失敗的階段，例如 `悟空·fixer 失敗，已執行 1203 秒：<原錯誤>`。
 - Turn job 的 `--scope` 是擁有者：Telegram 回送與聊天紀錄依它決定。回合本身的記憶、召回與 opencode session 在 `agent:schedule-<job id>`，同一個排程的多次觸發共用、不同排程互不相通，也不讀寫擁有者的記憶。要看排程回報過什麼，用 `schedule runs --id ID`。
-- Turn job 的模型：有指定時，該排程每次執行都用它，不受預設模型（`agent.default_model`，Web Settings 或 `/set_models` 設定）變更影響；沒指定時用執行當下的預設模型。套用範圍跟預設模型相同：產生回覆的那一棒、補救重送與 session 壓縮，規劃與輔助棒不指定模型。升級前建立的排程都視為沒指定。
+- Turn job 的模型：有指定時，該排程每次執行都用它，不受預設模型（`agent.default_model`，Web Settings 或 `/set_models` 設定）變更影響；沒指定時用執行當下的預設模型。套用範圍跟預設模型相同：回合本身、派出的 subagent，以及空輸出的補救重送。升級前建立的排程都視為沒指定。
 - Scheduled turn 需要底層 OpenCode provider/auth 已設定；Docker 模式會使用共用的 `opencode-config` volume。
 
 Docker 模式下 schedulerd 預設會隨 `docker compose up -d` 啟動，讓排程功能安裝後即可運作。若你不想執行排程 daemon，可手動停止該 service：`docker compose stop wukong-schedulerd`。
 
 ## 用自然語言建立排程（Telegram / 對話）
 
-除了手動下 `schedule add-turn`，**助手本身也知道自己具備排程能力**：每回合執行的系統提示詞會常駐注入一段「排程能力」說明（含當前 scope 與實際指令），所以你可以在 REPL / Telegram / Web 直接用自然語言交辦：
+除了手動下 `schedule add-turn`，**助手本身也知道自己具備排程能力**：助手的 agent 定義裡有一段「排程能力」說明（實際指令），當前 scope 放在 session 的指令層（CLI backend 沒有指令層，兩者都附在每回合的 prompt），所以你可以在 REPL / Telegram / Web 直接用自然語言交辦：
 
 > 「每天早上九點幫我做一次專案回顧」
 
 助手會透過底層 opencode 的 shell 能力，自行執行對應的 `wukong schedule add-turn --scope <當前 scope> --cron "0 9 * * *" --prompt "…"`（cron 由它換算）。
 
-- **前提**：底層 agent（opencode）需具備 shell 執行權限，且 `wukong` 在其 PATH 上。若 `wukong` 不在 PATH，設定 `WUKONG_BIN=/絕對/路徑/wukong`，注入的指令會改用該路徑。
+- **前提**：底層 agent（opencode）需具備 shell 執行權限，且 `wukong` 在其 PATH 上。若 `wukong` 不在 PATH，設定 `WUKONG_BIN=/絕對/路徑/wukong`，說明裡的指令會改用該路徑。
 - **結果回送 Telegram**：當排程是從 Telegram 建立的（scope 形如 `user:tg-<chat_id>`），`wukong-schedulerd` 觸發後會把該回合結果**主動推回原聊天室**——成功送渲染後的 HTML、失敗送一行簡短錯誤。daemon 需設定 `WUKONG_TG_TOKEN` 才能投遞；設 `WUKONG_SCHED_NOTIFY=0` 可全域關閉。
 - **權限詢問處置**：排程回合是無人值守的，opencode 送出的權限詢問**預設一律拒絕**，並把處置結果附在該 run 的訊息（`[無人值守權限]` 區塊）與 log。沒有這層策略時，詢問不會有人回答，opencode 會一直等到 `WUKONG_AGENT_TIMEOUT_SECS` 才失敗。若部署明確信任 container 隔離，可設 `WUKONG_SCHED_PERMISSION=allow` 讓權限請求自動允許一次；一般 question（非權限）在任何設定下都仍會被拒絕。
 - 投遞為 best-effort：推送失敗只記 log，不影響 job 本身的成功狀態（仍記於 `schedule runs`）。

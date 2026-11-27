@@ -16,12 +16,10 @@ wukong-memory = { path = "../wukong-memory" }
 wukong-gateway = { path = "../wukong-gateway" }
 wukong-cli = { path = "../wukong-cli" }
 wukong-runtime = { path = "../wukong-runtime" }
-wukong-orchestrator = { path = "../wukong-orchestrator" }
 wukong-render = { path = "../wukong-render" }
 wukong-settings = { path = "../wukong-settings" }
 wukong-scheduler = { path = "../wukong-scheduler" }
 wukong-chat-history = { path = "../wukong-chat-history" }
-wukong-skills = { path = "../wukong-skills" }
 axum = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true }

@@ -48,7 +48,6 @@ RUN mkdir -p "$PIPX_HOME" "$PIPX_BIN_DIR" && chown -R wukong:wukong /home/wukong
     gosu wukong pipx install /tmp/agent-reach.tar.gz && rm /tmp/agent-reach.tar.gz
 
 COPY workspace/SOUL.md workspace/AGENTS.md /usr/local/share/wukong/
-COPY crates/wukong-skills/assets/superpowers /usr/local/share/wukong/skills/superpowers
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # The entrypoint launches this for `opencode serve`. It must be copied here AND
 # added to the curated release-context in .github/workflows/release.yml — that

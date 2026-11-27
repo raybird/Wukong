@@ -31,7 +31,7 @@ impl Role {
         }
     }
 
-    /// One-line role description, listed in the routing prompt.
+    /// One-line role description: the `description` of this role's V2 subagent definition.
     pub fn description(&self) -> &'static str {
         match self {
             Role::Explorer => "結構洞察，快速掃描專案結構、理解檔案關聯與依賴。",
@@ -42,7 +42,7 @@ impl Role {
         }
     }
 
-    /// Role system prompt prepended when executing as this role.
+    /// Role card: the body of this role's V2 subagent definition (`wukong_runtime::agent_assets`).
     pub fn card(&self) -> &'static str {
         match self {
             Role::Explorer => {

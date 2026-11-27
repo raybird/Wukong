@@ -121,6 +121,7 @@ async fn main() {
         return;
     }
 
+    wukong_runtime::bootstrap::prepare_workspace_assets();
     let prompt = cli.prompt_text();
     let (stdin_tx, mut stdin_lines) = tokio::sync::mpsc::unbounded_channel();
     // 2026-10-03：REPL 與 question 共用一個 reader，避免互相預讀答案；
@@ -486,7 +487,7 @@ async fn run_one(
     };
     let turn = async {
         run_turn(memory, backend, cfg, input, &mut sink, &mut |role| {
-            eprintln!("🐵 悟空·{}", role.name());
+            eprintln!("{}", role_line(role.name()));
         })
         .await
     };
@@ -586,12 +587,6 @@ async fn answer_terminal_question(
 fn apply_settings_to_config(cfg: &mut GatewayConfig, settings: &wukong_settings::Settings) {
     let agent_settings = wukong_settings::effective_agent_settings(settings);
     cfg.apply_default_model(agent_settings.default_model.as_deref());
-    let planner_preferences = wukong_settings::effective_planner_preferences(settings);
-    cfg.apply_planner_preferences(
-        planner_preferences.enabled,
-        planner_preferences.roles,
-        planner_preferences.skills,
-    );
 }
 
 /// Dispatch a `wukong memory <op>` maintenance command.
@@ -651,8 +646,18 @@ fn local_prune_refusal(
     }
 }
 
+/// 2026-11-26（#45 SCN-002）：primary agent 派出 subagent 時印在 stderr 的一行。
+fn role_line(role: &str) -> String {
+    format!("🐵 悟空·{role}")
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_dispatched_subagent_is_named_on_stderr() {
+        assert_eq!(super::role_line("fixer"), "🐵 悟空·fixer");
+    }
+
     use super::*;
 
     fn local_backend() -> AgentBackend {
