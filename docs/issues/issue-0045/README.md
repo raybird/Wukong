@@ -22,7 +22,7 @@ GitHub issue 內文「留在 Wukong」清單裡的行為維持不變。正式部
 
 ## 現況
 
-- **現行 review**: review-794daea.md
+- **現行 review**: review-15e8730.md
 
 ## 快速導覽
 
@@ -298,9 +298,10 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | 2026-11-27 | 使用者對 review-364cebf 建議的決定記為 TBD-16；Task 6.9 修正 NICE TO HAVE 1、2、3、5，再送增量覆審 |
 | 2026-11-27 | 增量覆審 364cebf..794daea PASS（review-794daea.md，無 MUST FIX，SHOULD FIX 1 項、NICE TO HAVE 3 項） |
 | 2026-11-27 | 使用者對 review-794daea 建議的決定記為 TBD-17；Task 6.10 修正 SHOULD FIX 1、NICE TO HAVE 1、2，再送增量覆審 |
+| 2026-11-27 | 增量覆審 794daea..15e8730 PASS（review-15e8730.md，沒有任何發現）；沒有待觀察項目，狀態寫回已完成，合併後生效 |
 
 ---
 **建立日期**: 2026-11-26  
 **分級**: Large（runtime、orchestrator、skills、gateway、三個入口與排程的顯示、部署設定）  
 **風險**: High\
-**狀態**: 審查中
+**狀態**: 已完成
