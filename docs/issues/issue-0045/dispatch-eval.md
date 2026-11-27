@@ -133,6 +133,21 @@ bash docs/issues/issue-0045/scripts/dispatch-eval.sh wukong-issue44:v2-local "$(
 - 查找題 1 次被限流，重試 10 次、超過 90 秒仍失敗；其餘 2 次是 fixer、librarian 各 1。
 - 架構題 1 次 primary 自己回答（2/3，仍通過）；探索、設計、直接回答都通過。
 
+## 原始紀錄
+
+2026-11-27 依 review-65e960a 的建議存進版控，每行一個回合：題目、第幾次、回合是否成功、秒數、派出的 subagent、用到的模型、primary 用過的工具與 session ID。內容只有合成題目的抽取結果，沒有提示詞與回覆內文。
+
+| 輪 | 紀錄 |
+|---|---|
+| 1 | [dispatch/round-1.jsonl](dispatch/round-1.jsonl) |
+| 2 | [dispatch/round-2.jsonl](dispatch/round-2.jsonl) |
+| 3 | [dispatch/round-3.jsonl](dispatch/round-3.jsonl) |
+| 4 | [dispatch/round-4.jsonl](dispatch/round-4.jsonl)；實作題重跑 2 次仍 429：[dispatch/round-4-implement-retry.jsonl](dispatch/round-4-implement-retry.jsonl) |
+| 5 | [dispatch/round-5.jsonl](dispatch/round-5.jsonl) |
+| 6 | [dispatch/round-6.jsonl](dispatch/round-6.jsonl) |
+
+重判：`python3 -I docs/issues/issue-0045/scripts/dispatch_judge.py docs/issues/issue-0045/dispatch/round-<N>.jsonl <MODEL>`，MODEL 是 `nvidia/nvidia/nemotron-3-ultra-550b-a55b`（第 5 輪是 `opencode/big-pickle`）。2026-11-27 重判 6 輪，結果與上方各輪表格相同。
+
 ## 其他確認
 
 - **CLI backend**：它執行 `opencode run --dangerously-skip-permissions`，在 V2 是 `--auto` 的隱藏別名。

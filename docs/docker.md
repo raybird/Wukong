@@ -31,7 +31,7 @@
 
 ### 工作區裡由 Wukong 管理的檔案（2026-11-26，#45）
 
-四個入口（Web、Telegram、schedulerd、CLI）每次啟動都會整理掛載進來的 `/workspace`：
+Web、Telegram、schedulerd 每次啟動都會整理掛載進來的 `/workspace`，CLI 在要跑回合或進 REPL 時整理（`schedule`、`memory` 等子命令不整理）：
 
 | 路徑 | 內容 | 行為 |
 |------|------|------|
@@ -41,7 +41,7 @@
 | `SOUL.md` | 人格 | 只在缺檔時建立；內容寫進 `wukong.md` |
 
 - **人格與能力在 agent 定義裡**：`wukong.md` 含 SOUL.md 的人格、派工規則、輸出要求、排程能力，`WUKONG_MEMORIA_HINT` 開啟時另含長期記憶能力。改了 SOUL.md、`WUKONG_MEMORIA_HINT` 或 `WUKONG_BIN`，要重啟入口才會寫進定義。不要手改這六個定義檔，下次啟動會被覆寫。
-- **primary agent 的權限**：`wukong.md` 的 frontmatter 拒絕 `edit` 與 `execute`，shell 只允許 `wukong schedule *`（長期記憶開啟時另外允許 `memoria` 指令）。改檔、跑測試都由 subagent 執行。
+- **primary agent 的權限**：`wukong.md` 的 frontmatter 拒絕 `edit` 與 `execute`，shell 只允許 `wukong schedule *`（長期記憶開啟時另外允許 `memoria` 指令）。改檔、跑測試都由 subagent 執行。這是讓悟空改用派工的防呆，不是隔離邊界：允許的指令後面加轉向（例如 `wukong schedule list > 檔案`）仍寫得出檔案，隔離邊界仍是容器與掛載目錄。
 - **舊路徑**：`.wukong/skills/superpowers` 不再寫入（V2 讀不到那裡），既有部署留著的目錄可以刪掉。
 - **移除的變數**：`WUKONG_SESSION_COMPACT_EVERY_TURNS` 不再讀取，見下方環境變數表。
 

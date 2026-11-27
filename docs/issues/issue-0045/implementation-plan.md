@@ -692,6 +692,22 @@
   - crate README：`wukong-orchestrator` 改寫成只剩角色定義；`wukong-cli`、`wukong-telegram` 拿掉協作鏈的描述。`Role::description`、`Role::card` 的 doc comment 改成 subagent 定義（只動註解）。
   - 檢查：以 `planner`、`末棒`、`一棒`、`輔助棒`、`逐棒`、`前序協作`、`技能偏好`、`.wukong/skills` 搜尋常青文件與 crate README，剩下的都是說明「已移除」的句子；`docs/issues/`、`docs/superpowers/`、handover 是歷史紀錄，不改。
 
+### Task 6.6 — 審查建議修正（review-65e960a）
+- 產出與範圍：使用者 2026-11-27 選修的 SHOULD FIX 1、2、3、6 與 NICE TO HAVE 9、13（README 待確認事項 TBD-12）。
+- 相依：6.5、review-65e960a
+- 驗收編號：SCN-002（等待 subagent、排程階段）、SCN-003（原始紀錄）、SCN-009（既有部署的 AGENTS.md）、SCN-012（回合結束的判定）；修正既有行為，不新增驗收
+- 完成判準：每項行為修正都有先紅燈的測試；文件與原始紀錄可在版控中查到；CI 三道全綠。
+- 驗證：行為修正走紅燈到綠燈；文件以靜態核對；原始紀錄以 `dispatch_judge.py` 重判比對。
+- 狀態：✅ 已完成（2026-11-27）
+- 證據：
+  - SHOULD FIX 1（64e95b8）：V2 2.3.2 的 `Job.Kind` 有 shell、subagent、image、codemode 四種（由 binary 內的 schema 字串確認）。`has_background_jobs` 改成只看 `kind` 為 subagent 的工作，在用戶端過濾。新測試 `background_shells_of_a_subagent_do_not_keep_the_turn_open`：改之前回合一直等到事件串流結束（`event stream ended before session became idle`），改之後 gateway 的 opencode_server 測試 79 項全過。
+  - SHOULD FIX 2（0c54bf0）：`workspace/AGENTS.md` 改成主要助手派工、subagent 執行測試與指令；原版本存成 `assets/retired-agents-md/828fe85.md` 並加進 `RETIRED`，已部署的工作區照常備份再換新。新測試 `the_new_template_leaves_files_and_commands_to_subagents` 在舊範本上紅燈、新範本上綠燈。
+  - SHOULD FIX 3（0c54bf0）：`OUTDATED` 加上「你目前作為孫悟空」。`a_customized_file_is_left_alone_and_its_outdated_sections_are_reported` 改成期待兩段提醒，改之前 `left: 1 right: 2` 紅燈，改之後 workspace_template 測試 6 項全過。
+  - SHOULD FIX 6：各輪原始紀錄存進 [dispatch/](dispatch/)，dispatch-eval.md 新增「原始紀錄」段落；以 `dispatch_judge.py` 重判 6 輪，結果與各輪表格相同。
+  - NICE TO HAVE 9（a091c4f）：排程從 `SubagentReported` 事件得知回報，階段顯示最近派出、還沒回報的 subagent，都回報後回到「悟空」。新測試 `the_phase_returns_to_wukong_after_the_subagent_reports` 改之前訊息是「悟空·fixer 失敗」，改之後 scheduler 測試 58 項全過。
+  - NICE TO HAVE 13（文件小修）：AGENTS.md 與 docs/docker.md 註明 shell 白名單只是防呆（允許的指令加轉向仍能寫檔）；AGENTS.md 與 docs/docker.md 的入口整理時機改成 Web、Telegram、schedulerd 啟動時，CLI 在跑回合或進 REPL 前（照 `crates/wukong-cli/src/main.rs` 的 `prepare_workspace_assets` 呼叫位置）；README Timeline 的 SCN-001 重新核准列補上舊基線；CHANGELOG 補上回報後失敗的寫法。
+  - CI 三道（2026-11-27，a091c4f 加上本 Task 的文件）：`cargo fmt --all -- --check` 通過；`cargo clippy --all-targets --locked -- -D warnings` 通過；`cargo test --workspace --locked --no-fail-fast` 774 passed、0 failed、14 ignored。
+
 ## 測試策略
 
 - **真實模型**：派工、技能遵循、追問、人格，unit test 證明不了，以接真實 V2 加真實模型（TBD-6）的整合測試或演練腳本驗證（`#[ignore]`，與 #44 的 `managed_actual` 相同的做法）。同一題重複執行，記錄每次的結果。
