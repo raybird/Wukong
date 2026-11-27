@@ -20,6 +20,10 @@ GitHub #45。2026-11-24 使用者決定：OpenCode 升到 V2 之後，Wukong 只
 
 GitHub issue 內文「留在 Wukong」清單裡的行為維持不變。正式部署 RunWuKong 的實際換版不在本 issue。
 
+## 現況
+
+- **現行 review**: review-65e960a.md
+
 ## 快速導覽
 
 ### 當前流程
@@ -191,7 +195,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 ```
 
 ## Gherkin 核准紀錄
-- **核准 commit**: `待提交`
+- **核准 commit**: f0ce34ad4769324e73e406dbc2bcb15703169d34
 - **核准來源**: 範圍與「留在 Wukong」來自 GitHub #45 內文與使用者 2026-11-24 的決定（拆成兩個 issue，#44 合併後開始）；2026-11-26 使用者要求「好開始 /dev-cycle #45」。同日逐題確認：Q1「NVIDIA 為準（建議）」→ Background、SCN-003；Q2「移除（建議）」→ SCN-011；Q3「Wukong 管理、自動更新（建議）」→ SCN-009；Q4「session 指令層（建議）」→ SCN-007。同日總結確認推導行為（派工門檻、輪替後仍補上一回合、保留的動態區塊、舊壓縮變數忽略且 7 天輪替改每回合檢查、lease 在任何 LLM 呼叫前取得、subagent 沿用指定模型、自訂命令不加旗標、inbox 只評估）選「全部核准（建議）」→ SCN-001～SCN-014。同日 NVIDIA 憑證被拒（403）後，使用者表示「使用免費模型驗證也可以」→ Background、TBD-62026-11-27 修訂：Task 6.2 實測 tool 任務步數 4 → 中位數 8（primary 不能改檔，建檔要派給 fixer），使用者選「消掉輪詢，修訂 tool 的步數條件（建議）」→ SCN-001 的步數條件只適用 short 任務，tool 任務照實記錄；同日使用者指示「nvidia 限流可以換成 opencode 的模型」→ SCN-003 以 opencode/big-pickle 驗收（Task 6.1）。
 
 | Scenario | 核准日期 | 狀態 |
@@ -275,6 +279,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | 2026-11-27 | Task 6.3 完成：dind 裡從假發版 rc.44（b65b487）升級到本分支，本機與 server 模式各跑一輪（[rehearsal.md](rehearsal.md)）。發現 server 模式以對話建立的排程寫進 opencode-server 自己的資料庫、永遠不執行（v0.25.1 起的既有問題），使用者選在 #45 修（e70e4e2）；Telegram 因沒有 bot token 未執行 |
 | 2026-11-27 | Task 6.5 完成：根目錄 AGENTS.md、README.md、docs/docker.md、docs/entrypoints.md、docs/cli-reference.md、docs/memory.md、crate README 與 CHANGELOG `[Unreleased]` 改成單次呼叫加派工的現況 |
 | 2026-11-27 | 使用者確認：Task 5.2 維持移除整個 Skills 分頁、`/api/skills/*` 與 `/skills` 指令；TBD-9 記為已知差距不修；TBD-10 先送審，big-pickle 額度恢復後補跑 |
+| 2026-11-27 | 完整交付範圍 f9bc86e..65e960a 獨立審查 PASS（review-65e960a.md，無 MUST FIX，SHOULD FIX 6 項、NICE TO HAVE 7 項）；核准 commit 回填推導出的基線 f0ce34a |
 
 ---
 **建立日期**: 2026-11-26  
