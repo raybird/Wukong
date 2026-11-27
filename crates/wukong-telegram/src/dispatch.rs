@@ -21,6 +21,8 @@ use wukong_runtime::util::{now_unix, upload_root};
 /// Progress updates fed to the single status bubble.
 enum Progress {
     Role(Role),
+    /// 派出的 subagent 都回報了，回到悟空自己處理（2026-11-27，review-623c436）。
+    Primary,
     Reasoning(String),
     ToolUse(String),
     QuestionRequest(QuestionRequest),
@@ -163,6 +165,11 @@ async fn run_progress<C: TgClient>(
         let show = match msg {
             Progress::Role(r) => {
                 role = Some(r.name().to_string());
+                status = bubble_text(role.as_deref(), &reasoning);
+                true
+            }
+            Progress::Primary => {
+                role = None;
                 status = bubble_text(role.as_deref(), &reasoning);
                 true
             }
@@ -1480,6 +1487,8 @@ pub async fn handle_message_with_responder<C, B, R>(
             let tx_ev = tx.clone();
             let mut events_buf: Vec<(i64, String, Option<String>, String, i64)> = Vec::new();
             let mut event_seq: i64 = 0;
+            // on_role 與 on_step 都要更新它；兩者由 run_turn 同步、依序呼叫，不會重疊。
+            let active = std::cell::RefCell::new(wukong_orchestrator::ActiveSubagents::default());
             let result = run_turn_observed_with_attachments(
                 mem,
                 backend,
@@ -1564,11 +1573,23 @@ pub async fn handle_message_with_responder<C, B, R>(
                     StreamEvent::SubagentStarted { .. } | StreamEvent::SubagentReported { .. } => {}
                 },
                 &mut |r| {
+                    active.borrow_mut().dispatched(r);
                     let role_name = r.name().to_string();
                     queue_live_event(&live_tx, "role", None, &role_name, None);
                     let _ = tx.send(Progress::Role(r));
                 },
-                &mut |_, _| {},
+                // 回報後顯示還沒回報的 subagent，都回報了就回到悟空；Web 的即時事件以空的 role
+                // 表示悟空。
+                &mut |r, _| {
+                    let current = {
+                        let mut active = active.borrow_mut();
+                        active.reported(r);
+                        active.current()
+                    };
+                    let role_name = current.map(|r| r.name()).unwrap_or_default();
+                    queue_live_event(&live_tx, "role", None, role_name, None);
+                    let _ = tx.send(current.map_or(Progress::Primary, Progress::Role));
+                },
             )
             .await;
             drop(tx);
@@ -2517,6 +2538,57 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| e.kind == "role" && e.content == "fixer"));
+    }
+
+    // review-623c436 NICE TO HAVE 1（2026-11-27）：fixer 回報之後是悟空在處理，泡泡拿掉「·fixer」；
+    // Web 看的即時事件也補一個空的 role，代表回到悟空。
+    #[tokio::test]
+    async fn the_status_bubble_returns_to_wukong_after_the_subagent_reports() {
+        let client = MockTgClient::default();
+        let (mem, db_url) = open_memory_with_url().await;
+        let history = wukong_chat_history::ChatHistoryStore::open(&db_url)
+            .await
+            .unwrap();
+        let msg = TgMessage {
+            update_id: 1,
+            chat_id: 12,
+            text: "建立 hello.txt".to_string(),
+            attachments: Vec::new(),
+        };
+
+        handle_message(
+            &client,
+            &mem,
+            &base_cfg(),
+            &DispatchBackend,
+            Some(&history),
+            &[12],
+            &msg,
+        )
+        .await;
+
+        {
+            let edits = client.edits.lock().unwrap();
+            let fixer = edits
+                .iter()
+                .position(|(_, _, t)| t.starts_with("🐵　悟空·fixer"))
+                .expect("no fixer edit");
+            assert!(
+                edits[fixer + 1..]
+                    .iter()
+                    .any(|(_, _, t)| t.starts_with("🐵　思考中…")),
+                "bubble stays on fixer: {edits:?}"
+            );
+        }
+        let roles: Vec<String> = history
+            .live_events_after(&scope_for_chat(12), 0, 20)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "role")
+            .map(|e| e.content)
+            .collect();
+        assert_eq!(roles, vec!["fixer".to_string(), String::new()]);
     }
 
     struct QuestionBackend;

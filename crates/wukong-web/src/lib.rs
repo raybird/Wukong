@@ -801,6 +801,10 @@ where
             "/lib/unread-marker.mjs",
             get(static_assets::unread_marker_js),
         )
+        .route(
+            "/lib/chat-progress.mjs",
+            get(static_assets::chat_progress_js),
+        )
         .route("/components/wukong-chat.js", get(static_assets::chat_js))
         .route(
             "/components/chat-thread-header.js",
@@ -1120,6 +1124,12 @@ mod tests {
         .contains("javascript"));
         assert!(content_type(
             build_router(state(None, &[]).await),
+            "/lib/chat-progress.mjs"
+        )
+        .await
+        .contains("javascript"));
+        assert!(content_type(
+            build_router(state(None, &[]).await),
             "/lib/model-picker.mjs"
         )
         .await
@@ -1354,6 +1364,31 @@ mod tests {
         assert!(role_at < step_at && step_at < answer_at, "order:\n{body}");
         assert!(body.contains(r#""role":"fixer""#), "step role:\n{body}");
         assert!(body.contains(r#""skill":null"#), "step skill:\n{body}");
+    }
+
+    // review-623c436 NICE TO HAVE 1（2026-11-27）：fixer 回報之後是悟空在處理，進度補一個空的 role，
+    // 前端顯示回到悟空。
+    #[tokio::test]
+    async fn chat_returns_the_role_to_wukong_after_the_subagent_reports() {
+        let app = build_router(dispatch_state().await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/chat?q=build%20and%20fix")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = body_string(resp).await;
+
+        let step_at = body.find("event: step").expect("missing step event");
+        let answer_at = body.find("event: answer").expect("missing answer event");
+        let primary_at = body[step_at..]
+            .find("event: role\ndata: \n")
+            .map(|i| step_at + i)
+            .unwrap_or_else(|| panic!("no role back to wukong after the step:\n{body}"));
+        assert!(primary_at < answer_at, "order:\n{body}");
     }
 
     // #45 SCN-002：subagent 的產出卡片存進 turn_steps，之後從 steps API 讀得到。

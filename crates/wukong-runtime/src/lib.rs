@@ -12,7 +12,7 @@ pub mod turn;
 pub mod util;
 pub mod workspace_template;
 
-pub use wukong_orchestrator::Role;
+pub use wukong_orchestrator::{ActiveSubagents, Role};
 
 pub use turn::{
     run_turn, run_turn_observed, run_turn_observed_with_attachments, run_turn_session_passthrough,

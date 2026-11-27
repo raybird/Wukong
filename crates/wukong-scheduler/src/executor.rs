@@ -6,7 +6,7 @@ use wukong_gateway::stream::{permission_id, QuestionRequest, PERMISSION_ALLOW_ON
 use wukong_gateway::{GatewayError, StreamEvent};
 use wukong_memory::Memory;
 use wukong_runtime::maintenance::{memory_consolidate, memory_prune, memory_snapshot};
-use wukong_runtime::{Role, WukongError};
+use wukong_runtime::{ActiveSubagents, Role, WukongError};
 
 const SCHEDULED_TURN_AUTONOMY_HINT: &str = "\n\n[無人值守排程]\n這是由 scheduler 觸發的無人值守任務。不得呼叫 question 或要求使用者確認；如果流程、技能或工具規則需要使用者選擇，請直接自動採用推薦選項，並繼續完成任務。";
 const QUESTION_NOTE_HEADER: &str = "[無人值守權限]";
@@ -271,7 +271,7 @@ enum Phase {
     /// subagent，依派出順序；空的時候是 primary agent（悟空）在處理，否則顯示最近派出的那一個。
     /// 2026-11-27（review-65e960a）起 subagent 回報後就移出，之後的失敗記成悟空失敗。
     Turn {
-        running: Vec<Role>,
+        running: ActiveSubagents,
     },
 }
 
@@ -279,7 +279,7 @@ impl Phase {
     fn initial(job: &Job) -> Self {
         match job.kind {
             JobKind::Turn { .. } => Phase::Turn {
-                running: Vec::new(),
+                running: ActiveSubagents::default(),
             },
             JobKind::Maintenance { .. } => Phase::Maintenance,
         }
@@ -290,19 +290,15 @@ impl Phase {
             return;
         };
         match change {
-            SubagentChange::Dispatched(role) => running.push(role),
-            SubagentChange::Reported(role) => {
-                if let Some(i) = running.iter().rposition(|r| *r == role) {
-                    running.remove(i);
-                }
-            }
+            SubagentChange::Dispatched(role) => running.dispatched(role),
+            SubagentChange::Reported(role) => running.reported(role),
         }
     }
 
     fn label(&self) -> String {
         match self {
             Phase::Maintenance => "維護作業".to_string(),
-            Phase::Turn { running } => match running.last() {
+            Phase::Turn { running } => match running.current() {
                 Some(role) => format!("悟空·{}", role.name()),
                 None => "悟空".to_string(),
             },
@@ -312,7 +308,9 @@ impl Phase {
     /// 角色名稱是英文，後面接「失敗」要隔一個空白。
     fn failed(&self) -> String {
         match self {
-            Phase::Turn { running } if !running.is_empty() => format!("{} 失敗", self.label()),
+            Phase::Turn { running } if running.current().is_some() => {
+                format!("{} 失敗", self.label())
+            }
             _ => format!("{}失敗", self.label()),
         }
     }

@@ -298,6 +298,8 @@ where
                 let role_tx = tx.clone();
                 let ev_tx = tx.clone();
                 let step_tx = tx.clone();
+                // on_role 與 on_step 都要更新它；兩者由 run_turn 同步、依序呼叫，不會重疊。
+                let active = std::cell::RefCell::new(wukong_runtime::ActiveSubagents::default());
                 // Buffer helper-baton steps to persist them after the turn, linked
                 // to the final assistant message. (role, raw content, rendered html)
                 let mut steps_buf: Vec<(String, String, String)> = Vec::new();
@@ -366,6 +368,7 @@ where
                         | wukong_gateway::StreamEvent::SubagentReported { .. } => {}
                     },
                     &mut |role| {
+                        active.borrow_mut().dispatched(role);
                         let _ = role_tx.send(SseMsg::Role(role.name().to_string()));
                     },
                     &mut |step| {
@@ -379,6 +382,16 @@ where
                             step.role.name().to_string(),
                             step.output.to_string(),
                             html,
+                        ));
+                        // 回報後顯示還沒回報的 subagent；都回報了送空的 role，前端顯示回到悟空
+                        // （2026-11-27，review-623c436）。
+                        let current = {
+                            let mut active = active.borrow_mut();
+                            active.reported(step.role);
+                            active.current()
+                        };
+                        let _ = step_tx.send(SseMsg::Role(
+                            current.map(|r| r.name()).unwrap_or_default().to_string(),
                         ));
                     },
                 )

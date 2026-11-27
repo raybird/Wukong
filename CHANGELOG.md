@@ -29,7 +29,7 @@
 - **工作區的 `AGENTS.md` 與舊範本相同時自動換成新版。** 先備份成 `AGENTS.md.bak-{版本}`；改過的不動，log 會
   提醒其中過時的段落（人格那一句、「技能動態加載機制」）（#45）。
 - **正在處理的角色改顯示成「悟空」或「悟空·fixer」。** Telegram 的狀態泡泡、Web 的進度、排程執行中的訊息
-  都一樣，排程失敗訊息從「第 2 棒 fixer 失敗」改成「悟空·fixer 失敗」，fixer 回報之後才失敗的記成「悟空失敗」；
+  都一樣，subagent 回報後回到「悟空」；排程失敗訊息從「第 2 棒 fixer 失敗」改成「悟空·fixer 失敗」，fixer 回報之後才失敗的記成「悟空失敗」；
   Web 另外顯示 subagent 的產出卡片（#45）。
 - **Wukong 不再每 20 回合壓縮一次 session。** 壓縮交給 OpenCode 自己的自動壓縮；`WUKONG_SESSION_COMPACT_EVERY_TURNS`
   不再讀取，留在 `.env` 裡也不會報錯。session 開始超過 7 天時，改成在下一個回合開始時就換新的（以前要等到

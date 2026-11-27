@@ -4,6 +4,7 @@ import { bubbleNode, dateSeparatorNode, messageFrameNode, unreadDividerNode } fr
 import { activityDetailsNode, liveThinkingNode } from '/components/chat-activity.js';
 import { questionCardNode } from '/components/chat-question-card.js';
 import { waitForStableScrollHeight } from '/lib/chat-layout.mjs';
+import { roleProgressText } from '/lib/chat-progress.mjs';
 import {
   firstUnreadIndex,
   latestMessageId,
@@ -874,7 +875,7 @@ export class WukongChat extends HTMLElement {
         this.renderedMessageIds.add(String(data.message_id));
       }
     } else if (data.kind === 'role') {
-      this.ensureLiveProgress().innerHTML = '🐵 悟空·' + escapeHTML(data.content || '') + ' 思考中…';
+      this.ensureLiveProgress().innerHTML = escapeHTML(roleProgressText(data.content));
     } else if (data.kind === 'reasoning') {
       const thinking = this.ensureLiveThinking();
       thinking.querySelector('.reasoning').textContent += data.content || '';
@@ -943,7 +944,7 @@ export class WukongChat extends HTMLElement {
     const es = new EventSource(this.chatUrl('/chat', { q: text }));
 
     es.addEventListener('role', (ev) => {
-      progress.innerHTML = '🐵 悟空·' + escapeHTML(ev.data) + ' 思考中…';
+      progress.innerHTML = escapeHTML(roleProgressText(ev.data));
     });
     es.addEventListener('reasoning', (ev) => {
       if (!thinking) {

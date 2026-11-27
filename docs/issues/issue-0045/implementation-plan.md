@@ -708,6 +708,24 @@
   - NICE TO HAVE 13（文件小修）：AGENTS.md 與 docs/docker.md 註明 shell 白名單只是防呆（允許的指令加轉向仍能寫檔）；AGENTS.md 與 docs/docker.md 的入口整理時機改成 Web、Telegram、schedulerd 啟動時，CLI 在跑回合或進 REPL 前（照 `crates/wukong-cli/src/main.rs` 的 `prepare_workspace_assets` 呼叫位置）；README Timeline 的 SCN-001 重新核准列補上舊基線；CHANGELOG 補上回報後失敗的寫法。
   - CI 三道（2026-11-27，a091c4f 加上本 Task 的文件）：`cargo fmt --all -- --check` 通過；`cargo clippy --all-targets --locked -- -D warnings` 通過；`cargo test --workspace --locked --no-fail-fast` 774 passed、0 failed、14 ignored。
 
+### Task 6.7 — 增量覆審建議修正（review-623c436）
+- 產出與範圍：使用者 2026-11-27 選修的 NICE TO HAVE 1（Telegram 泡泡回報後回到悟空）、4（README 凍結內容的兩處）；2、3 記入待確認（README TBD-13）。
+- 相依：6.6、review-623c436
+- 驗收編號：SCN-002（入口看得到誰在處理）；修正既有行為，不新增驗收
+- 完成判準：Telegram、Web 與排程在 subagent 都回報後都回到悟空，各有先紅燈的測試；CHANGELOG「都一樣」成立；CI 三道全綠。
+- 驗證：入口行為走紅燈到綠燈；共用型別的抽出以排程前後同一組測試證明行為不變；文件以靜態核對。
+- 狀態：✅ 已完成（2026-11-27）
+- 證據：
+  - 查 NICE 1 時發現 Web 的 `/chat` 進度與 Telegram 寫給 Web 的即時事件也停在「悟空·fixer」（`wukong-chat.js` 收到 `step` 不改進度），一併修正，CHANGELOG 的「都一樣」才成立。
+  - 還沒回報的 subagent 由新的 `wukong_orchestrator::ActiveSubagents` 記住（`wukong_runtime` 轉出），排程、Telegram、Web 共用，不各寫一份；兩項單元測試涵蓋多個 subagent 與同一角色派出多次。
+  - 排程的 `Phase::Turn` 改用它：scheduler lib 測試改前改後都是 58 項全過（含 `the_phase_returns_to_wukong_after_the_subagent_reports`）。
+  - Telegram：新測試 `the_status_bubble_returns_to_wukong_after_the_subagent_reports` 改之前只有一則「🐵　悟空·fixer 思考中…」的編輯（紅燈），改之後泡泡回到「🐵　思考中…」，即時事件的 role 依序是 `fixer`、空字串；wukong-telegram 測試全過。
+  - Web：新測試 `chat_returns_the_role_to_wukong_after_the_subagent_reports` 改之前 `step` 之後沒有 role（紅燈），改之後 `step` 與 `answer` 之間有空的 role。前端的進度文字抽成 `static/lib/chat-progress.mjs` 的 `roleProgressText`，`node --test` 兩項（改之前模組不存在而失敗）；`serves_static_assets_with_content_types` 補上新模組，改之前回 404。wukong-web 測試 83 項全過，`static/lib` 四份 `.test.mjs` 都 0 fail。
+  - 既有問題，沒有修：`scripts/test-web-chat-scope.sh` 的 `chat-source` 檢查從 8638096 起就失敗，不在 CI 裡。
+  - NICE 4：README 核准紀錄的「TBD-62026-11-27」補上分隔；「重構步驟概要」Phase 3～6 改成 ✅。
+  - 文件：CHANGELOG、`docs/entrypoints.md`（Telegram 泡泡、Web 的 `role` 事件）、`crates/wukong-telegram/README.md`。
+  - CI 三道（2026-11-27）：`cargo fmt --all -- --check` 通過；`cargo clippy --all-targets --locked -- -D warnings` 通過；`cargo test --workspace --locked --no-fail-fast` 778 passed、0 failed、14 ignored。
+
 ## 測試策略
 
 - **真實模型**：派工、技能遵循、追問、人格，unit test 證明不了，以接真實 V2 加真實模型（TBD-6）的整合測試或演練腳本驗證（`#[ignore]`，與 #44 的 `managed_actual` 相同的做法）。同一題重複執行，記錄每次的結果。

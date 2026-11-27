@@ -196,7 +196,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 
 ## Gherkin 核准紀錄
 - **核准 commit**: f0ce34ad4769324e73e406dbc2bcb15703169d34
-- **核准來源**: 範圍與「留在 Wukong」來自 GitHub #45 內文與使用者 2026-11-24 的決定（拆成兩個 issue，#44 合併後開始）；2026-11-26 使用者要求「好開始 /dev-cycle #45」。同日逐題確認：Q1「NVIDIA 為準（建議）」→ Background、SCN-003；Q2「移除（建議）」→ SCN-011；Q3「Wukong 管理、自動更新（建議）」→ SCN-009；Q4「session 指令層（建議）」→ SCN-007。同日總結確認推導行為（派工門檻、輪替後仍補上一回合、保留的動態區塊、舊壓縮變數忽略且 7 天輪替改每回合檢查、lease 在任何 LLM 呼叫前取得、subagent 沿用指定模型、自訂命令不加旗標、inbox 只評估）選「全部核准（建議）」→ SCN-001～SCN-014。同日 NVIDIA 憑證被拒（403）後，使用者表示「使用免費模型驗證也可以」→ Background、TBD-62026-11-27 修訂：Task 6.2 實測 tool 任務步數 4 → 中位數 8（primary 不能改檔，建檔要派給 fixer），使用者選「消掉輪詢，修訂 tool 的步數條件（建議）」→ SCN-001 的步數條件只適用 short 任務，tool 任務照實記錄；同日使用者指示「nvidia 限流可以換成 opencode 的模型」→ SCN-003 以 opencode/big-pickle 驗收（Task 6.1）。
+- **核准來源**: 範圍與「留在 Wukong」來自 GitHub #45 內文與使用者 2026-11-24 的決定（拆成兩個 issue，#44 合併後開始）；2026-11-26 使用者要求「好開始 /dev-cycle #45」。同日逐題確認：Q1「NVIDIA 為準（建議）」→ Background、SCN-003；Q2「移除（建議）」→ SCN-011；Q3「Wukong 管理、自動更新（建議）」→ SCN-009；Q4「session 指令層（建議）」→ SCN-007。同日總結確認推導行為（派工門檻、輪替後仍補上一回合、保留的動態區塊、舊壓縮變數忽略且 7 天輪替改每回合檢查、lease 在任何 LLM 呼叫前取得、subagent 沿用指定模型、自訂命令不加旗標、inbox 只評估）選「全部核准（建議）」→ SCN-001～SCN-014。同日 NVIDIA 憑證被拒（403）後，使用者表示「使用免費模型驗證也可以」→ Background、TBD-6。2026-11-27 修訂：Task 6.2 實測 tool 任務步數 4 → 中位數 8（primary 不能改檔，建檔要派給 fixer），使用者選「消掉輪詢，修訂 tool 的步數條件（建議）」→ SCN-001 的步數條件只適用 short 任務，tool 任務照實記錄；同日使用者指示「nvidia 限流可以換成 opencode 的模型」→ SCN-003 以 opencode/big-pickle 驗收（Task 6.1）。
 
 | Scenario | 核准日期 | 狀態 |
 |----------|---------|------|
@@ -218,10 +218,10 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 ## 重構步驟概要
 1. ✅ **Phase 1** - V2 能力的契約探測（首要驗證）
 2. ✅ **Phase 2** - primary agent、subagent 與技能的定義與部署
-3. 📝 **Phase 3** - run_turn 改為單一 primary agent，拿掉 planner、接力鏈與依回合數壓縮
-4. 📝 **Phase 4** - 固定提示移到 agent 定義與 session 指令層
-5. 📝 **Phase 5** - 入口的角色顯示與規劃偏好移除
-6. 📝 **Phase 6** - 真實模型驗收、效能對照與常青文件
+3. ✅ **Phase 3** - run_turn 改為單一 primary agent，拿掉 planner、接力鏈與依回合數壓縮
+4. ✅ **Phase 4** - 固定提示移到 agent 定義與 session 指令層
+5. ✅ **Phase 5** - 入口的角色顯示與規劃偏好移除
+6. ✅ **Phase 6** - 真實模型驗收、效能對照與常青文件
 
 ## 風險與首要驗證
 
@@ -253,6 +253,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | TBD-10 | 最終的 agent 定義（f0ce34a：多了「派工後就結束這次回覆、等它回報」）還沒有完整跑過一輪派工評估：2026-11-27 nemotron 的實作題 3 次都被限流或逾時打斷，big-pickle 的免費額度同日用完（[dispatch-eval.md](dispatch-eval.md) 第 6 輪） | 已解決（2026-11-27）：big-pickle 額度到 14:38 仍未恢復，使用者要求改試 NVIDIA 上回應較快的模型；以 nemotron-3.5-super-vl-120b-a12b 用最終定義跑完整一輪，6 題全部通過（[dispatch-eval.md](dispatch-eval.md) 第 7 輪），使用者選「採用 super-vl 這輪」，big-pickle 不再補跑 | TBD-6 約定的驗證模型另加 super-vl（使用者 2026-11-27 指示），整輪只用這一個模型；結果不和第 5 輪 big-pickle 直接比較 |
 | TBD-11 | review-65e960a 需決策：Task 3.3 在 wukong-memory 新增 `agent_session_state.session_started_at` 欄位（7 天輪替不必每回合問 backend），涉及檔案表把 wukong-memory 列為不可觸及 | 已解決（2026-11-27，使用者選「接受並記錄」）：保留這個欄位與遷移，不改回每回合查 backend | 既有資料庫自動加欄位；舊列沒有值時，下一回合向 backend 查一次 session 開始時間補上（`backfill_session_started`）；涉及檔案表的「不可觸及」以這一列為例外 |
 | TBD-12 | review-65e960a 的 SHOULD FIX 與 NICE TO HAVE 怎麼處理 | 已解決（2026-11-27，使用者決定）：修正 SHOULD FIX 1（背景工作只算 subagent）、2（工作區範本改成派工）、3（人格那句的過時提醒）、6（原始派工紀錄進版控），NICE TO HAVE 9（排程階段回報後回到悟空）、13（文件小修），見計畫 Task 6.6；SHOULD FIX 4、5 由 TBD-11、TBD-10 處理。NICE TO HAVE 7（`ObservedStep.skill_name` 固定是 None）、8（固定提示有兩條組裝路徑）、10 併入 13 的文件說明、11（只有搶先改寫定義的入口會等 server 重新載入）、12（subagent 被限流時回合仍算成功）沒有選，留作已知差距 | 沒選的各項不影響驗收；修正後依「補跑後增量覆審」的決定，TBD-10 補跑後送增量覆審 |
+| TBD-13 | review-623c436 的 NICE TO HAVE 怎麼處理 | 已解決（2026-11-27，使用者決定）：修正 1（Telegram 泡泡回報後回到悟空；查證時發現 Web 也一樣，一併修正）與 4（README 凍結內容兩處），見計畫 Task 6.7；2（新的工作區 AGENTS.md 範本沒有真實模型證據：派工評估的工作區不放 AGENTS.md）與 3（用名稱找角色的寫法有兩份：`executor.rs`、`turn.rs`，目前一致）記為已知差距 | 2、3 不影響驗收；修正後再送增量覆審 |
 
 ## Timeline
 
@@ -285,6 +286,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | 2026-11-27 | 使用者對審查建議的決定記為 TBD-11、TBD-12；Task 6.6 修正選修的六項（64e95b8、0c54bf0、a091c4f 與本次文件提交），CI 三道全綠；PASS 的範圍不含這些修正，TBD-10 補跑後送增量覆審 |
 | 2026-11-27 | TBD-10 已解決：big-pickle 額度未恢復，依使用者指示改用 NVIDIA nemotron-3.5-super-vl-120b-a12b 以最終定義補跑完整一輪，6 題全部通過（dispatch-eval.md 第 7 輪）；接著送 d900bda 之後的增量覆審 |
 | 2026-11-27 | 增量覆審 65e960a..623c436 PASS（review-623c436.md，無 MUST FIX、SHOULD FIX，NICE TO HAVE 4 項）；上一份 PASS 選修的六項與 TBD-10、TBD-11 都確認處理完成 |
+| 2026-11-27 | 使用者對增量覆審建議的決定記為 TBD-13；Task 6.7 修正 NICE TO HAVE 1、4（Telegram、Web 在 subagent 回報後回到悟空，README 凍結內容兩處），再送增量覆審 |
 
 ---
 **建立日期**: 2026-11-26  
