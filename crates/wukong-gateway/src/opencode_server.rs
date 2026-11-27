@@ -29,6 +29,9 @@ const SESSION_PAGE_SIZE: usize = 1000;
 const SESSION_LIST_MAX_PAGES: usize = 100;
 /// 等 agent 定義重新載入時，兩次查詢 `/api/agent` 的間隔。
 const AGENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+/// 查背景工作失敗時最多查幾次、每次間隔多久（PR #47 第三方審查 P2-1）。
+const JOBS_LOOKUP_ATTEMPTS: usize = 3;
+const JOBS_LOOKUP_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
 pub struct OpencodeServerBackend {
     pub base_url: String,
@@ -60,48 +63,125 @@ struct CreateSessionBody {
     permissions: Vec<PermissionRule>,
 }
 
-/// 見 [`OpencodeServerBackend::interrupt_on_drop`]。回合本身的 session，加上串流中看到的
+/// 見 [`OpencodeServerBackend::interrupt_on_drop`]。回合本身的 session（第一個），加上串流中看到的
 /// subagent 子 session（#45：subagent 在背景執行，中斷回合時要一併中斷）。
-struct InterruptOnDrop(Vec<reqwest::RequestBuilder>);
+#[derive(Default)]
+struct InterruptOnDrop {
+    server: Option<ServerHandle>,
+    sessions: Vec<String>,
+}
 
 impl InterruptOnDrop {
-    fn add(&mut self, request: reqwest::RequestBuilder) {
-        self.0.push(request);
+    fn add(&mut self, session_id: &str) {
+        self.sessions.push(session_id.to_string());
     }
 
     fn disarm(&mut self) {
-        self.0.clear();
+        self.server = None;
+        self.sessions.clear();
     }
 
     /// 回合失敗時立即送出。Best-effort：server 端的執行仍會繼續並佔住 session，後續回合
     /// 要排在它後面；失敗也不影響原本要回傳的錯誤。
     async fn send_now(&mut self) {
-        for request in self.0.drain(..) {
-            let _ = request.send().await;
+        if let Some(server) = self.server.take() {
+            server
+                .interrupt_turn(std::mem::take(&mut self.sessions))
+                .await;
         }
     }
 }
 
 impl Drop for InterruptOnDrop {
     fn drop(&mut self) {
-        let requests = std::mem::take(&mut self.0);
-        if requests.is_empty() {
+        let Some(server) = self.server.take() else {
             return;
-        }
+        };
+        let sessions = std::mem::take(&mut self.sessions);
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                for request in requests {
-                    match request.send().await {
-                        Ok(response) => eprintln!(
-                            "turn_cancelled_interrupt status={}",
-                            response.status().as_u16()
-                        ),
+                for result in server.interrupt_turn(sessions).await {
+                    match result {
+                        Ok(status) => eprintln!("turn_cancelled_interrupt status={status}"),
                         Err(err) => eprintln!("turn_cancelled_interrupt_failed: {err}"),
                     }
                 }
             });
         }
     }
+}
+
+/// 中斷回合要用的連線資訊；取消發生在 backend 借用之外（future 被丟掉），所以另外帶一份。
+struct ServerHandle {
+    base_url: String,
+    client: reqwest::Client,
+    password: Option<String>,
+}
+
+impl ServerHandle {
+    fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        authorize(request, self.password.as_deref())
+    }
+
+    /// 依序中斷 `sessions`（第一個是回合本身的 session），再從背景工作清單補上串流中沒看到的
+    /// subagent 子 session。V2 中斷父 session 不會取消它的背景 subagent：`Session.interrupt` 只停
+    /// 那個 session 的執行，`Job.cancelSession` 只在刪除 session 時呼叫（PR #47 第三方審查 P2-2，
+    /// 查 2.3.2 的原始碼）。先停 primary，它才不會在查清單之後又派出新的工作。
+    async fn interrupt_turn(&self, mut sessions: Vec<String>) -> Vec<Result<u16, reqwest::Error>> {
+        let mut results = Vec::new();
+        for session in &sessions {
+            results.push(self.interrupt(session).await);
+        }
+        let Some(root) = sessions.first().cloned() else {
+            return results;
+        };
+        let url = format!(
+            "{}/api/experimental/job?sessionID={root}&descendants=true",
+            self.base_url
+        );
+        let jobs = match self.authorize(self.client.get(url)).send().await {
+            Ok(response) => response.json::<Value>().await.ok(),
+            Err(err) => {
+                eprintln!("turn_cancelled_jobs_lookup_failed session_id={root}: {err}");
+                None
+            }
+        };
+        for child in jobs
+            .iter()
+            .flat_map(subagent_jobs)
+            .filter_map(|job| job.get("childSessionID").and_then(Value::as_str))
+        {
+            if !sessions.iter().any(|s| s == child) {
+                results.push(self.interrupt(child).await);
+                sessions.push(child.to_string());
+            }
+        }
+        results
+    }
+
+    async fn interrupt(&self, session_id: &str) -> Result<u16, reqwest::Error> {
+        let url = format!("{}/api/session/{}/interrupt", self.base_url, session_id);
+        let response = self.authorize(self.client.post(url)).send().await?;
+        Ok(response.status().as_u16())
+    }
+}
+
+fn authorize(request: reqwest::RequestBuilder, password: Option<&str>) -> reqwest::RequestBuilder {
+    match password {
+        Some(password) => request.basic_auth(SERVER_USERNAME, Some(password)),
+        None => request,
+    }
+}
+
+/// 背景工作清單（`GET /api/experimental/job` 的回應）裡的 subagent 工作。清單也列出 subagent 開的
+/// 背景 shell、圖片與 code mode 工作（`Job.Kind`），在用戶端過濾，不依賴 server 端的 `kind` 參數。
+fn subagent_jobs(response: &Value) -> impl Iterator<Item = &Value> {
+    response
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|job| job.get("kind").and_then(Value::as_str) == Some("subagent"))
 }
 
 /// V2 的權限規則（openapi 的 `Permission.Rule`）。
@@ -583,43 +663,48 @@ impl OpencodeServerBackend {
     /// 回合的 future 在完成前被丟掉（入口取消、排程中止）時，V2 的執行仍會繼續佔住 session，
     /// 下一則 prompt 也會被併進這次執行；所以 drop 時在背景送 interrupt。
     fn interrupt_on_drop(&self, session_id: &str) -> InterruptOnDrop {
-        InterruptOnDrop(vec![self.interrupt_request(session_id)])
-    }
-
-    fn interrupt_request(&self, session_id: &str) -> reqwest::RequestBuilder {
-        let url = format!("{}/api/session/{}/interrupt", self.base_url, session_id);
-        self.authorize(self.client.post(url))
+        InterruptOnDrop {
+            server: Some(ServerHandle {
+                base_url: self.base_url.clone(),
+                client: self.client.clone(),
+                password: self.password.clone(),
+            }),
+            sessions: vec![session_id.to_string()],
+        }
     }
 
     /// 2026-11-26（#45）：這個 session 與它的子 session 還有沒有 subagent 工作（執行中，或回報還沒被
     /// 讀取）。subagent 一律在背景執行：primary 派工後先結束一次執行，收到回報再執行一次，
-    /// 清單裡沒有 subagent 了回合才真的結束（docs/issues/issue-0045/probe-subagent.md）。查詢失敗時
-    /// 當作沒有，回合以目前的回覆收尾，與派工之前的行為相同。
+    /// 清單裡沒有 subagent 了回合才真的結束（docs/issues/issue-0045/probe-subagent.md）。
     ///
     /// 只看 `kind` 為 subagent 的工作（2026-11-27，review-65e960a）：清單也列出 subagent 開的背景
     /// shell，結束後沒被讀取的也留著；`npm run dev` 這類不會自己結束的程式會讓回合等到逾時。
-    /// 在用戶端過濾，不依賴 server 端的 `kind` 參數。
+    ///
+    /// 查詢失敗時隔 [`JOBS_LOOKUP_RETRY_DELAY`] 重試，最多查 [`JOBS_LOOKUP_ATTEMPTS`] 次（PR #47
+    /// 第三方審查 P2-1）。都失敗才當作沒有，回合以目前的回覆收尾：這個查詢是事件之外的補漏，
+    /// 不因為它查不到就丟掉 primary 已經寫好的回覆。
     async fn has_background_jobs(&self, session_id: &str) -> bool {
         let url = format!(
             "{}/api/experimental/job?sessionID={session_id}&descendants=true",
             self.base_url
         );
-        match self
-            .send_json("background_jobs", self.client.get(url))
-            .await
-        {
-            Ok(value) => value
-                .get("data")
-                .and_then(Value::as_array)
-                .is_some_and(|jobs| {
-                    jobs.iter()
-                        .any(|job| job.get("kind").and_then(Value::as_str) == Some("subagent"))
-                }),
-            Err(err) => {
-                eprintln!("background_jobs_lookup_failed session_id={session_id}: {err}");
-                false
+        for attempt in 1..=JOBS_LOOKUP_ATTEMPTS {
+            match self
+                .send_json("background_jobs", self.client.get(&url))
+                .await
+            {
+                Ok(value) => return subagent_jobs(&value).next().is_some(),
+                Err(err) => {
+                    eprintln!(
+                        "background_jobs_lookup_failed session_id={session_id} attempt={attempt}/{JOBS_LOOKUP_ATTEMPTS}: {err}"
+                    );
+                    if attempt < JOBS_LOOKUP_ATTEMPTS {
+                        tokio::time::sleep(JOBS_LOOKUP_RETRY_DELAY).await;
+                    }
+                }
             }
         }
+        false
     }
 
     async fn open_event_stream(&self) -> Result<reqwest::Response, GatewayError> {
@@ -689,10 +774,7 @@ impl OpencodeServerBackend {
     }
 
     fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match self.password.as_deref() {
-            Some(password) => request.basic_auth(SERVER_USERNAME, Some(password)),
-            None => request,
-        }
+        authorize(request, self.password.as_deref())
     }
 
     /// 等 server 上這次執行（回合或壓縮，兩者都是排進 session 佇列的項目）結束。future 被丟掉時
@@ -794,7 +876,7 @@ impl OpencodeServerBackend {
                             .and_then(Value::as_str);
                         if let (Some(parent), Some(child)) = (parent, child) {
                             if parent == session_id || children.iter().any(|c| c == parent) {
-                                interrupt.add(self.interrupt_request(child));
+                                interrupt.add(child);
                                 children.push(child.to_string());
                             }
                         }
@@ -1451,7 +1533,7 @@ mod tests {
                 response,
                 "ses_1",
                 &mut |_| {},
-                &mut InterruptOnDrop(Vec::new()),
+                &mut InterruptOnDrop::default(),
             )
             .await;
         std::env::remove_var("WUKONG_AGENT_TIMEOUT_SECS");
@@ -1504,7 +1586,7 @@ mod tests {
                 response,
                 "ses_1",
                 &mut |_| {},
-                &mut InterruptOnDrop(Vec::new()),
+                &mut InterruptOnDrop::default(),
             )
             .await;
         std::env::remove_var("WUKONG_AGENT_TIMEOUT_SECS");
@@ -1527,7 +1609,7 @@ mod tests {
                 response,
                 "ses_1",
                 &mut |_| {},
-                &mut InterruptOnDrop(Vec::new()),
+                &mut InterruptOnDrop::default(),
             )
             .await;
         std::env::remove_var("WUKONG_AGENT_TIMEOUT_SECS");
@@ -1552,7 +1634,7 @@ mod tests {
                 response,
                 "ses_1",
                 &mut |_| {},
-                &mut InterruptOnDrop(Vec::new()),
+                &mut InterruptOnDrop::default(),
             )
             .await;
 
@@ -1578,7 +1660,7 @@ mod tests {
                 response,
                 "ses_1",
                 &mut |_| {},
-                &mut InterruptOnDrop(Vec::new()),
+                &mut InterruptOnDrop::default(),
             )
             .await;
 
@@ -1602,7 +1684,7 @@ mod tests {
                 response,
                 "ses_1",
                 &mut |_| {},
-                &mut InterruptOnDrop(Vec::new()),
+                &mut InterruptOnDrop::default(),
             )
             .await
             .expect("沒有錯誤事件時必須正常收尾");
@@ -1623,7 +1705,7 @@ mod tests {
                         reasoning.push_str(&text);
                     }
                 },
-                &mut InterruptOnDrop(Vec::new()),
+                &mut InterruptOnDrop::default(),
             )
             .await
             .unwrap();
@@ -1847,6 +1929,64 @@ mod tests {
         );
     }
 
+    // 第三方審查 P2-1（PR #47，2026-11-27）：查背景工作失敗時不能直接當作沒有，否則 fixer 還在跑、
+    // 事件又看不出來時，回合會以「已派工」收尾。先重試，重試都失敗才照舊收尾。
+    #[tokio::test]
+    async fn a_failed_job_lookup_is_retried_before_the_turn_ends() {
+        // 重試間隔讓這個測試跑約 1 秒；別的測試會暫時把回合逾時設成 1 秒，拿同一把鎖錯開
+        let _guard = crate::backend::AGENT_TIMEOUT_ENV_LOCK.lock().await;
+        let fake = fake_v2::FakeV2::start().await;
+        let mut events = fake_v2::fixture_events("server-dispatch-subagent", "ses_fake1");
+        events.remove(dispatch_event_index(
+            &events,
+            DISPATCH_CHILD,
+            "session.execution.started",
+            0,
+        ));
+        fake.script_events(events);
+        fake.script_jobs(vec![
+            json!("fail"),
+            json!("fail"),
+            json!([{"kind": "subagent", "agent": "fixer", "status": "running"}]),
+        ]);
+
+        let response = v2_backend(&fake)
+            .run_streaming(plain_request("派給 fixer"), &mut |_| {})
+            .await
+            .unwrap();
+
+        assert!(
+            response.text.starts_with("fixer 已完成，我也驗證過了"),
+            "{}",
+            response.text
+        );
+        // 第一次結束：失敗兩次、第三次看到 fixer；最後一次結束再查一次
+        assert_eq!(
+            fake.requests().iter().filter(|r| *r == JOBS_QUERY).count(),
+            4
+        );
+    }
+
+    #[tokio::test]
+    async fn a_job_lookup_that_keeps_failing_ends_the_turn_with_the_current_reply() {
+        // 重試間隔讓這個測試跑約 1 秒；別的測試會暫時把回合逾時設成 1 秒，拿同一把鎖錯開
+        let _guard = crate::backend::AGENT_TIMEOUT_ENV_LOCK.lock().await;
+        let fake = fake_v2::FakeV2::start().await;
+        fake.script_events(fake_v2::fixture_events("server-text-tool", "ses_fake1"));
+        fake.script_jobs(vec![json!("fail"), json!("fail"), json!("fail")]);
+
+        let response = v2_backend(&fake)
+            .run_streaming(plain_request("hi"), &mut |_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(response.text, "DONE");
+        assert_eq!(
+            fake.requests().iter().filter(|r| *r == JOBS_QUERY).count(),
+            3
+        );
+    }
+
     /// 派工樣本到 fixer 的子 session 建立之後（含）的前 `extra` 則事件。
     fn dispatch_events_until_child(extra: usize) -> Vec<String> {
         let events = fake_v2::fixture_events("server-dispatch-subagent", "ses_fake1");
@@ -1905,6 +2045,59 @@ mod tests {
             "{requests:?}"
         );
         assert!(requests.contains(&child), "{requests:?}");
+    }
+
+    // 第三方審查 P2-2（PR #47，2026-11-27）：V2 中斷父 session 不會取消它的背景 subagent
+    // （`Session.interrupt` 只停那個 session 的執行，`Job.cancelSession` 只在刪除 session 時呼叫）。
+    // 串流沒送到子 session 的建立事件（建立前就取消、或事件漏掉）時，取消要從背景工作清單找出子 session。
+    #[tokio::test]
+    async fn a_cancelled_turn_interrupts_subagents_the_stream_never_announced() {
+        let fake = fake_v2::FakeV2::start().await;
+        let mut events = dispatch_events_until_child(3);
+        let created = events
+            .iter()
+            .position(|e| e.contains("\"session.created\""))
+            .unwrap();
+        events.remove(created);
+        events.push("hold".to_string());
+        fake.script_events(events);
+        fake.script_jobs(vec![json!([
+            {"kind": "shell", "status": "running", "shellID": "sh_1", "command": "npm run dev"},
+            {"kind": "subagent", "status": "running", "agent": "fixer", "childSessionID": DISPATCH_CHILD}
+        ])]);
+        let backend = v2_backend(&fake);
+
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            backend.run_streaming(plain_request("派給 fixer"), &mut |_| {}),
+        )
+        .await;
+
+        assert!(cancelled.is_err(), "the turn should still be running");
+        let child = format!("POST /api/session/{DISPATCH_CHILD}/interrupt");
+        for _ in 0..50 {
+            if fake.requests().contains(&child) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let requests = fake.requests();
+        assert!(requests.contains(&child), "{requests:?}");
+        // 先停 primary，不讓它再派新的工作，再查清單
+        let root = requests
+            .iter()
+            .position(|r| r == "POST /api/session/ses_fake1/interrupt")
+            .expect("primary interrupted");
+        let lookup = requests.iter().position(|r| r == JOBS_QUERY).unwrap();
+        assert!(root < lookup, "{requests:?}");
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.ends_with("/interrupt"))
+                .count(),
+            2,
+            "{requests:?}"
+        );
     }
 
     #[tokio::test]
@@ -3047,7 +3240,7 @@ mod tests {
                 response,
                 "ses_1",
                 &mut |_| {},
-                &mut InterruptOnDrop(Vec::new()),
+                &mut InterruptOnDrop::default(),
             )
             .await
             .unwrap_err();

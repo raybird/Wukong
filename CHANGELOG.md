@@ -21,6 +21,7 @@
     比以前多幾步、慢一些。
   - 排程或 Web 指定了模型時，派出的 subagent 也用同一個模型。
   - 最終回覆是空的時，改成在同一個 session 補送一次修復提示，不再取前一棒的輸出。
+  - 派出的 subagent 都回報之後回合才結束；取消或失敗的回合會一併中斷派出去的 subagent。
 - **人格、派工規則與各種能力說明寫進 Wukong 管理的 agent 定義，不再附在每則訊息裡。** 入口啟動時寫到工作區的
   `.opencode/agents/`（`wukong.md` 與五個 subagent），升級後自動換成新版；改了 `SOUL.md`、`WUKONG_MEMORIA_HINT`
   或 `WUKONG_BIN` 要重啟入口才生效。這六個檔案不要手改，下次啟動會被覆寫（#45）。

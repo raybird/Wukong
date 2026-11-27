@@ -726,6 +726,35 @@
   - 文件：CHANGELOG、`docs/entrypoints.md`（Telegram 泡泡、Web 的 `role` 事件）、`crates/wukong-telegram/README.md`。
   - CI 三道（2026-11-27）：`cargo fmt --all -- --check` 通過；`cargo clippy --all-targets --locked -- -D warnings` 通過；`cargo test --workspace --locked --no-fail-fast` 778 passed、0 failed、14 ignored。
 
+### Task 6.8 — PR #47 第三方審查修正
+- 產出與範圍：第三方審查（[PR #47 留言](https://github.com/raybird/Wukong/pull/47#issuecomment-7214581086)，Reviewed HEAD cf47307，CONDITIONAL PASS）的 P2-1、P2-2，使用者 2026-11-27 決定（README TBD-15）；P3 即 TBD-12 沒選修的第 11 項，已是已知差距。
+- 相依：review-4ccfcec
+- 驗收編號：SCN-002（派工後等 subagent 回報）、SCN-012（回合取消與失敗時中斷 session 的既有保障）；修正既有行為，不新增驗收
+- 完成判準：查背景工作失敗時重試，重試都失敗才以目前的回覆收尾；回合取消或失敗時，串流中沒看到建立事件的 subagent 子 session 也被中斷；各有先紅燈的測試；CI 三道全綠。
+- 驗證：gateway 以假 V2 server 走紅燈到綠燈；V2 的中斷語意以 2.3.2 原始碼查證。
+- 狀態：✅ 已完成（2026-11-27）
+- 證據：
+  - V2 中斷語意（在 `wukong-issue44:v2-local` 映像裡對 `/opt/wukong-release/node_modules/@opencode/cli/bin/opencode.exe` 以 `grep -a` 查 2.3.2 的打包原始碼）：
+    - `Session.interrupt` 只呼叫 session 執行層的 `interrupt(sessionID)`，沒有處理子 session 或背景工作；
+    - 取消背景工作的 `Job.cancelSession` 全檔只出現一次，只有 `Session.remove` 呼叫（`interrupt` → `awaitIdle` → `cancelSession` → 刪除子 session）；
+    - 背景 subagent 由 `SubagentJob` 以 `resume(childSessionID)` 執行，只有工作本身被取消（`isCancelled`）時才中斷子 session。
+    - 結論：中斷父 session 不會停掉它的背景 subagent，P2-2 的風險成立。
+  - P2-1：`has_background_jobs` 查詢失敗時隔 500ms 重試，最多查 3 次；都失敗才照舊收尾並記 `background_jobs_lookup_failed … attempt=n/3`。新測試：
+    - `a_failed_job_lookup_is_retried_before_the_turn_ends`：失敗兩次、第三次看到 fixer。改之前回合以「已派給 fixer」收尾（紅燈），改之後等到 fixer 回報，查詢 4 次。
+    - `a_job_lookup_that_keeps_failing_ends_the_turn_with_the_current_reply`：三次都失敗時回覆 DONE、查詢 3 次（改之前只查 1 次，紅燈）。
+    - 兩項重試測試各跑約 1 秒，會與把回合逾時暫設為 1 秒的測試互相干擾；改為拿同一把 `AGENT_TIMEOUT_ENV_LOCK`，之後整組連跑三次都通過。
+  - P2-2：`InterruptOnDrop` 改成記 session ID 與連線資訊（`ServerHandle`）。取消或失敗時：
+    1. 先中斷回合的 session 與串流中看到的子 session；
+    2. 再查 `GET /api/experimental/job?descendants=true`，補中斷清單裡 subagent 工作的 `childSessionID`。
+    - 先停 primary，它才不會在查完清單後又派出新的工作。
+    - 新測試 `a_cancelled_turn_interrupts_subagents_the_stream_never_announced`：拿掉子 session 的 `session.created`，清單同時有背景 shell 與 fixer。改之前沒中斷 fixer（紅燈）；改之後中斷 fixer、不碰 shell，而且 primary 的中斷先於清單查詢。
+    - 既有的 `a_failed_turn_interrupts_the_subagent_sessions_too`、`a_cancelled_turn_interrupts_the_subagent_sessions_too` 照常通過。
+  - 精煉：
+    - 清單裡挑 subagent 工作的邏輯抽成 `subagent_jobs`，`has_background_jobs` 與取消共用；
+    - basic auth 抽成 `authorize`，backend 與 `ServerHandle` 共用。
+  - 文件：根目錄 `AGENTS.md`（server backend 的等待與取消規則）、CHANGELOG。
+  - CI 三道（2026-11-27）：`cargo fmt --all -- --check` 通過；`cargo clippy --all-targets --locked -- -D warnings` 通過；`cargo test --workspace --locked --no-fail-fast` 781 passed、0 failed、14 ignored。
+
 ## 測試策略
 
 - **真實模型**：派工、技能遵循、追問、人格，unit test 證明不了，以接真實 V2 加真實模型（TBD-6）的整合測試或演練腳本驗證（`#[ignore]`，與 #44 的 `managed_actual` 相同的做法）。同一題重複執行，記錄每次的結果。

@@ -100,6 +100,7 @@ impl FakeV2 {
     }
 
     /// 之後每次 `GET /api/experimental/job` 依序回的 `data`（背景工作清單）；用完回空清單。
+    /// 項目是字串 `"fail"` 時，那一次回 503。
     pub fn script_jobs(&self, jobs: Vec<Value>) {
         self.state.lock().unwrap().jobs = jobs;
     }
@@ -305,6 +306,13 @@ fn handle(
             } else {
                 state.jobs.remove(0)
             };
+            if jobs == "fail" {
+                return (
+                    "503 Service Unavailable",
+                    JSON,
+                    r#"{"_tag":"ServiceUnavailable","message":"job store busy"}"#.to_string(),
+                );
+            }
             ("200 OK", JSON, json!({ "data": jobs }).to_string())
         }
         ("POST", "/api/session") => {
