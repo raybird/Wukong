@@ -32,6 +32,9 @@ const AGENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_milli
 /// 查背景工作失敗時最多查幾次、每次間隔多久（PR #47 第三方審查 P2-1）。
 const JOBS_LOOKUP_ATTEMPTS: usize = 3;
 const JOBS_LOOKUP_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+/// 每次查背景工作最多等多久（review-364cebf NICE 1）。不沿用整個回合的 client 逾時：V2 卡住時，
+/// 重試會把延遲放大成好幾倍，而且等待期間看不到回合的 deadline。
+const JOBS_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub struct OpencodeServerBackend {
     pub base_url: String,
@@ -44,6 +47,8 @@ pub struct OpencodeServerBackend {
     session_attachments: Mutex<HashMap<String, Vec<crate::backend::AgentAttachment>>>,
     /// 重試持續多久就中止回合；只有測試會改。
     retry_give_up_after: std::time::Duration,
+    /// 見 [`JOBS_LOOKUP_TIMEOUT`]；只有測試會改。
+    jobs_lookup_timeout: std::time::Duration,
     /// 串流中看到的 form：form ID →（session ID, 欄位）。該 session 的事件串流結束時清掉。
     forms: Forms,
 }
@@ -116,6 +121,7 @@ struct ServerHandle {
     base_url: String,
     client: reqwest::Client,
     password: Option<String>,
+    jobs_lookup_timeout: std::time::Duration,
 }
 
 impl ServerHandle {
@@ -135,12 +141,8 @@ impl ServerHandle {
         let Some(root) = sessions.first().cloned() else {
             return results;
         };
-        let url = format!(
-            "{}/api/experimental/job?sessionID={root}&descendants=true",
-            self.base_url
-        );
-        let jobs = match self.authorize(self.client.get(url)).send().await {
-            Ok(response) => response.json::<Value>().await.ok(),
+        let jobs = match self.background_jobs(&root).await {
+            Ok(jobs) => Some(jobs),
             Err(err) => {
                 eprintln!("turn_cancelled_jobs_lookup_failed session_id={root}: {err}");
                 None
@@ -157,6 +159,28 @@ impl ServerHandle {
             }
         }
         results
+    }
+
+    /// 查一次這個 session 與它的子 session 的背景工作清單（`GET /api/experimental/job`），最多等
+    /// `jobs_lookup_timeout`。非 2xx 與不是 JSON 的回應都算失敗。
+    async fn background_jobs(&self, session_id: &str) -> Result<Value, String> {
+        let url = format!(
+            "{}/api/experimental/job?sessionID={session_id}&descendants=true",
+            self.base_url
+        );
+        let response = self
+            .authorize(self.client.get(url))
+            .timeout(self.jobs_lookup_timeout)
+            .send()
+            .await
+            .map_err(|err| err.to_string())?;
+        let status = response.status();
+        let text = response.text().await.map_err(|err| err.to_string())?;
+        if !status.is_success() {
+            return Err(format!("returned {status}: {text}"));
+        }
+        serde_json::from_str(&text)
+            .map_err(|err| format!("returned invalid JSON: {err}; body: {text}"))
     }
 
     async fn interrupt(&self, session_id: &str) -> Result<u16, reqwest::Error> {
@@ -296,6 +320,7 @@ impl OpencodeServerBackend {
                 .filter(|s| !s.is_empty()),
             session_attachments: Mutex::new(HashMap::new()),
             retry_give_up_after: crate::upstream_error::RETRY_GIVE_UP_AFTER,
+            jobs_lookup_timeout: JOBS_LOOKUP_TIMEOUT,
             forms: Mutex::new(HashMap::new()),
         }
     }
@@ -664,12 +689,17 @@ impl OpencodeServerBackend {
     /// 下一則 prompt 也會被併進這次執行；所以 drop 時在背景送 interrupt。
     fn interrupt_on_drop(&self, session_id: &str) -> InterruptOnDrop {
         InterruptOnDrop {
-            server: Some(ServerHandle {
-                base_url: self.base_url.clone(),
-                client: self.client.clone(),
-                password: self.password.clone(),
-            }),
+            server: Some(self.server_handle()),
             sessions: vec![session_id.to_string()],
+        }
+    }
+
+    fn server_handle(&self) -> ServerHandle {
+        ServerHandle {
+            base_url: self.base_url.clone(),
+            client: self.client.clone(),
+            password: self.password.clone(),
+            jobs_lookup_timeout: self.jobs_lookup_timeout,
         }
     }
 
@@ -680,19 +710,13 @@ impl OpencodeServerBackend {
     /// 只看 `kind` 為 subagent 的工作（2026-11-27，review-65e960a）：清單也列出 subagent 開的背景
     /// shell，結束後沒被讀取的也留著；`npm run dev` 這類不會自己結束的程式會讓回合等到逾時。
     ///
-    /// 查詢失敗時隔 [`JOBS_LOOKUP_RETRY_DELAY`] 重試，最多查 [`JOBS_LOOKUP_ATTEMPTS`] 次（PR #47
+    /// 每次查詢最多等 [`JOBS_LOOKUP_TIMEOUT`]。失敗時隔 [`JOBS_LOOKUP_RETRY_DELAY`] 重試，最多查 [`JOBS_LOOKUP_ATTEMPTS`] 次（PR #47
     /// 第三方審查 P2-1）。都失敗才當作沒有，回合以目前的回覆收尾：這個查詢是事件之外的補漏，
     /// 不因為它查不到就丟掉 primary 已經寫好的回覆。
     async fn has_background_jobs(&self, session_id: &str) -> bool {
-        let url = format!(
-            "{}/api/experimental/job?sessionID={session_id}&descendants=true",
-            self.base_url
-        );
+        let server = self.server_handle();
         for attempt in 1..=JOBS_LOOKUP_ATTEMPTS {
-            match self
-                .send_json("background_jobs", self.client.get(&url))
-                .await
-            {
+            match server.background_jobs(session_id).await {
                 Ok(value) => return subagent_jobs(&value).next().is_some(),
                 Err(err) => {
                     eprintln!(
@@ -1987,6 +2011,32 @@ mod tests {
         );
     }
 
+    // review-364cebf NICE 1（2026-11-27）：V2 卡住、不斷線也不回應時，每次查詢有自己的短逾時，
+    // 不沿用整個回合的 client 逾時，重試才不會把延遲放大好幾倍。
+    #[tokio::test]
+    async fn a_job_lookup_that_hangs_times_out_on_its_own() {
+        let _guard = crate::backend::AGENT_TIMEOUT_ENV_LOCK.lock().await;
+        let fake = fake_v2::FakeV2::start().await;
+        fake.script_events(fake_v2::fixture_events("server-text-tool", "ses_fake1"));
+        fake.script_jobs(vec![json!("hang"), json!("hang"), json!("hang")]);
+        let mut backend = v2_backend(&fake);
+        backend.jobs_lookup_timeout = std::time::Duration::from_millis(200);
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            backend.run_streaming(plain_request("hi"), &mut |_| {}),
+        )
+        .await
+        .expect("each lookup should give up on its own")
+        .unwrap();
+
+        assert_eq!(response.text, "DONE");
+        assert_eq!(
+            fake.requests().iter().filter(|r| *r == JOBS_QUERY).count(),
+            3
+        );
+    }
+
     /// 派工樣本到 fixer 的子 session 建立之後（含）的前 `extra` 則事件。
     fn dispatch_events_until_child(extra: usize) -> Vec<String> {
         let events = fake_v2::fixture_events("server-dispatch-subagent", "ses_fake1");
@@ -2023,6 +2073,10 @@ mod tests {
         let mut events = dispatch_events_until_child(3);
         events.push("hold".to_string());
         fake.script_events(events);
+        // 串流看過的 fixer 也在背景工作清單裡：只中斷一次（review-364cebf NICE 2）
+        fake.script_jobs(vec![json!([
+            {"kind": "subagent", "status": "running", "agent": "fixer", "childSessionID": DISPATCH_CHILD}
+        ])]);
         let backend = v2_backend(&fake);
 
         let cancelled = tokio::time::timeout(
@@ -2034,17 +2088,25 @@ mod tests {
         assert!(cancelled.is_err(), "the turn should still be running");
         let child = format!("POST /api/session/{DISPATCH_CHILD}/interrupt");
         for _ in 0..50 {
-            if fake.requests().contains(&child) {
+            if fake.requests().contains(&child) && fake.requests().contains(&JOBS_QUERY.to_string())
+            {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+        // 清單查完之後若還會重複中斷，給它時間送出
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let requests = fake.requests();
         assert!(
             requests.contains(&"POST /api/session/ses_fake1/interrupt".to_string()),
             "{requests:?}"
         );
-        assert!(requests.contains(&child), "{requests:?}");
+        assert!(requests.contains(&JOBS_QUERY.to_string()), "{requests:?}");
+        assert_eq!(
+            requests.iter().filter(|r| **r == child).count(),
+            1,
+            "{requests:?}"
+        );
     }
 
     // 第三方審查 P2-2（PR #47，2026-11-27）：V2 中斷父 session 不會取消它的背景 subagent

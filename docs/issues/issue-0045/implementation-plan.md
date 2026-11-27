@@ -729,14 +729,14 @@
 ### Task 6.8 — PR #47 第三方審查修正
 - 產出與範圍：第三方審查（[PR #47 留言](https://github.com/raybird/Wukong/pull/47#issuecomment-7214581086)，Reviewed HEAD cf47307，CONDITIONAL PASS）的 P2-1、P2-2，使用者 2026-11-27 決定（README TBD-15）；P3 即 TBD-12 沒選修的第 11 項，已是已知差距。
 - 相依：review-4ccfcec
-- 驗收編號：SCN-002（派工後等 subagent 回報）、SCN-012（回合取消與失敗時中斷 session 的既有保障）；修正既有行為，不新增驗收
+- 驗收編號：SCN-002（派工後等 subagent 回報）；取消與失敗時中斷 session 是 #44 起的既有保障，不在 Gherkin 裡；修正既有行為，不新增驗收
 - 完成判準：查背景工作失敗時重試，重試都失敗才以目前的回覆收尾；回合取消或失敗時，串流中沒看到建立事件的 subagent 子 session 也被中斷；各有先紅燈的測試；CI 三道全綠。
 - 驗證：gateway 以假 V2 server 走紅燈到綠燈；V2 的中斷語意以 2.3.2 原始碼查證。
 - 狀態：✅ 已完成（2026-11-27）
 - 證據：
   - V2 中斷語意（在 `wukong-issue44:v2-local` 映像裡對 `/opt/wukong-release/node_modules/@opencode/cli/bin/opencode.exe` 以 `grep -a` 查 2.3.2 的打包原始碼）：
     - `Session.interrupt` 只呼叫 session 執行層的 `interrupt(sessionID)`，沒有處理子 session 或背景工作；
-    - 取消背景工作的 `Job.cancelSession` 全檔只出現一次，只有 `Session.remove` 呼叫（`interrupt` → `awaitIdle` → `cancelSession` → 刪除子 session）；
+    - 取消背景工作的 `Job.cancelSession` 全檔只有一處呼叫，在 `Session.remove` 裡（`interrupt` → `awaitIdle` → `cancelSession` → 刪除子 session）；
     - 背景 subagent 由 `SubagentJob` 以 `resume(childSessionID)` 執行，只有工作本身被取消（`isCancelled`）時才中斷子 session。
     - 結論：中斷父 session 不會停掉它的背景 subagent，P2-2 的風險成立。
   - P2-1：`has_background_jobs` 查詢失敗時隔 500ms 重試，最多查 3 次；都失敗才照舊收尾並記 `background_jobs_lookup_failed … attempt=n/3`。新測試：
@@ -754,6 +754,24 @@
     - basic auth 抽成 `authorize`，backend 與 `ServerHandle` 共用。
   - 文件：根目錄 `AGENTS.md`（server backend 的等待與取消規則）、CHANGELOG。
   - CI 三道（2026-11-27）：`cargo fmt --all -- --check` 通過；`cargo clippy --all-targets --locked -- -D warnings` 通過；`cargo test --workspace --locked --no-fail-fast` 781 passed、0 failed、14 ignored。
+
+### Task 6.9 — 增量覆審建議修正（review-364cebf）
+- 產出與範圍：使用者 2026-11-27 選修的 NICE TO HAVE 1（每次查背景工作有自己的短逾時）、2（取消時去重有測試）、3（清單查詢共用一份）、5（文件措辭兩處）；4（取消之後 primary 可能被回報喚醒再跑一次）記為已知差距（README TBD-16）。
+- 相依：6.8、review-364cebf
+- 驗收編號：SCN-002；修正既有行為，不新增驗收
+- 完成判準：卡住的清單查詢在單次逾時後放棄，回合不必等到回合逾時；拿掉去重有測試會紅燈；等待與取消只有一份清單查詢；CI 三道全綠。
+- 驗證：gateway 以假 V2 server 走紅燈到綠燈；去重以變異測試證明測試有效；文件以靜態核對。
+- 狀態：✅ 已完成（2026-11-27）
+- 證據：
+  - NICE 1：
+    - 每次查詢最多等 `JOBS_LOOKUP_TIMEOUT`（10 秒），以 reqwest 的單次請求 `timeout` 實作；backend 的 `jobs_lookup_timeout` 只有測試會改。
+    - 假 server 的工作清單腳本多了 `"hang"`：連線開著、一直不回應。
+    - 新測試 `a_job_lookup_that_hangs_times_out_on_its_own`：三次都卡住時，回合回 DONE、查詢 3 次。改之前沿用回合逾時，10 秒內等不完（紅燈）。
+  - NICE 2：`a_cancelled_turn_interrupts_the_subagent_sessions_too` 讓清單也列出串流看過的 fixer，並斷言 fixer 只被中斷一次。
+    - 去重本來就有，所以改了測試就直接通過；把去重判斷改成永遠成立的變異會讓它紅燈，表示這個測試守得住。
+  - NICE 3：清單查詢收進 `ServerHandle::background_jobs`，等待（`has_background_jobs`）與取消共用。取消路徑因此也把非 2xx 與不是 JSON 的回應當成失敗、寫 `turn_cancelled_jobs_lookup_failed`，不再靜默當成空清單。
+  - NICE 5：Task 6.8 的「`Job.cancelSession` 全檔只出現一次」改成「只有一處呼叫」；Task 6.8 的驗收編號拿掉 SCN-012（它的 Gherkin 沒寫取消中斷）。
+  - CI 三道（2026-11-27）：`cargo fmt --all -- --check` 通過；`cargo clippy --all-targets --locked -- -D warnings` 通過；`cargo test --workspace --locked --no-fail-fast` 782 passed、0 failed、14 ignored；gateway lib 連跑三次都是 194 passed。
 
 ## 測試策略
 

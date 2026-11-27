@@ -14,6 +14,8 @@ use tokio::net::TcpListener;
 pub(super) const PASSWORD: &str = "fake-v2-secret";
 /// 真的 V2 不設上限；假 server 每頁最多回這麼多，確認呼叫端照 cursor 走，不是信任 limit。
 pub(super) const PAGE_CAP: usize = 50;
+/// `handle` 回這個狀態時，連線保持開著、一直不回應。
+const HANG: &str = "hang";
 
 #[derive(Default)]
 struct State {
@@ -60,6 +62,10 @@ impl FakeV2 {
                         return;
                     }
                     let (status, content_type, body) = handle(&state, &method, &path, auth, &body);
+                    if status == HANG {
+                        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                        return;
+                    }
                     let response = format!(
                         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
@@ -100,7 +106,7 @@ impl FakeV2 {
     }
 
     /// 之後每次 `GET /api/experimental/job` 依序回的 `data`（背景工作清單）；用完回空清單。
-    /// 項目是字串 `"fail"` 時，那一次回 503。
+    /// 項目是字串 `"fail"` 時，那一次回 503；是 `"hang"` 時，那一次一直不回應。
     pub fn script_jobs(&self, jobs: Vec<Value>) {
         self.state.lock().unwrap().jobs = jobs;
     }
@@ -306,6 +312,9 @@ fn handle(
             } else {
                 state.jobs.remove(0)
             };
+            if jobs == HANG {
+                return (HANG, JSON, String::new());
+            }
             if jobs == "fail" {
                 return (
                     "503 Service Unavailable",
