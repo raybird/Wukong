@@ -254,6 +254,7 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | TBD-11 | review-65e960a 需決策：Task 3.3 在 wukong-memory 新增 `agent_session_state.session_started_at` 欄位（7 天輪替不必每回合問 backend），涉及檔案表把 wukong-memory 列為不可觸及 | 已解決（2026-11-27，使用者選「接受並記錄」）：保留這個欄位與遷移，不改回每回合查 backend | 既有資料庫自動加欄位；舊列沒有值時，下一回合向 backend 查一次 session 開始時間補上（`backfill_session_started`）；涉及檔案表的「不可觸及」以這一列為例外 |
 | TBD-12 | review-65e960a 的 SHOULD FIX 與 NICE TO HAVE 怎麼處理 | 已解決（2026-11-27，使用者決定）：修正 SHOULD FIX 1（背景工作只算 subagent）、2（工作區範本改成派工）、3（人格那句的過時提醒）、6（原始派工紀錄進版控），NICE TO HAVE 9（排程階段回報後回到悟空）、13（文件小修），見計畫 Task 6.6；SHOULD FIX 4、5 由 TBD-11、TBD-10 處理。NICE TO HAVE 7（`ObservedStep.skill_name` 固定是 None）、8（固定提示有兩條組裝路徑）、10 併入 13 的文件說明、11（只有搶先改寫定義的入口會等 server 重新載入）、12（subagent 被限流時回合仍算成功）沒有選，留作已知差距 | 沒選的各項不影響驗收；修正後依「補跑後增量覆審」的決定，TBD-10 補跑後送增量覆審 |
 | TBD-13 | review-623c436 的 NICE TO HAVE 怎麼處理 | 已解決（2026-11-27，使用者決定）：修正 1（Telegram 泡泡回報後回到悟空；查證時發現 Web 也一樣，一併修正）與 4（README 凍結內容兩處），見計畫 Task 6.7；2（新的工作區 AGENTS.md 範本沒有真實模型證據：派工評估的工作區不放 AGENTS.md）與 3（用名稱找角色的寫法有兩份：`executor.rs`、`turn.rs`，目前一致）記為已知差距 | 2、3 不影響驗收；修正後再送增量覆審 |
+| TBD-14 | review-4ccfcec 的 NICE TO HAVE 怎麼處理 | 已解決（2026-11-27，使用者選「三項都記入待確認」）：1（CHANGELOG、docs/entrypoints.md 寫回報後回到「悟空」，Telegram 與 Web 實際顯示「🐵 思考中…」，只有排程字面是「悟空」）、2（「回報後取目前角色」的三行在 Telegram 與 Web 各一份，可讓 `ActiveSubagents::reported` 回傳目前角色）、3（`wukong-orchestrator` 的模組說明與 AGENTS.md 的 crate 表沒提到 `ActiveSubagents`）都記為已知差距，不修 | 都不影響行為與驗收；PASS 沿用 review-4ccfcec |
 
 ## Timeline
 
@@ -288,9 +289,10 @@ Feature: Wukong 只做 harness 做不到的部分，其餘交給 OpenCode V2
 | 2026-11-27 | 增量覆審 65e960a..623c436 PASS（review-623c436.md，無 MUST FIX、SHOULD FIX，NICE TO HAVE 4 項）；上一份 PASS 選修的六項與 TBD-10、TBD-11 都確認處理完成 |
 | 2026-11-27 | 使用者對增量覆審建議的決定記為 TBD-13；Task 6.7 修正 NICE TO HAVE 1、4（Telegram、Web 在 subagent 回報後回到悟空，README 凍結內容兩處），再送增量覆審 |
 | 2026-11-27 | 增量覆審 623c436..4ccfcec PASS（review-4ccfcec.md，無 MUST FIX、SHOULD FIX，NICE TO HAVE 3 項） |
+| 2026-11-27 | 使用者對 review-4ccfcec 建議的決定記為 TBD-14（三項都不修）；沒有待觀察項目，狀態寫成已完成，合併後生效 |
 
 ---
 **建立日期**: 2026-11-26  
 **分級**: Large（runtime、orchestrator、skills、gateway、三個入口與排程的顯示、部署設定）  
 **風險**: High\
-**狀態**: 實作中
+**狀態**: 已完成
